@@ -1,0 +1,93 @@
+{
+  "_comment": [
+    "Enrollment manifest for the CI test gates. Every workspace that pnpm-workspace.yaml",
+    "resolves must appear here — either with a floor under `vitest.workspaces`, or with a",
+    "written reason under `vitest.exempt`. A workspace that exists on disk and is missing",
+    "from both fails the gate, so adding a package without adding tests is a red build",
+    "rather than a global count that silently absorbs the gap.",
+    "Floors are per project, not global: a package that stops contributing tests entirely",
+    "cannot hide behind its neighbours' counts. Raising a floor is a normal part of adding",
+    "tests; lowering one is a decision that shows up in review — see `ratchet` below, and",
+    "scripts/ci/assert-floor-ratchet.mjs, which compares every number here against the same",
+    "file on origin/main.",
+    "Floors sit a little under the real counts on purpose. They are a loss detector, not a",
+    "target: the point is to catch a suite that shrank, not to go red every time a test is",
+    "renamed away. Recalibrated when the reviewed fix/ci-r6 lane joined Phase 2:",
+    "the combined tree runs more than 3,000 unit tests, including 676 web tests and",
+    "171 root mutation-ledger tests. Existing package floors remain owned by their",
+    "lanes; the new web, mutants, total and Playwright floors are measured here."
+  ],
+  "vitest": {
+    "workspaces": {
+      "apps/server": {
+        "project": "server",
+        "minTests": 22
+      },
+      "apps/web": {
+        "project": "web",
+        "minTests": 650
+      },
+      "mutants": {
+        "project": "mutants",
+        "minTests": 160
+      },
+      "packages/auth": {
+        "project": "auth",
+        "minTests": 200
+      },
+      "packages/core": {
+        "project": "core",
+        "minTests": 120
+      },
+      "packages/db": {
+        "project": "db",
+        "minTests": 10
+      },
+      "packages/ingest": {
+        "project": "ingest",
+        "minTests": 140
+      }
+    },
+    "exempt": {},
+    "minTotalTests": 2900
+  },
+  "playwright": {
+    "projects": {
+      "chromium": {
+        "minTests": 160
+      }
+    },
+    "minTotalTests": 160
+  },
+  "ratchet": {
+    "_comment": [
+      "Floors ratchet up. scripts/ci/assert-floor-ratchet.mjs reads this same file from",
+      "origin/main and fails if any floor here is lower than the one there — including the",
+      "quiet version, where an enrolled workspace is moved into `exempt` instead.",
+      "A decrease is allowed with a written reason keyed to exactly what came down, e.g.",
+      "  \"vitest.workspaces.packages/core.minTests\": \"why the suite is legitimately smaller\".",
+      "Justifications are checked in both directions: one that does not match an actual",
+      "decrease fails too, so nobody can pre-authorise next month's cut by landing a blanket",
+      "reason today.",
+      "There is no baseline until a manifest merges — origin/main carries none yet — so",
+      "today the script says `no baseline` loudly and checks only that every floor is a",
+      "whole number of at least 1. It becomes a real ratchet the moment a manifest exists on",
+      "main.",
+      "",
+      "`apps/web` moved out of `exempt` and into `workspaces` this round. That direction is",
+      "a tightening and needs no justification: the exemption said the workspace stayed",
+      "browser-free and contributed zero unit tests by design, and round 5 gave it a Vitest",
+      "project because `lib/env.ts` — the file that decides whether the app serves",
+      "production traffic — had had no unit test for four rounds. The exemption's stated",
+      "reason stopped being true, and `assert-vitest-report.mjs` fails a project that runs",
+      "while unenrolled, so leaving it exempt would have been red rather than quiet.",
+      "",
+      "Other package floors are left exactly as `fix/ci-r6` calibrated them, even where",
+      "this branch's counts are far above them (db 23 vs 10, server 104 vs 22). Raising",
+      "somebody else's floor from a branch they cannot see is how a ratchet ends up encoding",
+      "one branch's tree as everyone's minimum. Web, mutants, the shared total and Playwright",
+      "did have to move: the old values predated Phase 2 and would no longer detect a lost lane."
+    ],
+    "justifications": {}
+  }
+}

@@ -1,0 +1,95 @@
+# The one process in front of Atrium. THIS FILE IS THE PRODUCTION ONE.
+#
+# For a plaintext localhost topology, see `deploy/Caddyfile.dev` and
+# `docker-compose.dev.yml`. They are separate files rather than a variable in
+# this one, because round 4 shipped this file with `:80` and a paragraph asking
+# the operator to change it — and a comment is not a control. There is no
+# spelling of this file that serves production over cleartext.
+#
+# It exists for three reasons:
+#
+#  1. **TLS terminates here, automatically.** The site address below is
+#     `{$ATRIUM_DOMAIN}`, which Caddy resolves at load time: point the hostname
+#     at this box, publish 80 and 443, and Caddy obtains and renews a
+#     certificate over ACME on its own. `docker-compose.yml` declares
+#     ATRIUM_DOMAIN with `${ATRIUM_DOMAIN:?...}`, so compose refuses to start
+#     before Caddy ever sees an empty value — and Caddy refuses an empty site
+#     address too, which is the second lock on the same door.
+#     Caddy also serves the `:80` → `:443` redirect for this host itself; there
+#     is no cleartext listener here that answers anything else.
+#  2. **It is what makes the rate limiter's IP dimension real.** Both Atrium
+#     processes read the caller's address from `X-Forwarded-For` with
+#     `ATRIUM_TRUSTED_PROXY_HOPS=1` — one proxy, this one, appending the peer
+#     address on the right. Without something in this position the web app has
+#     no address at all: a Next.js Server Action cannot see the socket, and Next
+#     fills `x-forwarded-for` from the peer only when the client sent none, so a
+#     present value there is unfalsifiable. Round 3 of issue #26 shipped exactly
+#     that gap — `hops=0`, a null address, and a per-address limiter that
+#     counted nobody.
+#  3. It is the only service with a published port, so the hop count is a claim
+#     nobody can walk around.
+#
+# `reverse_proxy` sets `X-Forwarded-For` by appending the immediate peer, which
+# is the property the hop count depends on: the rightmost entry is written by
+# this process and cannot be forged by a client. A client that sends its own
+# `X-Forwarded-For` gets it prefixed, not honoured — `1.2.3.4, <real peer>` —
+# and both limiters count the real peer.
+{
+	# Access logs go to the container's stdout with the rest of the stack.
+	admin off
+	# No `email` here on purpose: ACME registers fine without a contact address,
+	# and an `email {$VAR}` that is unset makes Caddy fail on *that* line, which
+	# hides the failure that matters (an empty site address below). Add
+	# `email you@example.com` here if you want expiry notices.
+}
+
+# Loopback-only proxy liveness. This proves Caddy loaded its routes; the app's
+# own healthcheck separately proves a real rendered page succeeds.
+http://localhost:2019 {
+	handle /caddy-health {
+		respond "ok" 200
+	}
+	handle {
+		respond 404
+	}
+}
+
+# A hostname, not a port: this is what turns automatic HTTPS on. An IP address
+# or a bare `:80` here would disable it, which is why the value is required
+# rather than defaulted.
+{$ATRIUM_DOMAIN} {
+	log {
+		output stdout
+		format console
+	}
+
+	# HSTS. The certificate is automatic, so the downgrade path is the one thing
+	# left worth closing: a year, on this host, after which a browser that has
+	# been here once will not try cleartext again.
+	header {
+		Strict-Transport-Security "max-age=31536000"
+	}
+
+	# The realtime server. WebSocket upgrades pass through untouched; `/health`
+	# is here too so an external checker can reach it through the same entry.
+	handle /ws* {
+		reverse_proxy server:4000
+	}
+	handle /health {
+		reverse_proxy server:4000
+	}
+	handle /attachments/* {
+		reverse_proxy server:4000
+	}
+	# Path-style S3 URLs preserve /bucket/key. Keeping the path and Host intact
+	# is part of the signature, so this is deliberately not `handle_path`.
+	handle /{$S3_BUCKET}/* {
+		reverse_proxy minio:9000
+	}
+
+	# Everything else is the Next.js app: pages, Server Actions, the auth
+	# catch-all route.
+	handle {
+		reverse_proxy app:3000
+	}
+}

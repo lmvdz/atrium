@@ -1,11 +1,26 @@
+import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { drizzle } from 'drizzle-orm/postgres-js';
 import { migrate } from 'drizzle-orm/postgres-js/migrator';
 import postgres from 'postgres';
-import * as schema from './schema.js';
+import * as authSchema from './auth-schema.js';
+import * as appSchema from './schema.js';
 
-/** Absolute path to the generated SQL migrations shipped with this package. */
-export const migrationsFolder = fileURLToPath(new URL('../drizzle', import.meta.url));
+/** Every table in one object — application tables and Better Auth's alike. */
+const schema = { ...appSchema, ...authSchema };
+
+/**
+ * Absolute path to the generated SQL migrations shipped with this package.
+ *
+ * A function, and built with `join` rather than `new URL('../drizzle',
+ * import.meta.url)`, because bundlers read the latter as a static asset
+ * reference and try to resolve a directory that only exists on disk. The web app
+ * imports this module for its database client and must not drag the migration
+ * folder into its build.
+ */
+export function migrationsFolder(): string {
+  return join(dirname(fileURLToPath(import.meta.url)), '..', 'drizzle');
+}
 
 export interface DatabaseOptions {
   /** Postgres connection string, e.g. `process.env.DATABASE_URL`. */

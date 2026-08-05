@@ -1,0 +1,53 @@
+{
+  "mutation": "boundary-no-destructuring",
+  "verdict": "red",
+  "recordedAt": "2026-08-01T23:57:04.001Z",
+  "commit": "1602d0f261a153c22bb4876b86113cd009f94829",
+  "treeDirty": true,
+  "node": "v24.5.0",
+  "mutationHash": "175c300557869d93",
+  "claim": "packages/auth/test/room-access.test.ts — the destructuring fixtures, in both binding positions",
+  "suites": [
+    {
+      "suite": "auth:room-access",
+      "verdict": "red",
+      "subjectHash": "b067b0240a78fe70",
+      "suiteFile": "packages/auth/test/room-access.test.ts",
+      "suiteHash": "8c54c29456cc8782",
+      "files": [
+        "packages/auth/test/support/import-boundary.ts"
+      ],
+      "baseline": {
+        "suite": "auth:room-access",
+        "builds": [],
+        "command": "pnpm exec vitest run test/room-access.test.ts --reporter=json --outputFile=../../node_modules/.cache/ledger-baseline-auth-room-access.json",
+        "cwd": "packages/auth",
+        "exitCode": 0,
+        "total": 108,
+        "passed": 108,
+        "failed": 0,
+        "durationMs": 5207
+      },
+      "mutated": {
+        "suite": "auth:room-access",
+        "builds": [],
+        "command": "pnpm exec vitest run test/room-access.test.ts --reporter=json --outputFile=../../node_modules/.cache/ledger-mutated-boundary-no-destructuring.json",
+        "cwd": "packages/auth",
+        "exitCode": 1,
+        "total": 108,
+        "passed": 101,
+        "failed": 7,
+        "durationMs": 4533
+      },
+      "caught": [
+        "room membership is not reachable outside @atrium/auth evasions the round-6 regex admitted evasions the round-7 access check admitted fires on the table destructured straight off a handle",
+        "room membership is not reachable outside @atrium/auth evasions the round-6 regex admitted evasions the round-7 access check admitted fires through a handle declared only by its type annotation",
+        "room membership is not reachable outside @atrium/auth evasions the round-6 regex admitted evasions the round-7 access check admitted fires when the destructured table is renamed",
+        "room membership is not reachable outside @atrium/auth evasions the round-6 regex admitted evasions the round-7 access check admitted fires when the destructuring is nested",
+        "room membership is not reachable outside @atrium/auth evasions the round-6 regex admitted evasions the round-9 initializer walk admitted fires on a conditional used directly as the receiver",
+        "room membership is not reachable outside @atrium/auth evasions the round-6 regex admitted evasions the round-9 initializer walk admitted fires on the table destructured in a parameter default",
+        "room membership is not reachable outside @atrium/auth evasions the round-6 regex admitted evasions the round-9 initializer walk admitted fires on the table destructured off an annotated parameter"
+      ]
+    }
+  ]
+}

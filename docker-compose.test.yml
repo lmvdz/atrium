@@ -1,0 +1,51 @@
+# Ephemeral Postgres for the integration suite (issue #22).
+#
+#   pnpm test:integration          # brings this up, migrates, runs, tears down
+#   docker compose -f docker-compose.test.yml up -d   # leave it running
+#
+# Separate from docker-compose.yml on purpose, twice over:
+#
+#  - Credentials. The main file refuses to start without POSTGRES_PASSWORD and
+#    the S3 secrets (`${VAR:?}`), because it is the file that also runs on a
+#    VPS. This one is a throwaway database on a non-default port with no
+#    volume — the data does not survive `down`, so a fixed literal password is
+#    the honest thing rather than a secret to manage.
+#  - Isolation. Its own compose project name, so `pnpm test:integration` can
+#    never stop, wipe, or migrate the postgres a developer is using for `pnpm
+#    dev`. Set ATRIUM_TEST_PG_PORT if 55445 is taken.
+#
+# Storage is tmpfs: the suite truncates between files anyway, and a run that
+# leaves nothing behind cannot leak state into the next one.
+
+name: atrium-test
+
+services:
+  postgres-test:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: atrium_test
+      POSTGRES_PASSWORD: atrium_test
+      POSTGRES_DB: atrium_test
+      # No durability wanted: this database exists for one test run.
+      PGDATA: /var/lib/postgresql/data
+    command:
+      - postgres
+      - -c
+      - fsync=off
+      - -c
+      - synchronous_commit=off
+      - -c
+      - full_page_writes=off
+      # The suite opens a socket per simulated client and runs concurrent
+      # appends; the 100 default is enough but leaves no room to debug.
+      - -c
+      - max_connections=200
+    ports:
+      - '${ATRIUM_TEST_PG_PORT:-55445}:5432'
+    tmpfs:
+      - /var/lib/postgresql/data
+    healthcheck:
+      test: ['CMD-SHELL', 'pg_isready -U atrium_test -d atrium_test']
+      interval: 1s
+      timeout: 3s
+      retries: 30

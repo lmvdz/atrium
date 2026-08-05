@@ -1,0 +1,47 @@
+{
+  "mutation": "unbind-infra",
+  "verdict": "red",
+  "recordedAt": "2026-08-02T00:06:11.468Z",
+  "commit": "1602d0f261a153c22bb4876b86113cd009f94829",
+  "treeDirty": true,
+  "node": "v24.5.0",
+  "mutationHash": "608f91b7b46b4157",
+  "claim": "packages/auth/test/deployment.test.ts — the production-binding assertion",
+  "suites": [
+    {
+      "suite": "auth:deployment",
+      "verdict": "red",
+      "subjectHash": "3f7fb455b7a862c3",
+      "suiteFile": "packages/auth/test/deployment.test.ts",
+      "suiteHash": "70cb1611b76bd0c1",
+      "files": [
+        "docker-compose.yml"
+      ],
+      "baseline": {
+        "suite": "auth:deployment",
+        "builds": [],
+        "command": "pnpm exec vitest run test/deployment.test.ts --reporter=json --outputFile=../../node_modules/.cache/ledger-baseline-auth-deployment.json",
+        "cwd": "packages/auth",
+        "exitCode": 0,
+        "total": 5,
+        "passed": 5,
+        "failed": 0,
+        "durationMs": 1680
+      },
+      "mutated": {
+        "suite": "auth:deployment",
+        "builds": [],
+        "command": "pnpm exec vitest run test/deployment.test.ts --reporter=json --outputFile=../../node_modules/.cache/ledger-mutated-unbind-infra.json",
+        "cwd": "packages/auth",
+        "exitCode": 1,
+        "total": 5,
+        "passed": 4,
+        "failed": 1,
+        "durationMs": 6121
+      },
+      "caught": [
+        "the production compose publishes only the proxy to a network keeps postgres and minio on loopback"
+      ]
+    }
+  ]
+}

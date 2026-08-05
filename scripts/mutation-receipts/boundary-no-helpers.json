@@ -1,0 +1,49 @@
+{
+  "mutation": "boundary-no-helpers",
+  "verdict": "red",
+  "recordedAt": "2026-08-01T23:56:27.703Z",
+  "commit": "1602d0f261a153c22bb4876b86113cd009f94829",
+  "treeDirty": true,
+  "node": "v24.5.0",
+  "mutationHash": "890ded02e787a72f",
+  "claim": "packages/auth/test/room-access.test.ts — the laundered-helper fixtures and the empty-allowlist premise",
+  "suites": [
+    {
+      "suite": "auth:room-access",
+      "verdict": "red",
+      "subjectHash": "b067b0240a78fe70",
+      "suiteFile": "packages/auth/test/room-access.test.ts",
+      "suiteHash": "8c54c29456cc8782",
+      "files": [
+        "packages/auth/test/support/import-boundary.ts"
+      ],
+      "baseline": {
+        "suite": "auth:room-access",
+        "builds": [],
+        "command": "pnpm exec vitest run test/room-access.test.ts --reporter=json --outputFile=../../node_modules/.cache/ledger-baseline-auth-room-access.json",
+        "cwd": "packages/auth",
+        "exitCode": 0,
+        "total": 108,
+        "passed": 108,
+        "failed": 0,
+        "durationMs": 5207
+      },
+      "mutated": {
+        "suite": "auth:room-access",
+        "builds": [],
+        "command": "pnpm exec vitest run test/room-access.test.ts --reporter=json --outputFile=../../node_modules/.cache/ledger-mutated-boundary-no-helpers.json",
+        "cwd": "packages/auth",
+        "exitCode": 1,
+        "total": 108,
+        "passed": 105,
+        "failed": 3,
+        "durationMs": 7804
+      },
+      "caught": [
+        "room membership is not reachable outside @atrium/auth evasions the round-6 regex admitted and the controls, without which all of the above is noise allows an app to import a vetted reader that holds the table",
+        "room membership is not reachable outside @atrium/auth evasions the round-6 regex admitted fires on an unsafe helper re-exported from another package",
+        "room membership is not reachable outside @atrium/auth the premise, measured would fail this very repository if the allowlist were empty"
+      ]
+    }
+  ]
+}

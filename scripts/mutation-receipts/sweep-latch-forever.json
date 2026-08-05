@@ -1,0 +1,60 @@
+{
+  "mutation": "sweep-latch-forever",
+  "verdict": "red",
+  "recordedAt": "2026-08-01T23:58:09.608Z",
+  "commit": "1602d0f261a153c22bb4876b86113cd009f94829",
+  "treeDirty": true,
+  "node": "v24.5.0",
+  "mutationHash": "288427f74de8f271",
+  "claim": "apps/server/test/ws-server.test.ts — the latch tests, both by hanging until vitest gives up",
+  "suites": [
+    {
+      "suite": "server:ws-server",
+      "verdict": "red",
+      "subjectHash": "339f1d94c7ae85ae",
+      "suiteFile": "apps/server/test/ws-server.test.ts",
+      "suiteHash": "51d9f003b20eeadd",
+      "files": [
+        "apps/server/src/ws-server.ts"
+      ],
+      "baseline": {
+        "suite": "server:ws-server",
+        "builds": [
+          {
+            "command": "pnpm --filter @atrium/auth build",
+            "exitCode": 0,
+            "durationMs": 8231
+          }
+        ],
+        "command": "pnpm exec vitest run test/ws-server.test.ts --reporter=json --outputFile=../../node_modules/.cache/ledger-baseline-server-ws-server.json",
+        "cwd": "apps/server",
+        "exitCode": 0,
+        "total": 60,
+        "passed": 60,
+        "failed": 0,
+        "durationMs": 7248
+      },
+      "mutated": {
+        "suite": "server:ws-server",
+        "builds": [
+          {
+            "command": "pnpm --filter @atrium/auth build",
+            "exitCode": 0,
+            "durationMs": 7632
+          }
+        ],
+        "command": "pnpm exec vitest run test/ws-server.test.ts --reporter=json --outputFile=../../node_modules/.cache/ledger-mutated-sweep-latch-forever.json",
+        "cwd": "apps/server",
+        "exitCode": 1,
+        "total": 60,
+        "passed": 58,
+        "failed": 2,
+        "durationMs": 12713
+      },
+      "caught": [
+        "revocation reaches a subscription, not only a command closes the window on a bound even when the membership lookup never answers",
+        "revocation reaches a subscription, not only a command starts the next sweep even while a lookup from the last one is still hanging"
+      ]
+    }
+  ]
+}

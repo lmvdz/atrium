@@ -16,6 +16,7 @@
       "!**/playwright-report",
       "!**/test-results",
       "!packages/db/drizzle",
+      "!scripts/mutation-receipts",
       "!pnpm-lock.yaml",
       "!.claude",
       "!design/*.html"
@@ -77,7 +78,14 @@
   },
   "overrides": [
     {
-      "includes": ["**/*.config.*", "**/scripts/**", "apps/server/src/**"],
+      "includes": [
+        "**/*.config.*",
+        "**/scripts/**",
+        "design/*.mjs",
+        "apps/server/src/**",
+        "packages/core/mutants/**",
+        "mutants/**"
+      ],
       "linter": {
         "rules": {
           "suspicious": {

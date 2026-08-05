@@ -1,0 +1,1683 @@
+import type { ReceiptText } from './common.js';
+import { RECEIPT_POLICY, type ReceiptPolicy } from './policy.js';
+
+/**
+ * **What may differ between a quote and the text it was taken from.**
+ *
+ * ## Why this is a policy and not a `.replace()` chain
+ *
+ * Until r5 one function — `normalizeForMatch` — served two jobs with opposite
+ * risk profiles. It decided which model reads a window (routing), and it decided
+ * whether a quote and a message are the same text (the receipt). Getting routing
+ * wrong costs one model call. Getting the receipt wrong mints something false
+ * about a named person. One function cannot be tuned for both, and the version
+ * that was tuned for routing was doing measured semantic damage on the receipt
+ * path — r4's blind review found three separate cuts:
+ *
+ * | it deleted            | so this became certifiable                                        |
+ * | --------------------- | ----------------------------------------------------------------- |
+ * | backticks             | `` `Deploy production Friday.` `` — a sample — as its author's assertion |
+ * | link destinations     | `[https://safe.example](https://evil.example)` accepted as naming the safe URL |
+ * | NFKC compatibility    | `ｅｖｉｌ.example` and `evil.example` as one hostname               |
+ *
+ * Each deletion was individually defensible ("a model drops formatting while
+ * quoting correctly") and collectively it meant the receipt was comparing two
+ * texts neither author wrote.
+ *
+ * `packages/ingest/src/text.ts` had already answered the same question the other
+ * way for message bodies — stored verbatim, because "determinism does not need
+ * normalisation" and round 1's NFC pass was lossy. This file makes the core
+ * agree with the corpus.
+ *
+ * ## The shape of the answer
+ *
+ * Not a list of things to delete. **A list of the differences a quote is allowed
+ * to have from its source, each with the argument that admits it.** This is the
+ * third arrival of that principle in this repo (`RETRO.md`: denylists of
+ * evasions are unbounded; allowlist the compliant forms), and it is the same move
+ * `RECEIPT_POLICY.droppableTokens` made for the bearing check.
+ *
+ * The bar for an entry is the bar r4 set for `droppableTokens`: **an argument
+ * nobody can break.** Two candidates failed it and are recorded here so they are
+ * not re-added:
+ *
+ *  - **Case folding.** `US` / `us`, `Bill` / `bill`, `March` / `march` are
+ *    different words, and a quote is supposed to be verbatim. A model that
+ *    re-cases a sentence has edited it, and an edited reading goes to a person.
+ *    **r9: and nothing else in this package folds case either.** `dedupTokens`
+ *    did, for `findDuplicate`, on the flatly contradictory ground that "case is
+ *    the one difference that cannot change what a sentence says" — with the
+ *    three counterexamples above sitting in this paragraph the whole time. The
+ *    deduplicator's mistakes destroy readings where the receipt's only refer
+ *    them, so it was the wrong half of the file to hold the wider rule. See
+ *    below `orderedTokens` for the whole argument.
+ *  - **Underscore emphasis.** `_x_` is Markdown emphasis and `__init__` is an
+ *    identifier, and no rule separates them.
+ *  - **Asterisk emphasis**, which survived three drafts and two reviewers before
+ *    the bar caught up with it. It was admitted on the argument that emphasis
+ *    "changes how a sentence is set, never who, whether, how many or when", and
+ *    the spike measured a real cost for refusing it — three of eight apparent
+ *    provenance failures were a model dropping `**` while quoting correctly.
+ *    Then codex folded `a*b*c` to `abc`, and grok folded `2*3*4` to `234` —
+ *    which changes **how many**, in the one direction the justification promised
+ *    it could not. A word-boundary-flanking rule fixed both and left `*.ts*` in
+ *    a glob. Every repair was narrower than the last, which is the signature of
+ *    an entry that does not meet the bar: *an argument nobody can break*. Three
+ *    of the four entries r4 put in `droppableTokens` went the same way, for the
+ *    same reason.
+ *
+ *    The cost is now small, because `quoteCoversOwnText` changed what a quote
+ *    is: it must be the whole message body, so a model reproducing that body
+ *    verbatim carries the `**` with it and is unaffected. Only a model that
+ *    *strips* formatting is refused, and a model that strips formatting has
+ *    edited the text.
+ */
+
+/* ─────────────────────────────────────────────────────────────────────────
+ * Emptiness
+ * ───────────────────────────────────────────────────────────────────────── */
+
+/**
+ * **Is there anything here at all?** — the one emptiness test, used before every
+ * required receipt input.
+ *
+ * r3's gauntlet, as a polish note that is really a principle: zero-width
+ * characters were refused only *incidentally*. `"​"` is not `""`, so it walked
+ * past every `trim()` check marked "required" and died three checks later as
+ * not-found or too-short. An accidental refusal is one code change away from an
+ * accidental acceptance.
+ *
+ * The fix is not a list of invisible characters — that list is unbounded in
+ * exactly the way a stopword list is. It is the complement: **content is a
+ * letter, a digit, a pictograph, or a flag.**
+ *
+ * **The pictograph is r5.** Until r5 this read `[\p{L}\p{N}]`, and a message
+ * that is a row of 🚫 reduced to "nothing" — so `proposal.ts` refused it as a
+ * *blank quote* and the acceptance engine refused its window as *absent*. Both
+ * refusals were right about the outcome and lying about the cause, which is the
+ * shape r4's tokenizer defect had with Cyrillic: a failure wearing another
+ * failure's clothes. It also contradicted this package's own tokenizer, which
+ * has said since r4 that "every script, every mark and every emoji is content".
+ * Two answers to "is this text?" in one package is one answer too many.
+ *
+ * `\p{Regional_Indicator}` is beside it because a flag is not a pictograph:
+ * 🇺🇸 is two regional-indicator letters and matches `\p{Extended_Pictographic}`
+ * nowhere, so the first draft of this fix still called a flag-only message
+ * nothing. Found by the second pass of this round's own blind review, which is
+ * the argument for re-running a critic on what it made you change.
+ *
+ * Everything else — spaces of every width, zero-width joiners, format and
+ * control codes, unassigned code points, lone combining marks, punctuation on
+ * its own — is still absence, whether or not anybody has enumerated it. A quote
+ * of `"…"`, a message body of `"​"`, and `""` are the same fact about the world
+ * and get the same answer.
+ */
+const CONTENTFUL = /[\p{L}\p{N}\p{Extended_Pictographic}\p{Regional_Indicator}]/u;
+
+/**
+ * True when `text` carries at least one letter, digit or pictograph.
+ *
+ * A type predicate, and that is r5 too: `tsc` refuses `fix/core-engine-r4` as
+ * committed, on two errors this narrowing is half of. `commitmentAttribution`
+ * guarded a `string | null | undefined` with `isBlank` and then handed it to a
+ * function taking `string`, which reads correctly and does not compile — the
+ * guard proves the value is a string and the signature threw the proof away.
+ */
+export function hasContent(text: string | null | undefined): text is string {
+  return text !== null && text !== undefined && CONTENTFUL.test(text);
+}
+
+/** `hasContent`, negated — reads better at the gates, which are all refusals. */
+export function isBlank(text: string | null | undefined): boolean {
+  return !hasContent(text);
+}
+
+/* ─────────────────────────────────────────────────────────────────────────
+ * The allowlist
+ * ───────────────────────────────────────────────────────────────────────── */
+
+/**
+ * **The characters this fold deletes — enumerated, not subtracted.**
+ *
+ * This entry took three passes of blind review to get right, and the shape of
+ * each failure is the same one `RETRO.md` keeps recording.
+ *
+ *  - r4 deleted `\p{Cf}` wholesale, on the argument that a character with no
+ *    rendering cannot carry an assertion. A **bidi override** breaks it: a body
+ *    of `Bob will ‮ton‬ deploy production Friday.` *renders as* "Bob
+ *    will not deploy production Friday.", and deleting the override let a quote
+ *    of `ton` match — the record minting the affirmative of what its author
+ *    visibly wrote.
+ *  - r5's first repair subtracted the bidi set from `\p{Cf}`, which is a
+ *    **denylist of the exceptions somebody has thought of**, and the next pass
+ *    produced two more: `re­sign` (a soft hyphen, which renders as a hyphen
+ *    at a line break — *re-sign* is not *resign*) and `👩‍💻` versus
+ *    `👩💻` (a zero-width joiner, which decides whether two emoji are one
+ *    glyph).
+ *
+ * Both fixes were subtraction, and subtraction from a Unicode category is
+ * unbounded in exactly the way a stopword list is. So this is the other kind of
+ * list: **the characters whose removal provably cannot change what a reader
+ * sees**, each named.
+ *
+ *  - `U+200B` ZERO WIDTH SPACE — r3's gauntlet, the reason any of this exists:
+ *    a zero-width space spliced into a quote made it a different string from the
+ *    message it came out of. It permits a line break and paints nothing.
+ *  - `U+2060` WORD JOINER, and `U+2061`–`U+2064` the invisible mathematical
+ *    operators — no glyph, no shaping effect, no joining behaviour.
+ *  - `U+FEFF` ZERO WIDTH NO-BREAK SPACE / byte-order mark.
+ *
+ * Everything else that used to be swept up here — the bidi marks, embeddings,
+ * overrides and isolates; the soft hyphen; the zero-width joiner and
+ * non-joiner — is **content**, because it changes the glyphs a reader sees or
+ * the order they see them in. Kept, they are ordinary tokens, and a quote that
+ * omits them is simply not the text that is in the message.
+ *
+ * ## The control characters are gone from this list, and r6 is why
+ *
+ * Until r6 there was a second clause, `(?!\s)\p{Cc}`, with a docblock arguing
+ * that it could not fuse two words because "Tab, newline, vertical tab, form
+ * feed, carriage return **and NEL** are `\s`, and the whitespace rule already
+ * owns them".
+ *
+ * **JavaScript's `\s` does not contain U+0085 NEL.** ECMA-262 defines `\s` as
+ * *WhiteSpace* ∪ *LineTerminator*, and NEL is in neither — it is `Cc`, it is not
+ * `Zs`, and it is not a LineTerminator. Nor are U+007F or U+0080–U+009F. The
+ * clause therefore deleted them, and NEL is a Unicode **mandatory line break**
+ * (UAX #14 class BK), so deleting it changes what a reader sees — the exact bar
+ * this list is written to. `Bob will deploy<NEL>production Friday.` normalized to
+ * `deployproduction`, a quote of the fused text matched it, and the receipt was
+ * clean. The comment was false about the *language*, not about the code, which
+ * is the one kind of comment no amount of re-reading the code will catch.
+ *
+ * Two repairs followed, and only the second is a rule:
+ *
+ *  1. Subtract the missing characters — `(?![\t\n\v\f\r ])\p{Cc}` — which is a
+ *     denylist of the controls somebody has checked, and is wrong for U+0085 in
+ *     exactly the same way.
+ *  2. **Stop subtracting.** This list is now nothing but its enumeration, and
+ *     the whitespace rule below reads `\p{White_Space}` — Unicode's own
+ *     published inventory, which *does* contain U+0085 — instead of `\s`. Every
+ *     other control is content: kept, tokenized, and unable to fuse anything.
+ *
+ * The resulting set is enumerated by brute force over U+0000–U+10FFFF in
+ * `residue.test.ts` ("deletes exactly this set of code points and no others"),
+ * because a comment asserting a property of the language is a factual claim and
+ * must be measured rather than reasoned about.
+ */
+const DELETABLE = /[\u200B\u2060\u2061\u2062\u2063\u2064\uFEFF]/gu;
+
+/**
+ * **What counts as whitespace** — Unicode's own `White_Space` property, not
+ * JavaScript's `\s`.
+ *
+ * The two differ, and the difference is r6's second major finding. `\s` is
+ * *WhiteSpace* ∪ *LineTerminator* per ECMA-262, which adds U+FEFF (deleted
+ * above, before this ever runs) and, crucially, **omits U+0085 NEL** — a
+ * mandatory line break that every renderer breaks on. A run-collapsing rule that
+ * cannot see NEL leaves a line break inside a "word", and the fold that tried to
+ * compensate deleted it instead and fused the words either side.
+ *
+ * `\p{White_Space}` is a closed, published list, which is the distinction
+ * `RETRO.md` draws between an enumeration that is safe and one that is not.
+ */
+const WHITESPACE_RUN = /\p{White_Space}+/gu;
+
+/** One token that is nothing but whitespace. See `orderedTokens`. */
+const WHITESPACE_TOKEN = /^\p{White_Space}+$/u;
+
+/**
+ * **Where a line ends** — Unicode's mandatory line breaks (UAX #14 class BK),
+ * not `\n`.
+ *
+ * The same finding as `WHITESPACE_RUN`, at the other question this package asks
+ * about whitespace. U+0085 NEL, U+2028 LINE SEPARATOR and U+2029 PARAGRAPH
+ * SEPARATOR end a line everywhere a line is rendered, and `\n` does not see any
+ * of them. Two answers to "where does a line end" in one package is one answer
+ * too many, and the round that found `\s` was wrong about NEL found this one by
+ * running its own fix back over the rest of the file.
+ */
+export const LINE_BREAK = /[\n\v\f\r\u0085\u2028\u2029]/u;
+
+/** A terminator followed by space, or a line break. See `sentencesOf`. */
+const SENTENCE_BREAK = /(?<=[.!?…。？！])\p{White_Space}+|[\n\v\f\r\u0085\u2028\u2029]+/u;
+
+/**
+ * `[text](destination)`, and the image form.
+ *
+ * **The destination is content.** r4's blind review: a message reading
+ * `Use [https://safe.example/app](https://evil.example/app) today.` normalized
+ * to a sentence naming the *safe* URL, so a statement naming the safe URL was
+ * certifiable against a record whose actionable link goes elsewhere. That is a
+ * security defect, not a fidelity one — the reader clicks the record, not the
+ * statement.
+ *
+ * So a link normalizes to its text **and** its destination, and the destination
+ * only disappears when the text already states it. A statement that drops the
+ * destination is then a statement that drops words the quote carries, which is
+ * the case `refer` exists for: a person looks at where the link actually goes.
+ *
+ * ## …and the title and the image marker, which r7 found still on the floor
+ *
+ * The "Four entries" this fold admits are enumerated above with the argument
+ * that admits each. This rule was quietly deleting two more things that are not
+ * on that list, and r7's blind review found them with a 400k-sample collision
+ * search — **the only surprising collisions it found, and all five were this
+ * rule**:
+ *
+ *  - **The link title.** `[the runbook](https://x.example "Do NOT run step 4")`
+ *    normalized to `the runbook https://x.example`, so a statement omitting
+ *    *Do NOT run step 4* was certifiable against a record that says it. That is
+ *    r4's own argument about the destination, word for word: the title is
+ *    author-written text a reader sees, and deleting it lets a statement drop
+ *    what the message says.
+ *  - **The `!` image marker.** `![alt](url)` and `[alt](url)` are different
+ *    things — one embeds, one links — and folding both to `alt url` made them
+ *    the same text.
+ *
+ * Neither had an argument, because neither was ever admitted; they were
+ * consumed by the pattern as syntax and never re-emitted. **Writing them into
+ * the allowlist as entries five and six was the cheaper repair and is the one
+ * this file's own history refuses**: `RETRO.md` records twice that a limitation
+ * stated in prose is not a disposition, and the disposition here would have been
+ * "auto-accept a statement that drops a warning its author wrote". They are
+ * content now, on the same argument the destination is, and the allowlist stays
+ * at four.
+ *
+ * A statement quoting the message verbatim carries them and is unaffected —
+ * `quoteCoversOwnText` already requires the quote to be the whole body — so the
+ * only reading this refuses is one that strips them, which is a reading that
+ * edited the text.
+ */
+const MARKDOWN_LINK = /(!?)\[([^\]]*)\]\(\s*([^)\s]*)(?:\s+"([^"]*)")?\s*\)/g;
+
+/**
+ * The one link policy, called by both folds.
+ *
+ * Everything a link is made of survives except the punctuation that arranges it:
+ * the marker, the text, the destination, the title. The destination is dropped
+ * only when the text already states it, so an autolink does not become a stutter
+ * nothing can bear.
+ */
+function unfoldLink(
+  _match: string,
+  bang: string,
+  label: string,
+  destination: string,
+  title?: string,
+): string {
+  const text = label.trim();
+  const target = destination.trim();
+  const caption = (title ?? '').trim();
+  const linked = target.length === 0 || text === target ? text : `${text} ${target}`;
+  return `${bang}${caption.length === 0 ? linked : `${linked} ${caption}`}`;
+}
+
+/**
+ * Code, in every spelling Markdown gives it: a fence, a double-backtick span, a
+ * single-backtick span.
+ *
+ * Split on rather than folded away, because the prose rules above are wrong
+ * inside code — `*` is a glob, `_` is an identifier, `[a](b)` is a literal — and
+ * because **the backticks themselves are content**. A backticked span is
+ * *mention, not use*: `` `Deploy production Friday.` `` is a string its author
+ * displayed, not a sentence its author asserted, and r4's normalization deleted
+ * exactly the two characters that carry that distinction. `~~` was excluded from
+ * folding in r4 for the same class of reason (strikethrough is retraction, not
+ * emphasis); this is that argument applied to the delimiter that separates
+ * quoting a thing from saying it.
+ *
+ * The single-backtick form stops at `\n` and not at every line break
+ * `LINE_BREAK` knows about, which is deliberate rather than an oversight this
+ * round missed: a run of backticks around a U+0085 is not a code span to a
+ * renderer and *is* one here, so more text is compared byte for byte than
+ * strictly needs to be. Over-inclusive is the safe direction for this
+ * particular split — everything inside a code segment is held to a stricter
+ * comparison, never a looser one.
+ */
+const CODE_SPAN = /(```[\s\S]*?```|``[\s\S]*?``|`[^`\n]*`)/;
+
+/**
+ * The differences a quote may have from the text it was taken from — **and no
+ * others.**
+ *
+ * In order, with the argument that admits each:
+ *
+ *  1. **Whitespace runs collapse, and the ends are trimmed.** A client wraps a
+ *     message and a quote copied out of it carries different line breaks. A run
+ *     of horizontal space is not a token in any script. "Whitespace" is
+ *     `\p{White_Space}` and not `\s`; `WHITESPACE_RUN` says why the difference
+ *     cost a round.
+ *  2. **Characters with no rendering are dropped.** See `DELETABLE`.
+ *  3. **A typographic apostrophe is an apostrophe.** `won’t` and `won't` are one
+ *     word entered two ways; treating them as two produces a refusal that has
+ *     nothing to do with what was said.
+ *  4. **A link contributes its destination.** See `MARKDOWN_LINK`.
+ *
+ * Four entries. Not admitted, and each one used to be: NFKC compatibility
+ * folding, case folding, backtick deletion, underscore emphasis, **asterisk
+ * emphasis**, and bare link-text substitution. The header of this file says why.
+ */
+export function normalizeForReceipt(text: string): ReceiptText {
+  const out: string[] = [];
+  for (const [index, segment] of text.split(CODE_SPAN).entries()) {
+    // `String.split` with one capture group alternates: prose, delimiter, prose…
+    //
+    // **A code segment is passed through byte for byte.** Not even the whitespace
+    // collapse and the invisible-character drop apply inside one, and that is
+    // this round's own blind cross-lineage review: the first draft collapsed
+    // whitespace across the whole string after rejoining, so
+    // `` `Set the deployment password to `a  b` immediately.` `` and the same
+    // sentence with `` `a b` `` compared equal. Two spaces in prose are a line
+    // wrap; two spaces in a password are a different password. Every argument in
+    // the allowlist above is an argument about *prose*, and none of them survives
+    // being carried into a literal.
+    const isCode = index % 2 === 1;
+    out.push(isCode ? segment : foldProse(segment));
+  }
+  return out.join('').trim() as ReceiptText;
+}
+
+function foldProse(text: string): string {
+  const folded = text.replace(DELETABLE, '').replace(/[’ʼ]/g, "'");
+  return folded.replace(MARKDOWN_LINK, unfoldLink).replace(WHITESPACE_RUN, ' ');
+}
+
+/**
+ * **Every link this text is made of, as markup rather than as words** — the one
+ * many-to-one rule in the fold above, read back out.
+ *
+ * ## What this is read against — r12
+ *
+ * **The message body**, and nothing else. r10 and r11 both diffed the statement
+ * against the *quote*, and the quote is a proposal field the proposer writes: a
+ * forgery put into `quote` as well as `payload.statement` cancels to an empty
+ * multiset and lands. Everything below is unchanged — what moved is the first
+ * argument at the call site, from a field somebody supplied to the text an
+ * author actually wrote. See `addedStructure`.
+ *
+ * ## Why this exists — r10, and it is r7's finding in a mirror
+ *
+ * `unfoldLink` is deliberately lossy in one direction: `[label](dest "title")`
+ * becomes `label dest title`, so nothing an author wrote can be *deleted* by a
+ * statement that drops the punctuation. r4 and r7 hardened that direction twice
+ * — the destination, then the title and the image marker — and both rounds asked
+ * only whether a **message** containing a link could be reduced to a statement
+ * that hides where it goes.
+ *
+ * The mirror was unguarded. A statement may **add** link syntax built out of the
+ * author's own words, fold to the identical normal form, and land:
+ *
+ * ```
+ * alice wrote : Read the runbook at https://safe.example do not run step 4.
+ * record says : Read the runbook at [https://safe.example]( "do not run step 4").
+ *
+ * alice wrote : Use https://safe.example and never https://evil.example for the runbook.
+ * record says : Use [https://safe.example and never](https://evil.example) for the runbook.
+ * ```
+ *
+ * Both `auto_accept`. A 400,000-sample collision search over the fold (313,699
+ * distinct normal forms) found exactly one structural collision class and this
+ * is it — every other rule in `foldProse` deletes only characters that paint
+ * nothing, or collapses spacing, and neither can build structure out of prose.
+ * The harm renders in another lane; the *stored text is markup its named author
+ * never wrote*, and this package is the only gatekeeper of that.
+ *
+ * ## What a descriptor is
+ *
+ * The rendered form of one link, with the components whitespace-collapsed —
+ * `[label](dest "title")`, `![label](dest)` — so it reads in a refusal and
+ * compares as a key. Whitespace inside a link is collapsed because the fold
+ * collapses it: a statement whose link differs from the quote's by a space is a
+ * statement that reproduced the author's link, and `whitespaceDiffers` is where
+ * that is reported.
+ *
+ * **Code segments are skipped**, on the same argument `normalizeForReceipt`
+ * splits on them: `` `[a](b)` `` is a literal its author displayed, not markup,
+ * and the fold never unfolds one.
+ */
+export function linkStructures(text: string): string[] {
+  const out: string[] = [];
+  for (const [index, segment] of text.split(CODE_SPAN).entries()) {
+    if (index % 2 === 1) continue;
+    const prepared = segment.replace(DELETABLE, '').replace(/[’ʼ]/g, "'");
+    for (const match of prepared.matchAll(MARKDOWN_LINK)) {
+      const [, bang = '', label = '', destination = '', title] = match;
+      const collapse = (value: string): string => value.replace(WHITESPACE_RUN, ' ').trim();
+      const caption = title === undefined ? '' : ` "${collapse(title)}"`;
+      out.push(`${bang}[${collapse(label)}](${collapse(destination)}${caption})`);
+    }
+  }
+  return out.sort();
+}
+
+/**
+ * **Link markup the statement has and the message its author wrote does not** —
+ * a multiset difference, so two identical links in the statement need two in the
+ * message.
+ *
+ * One-directional on purpose, and the direction is the one r4 argued: a
+ * statement that *drops* a link keeps the destination and the title as words,
+ * because they are content, so nothing the author wrote disappears. A statement
+ * that *adds* one is text nobody wrote, and no reduction of the author's words
+ * produces it.
+ */
+export function addedLinkStructure(authored: string, statement: string): string[] {
+  return addedStructure(authored, statement, linkStructures);
+}
+
+/**
+ * **The one mechanism, since r11**: markup the statement has and the author's
+ * own message does not, counted rather than merely present.
+ *
+ * A multiset difference, so two identical structures in the statement need two
+ * in the message, and one-directional for the reason `addedLinkStructure`'s
+ * docblock gives: a statement that *drops* markup keeps every word the author
+ * wrote, and a statement that *adds* it is text nobody wrote.
+ *
+ * ## The first argument is `authored`, and that is r12's whole finding
+ *
+ * It was `quote` in r10 and r11. **The quote is a proposal field**: `Proposal`
+ * carries `quote` beside `payload.statement` and the same proposer writes both,
+ * so a forgery placed in *both* fields cancelled here to an empty difference and
+ * every other check on the receipt passed. Two mechanisms, each correct alone,
+ * and the defect was the seam — the quote's own fidelity is proved against the
+ * body by `normalizeForReceipt`, and that fold was designed to ignore exactly
+ * the dimension these readers depend on (a whitespace run is one space, and
+ * `[label](dest "title")` is `label dest title`).
+ *
+ * A guard on what an author wrote can only be anchored to text the author wrote.
+ * Comparing two fields the same caller filled in proves nothing at all, whatever
+ * either of them says. The reader is unchanged; the anchor is the cited
+ * message's body. See `validateProposalProvenance`.
+ *
+ * ## Why the body loses nothing, stated where it can be checked
+ *
+ * The body is a *superset* of the quote, so the obvious worry is that structure
+ * the author wrote somewhere else in the message now cancels a forgery spliced
+ * in here. **On the auto-accept path there is no somewhere else.**
+ * `quoteCoversOwnText` already requires the quote to be the whole body — a quote
+ * that is anything less is `quote_omits_surrounding_text`, `refer`, never
+ * accepted on a machine's word — so where it matters the body and the quote hold
+ * the same words. What they do *not* hold identically is the spacing and the
+ * link punctuation, because `significant` compares them through the fold, and
+ * that difference is exactly the forgery. The anchor is strictly better in the
+ * dimension under attack and identical in every other.
+ *
+ * On the `refer` path the two differ and the body is the looser of the two. That
+ * is the right direction there: the reading is going to a person either way,
+ * with `quote_omits_surrounding_text` beside it telling them the quote is not
+ * the whole message.
+ *
+ * Extracted so the block-structure guard below is the same rule with a different
+ * reader, rather than a second implementation of the same idea that can drift
+ * away from the first — `normalizeForRouting`'s own comment records what that
+ * costs ("one *implementation* now too, which is what makes the sentence true
+ * rather than aspirational").
+ */
+function addedStructure(
+  authored: string,
+  statement: string,
+  read: (text: string) => string[],
+): string[] {
+  const available = new Map<string, number>();
+  for (const structure of read(authored)) {
+    available.set(structure, (available.get(structure) ?? 0) + 1);
+  }
+  const added: string[] = [];
+  for (const structure of read(statement)) {
+    const spare = available.get(structure) ?? 0;
+    if (spare === 0) added.push(structure);
+    else available.set(structure, spare - 1);
+  }
+  return added;
+}
+
+/**
+ * **A line-initial Markdown block marker — the closed inventory.**
+ *
+ * Every construct in CommonMark that a *line's own beginning* can open, plus
+ * GFM's table row. Enumerated from the specification's block-start table rather
+ * than from the constructions somebody thought of, which is the distinction this
+ * file already draws for `\p{White_Space}`: a closed published list is a safe
+ * enumeration, a list of the evasions somebody has met is not.
+ *
+ *  - `>` block quote (no space required after it)
+ *  - `#`–`######` ATX heading, which must be followed by space or end of line
+ *  - `-` `+` `*` bullet list, same requirement
+ *  - `1.` `1)` ordered list, same requirement
+ *  - `<` + tag character, HTML block
+ *  - `[label]:` link reference definition
+ *  - `|` GFM table row
+ *
+ * Thematic breaks (`---`, `***`, `___`), setext underlines (`===`, `---`) and
+ * code fences are whole-line shapes rather than prefixes, so they are matched
+ * separately below.
+ *
+ * **`<` is narrowed to a tag character** because `< 5 seconds` at the start of a
+ * line is prose in every flavour, and a refusal that fires on it would be a
+ * refusal that is false about the room's own words — the failure r7 measured
+ * 56,559 times one function over.
+ */
+const BLOCK_MARKER =
+  /^(?:#{1,6}(?=[ \t]|$)|>|[-+*](?=[ \t]|$)|\d{1,9}[.)](?=[ \t]|$)|<[a-zA-Z!/?]|\[[^\]]*\]:|\|)/;
+
+/** A whole line that is nothing but break/underline punctuation. */
+const THEMATIC_BREAK = /^(?:[-*_] ?){3,}$/;
+const SETEXT_UNDERLINE = /^=+$/;
+
+/**
+ * A fenced-code opener — **read off the raw text, before the code-span split.**
+ *
+ * r11's own probe of `blockStructures` found the hole: `CODE_SPAN`'s
+ * double-backtick alternative consumes the first two characters of a three-tick
+ * opener and re-emits the rest as ordinary prose, so a fence was named in the
+ * inventory above and invisible to the scanner reading it. A published list the
+ * code cannot see is worse than a shorter honest one, which is why this is a
+ * second pass rather than a line deleted from the docblock.
+ *
+ * Symmetric between quote and statement by construction — both are scanned the
+ * same way — so a fence the author wrote cancels and only one the statement
+ * built is reported.
+ */
+const CODE_FENCE = /^ {0,3}(?:`{3,}|~{3,})/;
+
+/**
+ * Where `blockStructures` splits lines — **the same answer `LINE_BREAK` gives**,
+ * and it has to be. `LINE_BREAK` is the single-character form of this and its
+ * docblock carries the argument: two answers to "where does a line end" in one
+ * package is one answer too many. A bare newline would not see U+0085, and a
+ * fold that already forgives a NEL as whitespace would then be a fold that can
+ * hide a heading behind one.
+ *
+ * **CRLF is one break, not two — r12.** UAX #14 pairs CR LF as a single
+ * mandatory break, and the character class alone split `a\r\nb` into three lines
+ * with an empty one between them. That cost nothing while the only question
+ * asked here was "does a line *begin* with a marker", because an empty line
+ * opens nothing. `breakStructures` asks whether a line is *blank*, and under the
+ * class alone a CRLF text would report a paragraph break at every line ending:
+ * harmless on the message's side, where the difference is one-directional, and a
+ * **false refusal** on a statement whose line endings differ from its message's.
+ * The alternation comes first because alternation is ordered — the class would
+ * otherwise match the CR on its own and leave the LF to start the next line.
+ */
+const LINE_BREAK_SPLIT = /\r\n|[\n\v\f\r\u0085\u2028\u2029]/;
+
+/**
+ * **Every block a text's line beginnings open** — the second many-to-one rule in
+ * the fold, read back out, and r11's finding.
+ *
+ * ## Why this exists
+ *
+ * `foldProse` collapses `\p{White_Space}+` to one space. That entry has the
+ * strongest argument of the four the fold admits — a client wraps a message and
+ * a quote copied out of it carries different line breaks — and it is not
+ * narrowed here. But the collapse runs in *both* directions, so a statement may
+ * put a **line break where its author put a space**, fold to the identical
+ * normal form, be `borne`, and land:
+ *
+ * ```
+ * author : Latency > 200ms is unacceptable for the search API.
+ * record : Latency\n> 200ms is unacceptable for the search API.     → a block quote
+ * author : See section # 4 of the runbook before the deploy.
+ * record : See section\n# 4 of the runbook before the deploy.       → a heading
+ * author : Do this before the freeze: run the migration script.
+ * record : Do this before the freeze:\n    run the migration script.
+ * ```
+ *
+ * Every one `auto_accept`, every one landing in `state.objects`, every one built
+ * out of the author's own characters. It is r10's link finding at the other rule
+ * that can *build* structure rather than delete it, and r10's own sentence
+ * governs it: the stored text is markup its named author never wrote, and this
+ * package is the only gatekeeper of that.
+ *
+ * ## What is claimed, and what is not
+ *
+ * The finding is mechanical and flavour-independent: **the statement begins a
+ * line with a marker the quote does not**. Whether a given renderer turns that
+ * line into a block is not claimed and is not this package's to know — the
+ * record is written here and rendered in another lane, which is the same
+ * asymmetry `linkStructures` was built on. Two of the shapes above are
+ * deliberately included on that ground rather than on a rendering claim:
+ * CommonMark says an indented chunk *cannot interrupt a paragraph*, and GFM
+ * needs a delimiter row before `|` is a table, so neither builds a block in a
+ * strict reader — and both are the author's characters re-broken into lines by
+ * something that was not the author.
+ *
+ * **Code segments are skipped**, on the same argument `linkStructures` gives:
+ * a backticked span is mention, not use, `normalizeForReceipt` passes one
+ * through byte for byte, and a `>` displayed inside a literal opens nothing. A
+ * segment that does not itself start at a line beginning has its first line
+ * skipped, because `` `x` > a `` is not a block quote.
+ *
+ * ## The half this cannot see, which is `breakStructures` — r12
+ *
+ * This reads **line beginnings**, so the structure a line *ending* makes is
+ * invisible to it: a blank line splits one paragraph into two and reports
+ * nothing, because `blockOpener` returns `null` for a blank line — correctly, a
+ * blank line *ends* a block. But inserting one into a single paragraph *starts*
+ * a second, which is the same finding one question over. The rule below reads
+ * that half; `addedBlockStructure` diffs both together, because they are one
+ * question — *is this rendered structure the author's?* — with two readers.
+ */
+export function blockStructures(text: string): string[] {
+  const out: string[] = [];
+  // Fences first, on the raw text — see `CODE_FENCE` for why they cannot be read
+  // out of the segment walk below. Prepared exactly as the walk prepares a prose
+  // segment: two passes over one text that fold differently are two answers to
+  // one question, and the difference would show up as a descriptor that does not
+  // cancel against the quote's.
+  const prepare = (value: string): string => value.replace(DELETABLE, '').replace(/[’ʼ]/g, "'");
+  for (const line of prepare(text).split(LINE_BREAK_SPLIT)) {
+    if (CODE_FENCE.test(line)) out.push(line.replace(WHITESPACE_RUN, ' ').trim());
+  }
+  // The first line of the whole text is a line beginning; after that it depends
+  // on what the previous segment ended with, which is why this is carried across
+  // the code-segment boundary rather than reset per segment.
+  let atLineStart = true;
+  for (const [index, segment] of text.split(CODE_SPAN).entries()) {
+    const isCode = index % 2 === 1;
+    if (!isCode) {
+      const lines = prepare(segment).split(LINE_BREAK_SPLIT);
+      for (const [position, line] of lines.entries()) {
+        if (position === 0 && !atLineStart) continue;
+        const opener = blockOpener(line);
+        if (opener !== null) out.push(opener);
+      }
+    }
+    // An empty segment — `String.split` emits one whenever a delimiter starts or
+    // ends the text — says nothing about where the next one begins, so it must
+    // not be read as "not at a line start".
+    if (segment.length > 0) atLineStart = LINE_BREAK_SPLIT.test(segment.slice(-1));
+  }
+  return out.sort();
+}
+
+/**
+ * The block this line opens, as a descriptor — the marker with the rest of the
+ * line whitespace-collapsed behind it, so it reads in a refusal and compares as
+ * a key.
+ *
+ * Collapsed for the reason `linkStructures` collapses: the fold forgives
+ * whitespace inside the line, so a quote and a statement whose markers agree
+ * must produce one descriptor rather than two.
+ */
+function blockOpener(line: string): string | null {
+  // Leading whitespace in *columns*, because a tab advances to the next multiple
+  // of four and four columns is where an indented code block begins.
+  let column = 0;
+  let index = 0;
+  for (; index < line.length; index += 1) {
+    const character = line[index];
+    if (character === ' ') column += 1;
+    else if (character === '\t') column += 4 - (column % 4);
+    else break;
+  }
+  const rest = line.slice(index).replace(WHITESPACE_RUN, ' ').trim();
+  // A blank line opens nothing — it *ends* a block, which is a difference in the
+  // other direction and not one this rule reports.
+  if (rest.length === 0) return null;
+  if (column >= 4) return `    ${rest}`;
+  if (THEMATIC_BREAK.test(rest) || SETEXT_UNDERLINE.test(rest)) return rest;
+  return BLOCK_MARKER.test(rest) ? rest : null;
+}
+
+/** A line with nothing in it but whitespace — CommonMark's blank line. */
+function isBlankLine(line: string): boolean {
+  return line.replace(WHITESPACE_RUN, '').length === 0;
+}
+
+/**
+ * A **hard line break**, in the two spellings CommonMark gives it: two or more
+ * spaces before the break, or a backslash before it.
+ *
+ * Only the first is reachable through the fold — a backslash is not whitespace,
+ * so `foo\⏎bar` and `foo bar` are different normal forms and the receipt refuses
+ * the statement before this rule is consulted. It is enumerated anyway, on the
+ * discipline `BLOCK_MARKER` states: the list comes from the specification's
+ * table rather than from the evasions somebody has met, and a reader narrowed to
+ * "the one that happens to be reachable today" is a reader that goes wrong the
+ * next time a fold entry moves. Tabs are not spaces here, because CommonMark
+ * says a hard break is spaces.
+ */
+const HARD_LINE_BREAK = /(?: {2,}|\\)$/;
+
+/**
+ * **The structure a line's *ending* makes** — the half `blockStructures` cannot
+ * see, and r12's second face.
+ *
+ * ## Why this exists
+ *
+ * `blockStructures` reports a marker at a line *beginning*, so the two rendered
+ * breaks that carry no marker at all were clean with an honest quote and a
+ * proposer-written one alike:
+ *
+ * ```
+ * author : Do not deploy on Friday. Bob agreed to the rollback plan.
+ * record : Do not deploy on Friday.⏎⏎Bob agreed to the rollback plan.   → two paragraphs
+ * record : Do not deploy on Friday.··⏎Bob agreed to the rollback plan.  → a <br>
+ * ```
+ *
+ * Both `auto_accept` before this rule, both stored, both built out of the
+ * author's own characters by the same fold entry r11 found: a run of whitespace
+ * is one space whichever characters it is made of. It is r11's finding at the
+ * shapes r11's reader was structurally unable to report.
+ *
+ * ## Where the line is drawn, and why a bare newline is on the other side of it
+ *
+ * A blank line and a hard break are structure in **every** CommonMark-family
+ * renderer: one closes a paragraph and opens another, one emits a `<br>`. A
+ * *bare* newline inside a paragraph is a space in CommonMark and a `<br>` only
+ * under a renderer configured with `breaks: true`. Reporting it would be this
+ * package claiming a rendering it cannot know, and it would narrow the fold's
+ * whitespace entry — the entry with the best argument of the four, which r11
+ * refused to narrow and this round does not either. **So a re-wrapped line is
+ * still free, and that is the stated residue**: a renderer that breaks on every
+ * newline renders a statement whose lines were re-wrapped differently from its
+ * author's. The record is written here and rendered in another lane, which is
+ * the asymmetry `linkStructures` was built on, and this is the one place it is
+ * paid for rather than collected.
+ *
+ * ## Read off the raw text, like `CODE_FENCE`
+ *
+ * A blank line cannot occur inside a code *span* — it ends the paragraph the
+ * span lives in — so the only literal this over-reads is a fenced block, whose
+ * fences `CODE_FENCE` already reads the same way and whose contents the receipt
+ * compares byte for byte. Both texts are read identically, so an over-read
+ * cancels; the alternative, threading blank-line runs through the segment walk,
+ * is a second answer to where a line ends inside a rule that exists because
+ * there is only one.
+ *
+ * The descriptor names the content either side of the break, so it cancels only
+ * against the same break in the same place — a paragraph break the author put
+ * somewhere else is still a paragraph break the author did not put here.
+ */
+export function breakStructures(text: string): string[] {
+  const out: string[] = [];
+  const prepared = text.replace(DELETABLE, '').replace(/[’ʼ]/g, "'");
+  const lines = prepared.split(LINE_BREAK_SPLIT);
+  const collapse = (line: string): string => line.replace(WHITESPACE_RUN, ' ').trim();
+  for (const [index, line] of lines.entries()) {
+    if (index === 0) continue;
+    // The nearest content line before this one, and this one's own content. A
+    // break with nothing on one side of it renders nothing: leading and trailing
+    // blank lines are trimmed by the fold, and a hard break at the end of a
+    // block is a hard break CommonMark drops.
+    if (isBlankLine(line)) continue;
+    let previous = index - 1;
+    while (previous >= 0 && isBlankLine(lines[previous] as string)) previous -= 1;
+    if (previous < 0) continue;
+    if (previous < index - 1) out.push(`blank line before "${collapse(line)}"`);
+    else if (HARD_LINE_BREAK.test(lines[previous] as string)) {
+      out.push(`hard line break after "${collapse(lines[previous] as string)}"`);
+    }
+  }
+  return out.sort();
+}
+
+/**
+ * **Block markup the statement has and the author's own message does not** —
+ * both readers through the same multiset difference `addedLinkStructure` uses,
+ * for the same reason and in the same direction.
+ *
+ * One difference over two readers rather than two differences, because the two
+ * report disjoint descriptors — a block opener is a marker or a four-column
+ * indent, a break descriptor is a sentence — so concatenating them is the same
+ * answer as diffing each and concatenating those, and it is one refusal to read.
+ */
+export function addedBlockStructure(authored: string, statement: string): string[] {
+  return addedStructure(authored, statement, (text) => [
+    ...blockStructures(text),
+    ...breakStructures(text),
+  ]);
+}
+
+/**
+ * The lossy normalization, for the questions where being lossy is the safe
+ * direction: **which model reads this window**, and **is this reading a
+ * duplicate of one the room already accepted**.
+ *
+ * Everything `normalizeForReceipt` refuses to do is done here, on purpose. A
+ * trigger that fires on a fullwidth spelling costs one model call. A dedup that
+ * treats `Deploy` and `deploy` as one word discards a re-proposal, which is what
+ * it is for. Neither can mint a fact, and `escalation.ts` states in its own
+ * stopword comment that the routing list "has not decided whether a reading
+ * becomes a fact since r4, and it must never do so again".
+ *
+ * The one call this makes on the receipt path is the later-correction scan, and
+ * it is deliberate: that scan is a *detector*, its false positives cost a
+ * referral rather than an acceptance, so it wants the loose comparison.
+ */
+export function normalizeForRouting(text: string): string {
+  return (
+    text
+      .normalize('NFKC')
+      .replace(/[’ʼ]/g, "'")
+      // **The same link policy the receipt uses, and r5's third review pass is
+      // why.** This fold used to collapse `[text](destination)` to its text, and
+      // `laterRevision` runs over it — so a later message that changed only the
+      // *destination* of a link ("Use [https://safe.example/app](https://evil.example/app)
+      // …" after "Use https://safe.example/app …") reduced to the same tokens as
+      // the one before it and did not read as a revision. A destination is content
+      // wherever it appears; there is one answer to that question now, not two.
+      // **One function, since r7.** The two folds each carried their own copy of
+      // this callback, and r7 changed one of them — to stop discarding the link
+      // title and the `!` image marker — which silently left routing on the old
+      // policy and, because the pattern's capture groups moved with it, dropped
+      // destinations from routing entirely. `escalation.test.ts` caught it in
+      // one run. The comment above says "there is one answer to that question
+      // now, not two"; it is one *implementation* now too, which is what makes
+      // the sentence true rather than aspirational.
+      .replace(MARKDOWN_LINK, unfoldLink)
+      .replace(/[*_`]+/g, ' ')
+      .replace(DELETABLE, '')
+      .replace(WHITESPACE_RUN, ' ')
+      .trim()
+      .toLowerCase()
+  );
+}
+
+/* ─────────────────────────────────────────────────────────────────────────
+ * Tokens and sentences
+ * ───────────────────────────────────────────────────────────────────────── */
+
+/**
+ * A word in any script: letters, digits and combining marks, with apostrophes
+ * *inside* it. **Every other single code point is one token of its own** —
+ * including the spaces between words and a standalone apostrophe.
+ *
+ * The alternation is the whole design. r4's first version split on
+ * `/[^a-z0-9']+/`, which is a **denylist of the characters that may carry
+ * meaning** wearing a tokenizer's clothes, and r4's own blind review walked
+ * through it four ways in one pass: `Bob will ｎｏｔ deploy` (fullwidth — not
+ * `[a-z]`, so deleted), `Bob will не deploy` (Cyrillic — deleted), `❌ Bob will
+ * deploy` (emoji — deleted), and `Bob will deploy Friday?` (the question mark —
+ * deleted). Each one bore its own affirmative and auto-accepted. A Russian
+ * sentence, meanwhile, tokenized to *nothing at all* and was refused as empty.
+ *
+ * So the rule is inverted: a token is a word, or it is a code point, and
+ * **nothing may go missing**.
+ *
+ * That sentence read "`RECEIPT_POLICY.droppableTokens` is the only thing that
+ * may go missing" until r7, thirty lines above the paragraph below saying
+ * nothing may — the field was emptied in r6 and deleted, and this line kept
+ * describing it in the present tense. `boundary.test.ts` asserts its absence by
+ * name so nobody re-adds it; this comment is the other half of that, because a
+ * live comment naming a deleted mechanism is an invitation to restore it.
+ *
+ * ## `[\s\S]` and not `[^\s']`, which is r6's first finding
+ *
+ * r4 fixed the *character class* of the denylist and left the denylist. The
+ * second alternative was `[^\s']`, so the tokenizer **discarded all whitespace
+ * and every standalone ASCII apostrophe** — and the token comparison is the only
+ * comparison the acceptance path makes between a quote and the statement being
+ * minted from it. Four inputs auto-accepted with a `payload.statement` its named
+ * author never wrote:
+ *
+ * | body, quoted verbatim                                | minted statement                          |
+ * | ---------------------------------------------------- | ----------------------------------------- |
+ * | ``Run `rm -rf / tmp/cache` on the box tonight.``      | ``Run `rm -rf /tmp/cache` on the box tonight.`` |
+ * | ``Set the password to `a  b` today, everyone.``       | ``Set the password to `a b` today, everyone.``  |
+ * | `We will deploy production Friday, promise.`          | `We will 'deploy' production 'Friday', promise.` |
+ * | `'We will deploy production Friday.'`                 | the same sentence, as an assertion        |
+ *
+ * The first two are `normalizeForReceipt`'s own named counterexample: it passes
+ * a code segment through byte for byte precisely because *two spaces in a
+ * password are a different password* — and it was correct, and **nothing at the
+ * comparison consulted it**. The last two are the mention/use distinction:
+ * backticks and double quotes are content and were refused, and the plain
+ * apostrophe was invisible, so `'…'` fell through while `‘…’` survived only
+ * because `’` folds to `'` and vanished and `‘` did not. Failing closed by luck
+ * is not a rule.
+ *
+ * The repair is not a longer character class. It is the property that makes the
+ * claim checkable: **the token stream reassembles the text it came from.**
+ * `orderedTokens(t).join('') === normalizeForReceipt(t)` for every `t`, which
+ * `bearing.test.ts` pins over a corpus and over brute-forced code points, and
+ * from which `borne ⇒ the statement is the quote` follows rather than being
+ * asserted in a comment.
+ */
+const WORD = String.raw`[\p{L}\p{N}\p{M}]+(?:'[\p{L}\p{N}\p{M}]+)*`;
+const TOKEN = new RegExp(String.raw`${WORD}|[\s\S]`, 'gu');
+
+/**
+ * The detector's tokenizer: the same word rule, **minus the whitespace**.
+ *
+ * One difference from `TOKEN`, written as one difference rather than as a second
+ * regex, and it is not a relaxation of the receipt — it is the shape of the two
+ * questions. `routingTokens` runs over `normalizeForRouting`, which has already
+ * collapsed every whitespace run to a single space and deleted the markdown, so
+ * a space token there carries no information at all. Carrying it anyway
+ * **measurably broke the correction scan**: an inserted word arrives with an
+ * inserted space, so `laterRevision` comparing *"We will not deploy production
+ * Friday."* against *"We will deploy production Friday."* resynchronised on the
+ * space instead of on the word, reported a difference on both sides, and read a
+ * plain contradiction as an unrelated sentence.
+ *
+ * The receipt tokenizer cannot make that trade, because there the spacing *is*
+ * the content — see `TOKEN`.
+ */
+const ROUTING_TOKEN = new RegExp(String.raw`${WORD}|\S`, 'gu');
+
+/**
+ * Every token of a text, in the order it was written, **losing nothing**.
+ *
+ * Deliberately unlike `contentTokens` in all five ways that matter, and each
+ * one is a defect the gauntlets exploited or could have:
+ *
+ *  - **No stopword list.** `not`, `all`, `some`, `will`, `might`, `unless` and
+ *    every word nobody has thought of yet are content here. There is no list to
+ *    get wrong because there is no list.
+ *  - **No de-duplication.** "not not" is two tokens. A `Set` cannot tell double
+ *    negation from single.
+ *  - **No length floor.** `no` is two characters and inverts a sentence.
+ *  - **No character class of "real" words.** Every script, every mark and every
+ *    emoji is content; see `TOKEN`.
+ *  - **Nothing is discarded at all.** Not the spaces, not a lone apostrophe.
+ *    `join('')` reconstructs `normalizeForReceipt(text)` exactly, so two equal
+ *    token streams are two equal texts — which is what the receipt claims and,
+ *    until r6, was not what it proved.
+ *
+ * Apostrophes are kept *inside* a word, so `won't` is one token and is not
+ * `will`. A standalone apostrophe is its own token: `'online'` is three tokens,
+ * because the marks that turn a sentence into a quotation of a sentence are the
+ * same marks the backtick rule already calls content.
+ */
+export function orderedTokens(text: string): string[] {
+  return normalizeForReceipt(text).match(TOKEN) ?? [];
+}
+
+/** True when a token is nothing but whitespace. See `alignTokens`. */
+export function isWhitespaceToken(token: string): boolean {
+  return WHITESPACE_TOKEN.test(token);
+}
+
+/**
+ * **There is no dedup tokenizer any more — r9, and this comment is the entry in
+ * the not-admitted list.**
+ *
+ * r8 wrote one. `findDuplicate` had been running on `routingTokens`, whose fold
+ * is NFKC, on the argument that *"being lossy here means firing more often,
+ * which for a re-proposal is the harmless direction"* — and a duplicate is
+ * **discarded**, so firing more often was not the harmless direction but silent
+ * destruction. NFKC maps `10²` onto `102`, and a reading of *"the p99 settled at
+ * 10² ms"* was thrown away as a duplicate of the accepted *"the p99 settled at
+ * 102 ms"*: 100 against 102, no proposal, no issue, no trace. r8 narrowed the
+ * fold to case alone and kept it, on the ground that *"case is the one
+ * difference that cannot change what a sentence says"*.
+ *
+ * **That ground is the one this file's header rejects by name, four hundred
+ * lines up**: `US` / `us`, `Bill` / `bill`, `March` / `march` are different
+ * words. Those are *prose* counterexamples, so no boundary inside the text
+ * rescues the claim — folding case only outside code segments would still read
+ * *"Send the bill to Acme"* as a re-proposal of *"Send the Bill to Acme"*. Both
+ * sentences cannot be true in one file, and the one with counterexamples
+ * attached is the one that stands.
+ *
+ * **What decides it is that the two errors point opposite ways.** The receipt
+ * erring strict *refuses* a reading, and a refused reading goes to a person. The
+ * dedup erring forgiving *discards* one, and a discarded reading goes nowhere —
+ * `verdict: 'discard'`, `visibility: 'none'`, never shown, never stored. A
+ * comparison whose failure mode is destruction may not have a **wider**
+ * allowlist than one whose failure mode is referral. `normalizeForReceipt` is
+ * this repo's answer to "which differences between two texts leave what was said
+ * intact", built to the bar of *an argument nobody can break*; the deduplicator
+ * asks that same question with more to lose, so it gets that same answer and not
+ * a looser one.
+ *
+ * The measured cost is close to nothing, because of what the receipt already
+ * requires. A machine reading only lands when `borne` holds — the statement *is*
+ * the quote — and `quoteCoversOwnText` requires the quote to be a cited author's
+ * whole message body. `normalizeForReceipt` does not fold case, so an accepted
+ * object's text carries the exact case of a real message body. Two readings of
+ * *the same* message are therefore case-identical and still dedup exactly; a
+ * case difference between two statements means they came from two **different
+ * bodies**, which is the correction case, not the re-proposal case. The fold
+ * could not fire on what it was for, and could only fire on what it destroyed.
+ *
+ * `findDuplicate` calls `orderedTokens`, so there is one tokenizer for "is this
+ * the same sentence" and no second allowlist to drift away from the first.
+ */
+
+export function routingTokens(text: string): string[] {
+  return normalizeForRouting(text).match(ROUTING_TOKEN) ?? [];
+}
+
+/**
+ * A text split into sentences: on a terminator followed by whitespace, or on a
+ * line break.
+ *
+ * Deliberately crude, **and the docblock used to be wrong about which way.** It
+ * said this "splits *less* than a linguist would (an abbreviation keeps its
+ * sentence whole)", so under-splitting could only make the checks harder to
+ * satisfy. `Mr. Smith will ship it.` splits into `Mr.` and `Smith will ship it.`
+ * — it splits *more*, and that direction makes `quoteSpansWholeSentences`
+ * **easier** to satisfy, which is the opposite of what the paragraph promised.
+ * Found by this round's own adversarial pass, which is what a rationale about
+ * behaviour is for: it is a claim, and claims get measured.
+ *
+ * The disposition is unaffected, and that is why the crudeness is still
+ * acceptable rather than a defect with a note attached. Both of the findings
+ * this splitter can produce are `refer` — `quote_is_a_fragment` and
+ * `quote_omits_surrounding_text` — and the gate that decides acceptance is
+ * `quoteCoversOwnText`, which compares against the **whole body** and does not
+ * use this function at all. Over-splitting can move a refusal from one refer to
+ * the other; it cannot produce an acceptance.
+ */
+export function sentencesOf(text: string): string[] {
+  return text
+    .split(SENTENCE_BREAK)
+    .map((sentence) => sentence.trim())
+    .filter((sentence) => sentence.length > 0);
+}
+
+/* ─────────────────────────────────────────────────────────────────────────
+ * Does the quote bear the statement?
+ * ───────────────────────────────────────────────────────────────────────── */
+
+/**
+ * What the bearing check found. **`borne` is the only affirmative answer** —
+ * every other shape of this result is a refusal, and the three fields beside it
+ * say which refusal it is.
+ */
+export interface StatementBearing {
+  /**
+   * True only when **the statement is the quote** — the same marks in the same
+   * order, with nothing removed at all.
+   *
+   * That sentence has been in this file since r4 with an exception attached to
+   * it, and r6 removed the last exception: `orderedTokens` loses nothing, so an
+   * equal token stream is an equal text, and `droppableTokens` is gone (see
+   * `policy.ts`), so there is nothing in front of the comparison either. `borne`
+   * is now exactly `normalizeForReceipt(quote) === normalizeForReceipt(statement)`.
+   *
+   * The invariant that keeps this honest: `borne` is true exactly when all three
+   * of `unmatchedInQuote`, `unmatchedInStatement` and `whitespaceDiffers` are
+   * empty/false. A caller that reads the two lists and not the flag would fail
+   * open on a re-spaced code literal, so `escalation.ts` branches on `borne`
+   * first and names every way it can be false.
+   */
+  borne: boolean;
+  /** Non-whitespace tokens the statement asserts that the quote does not contain, in order. */
+  unmatchedInStatement: string[];
+  /** Non-whitespace tokens the quote contains that the statement drops, in order. */
+  unmatchedInQuote: string[];
+  /**
+   * **At least one space could not be paired.**
+   *
+   * Kept out of the two lists because a refusal that reads *the quote says `" "`*
+   * is a refusal nobody can act on. It is set as collateral whenever words differ
+   * too — an inserted word arrives with an inserted space — so it is *decisive*
+   * only when the two lists are empty, and `escalation.ts` reads the three in
+   * that order.
+   *
+   * When it is decisive it means the two texts are spaced differently, and that
+   * is all it is claimed to mean. Two drafts of this docblock tried to enumerate
+   * the ways that can happen — "only inside a code span", then "a code span or a
+   * dropped full stop" — and a brute force over generated pairs broke both, the
+   * second with `wa 'z` against `wa' z`. A list of the ways a thing can happen
+   * is the instrument `RETRO.md` keeps recording, in prose as much as in code.
+   * (Both of those enumerations were artefacts of `droppableTokens`, which is
+   * gone; the fact is still stated as a fact, because the next reader should not
+   * have to trust that it stayed gone.)
+   */
+  whitespaceDiffers: boolean;
+  /** Set when the check declined to run at all, rather than running and failing. */
+  undecidable: 'empty_quote' | 'empty_statement' | 'too_long' | null;
+}
+
+const declined = (undecidable: StatementBearing['undecidable']): StatementBearing => ({
+  borne: false,
+  unmatchedInStatement: [],
+  unmatchedInQuote: [],
+  whitespaceDiffers: false,
+  undecidable,
+});
+
+const sameRun = (a: readonly string[], b: readonly string[]): boolean =>
+  a.length === b.length && a.every((token, index) => token === b[index]);
+
+/**
+ * The alignment itself, over tokens somebody else produced.
+ *
+ * Split out from `statementBearing` in r5 so the later-correction detector can
+ * run the same comparison over *routing* tokens without a second implementation
+ * of the alignment. One alignment, two tokenizations, and the caller says which
+ * — rather than two alignments that can drift.
+ *
+ * Deterministic, total, and bounded by `RECEIPT_POLICY.maxAlignedTokens` — an
+ * input too big to align is refused, not approximated.
+ *
+ * ## The verdict and the diagnosis are computed separately, and r6 is why
+ *
+ * `borne` is `sameRun`: two lists of tokens, equal length, equal element by
+ * element, **and nothing else**. There is no forgiveness step in front of it any
+ * more — see `policy.ts` for the obituary of `droppableTokens`, which grok's
+ * blind pass broke on ``Load `.env` …`` bearing ``Load `env` …``. Since
+ * `orderedTokens` reassembles the text it came from, `borne` is now literally
+ * *the two normalized texts are the same string*.
+ *
+ * The three fields beside it are a **diagnosis** — greedy, with a one-sided
+ * lookahead so that one interposed word ("not") is reported as one interposed
+ * word instead of knocking every later token out of alignment. A resynchronising
+ * diff is a judgement call about which tokens correspond, and until r6 that
+ * judgement call *was* the verdict: `borne` was "the diff found nothing", so any
+ * way the diff could be fooled was a way the receipt could be fooled. Now it
+ * only decides what the refusal says.
+ *
+ * The two cannot disagree in the affirmative direction — an elementwise-equal
+ * pair produces an empty diff — and if they ever disagree the other way,
+ * `escalation.ts` has a named problem for it rather than a silent pass.
+ */
+export function alignTokens(
+  quote: readonly string[],
+  statement: readonly string[],
+  policy: ReceiptPolicy = RECEIPT_POLICY,
+): StatementBearing {
+  if (quote.length === 0) return declined('empty_quote');
+  if (statement.length === 0) return declined('empty_statement');
+  if (quote.length > policy.maxAlignedTokens || statement.length > policy.maxAlignedTokens) {
+    return declined('too_long');
+  }
+
+  const unmatchedInQuote: string[] = [];
+  const unmatchedInStatement: string[] = [];
+  let whitespaceDiffers = false;
+  /**
+   * One token the diff could not pair. Whitespace sets the flag; every other
+   * token is named in its list. The split is about what the refusal *says* —
+   * a refusal reading *the quote says `" "`* is one nobody can act on — and it
+   * cannot change the verdict, which is `sameRun` above.
+   */
+  const unaccounted = (token: string, into: string[]): void => {
+    if (isWhitespaceToken(token)) whitespaceDiffers = true;
+    else into.push(token);
+  };
+  let i = 0;
+  let j = 0;
+
+  while (i < quote.length && j < statement.length) {
+    const qt = quote[i];
+    const st = statement[j];
+    if (qt === st) {
+      i += 1;
+      j += 1;
+      continue;
+    }
+    // **A space never drives the resynchronisation.** The lookahead below asks
+    // "can this token still be matched later", and a space can always be matched
+    // later, so a stream with spaces in it made the diff ping-pong: a substituted
+    // word was reported, then the space after it dragged a word off the other
+    // side, and the two chased each other to the end of the sentence.
+    // `we ship on Friday afternoon` vs `we ship it on Friday afternoon` named
+    // `it`, `on` and `Friday` instead of `it`. Spacing that could not be paired
+    // is recorded and stepped over; only real tokens steer.
+    if (qt !== undefined && isWhitespaceToken(qt) && st !== undefined && !isWhitespaceToken(st)) {
+      whitespaceDiffers = true;
+      i += 1;
+      continue;
+    }
+    if (st !== undefined && isWhitespaceToken(st) && qt !== undefined && !isWhitespaceToken(qt)) {
+      whitespaceDiffers = true;
+      j += 1;
+      continue;
+    }
+    // A real disagreement. Resynchronise towards whichever side can still be
+    // matched, so one interposed word ("not") is reported as one interposed word
+    // rather than knocking every later token out of alignment.
+    if (st !== undefined && quote.indexOf(st, i + 1) !== -1) {
+      if (qt !== undefined) unaccounted(qt, unmatchedInQuote);
+      i += 1;
+    } else {
+      if (st !== undefined) unaccounted(st, unmatchedInStatement);
+      j += 1;
+    }
+  }
+
+  // Whatever is left over on either side is unaccounted for — a trailing
+  // "unless CI is red" is exactly this case, and it is why the tail is not
+  // forgiven.
+  for (; i < quote.length; i += 1) {
+    const leftover = quote[i];
+    if (leftover !== undefined) unaccounted(leftover, unmatchedInQuote);
+  }
+  for (; j < statement.length; j += 1) {
+    const leftover = statement[j];
+    if (leftover !== undefined) unaccounted(leftover, unmatchedInStatement);
+  }
+
+  return {
+    borne: sameRun(quote, statement),
+    unmatchedInStatement,
+    unmatchedInQuote,
+    whitespaceDiffers,
+    undecidable: null,
+  };
+}
+
+/**
+ * **Is the asserted statement a word-for-word reduction of this quote?**
+ *
+ * ## What this proves, stated in the terms it actually holds
+ *
+ * `borne === true` means exactly one thing, and it is worth writing out because
+ * the check it replaced claimed something it could not deliver:
+ *
+ * > Every token of the statement appears in the quote, in the same order, and
+ * > every token of the quote appears in the statement, in the same order, with
+ * > no exception. A token is a word in any script, or **any single code point**
+ * > — a mark, a space, an apostrophe — after the differences
+ * > `normalizeForReceipt` admits.
+ *
+ * ## Which is to say: the statement *is* the quote
+ *
+ * That sentence was in this docblock before r6 and was not true of the code.
+ * The tokenizer discarded whitespace and standalone apostrophes, and this
+ * comparison is the only one the acceptance path makes between the quote and the
+ * statement being minted — so ``Run `rm -rf / tmp/cache` …`` bore ``Run `rm -rf
+ * /tmp/cache` …``, and `We will deploy production Friday, promise.` bore `We
+ * will 'deploy' production 'Friday', promise.` `TOKEN` has the table.
+ *
+ * It is true now, and it is true *by construction* rather than by inspection:
+ * `orderedTokens` is exhaustive, so `join('')` rebuilds the normalized text, and
+ * nothing is removed before the comparison, so two equal token streams are two
+ * equal texts. `bearing.test.ts` asserts the equivalence directly —
+ * `borne === (normalizeForReceipt(quote) === normalizeForReceipt(statement))`,
+ * over a generated space rather than a corpus — which is the assertion that
+ * carries all of this.
+ *
+ * That is a **structural** claim about two strings. It is not entailment, and
+ * nothing here can establish entailment — but combined with the checks around it
+ * (the quote is the whole of a cited author's own text in a message no later
+ * message revisits, and it is written by exactly one identifiable person) it
+ * supports the sentence the product actually needs to be able to say: *the
+ * sentence being asserted is one somebody in this room wrote, in these words,
+ * and nothing around it in the record changes it.*
+ *
+ * ## Why not the softer test
+ *
+ * r3 asked "how many of the statement's content words does the quote contain",
+ * over a de-duplicated set, with `not` dropped as a stopword. The answer for
+ * *"Bob will not deploy production Friday"* → *"Bob will deploy production
+ * Friday"* was 100%, and that acceptance was automatic. Every softening of the
+ * test above reopens it somewhere:
+ *
+ *  - A **set** cannot see order, so "A blocks B" and "B blocks A" are the same.
+ *  - A **threshold** licenses dropping whatever falls under it, and one dropped
+ *    word is all a negation needs.
+ *  - A **stopword list** decides in advance which words cannot matter, which is
+ *    the assumption that failed.
+ *  - Checking only the **covering span** of the statement inside the quote misses
+ *    the prefix ("I don't think ") and the suffix (" unless CI is red"), which is
+ *    where a qualifier lives. So the *whole* quote must be accounted for.
+ *
+ * The cost is stated rather than hidden: a model reading that paraphrases —
+ * expands a pronoun, fixes a tense, tightens the wording — is no longer
+ * auto-acceptable. It is not destroyed; it goes to a person, which is where a
+ * reading that is not in the record in these words belongs.
+ */
+export function statementBearing(
+  quote: string,
+  statement: string,
+  policy: ReceiptPolicy = RECEIPT_POLICY,
+): StatementBearing {
+  if (isBlank(quote)) return declined('empty_quote');
+  if (isBlank(statement)) return declined('empty_statement');
+  return alignTokens(orderedTokens(quote), orderedTokens(statement), policy);
+}
+
+/* ─────────────────────────────────────────────────────────────────────────
+ * Where the scissors may cut
+ * ───────────────────────────────────────────────────────────────────────── */
+
+/**
+ * The quote's tokens, with **the spacing between them** taken out.
+ *
+ * The two functions below ask *which marks, in which order*, over a text that
+ * has been cut into sentences and reassembled; the cut throws the whitespace
+ * between two sentences away, so comparing spacing here would compare an
+ * artefact of the splitter.
+ *
+ * ## What this used to promise, and why it was false — r12
+ *
+ * It said spacing fidelity *"is proved twice elsewhere"*, and named
+ * `validateProposalProvenance` as requiring the quote to occur in the message
+ * body **verbatim** under `normalizeForReceipt`. Under that fold nothing about
+ * spacing is verbatim, and it is not an oversight: entry 1 collapses every
+ * whitespace run to one space and trims the ends, entry 4 unfolds `[label](dest
+ * "title")` into `label dest title`. Both keep their arguments and neither is
+ * narrowed. But **the fold was designed to ignore exactly the dimension a
+ * structure guard depends on**, and a sentence promising the opposite is how
+ * r10's and r11's guards came to be anchored to the quote while being read as
+ * anchored to the message. Two mechanisms, each correct alone; the defect was
+ * the seam, and this sentence was the seam written down.
+ *
+ * What holds, in the terms it holds in:
+ *
+ *  - The quote occurs in the body **word for word, mark for mark, in order**.
+ *    `normalizeForReceipt` admits four differences and each is enumerated with
+ *    the argument that admits it; inside a code segment it is byte for byte,
+ *    because the fold does not run there.
+ *  - **Nothing is proved about spacing, line structure or link punctuation** by
+ *    that comparison. `alignTokens` does report `whitespaceDiffers`, but only
+ *    the branch where the two texts already fail to bear each other reads it, so
+ *    it says nothing about a statement that folds to its quote exactly.
+ *  - Structure fidelity is proved separately by `addedLinkStructure` and
+ *    `addedBlockStructure`, and **against the body** rather than against the
+ *    quote: they are the guards on what the author wrote, and the quote is a
+ *    field the proposer fills in.
+ */
+function significant(text: string): string[] {
+  return orderedTokens(text).filter((token) => !isWhitespaceToken(token));
+}
+
+/**
+ * **Is the quote a run of whole sentences of this text, rather than a span cut
+ * out of the middle of one?**
+ *
+ * r4's own blind review found the defect this exists for. Making the *statement
+ * vs quote* comparison exact does nothing if the *quote vs message* relation is
+ * still "any substring", because the model chooses the span:
+ *
+ * | message body                                              | quote = statement                         |
+ * | --------------------------------------------------------- | ----------------------------------------- |
+ * | It is not true that Bob will deploy production Friday …    | Bob will deploy production Friday …       |
+ * | Nobody thinks Bob will deploy production Friday this week   | Bob will deploy production Friday this week |
+ * | I doubt Bob will deploy production Friday this coming week  | Bob will deploy production Friday this coming week |
+ *
+ * Every one of those quotes is verbatim, correctly attributed, long enough, and
+ * borne word-for-word by its own statement — because the inverter was left
+ * outside the span. Quote-mining is the same defect as the stopword list with
+ * the scissors moved.
+ *
+ * This answers the narrower of the two questions r5 asks about the scissors;
+ * `quoteCoversOwnText` answers the other one, and the two report different
+ * problems because they tell a reader different things about the receipt.
+ */
+export function quoteSpansWholeSentences(
+  quote: string,
+  ownText: string,
+  policy: ReceiptPolicy = RECEIPT_POLICY,
+): boolean {
+  const wanted = significant(quote);
+  if (wanted.length === 0) return false;
+
+  const sentences = sentencesOf(ownText);
+  // Bounded, and refusing rather than degrading, for the same reason the
+  // alignment is: the body is somebody else's input.
+  if (sentences.length > policy.maxScannedSentences) return false;
+  const tokenized = sentences.map((sentence) => significant(sentence));
+
+  for (let start = 0; start < tokenized.length; start += 1) {
+    const run: string[] = [];
+    for (let end = start; end < tokenized.length; end += 1) {
+      run.push(...(tokenized[end] ?? []));
+      if (run.length > wanted.length) break;
+      if (run.length === wanted.length && sameRun(run, wanted)) return true;
+    }
+  }
+  return false;
+}
+
+/**
+ * **Is the quote the whole of what this author wrote here?**
+ *
+ * ## The residue r4 documented and then accepted anyway
+ *
+ * r4 closed the scissors *inside* a sentence and wrote the leftover down in its
+ * own prose: *"polarity that lives in a different sentence ('I will deploy
+ * Friday. Not.') is not visible to this and is not visible to any span rule …
+ * it is why the guarantee is written as 'somebody wrote this sentence', not
+ * 'somebody meant it'."*
+ *
+ * Every word of that is true and the code auto-accepted the sentence anyway,
+ * while the same round built the third severity the case needs. A limit written
+ * into a comment changes nothing about what the program does with an input that
+ * lands in it. So the limit is now a disposition: an input inside it is
+ * **referred**.
+ *
+ * ## Why the rule is "all of it" and not a list of inverters
+ *
+ * The obvious fix is to look at the neighbouring sentence for the things that
+ * change the force of the quoted one — a negation, `unless`, `if`, `was going
+ * to`, `instead`, a question mark, a retraction verb. That is a denylist, it is
+ * unbounded by construction, and this repo has now paid for that lesson three
+ * times (`RETRO.md`). Each candidate allowlist was tried and each one leaves the
+ * model holding the scissors:
+ *
+ * | candidate                                            | breaks on                                  |
+ * | ---------------------------------------------------- | ------------------------------------------ |
+ * | neighbour must be ≥ n words                          | `Unless CI is red.`                        |
+ * | neighbour must end in a full stop                    | `Not.`                                     |
+ * | neighbour must not open with a linking word          | a denylist of linking words, unbounded     |
+ * | quote must reach the end of the text                 | `Hypothetically. We will deploy Friday.`   |
+ *
+ * The only form with no scissors left in it is the one this function checks:
+ * **the quote is the entirety of the message body** — every line of it,
+ * blockquote markers included. Then there is no neighbouring sentence, so there
+ * is nothing for a neighbouring sentence to do, and the guarantee strengthens
+ * from *somebody wrote this sentence* to *somebody wrote this message and it
+ * says exactly this*.
+ *
+ * ## Why the *body*, and not the "own text"
+ *
+ * r5's first draft compared against `stripReplyBlockquotes(body)`, which is the
+ * right input for asking **who wrote the quote** (r1's finding: a reply-quote
+ * reproduces somebody else's paragraph, and attributing it to the replier is the
+ * spike's worst error). grok's blind pass showed it is the wrong input for
+ * asking **what surrounds the quote**: `stripReplyBlockquotes` deletes every
+ * line beginning with `>` whether or not anybody else ever wrote it, so an
+ * author who writes
+ *
+ *     We will deploy production Friday.
+ *     > Not.
+ *
+ * has their own second line deleted, the first line becomes the whole "own
+ * text", and the sentence certifies. That is this round's own defect class,
+ * reappearing through the helper that was supposed to prevent a different one.
+ *
+ * Two questions, two inputs. Authorship reads the stripped text, because a
+ * blockquote is not the replier's sentence. Coverage reads the body, because
+ * a blockquote is still *there*, and a machine cannot tell the author quoting
+ * somebody from the author formatting an aside.
+ *
+ * The cost is stated rather than hidden, and it is large: a reading drawn from
+ * one sentence of a multi-sentence message is no longer auto-acceptable. It is
+ * not discarded — it is `refer`, so it stays staged with its quote beside its
+ * statement for a person to read, which is the disposition the whole third
+ * severity exists for.
+ */
+export function quoteCoversOwnText(quote: string, ownText: string): boolean {
+  const wanted = significant(quote);
+  if (wanted.length === 0) return false;
+  return sameRun(significant(ownText), wanted);
+}
+
+/**
+ * **Is this text offered as an assertion?**
+ *
+ * A question quoted verbatim is an OpenQuestion or a referral, never a Claim.
+ * Until r5 nothing asked: `objects.ts` requires a nonempty string and the
+ * receipt proves string equality, so `"Would we deploy production Friday?"`
+ * minted as a `claim` with an identical quote auto-accepted — the receipt was
+ * perfect and the reading turned somebody's question into their position.
+ *
+ * The test is the mark, and it is the same argument `RECEIPT_POLICY`'s
+ * `droppableTokens` makes for keeping `?` out of the set it will forgive:
+ * *"Bob will deploy Friday?" is a question and minting it as an assertion is the
+ * same defect in different clothes.* Here the mark is read rather than compared.
+ *
+ * ## The limit, and what the code does with an input inside it
+ *
+ * Deliberately only the mark. An interrogative without one — *"I wonder whether
+ * we should deploy production Friday."* — reads as an assertion to any string
+ * check, and inventing a grammar to catch it would be the guess this file
+ * refuses to make everywhere else. That input **auto-accepts**, and this is
+ * stated as a disposition rather than as a residue, because r4 was failed for
+ * writing a limit down and leaving the disposition wrong:
+ *
+ * By the time anything reaches here, `quoteCoversOwnText` has established that
+ * the statement is **the whole of one message, verbatim, by an identified
+ * author**. So the object this limit admits is a real sentence somebody wrote,
+ * filed under the wrong type — a mis-typed `claim` where an `open_question`
+ * belonged. That is a different class from the ones this file exists to refuse:
+ * the record does not attribute to anybody a sentence they did not write, and
+ * the recovery is the ordinary one (a person re-types it, and #5/#17's
+ * correction-rate telemetry counts it), rather than a false statement nobody can
+ * see is false.
+ *
+ * What is claimed is exactly what is checked: **a sentence carrying a question
+ * mark is not an assertion.**
+ *
+ * ## What representation it reads, r8
+ *
+ * `ReceiptText`, like every other predicate whose guarantee was established over
+ * the fold — see `ReceiptText` in `common.ts` for the finding that made this a
+ * type rather than a habit. No input distinguishes the two representations here
+ * today: `normalizeForReceipt` deletes invisibles, folds apostrophes, collapses
+ * whitespace and unfolds links, and not one of those adds or removes a question
+ * mark. That is the argument r7 made for `readsAsCommitment` — *"the proposer
+ * does not control the input"* — and it was false there, so "it happens not to
+ * matter" is no longer a reason to leave a predicate on the rawer form.
+ *
+ * ## Which characters are question marks
+ *
+ * This round's own blind review: the first draft compared tokens against the
+ * ASCII `?` alone, and `Would we deploy production Friday？` — U+FF1F, the
+ * fullwidth form — was minted as a claim. Removing NFKC from the receipt fold
+ * was right (it made distinct hostnames compare equal) and it left this check
+ * reading one spelling of a mark that has several.
+ *
+ * The answer is `QUESTION_MARKS` — and r8's blind review is why the sentence
+ * that used to stand here, *"Unicode's own inventory of question marks,
+ * enumerated"*, has been deleted rather than edited.
+ *
+ * **There is no such inventory.** Unicode publishes no `Question_Mark`
+ * property. `\p{Sentence_Terminal}` is the closest thing and it is a superset —
+ * it holds every full stop and exclamation mark in every script, so a check
+ * built on it would refuse every declarative sentence ever written. What this
+ * list actually is: **a hand enumeration**, and calling a hand enumeration a
+ * published property is what let it stay incomplete for three rounds while its
+ * own docblock said it could not be. It was missing `⳺`/`⳻` (U+2CFA/U+2CFB,
+ * Coptic), `⹔` (U+2E54, medieval), `⸘` (U+2E18, inverted interrobang), `𞥟`
+ * (U+1E95F, Adlam) and — the one that reopened r5's defect outright — the
+ * ordinary chat ornaments `❓`/`❔` (U+2753/U+2754). *"Would we deploy production
+ * Friday❓"* minted as a `claim` auto-accepted.
+ *
+ * It also held a mark that is **not a question mark**: U+AA5D, labelled here as
+ * "CHAM QUESTION MARK". The Cham block encodes AA5C SPIRAL, AA5D DANDA, AA5E
+ * DOUBLE DANDA, AA5F TRIPLE DANDA — a full stop and its repetitions, no
+ * interrogative. A name invented for a code point is the same class of defect as
+ * the comment that claimed `\s` contained NEL: a factual claim about an external
+ * standard, asserted in a comment, never measured.
+ *
+ * ## Two sets, because the two questions have opposite safe directions
+ *
+ * The list feeds two checks in `escalation.ts` that are mirror images, and
+ * `normalizeForMatch`'s history in this very file is what happens when one
+ * instrument serves two risk profiles:
+ *
+ *  - *"this is being minted as something other than an open question — does it
+ *    carry a question mark?"* A hit **refuses**. Being over-inclusive costs a
+ *    referral; being under-inclusive auto-accepts somebody's question as their
+ *    position. Safe direction: **generous**.
+ *  - *"this is being minted as an open question — does it carry a question
+ *    mark?"* A miss refuses. Being over-inclusive **auto-accepts a declarative
+ *    at `open_question`'s lower θ**, which is the laundering r7 closed. Safe
+ *    direction: **strict**.
+ *
+ * So `QUESTION_MARKS` is the strict set — marks that *certify* a text as a
+ * question — and `QUESTION_SHAPED_MARKS` is the generous superset that merely
+ * *refuses to certify it as an assertion*. `isAssertion` reads the generous one,
+ * `readsAsQuestion` reads the strict one, and a mark nobody can verify goes in
+ * the generous set only: it then costs a glance and never buys an acceptance.
+ * U+AA5D is that mark, and it is the reason the second set exists rather than a
+ * decision being guessed in either direction.
+ *
+ * **How completeness is measured now, since it cannot be derived.**
+ * `residue.test.ts` partitions `\p{Sentence_Terminal}` — Unicode's own list, 170
+ * code points — into "a question mark" and "explicitly not one", and asserts the
+ * two halves cover it exactly. A future Unicode release that adds a sentence
+ * terminator fails that test until somebody classifies it. It does not reach the
+ * marks outside `Sentence_Terminal` (`¿`, `՞`, the ornaments), which are pinned
+ * one by one; nothing available offline can derive those, and saying so is
+ * better than a third round of a sentence that claims a property Unicode does
+ * not publish.
+ *
+ * **NFKC was here and is gone.** The second repair folded the text first, on the
+ * argument that this is a classification question rather than a comparison, so
+ * compatibility folding is exactly right. True, and by the time the inventory
+ * was complete it was also *redundant* — every compatibility spelling NFKC
+ * mapped onto `?` (U+FF1F, U+FE56, the U+2047–U+2049 ligatures) is in the list
+ * above, so no input could tell the two mechanisms apart. The mutation ledger
+ * said so out loud: the row that deleted the fold **escaped**, because nothing
+ * pinned it. Worse, folding first *destroys* one mark — U+037E GREEK QUESTION
+ * MARK canonically decomposes to an ASCII semicolon, so a check that read only
+ * the folded form would see punctuation. One mechanism, pinned, reading the text
+ * it was given.
+ */
+export const QUESTION_MARKS: readonly string[] = Object.freeze([
+  '\u003F', // QUESTION MARK
+  '\u00BF', // INVERTED QUESTION MARK — a Spanish interrogative opens with one
+  '\u037E', // GREEK QUESTION MARK
+  '\u055E', // ARMENIAN QUESTION MARK
+  '\u061F', // ARABIC QUESTION MARK
+  '\u1367', // ETHIOPIC QUESTION MARK
+  '\u1945', // LIMBU QUESTION MARK
+  '\u2047', // DOUBLE QUESTION MARK
+  '\u2048', // QUESTION EXCLAMATION MARK
+  '\u2049', // EXCLAMATION QUESTION MARK
+  '\u203D', // INTERROBANG
+  '\u2753', // BLACK QUESTION MARK ORNAMENT — r8; what a phone keyboard emits
+  '\u2754', // WHITE QUESTION MARK ORNAMENT — r8
+  '\u2CFA', // COPTIC OLD NUBIAN DIRECT QUESTION MARK — r8
+  '\u2CFB', // COPTIC OLD NUBIAN INDIRECT QUESTION MARK — r8
+  '\u2E18', // INVERTED INTERROBANG — r8
+  '\u2E2E', // REVERSED QUESTION MARK
+  '\u2E54', // MEDIEVAL QUESTION MARK — r8
+  '\uA60F', // VAI QUESTION MARK
+  '\uA6F7', // BAMUM QUESTION MARK
+  '\uFE16', // PRESENTATION FORM FOR VERTICAL QUESTION MARK
+  '\uFE56', // SMALL QUESTION MARK
+  '\uFF1F', // FULLWIDTH QUESTION MARK
+  '\u{11143}', // CHAKMA QUESTION MARK
+  '\u{1E95F}', // ADLAM INITIAL QUESTION MARK — r8
+]);
+
+/**
+ * The strict set, plus marks that *look* interrogative and cannot be verified as
+ * such. Read only by `isAssertion`, whose safe direction is over-inclusion.
+ *
+ * One entry, and its presence is the whole point: U+AA5D is the Cham danda — see
+ * the docblock above — so a Cham sentence ending in one is no longer *certified*
+ * as a question, while a `claim` minted from one is still referred rather than
+ * auto-accepted, exactly where r7 left it. Being wrong about this character now
+ * costs one glance in one direction instead of an acceptance in the other, which
+ * is the only honest disposition for a fact about Unicode that nothing available
+ * here can check.
+ */
+export const QUESTION_SHAPED_MARKS: readonly string[] = Object.freeze([
+  ...QUESTION_MARKS,
+  '\uAA5D', // CHAM PUNCTUATION DANDA — r7 called it a question mark; unverified
+]);
+
+const QUESTION_MARK = new RegExp(`[${QUESTION_MARKS.join('')}]`, 'u');
+const QUESTION_SHAPED = new RegExp(`[${QUESTION_SHAPED_MARKS.join('')}]`, 'u');
+
+/**
+ * **Nothing in this text reads as a question.** The generous direction: anything
+ * question-shaped means this is not being offered as an assertion.
+ */
+export function isAssertion(text: ReceiptText): boolean {
+  return !QUESTION_SHAPED.test(text);
+}
+
+/**
+ * **This text certifies itself as a question.** The strict direction, and
+ * deliberately not the negation of `isAssertion`: a mark nobody can verify
+ * refuses an assertion without proving a question, so both checks refuse it and
+ * neither accepts on it.
+ */
+export function readsAsQuestion(text: ReceiptText): boolean {
+  return QUESTION_MARK.test(text);
+}

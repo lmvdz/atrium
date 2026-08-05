@@ -1,0 +1,509 @@
+/* The state lens: objectives, objects, and the receipt behind each one.
+   No hex, rgb() or hsl(): every colour is a token from design/tokens.css. */
+
+.lensHead {
+  padding: 10px 14px 9px;
+  border-bottom: 1px solid var(--line);
+  background: var(--bg2);
+}
+
+.lensHeadTop {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.lensHeadSpacer {
+  flex: 1;
+}
+
+.lensHeadLabel {
+  color: var(--tx2);
+}
+
+.lensHeadSub {
+  margin-top: 5px;
+  font-family: 'JetBrains Mono Variable', ui-monospace, monospace;
+  font-size: 10px;
+  color: var(--tx2);
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex-wrap: wrap;
+}
+
+/* The animation is NOT declared here. A CSS Module rewrites animation-names it
+   sees, including references to globally-declared keyframes, so `animation:
+   gl-pulse` in this file resolved to a name no keyframe had — the dot was
+   static and `getAnimations()` returned []. The motion comes from the global
+   `atr-pulse` class in globals.css, worn in the markup beside this one. */
+.live {
+  width: 5px;
+  height: 5px;
+  border-radius: 50%;
+  background: var(--grn2);
+}
+
+.lensBody {
+  overflow-y: auto;
+  overflow-x: hidden;
+  min-height: 0;
+  padding-bottom: 24px;
+}
+
+/* --- objective group ----------------------------------------------------- */
+
+.obj {
+  border-bottom: 1px solid var(--line);
+}
+
+.objHead {
+  width: 100%;
+  text-align: left;
+  display: grid;
+  grid-template-columns: 12px 1fr auto;
+  column-gap: 8px;
+  align-items: start;
+  padding: 9px 14px;
+  transition: background 0.12s ease;
+}
+
+.objHead:hover {
+  background: var(--bg1);
+}
+
+.objTwisty {
+  font-family: 'JetBrains Mono Variable', ui-monospace, monospace;
+  font-size: 10px;
+  color: var(--tx2);
+  padding-top: 2px;
+}
+
+.objTitle {
+  display: block;
+  font-size: 10.5px;
+  font-weight: 600;
+  color: var(--tx0);
+  line-height: 1.35;
+}
+
+.objCount {
+  display: block;
+  margin-top: 3px;
+  font-family: 'JetBrains Mono Variable', ui-monospace, monospace;
+  font-size: 10px;
+  color: var(--tx2);
+}
+
+.warn {
+  color: var(--amb2);
+}
+
+/* wears `atr-lbl` in markup for the tracking; states its own colour */
+.status {
+  border: 1px solid var(--line);
+  background: var(--bg1);
+  color: var(--tx2);
+  border-radius: 0;
+  padding: 2px 4px 3px 5px;
+  white-space: nowrap;
+}
+
+.status.statusActive {
+  border-color: var(--grnbd);
+  background: var(--grnbg);
+  color: var(--tx1);
+}
+
+.status.statusBlocked {
+  border-color: var(--ambbd);
+  background: var(--ambbg);
+  color: var(--amb2);
+}
+
+.groupLabelText,
+.rcSectionLabelText {
+  color: var(--tx2);
+}
+
+.group {
+  padding: 0 14px 4px;
+}
+
+.groupLabel {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  padding: 7px 0 4px;
+}
+
+.groupRule {
+  flex: 1;
+  height: 1px;
+  background: var(--line);
+}
+
+/* --- object row ---------------------------------------------------------- */
+
+.oitem {
+  width: 100%;
+  text-align: left;
+  display: grid;
+  grid-template-columns: 13px 1fr;
+  column-gap: 7px;
+  padding: 4px 6px 5px 5px;
+  border-radius: 0;
+  border: 1px solid transparent;
+  transition:
+    background 0.12s ease,
+    border-color 0.12s ease;
+}
+
+.oitem:hover {
+  background: var(--bg1);
+  border-color: var(--line);
+}
+
+.oitemGlyph {
+  font-size: 11px;
+  padding-top: 1px;
+}
+
+.oitemText {
+  font-size: 10.5px;
+  color: var(--tx1);
+  line-height: 1.4;
+}
+
+.oitemSettled .oitemText {
+  color: var(--tx0);
+}
+
+.oitemMeta {
+  margin-top: 2px;
+  font-family: 'JetBrains Mono Variable', ui-monospace, monospace;
+  font-size: 10.5px;
+  color: var(--tx1);
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  flex-wrap: wrap;
+}
+
+/* --- receipt ------------------------------------------------------------- */
+
+.receipt {
+  padding: 0 0 30px;
+}
+
+.rcTop {
+  position: sticky;
+  top: 0;
+  z-index: 2;
+  background: var(--bg2);
+  border-bottom: 1px solid var(--line);
+  padding: 8px 14px 10px;
+}
+
+.rcBack {
+  color: var(--tx2);
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 2px 6px 3px 4px;
+  border-radius: 0;
+  transition:
+    background 0.12s ease,
+    color 0.12s ease;
+}
+
+.rcBack:hover {
+  background: var(--bg1);
+  color: var(--tx0);
+}
+
+.rcTitle {
+  display: grid;
+  grid-template-columns: 14px 1fr;
+  column-gap: 8px;
+  margin-top: 8px;
+}
+
+.rcTitleGlyph {
+  font-size: 12px;
+  padding-top: 1px;
+}
+
+.rcHeading {
+  font-size: 11px;
+  font-weight: 600;
+  color: var(--tx0);
+  line-height: 1.35;
+}
+
+.rcState {
+  margin-top: 7px;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex-wrap: wrap;
+  font-family: 'JetBrains Mono Variable', ui-monospace, monospace;
+  font-size: 10px;
+  color: var(--tx2);
+}
+
+.rcSection {
+  padding: 10px 14px 3px;
+}
+
+.rcSectionLabel {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  padding-bottom: 6px;
+}
+
+/* what-happened line: glyph + text, every line epistemically tagged */
+.happened {
+  display: grid;
+  grid-template-columns: 13px 1fr;
+  column-gap: 7px;
+  padding: 3px 0;
+}
+
+.happenedGlyph {
+  font-size: 10.5px;
+}
+
+.happenedText {
+  font-size: 11.5px;
+  color: var(--tx1);
+}
+
+/* The history line's words, in the system treatment. There is no `.happenedWho`
+   any more: a name column beside page-authored words is an attribution column,
+   and the actor of the event lives inside the sentence instead. */
+.happenedVoice {
+  font-size: 11.5px;
+  color: var(--tx1);
+}
+
+.happenedAt {
+  font-family: 'JetBrains Mono Variable', ui-monospace, monospace;
+  font-size: 10px;
+  color: var(--tx2);
+  margin-left: 5px;
+}
+
+.happenedLegend {
+  padding: 6px 0 2px;
+  font-family: 'JetBrains Mono Variable', ui-monospace, monospace;
+  font-size: 10px;
+  color: var(--tx2);
+  border-top: 1px solid var(--line);
+  margin-top: 5px;
+}
+
+/* provenance: truncated, hover/focus reveals the source excerpt */
+.prov {
+  display: block;
+  width: 100%;
+  max-width: 100%;
+  min-width: 0;
+  text-align: left;
+  border: 1px solid var(--line);
+  border-radius: 0;
+  background: var(--bg2);
+  padding: 5px 8px 6px;
+  margin-bottom: 5px;
+  transition:
+    border-color 0.12s ease,
+    background 0.12s ease;
+}
+
+.prov:hover {
+  border-color: var(--line3);
+  background: var(--bg7);
+}
+
+.provHead {
+  display: flex;
+  align-items: baseline;
+  gap: 6px;
+  font-family: 'JetBrains Mono Variable', ui-monospace, monospace;
+  font-size: 10px;
+  color: var(--tx2);
+}
+
+.provWho {
+  color: var(--tx1);
+}
+
+.provJump {
+  margin-left: auto;
+  opacity: 0;
+  color: var(--blu2);
+  transition: opacity 0.12s ease;
+}
+
+.prov:hover .provJump,
+.prov:focus-visible .provJump {
+  opacity: 1;
+}
+
+/* THE QUOTATION IS NOT CLAMPED. Round 6 clamped it to one line and opened it to
+   four on hover and on `:focus-visible`, with
+   `data-truncates="focusing this row expands it; the cited record is on this
+   page"`. A focus-clamp expansion is none of the three routes CONVENTIONS
+   permits, and the second half of that sentence was FALSE for the excerpt of
+   `m-legal@identity-service` — that record is not in this room's feed, and the
+   row's own label says so. A receipt is the trustworthy record and a quotation is
+   the one string where a hover-only remainder is least defensible; the pane
+   scrolls instead. */
+.provExcerpt {
+  display: block;
+  max-width: 100%;
+  margin-top: 2px;
+  font-size: 11px;
+  color: var(--tx1);
+  line-height: 1.4;
+  font-style: normal;
+  overflow-wrap: anywhere;
+}
+
+/* AND THE PAGE'S NOTE IS NOT A HOVER AFFORDANCE. It was `max-height: 0;
+   opacity: 0`, revealed on hover — a whole sentence of the page's own account of
+   why this excerpt is on the receipt, invisible to touch and to a keyboard until
+   round 7. "Anything that must be discoverable without hovering is not a hover
+   affordance" (CONVENTIONS); the page explaining its own record qualifies. */
+.provNote {
+  display: block;
+  margin-top: 4px;
+  font-family: 'JetBrains Mono Variable', ui-monospace, monospace;
+  font-size: 10px;
+  color: var(--tx2);
+}
+
+/* the correction chain — two voices, kept visibly apart */
+.corr {
+  border-left: 2px solid var(--line2);
+  padding: 2px 0 2px 9px;
+  margin-bottom: 7px;
+}
+
+.corrHead {
+  font-family: 'JetBrains Mono Variable', ui-monospace, monospace;
+  font-size: 10px;
+  color: var(--tx2);
+}
+
+.corrBody {
+  font-size: 11px;
+  color: var(--tx1);
+  margin-top: 2px;
+}
+
+/* the empty state for PROVENANCE — the same weight the correction chain's
+   already had. Nine of the ten receipts in the gallery reach it. */
+.provEmpty {
+  font-size: 11px;
+  color: var(--tx1);
+}
+
+/* SYSTEM voice: mono, muted, no quotation marks, no first person */
+.corrWas,
+.corrNow,
+.corrFact {
+  font-family: 'JetBrains Mono Variable', ui-monospace, monospace;
+  font-size: 10px;
+  color: var(--tx2);
+}
+
+.corrNow {
+  color: var(--tx1);
+}
+
+.corrFact {
+  margin-top: 3px;
+  line-height: 1.4;
+}
+
+/* HUMAN voice: italic inside <q>, attributed, and only ever real words */
+.corrReason {
+  margin-top: 4px;
+  padding: 4px 8px 5px;
+  border-left: 2px solid var(--filebd);
+  background: var(--bg1);
+  border-radius: 0 3px 3px 0;
+}
+
+.corrLink {
+  color: var(--blu2);
+  border-bottom: 1px solid var(--filebd);
+  font-family: 'JetBrains Mono Variable', ui-monospace, monospace;
+  font-size: 10px;
+}
+
+.corrLink:hover {
+  color: var(--tx0);
+  border-bottom-color: var(--line3);
+}
+
+/* the receipt's own action stays reachable: a long correction chain would
+   otherwise push Reopen past the bottom of the pane, a dead end by scroll
+   position */
+.rcFoot {
+  position: sticky;
+  bottom: 0;
+  z-index: 2;
+  margin: 10px 0 0;
+  padding: 10px 14px;
+  border-top: 1px dashed var(--line);
+  background: var(--bg3);
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.rcFootNote {
+  font-family: inherit;
+  font-size: 10px;
+  color: var(--tx2);
+  flex: 1;
+  line-height: 1.4;
+}
+
+.rcAccept,
+.rcAccept label {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.rcAccept select {
+  max-width: 180px;
+  border: 1px solid var(--line2);
+  background: var(--bg1);
+  color: var(--tx0);
+  font: inherit;
+  font-size: 10px;
+}
+
+.rcSupersede {
+  margin: 8px 14px 14px;
+  padding: 8px;
+  border: 1px dashed var(--line);
+}
+
+.rcSupersedeChoices {
+  display: grid;
+  gap: 6px;
+  margin: 6px 0;
+}
+
+.rcSupersedeChoices button {
+  display: grid;
+  grid-template-columns: max-content 1fr;
+  gap: 8px;
+  text-align: left;
+}

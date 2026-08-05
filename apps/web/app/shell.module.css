@@ -1,7 +1,30 @@
 /*
- * Shell layout. Every value here is a token from design/tokens.css — no
- * hardcoded colours, ever. When the design/tokens branch lands this file keeps
- * working unchanged.
+ * The global chrome: the bar that carries the wordmark and who you are.
+ *
+ * WHAT WAS DELETED HERE, AND WHY. The UI lane (#39) deleted this whole file;
+ * the auth lane (#26) was still editing it. Both are right about their own
+ * half. Everything below `.accountButton` in the old file — `.regions`,
+ * `.region`, `.feed`, `.message`, `.stateList`, `.attentionItem`, `.composer`,
+ * `.trailer` and the 900px media query — styled the SCAFFOLD's three-region
+ * placeholder page, and that page no longer exists: `app/page.tsx` renders
+ * `RoomSession` → `AppFrame`, whose layout lives in
+ * `src/components/frame/frame.module.css`. Those rules had no consumer left, so
+ * keeping them would have been dead CSS shadowing a live stylesheet. `.roomName`
+ * went with them — it held the literal `#scaffold`; `RoomHead` prints the room's
+ * real name now — and `.themeToggle` went because the toggle moved into the
+ * frame's workspace strip and wears `frame.module.css`'s `.iconbtn` there.
+ *
+ * What is left is the part the UI lane never replaced: the account cluster,
+ * which is session state and has no owner inside the frame.
+ *
+ * KNOWN, PRE-EXISTING, NOT INTRODUCED BY THE MERGE: `--sp-*`, `--fs-*`,
+ * `--font-mono` and `--ls-label` are not defined by `design/tokens.css` (nor
+ * were they on `main`, `fix/auth-r11` or `fix/ui-components-r10` — all three
+ * ship the same 172-line sheet). These declarations therefore fall back to the
+ * browser default today, exactly as they did before this merge. Left as-is
+ * rather than silently re-pointed: guessing a replacement token would change
+ * shipped pixels under cover of a merge. `(auth)/auth.module.css` and
+ * `app/workspace.module.css` have the same gap.
  */
 
 .app {
@@ -12,218 +35,74 @@
   color: var(--tx0);
 }
 
+/* The account bar owns the grid's first row. A full product frame in the
+   second row must fill the remaining track, not ask for a second 100vh below
+   that bar. The replay and pin routes add one semantic wrapper around the
+   frame, so both direct forms are named here. */
+.app > :last-child {
+  min-height: 0;
+}
+
+.app > :global([data-frame]),
+.app > :last-child > :global([data-frame]) {
+  height: 100%;
+}
+
 .topbar {
   display: flex;
   align-items: center;
-  gap: var(--sp-4);
-  padding: var(--sp-3) var(--sp-5);
-  background: var(--strip);
+  min-height: 28px;
+  gap: 12px;
+  padding: 4px 14px;
+  background: var(--bg2);
   border-bottom: 1px solid var(--line);
 }
 
 .wordmark {
-  font-family: var(--font-mono);
-  font-size: var(--fs-lg);
+  font-family: 'JetBrains Mono Variable', ui-monospace, monospace;
+  font-size: 10px;
   font-weight: 600;
-  letter-spacing: 0.02em;
-  color: var(--stileac);
+  text-transform: uppercase;
+  color: var(--tx0);
+  text-decoration: none;
 }
 
-.roomName {
+/* Was `.roomName`, which was doing double duty as the flex spacer while also
+   printing an invented room name. The spacing job is real; the string was not. */
+.spacer {
   flex: 1;
-  font-family: var(--font-mono);
-  font-size: var(--fs-row);
-  color: var(--stx);
 }
 
-.themeToggle {
-  padding: var(--sp-1) var(--sp-3);
-  border: 1px solid var(--stbd);
-  border-radius: var(--radius-pill);
-  background: var(--stile);
-  color: var(--stx);
-  font-family: var(--font-mono);
-  font-size: var(--fs-micro);
-  letter-spacing: var(--ls-label);
+/* ── account ──────────────────────────────────────────────────────────── */
+
+.account {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-3);
+}
+
+.accountLink {
+  font-family: 'JetBrains Mono Variable', ui-monospace, monospace;
+  font-size: 10px;
+  color: var(--tx1);
+  text-decoration: none;
+}
+
+.accountLink:hover {
+  color: var(--grn2);
+}
+
+.accountButton {
+  padding: 0;
+  border: none;
+  background: none;
+  color: var(--tx1);
+  font-family: 'JetBrains Mono Variable', ui-monospace, monospace;
+  font-size: 10px;
   text-transform: uppercase;
   cursor: pointer;
 }
 
-.themeToggle:hover {
-  color: var(--stileac);
-}
-
-.regions {
-  display: grid;
-  grid-template-columns: minmax(0, 1.4fr) minmax(0, 1fr) minmax(0, 0.9fr);
-  min-height: 0;
-}
-
-.region {
-  display: flex;
-  flex-direction: column;
-  min-width: 0;
-  min-height: 0;
-  padding: var(--sp-5) var(--sp-5) var(--sp-4);
-  overflow-y: auto;
-  border-right: 1px solid var(--line);
-  background: var(--bg1);
-}
-
-.region:last-child {
-  border-right: none;
-  background: var(--bg2);
-}
-
-.regionTitle {
-  margin: 0;
-  font-size: var(--fs-micro);
-  font-weight: 600;
-  letter-spacing: var(--ls-label);
-  text-transform: uppercase;
-  color: var(--tx3);
-}
-
-.regionNote {
-  margin: var(--sp-1) 0 var(--sp-5);
-  font-size: var(--fs-row);
-  color: var(--tx4);
-}
-
-/* ── conversation ─────────────────────────────────────────────────────── */
-
-.feed {
-  flex: 1;
-  margin: 0;
-  padding: 0;
-  list-style: none;
-}
-
-.message {
-  display: grid;
-  grid-template-columns: auto auto 1fr;
-  gap: var(--sp-3);
-  align-items: baseline;
-  padding: var(--sp-1) 0;
-  font-family: var(--font-mono);
-  font-size: var(--fs-row);
-}
-
-.timestamp {
-  color: var(--tx4);
-}
-
-.author {
-  color: var(--blu);
-  font-weight: 500;
-}
-
-.body {
-  color: var(--tx1);
-}
-
-.composer {
-  margin-top: var(--sp-4);
-  padding: var(--sp-3) var(--sp-4);
-  border: 1px solid var(--line2);
-  border-radius: var(--radius-pill);
-  background: var(--bg3);
-  color: var(--tx4);
-  font-family: var(--font-mono);
-  font-size: var(--fs-row);
-}
-
-/* ── current state ────────────────────────────────────────────────────── */
-
-.stateList,
-.attentionList {
-  display: flex;
-  flex-direction: column;
-  gap: var(--sp-2);
-  margin: 0;
-  padding: 0;
-  list-style: none;
-}
-
-.stateItem {
-  display: grid;
-  grid-template-columns: auto auto 1fr;
-  gap: var(--sp-3);
-  align-items: baseline;
-  padding: var(--sp-2) var(--sp-3);
-  border: 1px solid var(--line);
-  border-radius: var(--radius-card);
-  background: var(--bg3);
-}
-
-.markAccepted {
-  color: var(--grn);
-  font-family: var(--font-mono);
-}
-
-.markProposed {
-  color: var(--tx3);
-  font-family: var(--font-mono);
-}
-
-.stateKind {
-  font-size: var(--fs-micro);
-  letter-spacing: var(--ls-label);
-  text-transform: uppercase;
-  color: var(--tx4);
-}
-
-.stateText {
-  font-size: var(--fs-row);
-  color: var(--tx1);
-}
-
-/* ── needs you ────────────────────────────────────────────────────────── */
-
-.attentionItem {
-  display: flex;
-  flex-direction: column;
-  gap: var(--sp-1);
-  padding: var(--sp-3) var(--sp-4);
-  border: 1px solid var(--ambbd);
-  border-radius: var(--radius-card);
-  background: var(--ambbg);
-}
-
-.attentionLabel {
-  font-size: var(--fs-micro);
-  font-weight: 600;
-  letter-spacing: var(--ls-label);
-  text-transform: uppercase;
-  color: var(--amb);
-}
-
-.attentionText {
-  font-size: var(--fs-base);
-  color: var(--tx0);
-}
-
-/* Every attention item must say why it needs *this* person. */
-.attentionRationale {
-  font-family: var(--font-mono);
-  font-size: var(--fs-micro);
-  color: var(--tx3);
-}
-
-.trailer {
-  margin-top: var(--sp-4);
-  font-family: var(--font-mono);
-  font-size: var(--fs-micro);
-  color: var(--tx4);
-}
-
-@media (width <= 900px) {
-  .regions {
-    grid-template-columns: 1fr;
-  }
-
-  .region {
-    border-right: none;
-    border-bottom: 1px solid var(--line);
-  }
+.accountButton:hover {
+  color: var(--grn2);
 }

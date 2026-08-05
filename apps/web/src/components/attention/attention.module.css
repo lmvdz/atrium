@@ -1,0 +1,523 @@
+/* The pin: what needs THIS person, above the feed, hardest first.
+   No hex, rgb() or hsl(): every colour is a token from design/tokens.css. */
+
+/* corpus turn 17: owed floats up and opens, clean compresses to a count, the
+   pin FOLDS rather than scrolls. Budgeted to stay under ~240px at 820h. */
+.pin {
+  background: var(--bg2);
+  border-bottom: 1px solid var(--line2);
+  padding: 6px 20px 5px;
+}
+
+.pinHead {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 5px;
+}
+
+.pinHeadGlyph {
+  color: var(--amb2);
+  font-family: 'JetBrains Mono Variable', ui-monospace, monospace;
+  font-size: 11px;
+}
+
+.pinHeadLabel {
+  color: var(--amb2);
+}
+
+.pinRule {
+  flex: 1;
+  height: 1px;
+  background: var(--line);
+}
+
+/* wears the `atr-lbl` idiom in markup — the tracking is declared once, globally */
+.fold {
+  color: var(--tx2);
+  padding: 1px 6px 2px;
+  border-radius: 4px;
+  border: 1px solid transparent;
+  transition:
+    background 0.12s ease,
+    color 0.12s ease,
+    border-color 0.12s ease;
+}
+
+.fold:hover {
+  background: var(--bg7);
+  color: var(--tx0);
+  border-color: var(--line);
+}
+
+/* THE SECOND LINE OF DEFENCE. `foldPin` bounds the pin by COUNT, which is the
+   bound that matters because it is derived from the items and testable without
+   a browser. This max-height bounds it by PIXELS as well, so a budget that is
+   one row too generous — or a card that grew a line — still cannot push the
+   composer off the bottom of the frame. Round 1: at 19 owed items the composer
+   sat at 909px in a 900px viewport with scrollHeight stuck at 900, unreachable
+   by any means. Nothing about that failure was recoverable by the user.
+
+   340px, not tighter: the belt must clear the budgeted content — one open card,
+   four compressed rows, and the "N more owed" line — or it clips the very
+   affordance that says what is behind the fold, which is the worse failure of
+   the two. Measured at 19 items: the list comes to 314px, and the e2e asserts
+   the overflow button is inside the pin's visible box rather than merely in the
+   DOM. The count bound is what does the work; this is what catches the count
+   bound being wrong.
+
+   ROUND 2's GAUNTLET: this belt was clipping REAL CONTENT once the overflow
+   affordance was used. `showAll` raised the row budget from 4 to 9 while the
+   belt stayed at 340px, so the expanded pin held more than it could show —
+   `overflow: hidden` still scrolls programmatically, so tabbing into a row
+   below the clip scrolled the container and took three rows off the TOP with no
+   scrollbar and no way back. The budget no longer moves: the affordance pages a
+   fixed-size window instead of raising a cap, so the list holds the same rows
+   in every state and this belt is back to being a second line of defence
+   against a budget that is wrong rather than a clip over live content. The e2e
+   asserts `scrollHeight <= clientHeight` after expanding — a pin that has
+   become a hidden scroll container fails there.
+
+   ROUND 4's GAUNTLET: A CONSTANT IS NOT A BOUND AGAINST A VIEWPORT.
+
+   `340px` does not shrink, and `.app` is `height: 100vh`. At 1124x500 the pin
+   held its full 340 out of a 500px frame, the feed collapsed to 22px, and the
+   composer's bottom edge sat at 511 in a 500px viewport with
+   `scrollHeight === clientHeight` — round 1's exact signature, at a short
+   viewport instead of a long list. Every harness viewport hard-coded 900, so
+   the one number that mattered was the one number never varied.
+
+   The belt is now relative to the frame it has to fit inside: `min()` takes
+   whichever of the two bounds is tighter, so at 900px it is the same 340 that
+   was measured against the budgeted content, and at 500px it is 34vh = 170 and
+   the feed keeps its floor. 34vh, not less: the pin still has to clear one open
+   card plus the "N more owed" line, and clipping the affordance that says what
+   is behind the fold is the worse of the two failures (the paragraph above).
+   Below ~420px of viewport there is no split that satisfies both, and the
+   height sweep in e2e/pin-bound.spec.ts is what says where that floor is
+   instead of leaving it to be discovered on somebody's laptop. */
+.pinList {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  max-height: min(340px, 34vh);
+  overflow: hidden;
+}
+
+/* THE AFFORDANCE OUT OF THE FOLD IS A SIBLING OF THE CLIPPED LIST, NOT A CHILD.
+
+   Found by the blind cross-lineage review of round 5. The belt is sized from a
+   measured card height, and `AttentionCard` bounds neither its title nor its
+   action count — so an item with a long enough title pushes the card past the
+   belt, and the first thing `overflow: hidden` eats is the last child, which was
+   the "N more owed" control. That is round 2's stranding defect wearing a
+   different cause: owed items behind an affordance that cannot be reached.
+
+   Outside the clip it cannot be eaten, whatever the card does. The card's own
+   growth is bounded separately (`.acardTitle` clamps to two lines) so the budget
+   ladder's geometry stays true, but the two are independent defences on purpose:
+   one of them is arithmetic and the other one is structure. */
+.pinMore {
+  margin-top: 4px;
+}
+
+/* --- the open card ------------------------------------------------------- */
+
+.acard {
+  border: 1px solid var(--line);
+  border-radius: 0;
+  background: var(--bg2);
+  padding: 6px 10px 6px 9px;
+  display: grid;
+  grid-template-columns: 14px minmax(0, 1fr);
+  column-gap: 8px;
+}
+
+/* THE CARD'S BORDER SAYS WHICH KIND OF DEMAND THIS IS, so it is a non-text
+   graphic under 1.4.11 and it is in the rendered audit's registry.
+
+   --ambbd measured 1.76:1 against the pin's --bg1 and --redbd 1.74:1 against its
+   own --redbg. Both are now the foreground step of their own hue, which is what
+   the inset stripe beside them was already using: --amb2 at 4.69:1 / 9.85:1 and
+   --red2 at 3.89:1 / 5.05:1, measured against BOTH adjacent colours — the fill
+   the border encloses and the surface it sits on. Measuring only the friendlier
+   of the two is how these survived four rounds of contrast passes. */
+.acardGate {
+  background: var(--ambbg5);
+  border-color: var(--amb2);
+  box-shadow: inset 2px 0 0 var(--amb2);
+}
+
+.acardDestructive {
+  background: var(--redbg);
+  border-color: var(--red2);
+  box-shadow: inset 2px 0 0 var(--red2);
+}
+
+.acardGlyph {
+  padding-top: 1px;
+}
+
+/* Clamped to two lines. The pin's row budget is computed from a measured card
+   height (model/records.ts, PIN_GEOMETRY), and an unbounded wrapping title makes
+   that arithmetic false — the card grows and the belt clips rows the fold still
+   counts as shown. Two lines, not one: a decision's title is a sentence, and
+   truncating it to a single line is how "drop users_legacy at cutover rather
+   than after the retention window" becomes "drop users_legacy at cutover…". */
+/* NO CLAMP — this is the OPEN card, and it is where the compressed row's route
+   goes. Round 6 removed the two-line clamp from `.why` for exactly that reason
+   ("a route to a clip is a route to nothing") and left this one, one block up:
+   the title a reader clicks the compressed row to see in full was itself cut at
+   two lines. Round 7. */
+.acardTitle {
+  font-size: 11px;
+  color: var(--tx0);
+  font-weight: 500;
+  line-height: 1.3;
+  overflow-wrap: anywhere;
+}
+
+/* BRIEF concept 8. The rationale is required by the type, so this element is
+   always populated — there is no empty-state branch for it, by construction. */
+.why {
+  margin-top: 2px;
+  font-size: 11px;
+  color: var(--tx1);
+  display: flex;
+  gap: 6px;
+  line-height: 1.3;
+  /* NO CLAMP. This block held `max-height: 29px; overflow: hidden` — two lines'
+     worth — on the OPEN card, which is the surface a compressed row's clamp
+     routes the reader TO. A clip at the end of the route is a route to nothing,
+     and neither enumerator could see it: the CSS scan knew only `text-overflow`
+     and `-webkit-line-clamp`, and the browser sweep skips containers whose text
+     lives in children. Found by the blind cross-lineage review of round 6.
+
+     Unclamping is safe here in a way it was not before round 5: the pin's row
+     budget is derived from the room there is rather than from an assumed card
+     height, and the way out of the fold lives outside the clipped box, so a
+     card that grows costs a row and never costs the affordance. A rationale is
+     capped at 240 characters, which is four lines at this size — the reason
+     BRIEF concept 8 requires on screen is on screen. */
+}
+
+/* the WHY YOU label is a real element, not a ::before: it is content a screen
+   reader should hear, and it wears the one global label idiom */
+.whyLabel {
+  flex: none;
+  color: var(--amb2);
+  padding-top: 1px;
+}
+
+/* --red3 for the same reason the glyph uses it: --red2 is under AA in dark */
+.acardDestructive .whyLabel {
+  color: var(--red3);
+}
+
+.acardFoot {
+  margin-top: 4px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 6px;
+  flex-wrap: wrap;
+}
+
+.acardMeta {
+  font-family: 'JetBrains Mono Variable', ui-monospace, monospace;
+  font-size: 10px;
+  color: var(--tx2);
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex-wrap: wrap;
+  min-width: 0;
+}
+
+.acardActions {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex-wrap: wrap;
+  flex: none;
+}
+
+.acardActions button {
+  padding: 2px 9px 3px;
+}
+
+/* the source of an owed item can live in another room; it says so and goes */
+.xroom {
+  color: var(--blu2);
+  border-bottom: 1px solid var(--filebd);
+  white-space: nowrap;
+}
+
+.xroom:hover {
+  color: var(--tx0);
+  border-bottom-color: var(--line3);
+}
+
+.link {
+  color: inherit;
+  border-bottom: 1px solid var(--line2);
+}
+
+.link:hover {
+  color: var(--tx0);
+  border-bottom-color: var(--line3);
+}
+
+/* --- the compressed row -------------------------------------------------- */
+/* still visible, still glyphed, still one click to act. Folding hides noise,
+   never signal. */
+
+.acomp {
+  display: grid;
+  grid-template-columns: 14px minmax(0, 1fr) auto;
+  column-gap: 8px;
+  align-items: center;
+  border: 1px solid var(--line);
+  border-radius: 0;
+  background: var(--bg2);
+  padding: 3px 5px 4px 9px;
+  width: 100%;
+  text-align: left;
+  transition:
+    background 0.12s ease,
+    border-color 0.12s ease;
+}
+
+.acomp:hover {
+  background: var(--bg7);
+  border-color: var(--line3);
+}
+
+/* amber and red are not interchangeable severities — a compressed destructive
+   item is still destructive, and it says so before you reach for its button */
+.acompDestructive {
+  background: var(--redbg);
+  border-color: var(--redbd);
+  box-shadow: inset 2px 0 0 var(--red3);
+}
+
+.acompText {
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+}
+
+.acompTitle {
+  font-size: 10.5px;
+  color: var(--tx1);
+  text-align: left;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* BRIEF concept 8 on screen, not on hover. One line's worth: the row stays
+   compressed, and the `title` carries the remainder for the rare long one. */
+.acompWhy {
+  display: flex;
+  gap: 5px;
+  align-items: baseline;
+  font-family: 'JetBrains Mono Variable', ui-monospace, monospace;
+  font-size: 10px;
+  color: var(--tx2);
+  line-height: 1.3;
+  min-width: 0;
+  /* It is a button now — the non-hover route to the reason it clamps. It has to
+     keep looking like the line it was, so it drops the button chrome and keeps
+     the focus ring the shell paints on every focusable control. The typography
+     is restated rather than inherited: `font: inherit` is a shorthand and would
+     silently overwrite the family and size set three lines up. */
+  width: 100%;
+  padding: 0;
+  border: 0;
+  background: none;
+  text-align: left;
+  cursor: pointer;
+  font-weight: inherit;
+}
+
+/* the ellipsis lives on a real element: an anonymous flex item made from a bare
+   text node does not take `text-overflow`, so the reason would be cut mid-word
+   with nothing to say it had been */
+.acompWhyText {
+  min-width: 0;
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+}
+
+.acompWhyLabel {
+  flex: none;
+  color: var(--amb2);
+}
+
+.acompDestructive .acompWhyLabel {
+  color: var(--red3);
+}
+
+.acompHold {
+  font-size: 11px;
+  padding: 2px 7px 3px;
+}
+
+.acompMeta {
+  font-family: 'JetBrains Mono Variable', ui-monospace, monospace;
+  font-size: 10px;
+  color: var(--tx2);
+  white-space: nowrap;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.acompMeta button {
+  font-size: 11px;
+  padding: 1px 7px 2px;
+}
+
+/* the item's own words outrank its metadata: below the wide layout the facts
+   step aside so the title stays readable. They are still on the open card and
+   still in the lens — nothing is lost, only deferred. */
+.acompFacts {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+/* --- trailer ------------------------------------------------------------- */
+/* the trailer WRAPS rather than clipping. Below 1340 a nowrap version eats the
+   checkable half of the sentence — the objective, commitment and failure counts
+   — and leaves only the lead clause, which is the one part that is a summary
+   rather than a fact. A fact you cannot read is not on the page. */
+
+/* The lead is a control: it says something is wrong outside the pin, so it has
+   to be able to show you. Chrome-free so the trailer still reads as one
+   sentence; underlined so it does not read as an inert clause. */
+.trailerLead {
+  padding: 0;
+  border: 0;
+  background: none;
+  font: inherit;
+  color: var(--tx1);
+  cursor: pointer;
+  text-decoration: underline;
+  text-underline-offset: 2px;
+  text-decoration-color: var(--line3);
+}
+
+.trailer {
+  margin-top: 5px;
+  padding-top: 5px;
+  border-top: 1px dashed var(--line);
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  font-family: 'JetBrains Mono Variable', ui-monospace, monospace;
+  font-size: 10px;
+  color: var(--tx2);
+  line-height: 1.5;
+  min-width: 0;
+}
+
+.trailer b {
+  color: var(--tx1);
+  font-weight: 500;
+}
+
+/* --- the overflow affordance --------------------------------------------- */
+/* "N more owed" — explicit, counted, and named by derived glyph. The pin folds
+   rather than scrolling, so what is behind the fold has to say how hard it is
+   before you decide whether to open it. */
+
+.more {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  flex-wrap: wrap;
+  width: 100%;
+  text-align: left;
+  border: 1px dashed var(--ambbd);
+  border-radius: 0;
+  background: var(--ambbg5);
+  padding: 3px 9px 4px;
+  font-family: 'JetBrains Mono Variable', ui-monospace, monospace;
+  font-size: 10px;
+  color: var(--tx2);
+  transition:
+    background 0.12s ease,
+    border-color 0.12s ease;
+}
+
+.more:hover {
+  background: var(--ambbg);
+  border-color: var(--amb2);
+}
+
+.moreCount {
+  color: var(--amb2);
+  font-weight: 600;
+  flex: none;
+}
+
+.moreTally {
+  flex: none;
+  color: var(--tx1);
+}
+
+.tallyGlyph {
+  font-family: 'JetBrains Mono Variable', ui-monospace, monospace;
+  padding-right: 2px;
+}
+
+/* WHAT THE NEXT CLICK DOES. `flex: none`, so it is never the thing that gives
+   way at a narrow width — the explanatory tail below is. --tx1 on --ambbg5
+   measures 10.33:1 light and 10.90:1 dark. */
+.moreNext {
+  flex: none;
+  color: var(--tx1);
+  font-weight: 600;
+}
+
+.moreHint {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* everything clean compresses to a count and never takes a row */
+.clean {
+  font-family: 'JetBrains Mono Variable', ui-monospace, monospace;
+  font-size: 10px;
+  color: var(--tx2);
+  padding: 2px 2px 0;
+}
+
+/* --- empty --------------------------------------------------------------- */
+/* silence presented as a result, not an absence */
+
+.empty {
+  padding: 12px;
+  margin: 0;
+  border: 1px dashed var(--line);
+  border-radius: 0;
+  color: var(--tx2);
+  text-align: center;
+  line-height: 1.6;
+}
+
+@media (max-width: 1279px) {
+  .pin {
+    padding: 7px 12px 8px;
+  }
+
+  .acompFacts {
+    display: none;
+  }
+}

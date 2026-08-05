@@ -1,0 +1,326 @@
+/* ---------------------------------------------------------------------------
+ * Atrium global stylesheet.
+ *
+ * Three things live here and nothing else:
+ *   1. the token import — design/tokens.css is the ONLY source of colour in the
+ *      app. No hex, rgb() or hsl() appears in any other stylesheet.
+ *   2. the reset + document base (12.5px, Inter, warm paper).
+ *   3. the idioms that are genuinely app-wide: the three keyframes, the blanket
+ *      prefers-reduced-motion kill switch, the scrollbar, and the small set of
+ *      typographic utilities (`atr-lbl`, `atr-meta`, `atr-mono`, `atr-claim`,
+ *      `atr-btn`, `atr-chip`, `atr-rise`) that every surface wears.
+ *
+ * Everything else is a CSS Module beside its component. See
+ * design/CONVENTIONS.md for the rules these encode.
+ * ------------------------------------------------------------------------- */
+
+@import '@fontsource-variable/jetbrains-mono';
+@import '../../../design/tokens.css';
+
+/* ===========================================================================
+ * COLOUR USAGE RULES (carried from the prototype's round-2 contrast pass)
+ *
+ *   TEXT never uses --tx3 or --tx4. Measured against every surface they land
+ *   on, --tx3 tops out at 4.25:1 and --tx4 at 2.60:1 in the light theme — both
+ *   under AA for the 10–12.5px sizes this shell is built from. The whole app
+ *   therefore reads on --tx0 / --tx1 / --tx2 only. Quiet-but-legible is done
+ *   with the mono/sans split and the --line* ramp, not with a grey a third of
+ *   readers cannot resolve.
+ *
+ *   Amber and green FOREGROUNDS use --amb2 / --grn2, never the bare --amb /
+ *   --grn: those measure 2.64–3.57:1 in light and cannot carry text. The bare
+ *   names are for fills and borders. Green text on a green fill fails, so green
+ *   chips carry --tx1 on --grnbg with a --grnbd border — the hue rides the
+ *   border, the contrast rides the text token.
+ *
+ *   FOCUS RING — WCAG 1.4.11, non-text contrast, ≥3:1 against every adjacent
+ *   colour. The ring used to be --line3, which measures 1.63:1 light and
+ *   1.17:1 dark at its worst surface: it failed on all 70 focusable controls
+ *   per frame in both themes, and since nothing else in this shell reacts to
+ *   focus, the ring is the ONLY keyboard wayfinding there is. Note that this
+ *   comment block audited text in detail and never audited the ring — which is
+ *   how it survived a contrast pass. It is now --tx1, measured against all 19
+ *   surfaces the ring can land on: worst case 8.32:1 light (on --bg6) and
+ *   7.82:1 dark (on --grnav). The ring sits OUTSIDE the border box, so a
+ *   button's own fill is never adjacent to it; the offset gap shows the parent.
+ *   Asserted in test/token-contrast.test.ts and again in the rendered audit.
+ *
+ *   TYPE FLOOR: nothing below 10px, ever.
+ *   LABEL IDIOM: exactly one — 10px / .14em / uppercase / mono, declared once
+ *   below in `.atr-lbl`. It is the only `letter-spacing` in the app.
+ * ======================================================================== */
+
+*,
+*::before,
+*::after {
+  box-sizing: border-box;
+}
+
+[hidden] {
+  /* biome-ignore lint/complexity/noImportantStyles: `hidden` is a promise the
+     platform makes; a display rule further down must not be able to break it. */
+  display: none !important;
+}
+
+html,
+body {
+  height: 100%;
+}
+
+body {
+  margin: 0;
+  background: var(--bg0);
+  color: var(--tx1);
+  font-family: 'JetBrains Mono Variable', ui-monospace, sfmono-regular, menlo, monospace;
+  font-size: 10.5px;
+  line-height: 1.45;
+  -webkit-font-smoothing: antialiased;
+  text-rendering: optimizelegibility;
+}
+
+/* WIRE is one typographic instrument. Component-era mono/sans declarations
+   remain locally documented, but the latest full-frame system deliberately
+   removes that split. This selector is scoped to the real frame so auth forms
+   retain their independently reviewed form typography. */
+body [data-frame],
+body [data-frame] *,
+button,
+input,
+textarea,
+select {
+  font-family: 'JetBrains Mono Variable', ui-monospace, sfmono-regular, menlo, monospace;
+}
+
+button {
+  font: inherit;
+  color: inherit;
+  background: none;
+  border: 0;
+  padding: 0;
+  cursor: pointer;
+}
+
+:focus-visible {
+  outline: 2px solid var(--tx1);
+  outline-offset: 1px;
+  border-radius: 3px;
+}
+
+::selection {
+  background: var(--ambbg3);
+  color: var(--tx0);
+}
+
+/* ===========================================================================
+ * MOTION — three keyframes, per design/CONVENTIONS.md. Nothing else animates.
+ * ======================================================================== */
+
+/* `gl-blink` is NOT declared here. CONVENTIONS lists three keyframes; this app
+   consumes two. Blink is for live/recording indicators and Atrium v1 has no
+   voice surface, so it goes where the call-era tokens went: documented as
+   returning in Phase 4 rather than sitting in the stylesheet unreferenced. A
+   keyframe nothing uses is a keyframe nobody notices has stopped working. */
+
+@keyframes gl-pulse {
+  0%,
+  100% {
+    opacity: 1;
+  }
+  50% {
+    opacity: 0.35;
+  }
+}
+
+@keyframes gl-rise {
+  from {
+    opacity: 0;
+    transform: translateY(2px);
+  }
+  to {
+    opacity: 1;
+    transform: none;
+  }
+}
+
+/* Content appearing — .2s is the default, .15s for a timeline row.
+   `backwards`, never `both`: a forwards fill pins the element at the keyframe's
+   `opacity: 1` for good, and an animated fill outranks a normal declaration. A
+   row that then gets dimmed by a filter would silently stay at full opacity. */
+.atr-rise {
+  animation: gl-rise 0.2s ease backwards;
+}
+
+.atr-rise-s {
+  animation: gl-rise 0.15s ease backwards;
+}
+
+/* IN-PROGRESS. This class is GLOBAL on purpose. Round 1: `.live` in
+   lens.module.css said `animation: gl-pulse 1.6s infinite`, and CSS Modules
+   rewrites animation-NAMES inside a module even when the keyframes are global —
+   so the computed name was `lens_gl-pulse__hash`, no such keyframe existed, and
+   `getAnimations()` on the live indicator returned []. The dot had been static
+   since it was written. An animation declared beside its keyframes cannot be
+   scoped away. */
+.atr-pulse {
+  animation: gl-pulse 1.6s infinite;
+}
+
+/* The blanket kill switch. Not per-component opt-in: any animation added
+   anywhere in the app is covered by this rule the moment it is written. */
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    /* biome-ignore lint/complexity/noImportantStyles: this is the blanket kill
+       switch design/CONVENTIONS.md mandates. Without !important it stops being
+       blanket — any component rule wins and the guarantee quietly rots. */
+    animation: none !important;
+    /* biome-ignore lint/complexity/noImportantStyles: same rule, same reason. */
+    transition: none !important;
+  }
+}
+
+/* ===========================================================================
+ * TYPOGRAPHIC IDIOMS — the machine/human split from CONVENTIONS.md.
+ * ======================================================================== */
+
+.atr-mono {
+  font-family: 'JetBrains Mono Variable', ui-monospace, sfmono-regular, menlo, monospace;
+}
+
+/* THE ONLY `letter-spacing` DECLARATION IN THE APP. Anything wearing the label
+   idiom wears this class; nothing else is tracked.
+
+   It deliberately sets no `color`: a CSS-Module class on the same element has
+   identical specificity, so which of the two wins would depend on stylesheet
+   order. Every label states its own colour beside it instead. */
+.atr-lbl {
+  font-family: 'JetBrains Mono Variable', ui-monospace, monospace;
+  font-size: 10px;
+  line-height: 1;
+  letter-spacing: 0.14em;
+}
+
+/* machine metadata — mono, 10px, no tracking (tracking belongs to labels) */
+.atr-meta {
+  font-family: 'JetBrains Mono Variable', ui-monospace, monospace;
+  font-size: 10px;
+  color: var(--tx2);
+}
+
+/* A claim never dresses as a fact: the dotted underline is the visual
+   difference between "someone said it" and "the system checked it".
+
+   THAT SENTENCE IS WHY THE TOKEN CHANGED. A graphic carrying that distinction
+   is a meaningful non-text graphic under WCAG 1.4.11 and needs 3:1, and
+   --line3 measured 1.32–2.23:1 against the surfaces it lands on — under the
+   floor in every theme. The `~` glyph carries the same meaning redundantly on
+   some rows, but not on all of them: <ClaimText> deliberately renders the
+   underline WITHOUT a `~` for gate-proposals, and round 3's gauntlet counted 9
+   elements beside ◆ and 6 beside ■ where a 1px dotted stroke at sub-2:1 was
+   the sole carrier. A 1.4.11 graphic that is only sometimes redundant is not
+   redundant.
+
+   --tx2 is the quietest token that clears 3:1 against every surface in the app,
+   including the worst of them: 4.29:1 light and 4.69:1 dark on --redbg3. It
+   stays quieter than the words it sits under (--tx0/--tx1) by a token step and
+   by being 1px dotted rather than solid — the same "a token step and a shape,
+   never alpha" rule this file's de-emphasis section already states. Asserted
+   from the tokens in test/token-contrast.test.ts and against the rendered page
+   in the e2e non-text-graphic sweep. */
+.atr-claim {
+  border-bottom: 1px dotted var(--tx2);
+  padding-bottom: 1px;
+}
+
+.atr-btn {
+  font-size: 11.5px;
+  font-weight: 500;
+  padding: 3px 9px 4px;
+  border: 1px solid var(--line2);
+  border-radius: 4px;
+  background: var(--bg3);
+  color: var(--tx1);
+  transition:
+    background 0.12s ease,
+    border-color 0.12s ease,
+    color 0.12s ease,
+    transform 0.1s ease;
+}
+
+.atr-btn:hover {
+  background: var(--bg7);
+  border-color: var(--line3);
+  color: var(--tx0);
+}
+
+.atr-btn:active {
+  transform: translateY(1px);
+}
+
+/* the reversible one-click answer — amber fill, --bg3 on --amb2 is 5.14:1 light
+   and 10.96:1 dark, so it needs no per-theme override */
+.atr-btn-amber {
+  background: var(--amb2);
+  border-color: var(--amb2);
+  color: var(--bg3);
+}
+
+.atr-btn-amber:hover {
+  background: var(--amb2);
+  border-color: var(--tx1);
+  color: var(--bg3);
+}
+
+.atr-btn-ghost {
+  background: transparent;
+  border-color: transparent;
+  color: var(--tx2);
+}
+
+.atr-btn-ghost:hover {
+  background: var(--bg7);
+  color: var(--tx0);
+}
+
+.atr-btn-sm {
+  font-size: 11px;
+  padding: 2px 7px 3px;
+}
+
+.atr-chip {
+  font-family: 'JetBrains Mono Variable', ui-monospace, monospace;
+  font-size: 10px;
+  border: 1px solid var(--line);
+  background: var(--bg7);
+  color: var(--tx2);
+  border-radius: 3px;
+  padding: 1px 5px 2px;
+  white-space: nowrap;
+}
+
+.atr-scroll {
+  scrollbar-width: thin;
+  scrollbar-color: var(--line2) transparent;
+}
+
+.atr-scroll::-webkit-scrollbar {
+  width: 9px;
+  height: 9px;
+}
+
+.atr-scroll::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+.atr-scroll::-webkit-scrollbar-thumb {
+  background: var(--line2);
+  border: 3px solid transparent;
+  background-clip: content-box;
+  border-radius: 9px;
+}
+
+.atr-scroll::-webkit-scrollbar-thumb:hover {
+  background: var(--line3);
+  background-clip: content-box;
+}

@@ -241,7 +241,14 @@ if (entry === fileURLToPath(import.meta.url)) {
       process.exitCode = code;
     })
     .catch((error: unknown) => {
-      console.error(error instanceof Error ? error.message : String(error));
+      // Exit code before description. `instanceof` runs a Proxy's
+      // `getPrototypeOf` trap and `String()` runs `Symbol.toPrimitive`, so a
+      // rejection travelling up from `gh` or from the filesystem could throw on
+      // the line above the assignment and leave a failed run reporting success
+      // — the fail-open shape round 9 swept for. Ordering rather than a shared
+      // helper here: `@atrium/ingest` must not take a dependency on
+      // `@atrium/auth`, and ordering is what secures the exit code.
       process.exitCode = 1;
+      console.error(error instanceof Error ? error.message : String(error));
     });
 }

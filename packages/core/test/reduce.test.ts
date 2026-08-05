@@ -1,6 +1,26 @@
 import { describe, expect, it } from 'vitest';
-import { appendEvent, computeAttention, foldEvents, reduce, serializeState } from '../src/index.js';
-import { ALICE, at, BOB, event, human, ROOM, sampleLog, shuffle } from './fixtures.js';
+import {
+  type AuthoredEvent,
+  appendEvent,
+  computeAttention,
+  foldEvents,
+  reduce,
+  renderRationale,
+  serializeState,
+  wasConsumed,
+} from '../src/index.js';
+import {
+  ALICE,
+  at,
+  BOB,
+  event,
+  human,
+  ids,
+  ROOM,
+  reminted,
+  sampleLog,
+  shuffle,
+} from './fixtures.js';
 
 describe('reduce — determinism', () => {
   it('is a pure function: the same events produce the same state', () => {
@@ -12,7 +32,7 @@ describe('reduce — determinism', () => {
     const canonical = serializeState(reduce(sampleLog()));
     for (const seed of [1, 7, 42, 1337, 90210]) {
       const shuffled = shuffle(sampleLog(), seed);
-      expect(shuffled.map((e) => e.id)).not.toEqual(sampleLog().map((e) => e.id));
+      expect(ids(shuffled)).not.toEqual(ids(sampleLog()));
       expect(serializeState(reduce(shuffled))).toBe(canonical);
     }
   });
@@ -27,8 +47,31 @@ describe('reduce — determinism', () => {
   it('folds incrementally to the same state as a full replay', () => {
     const events = sampleLog();
     const full = reduce(events);
-    const incremental = events.reduce((state, next) => appendEvent(state, next).state, reduce([]));
+    const incremental = events.reduce(
+      (state, next) => appendEvent(state, next.event, next).state,
+      reduce([]),
+    );
     expect(serializeState(incremental)).toBe(serializeState(full));
+  });
+
+  it('folds an out-of-order arrival to a replay of what it consumed', () => {
+    // The half the test above cannot reach, r8. `sampleLog()` is already in
+    // canonical order, so folding it one at a time never puts an event at or
+    // before the cursor — delete the position gate entirely and that test stays
+    // green. Live≡replay is a claim about *arrival* order, and this is the only
+    // shape that measures it.
+    for (const seed of [1, 7, 42, 1337]) {
+      const arrival = shuffle(sampleLog(), seed);
+      const consumed: AuthoredEvent[] = [];
+      let live = reduce([]);
+      for (const next of arrival) {
+        const result = appendEvent(live, next.event, next);
+        if (wasConsumed(result)) consumed.push(next);
+        live = result.state;
+      }
+      expect(serializeState(live), `seed ${seed}`).toBe(serializeState(reduce(consumed)));
+      expect(consumed.length, `seed ${seed}`).toBeLessThan(arrival.length);
+    }
   });
 
   it('is idempotent per event id — a redelivery is rejected, not double-applied', () => {
@@ -60,8 +103,10 @@ describe('reduce — determinism', () => {
 
   it('rejects a redelivery that re-minted its timestamp, and says so', () => {
     const events = sampleLog();
-    const reminted = events.map((e) => ({ ...e, at: at(20 + Number(e.id.slice(3))) }));
-    const { state, outcomes } = foldEvents([...events, ...reminted]);
+    const late = events.map((entry) =>
+      reminted(entry, { at: at(20 + Number(entry.event.id.slice(3))) }),
+    );
+    const { state, outcomes } = foldEvents([...events, ...late]);
     const rejected = outcomes.filter((o) => o.outcome === 'rejected');
 
     expect(rejected).toHaveLength(events.length);
@@ -94,7 +139,7 @@ describe('reduce — acceptance', () => {
   it('refuses to accept the same object id twice', () => {
     const [proposal, accept] = sampleLog();
     if (!proposal || !accept) throw new Error('fixture changed');
-    const state = reduce([proposal, accept, { ...accept, id: 'ev_dup' }]);
+    const state = reduce([proposal, accept, reminted(accept, { id: 'ev_dup', at: at(20) })]);
     expect(state.issues).toEqual([
       { eventId: 'ev_dup', reason: 'object "obj_decision_1" already accepted' },
     ]);
@@ -108,6 +153,219 @@ describe('reduce — acceptance', () => {
       proposalId: 'prop_1',
       interpretationId: null,
     });
+  });
+
+  /**
+   * #22 r9, D1 — the forgery, at the reducer, in the shape it was executed in.
+   *
+   * Alice stages a commitment naming Bob, describes it as a reading by
+   * `claude-opus-4.6` at confidence 1, and quotes a sentence that appears in no
+   * message anybody wrote. Then she accepts it herself. On r8 that was two
+   * successful appends and a durable commitment against Bob, because a human
+   * matches every proposer (`actorMatchesProposer`) and a human acceptance runs
+   * none of the receipt gates — the quote was never matched against anything.
+   *
+   * The `authority-matrix` suite enumerates this cell now, and this is the
+   * hand-written statement of the same rule: it says *which* refusal, and it says
+   * the object is not there. Both halves matter — "something was refused" would
+   * pass on a reducer that refused it for the wrong reason, and a refusal that
+   * still minted the object would be a complaint rather than a boundary.
+   */
+  it('refuses a person accepting a model-attributed reading they staged themselves', () => {
+    const staged = event({
+      id: 'ev_self_prop',
+      at: at(1),
+      // The trusted actor: Alice's session. The proposal it carries says a model
+      // read it. `stagedBy` is minted from this and from nothing in the payload.
+      actor: human(),
+      type: 'proposal_recorded',
+      proposal: {
+        id: 'prop_self',
+        roomId: ROOM,
+        type: 'commitment',
+        payload: { statement: 'bob takes full responsibility', owner: BOB },
+        confidence: 1,
+        proposer: { kind: 'model', model: 'claude-opus-4.6' },
+        provenance: ['msg_1'],
+        quote: 'yes, I take full responsibility and will pay for it personally',
+        createdAt: at(1),
+      },
+    });
+    const accept = event({
+      id: 'ev_self_acc',
+      at: at(2),
+      actor: human(),
+      type: 'object_accepted',
+      object: {
+        id: 'obj_self',
+        roomId: ROOM,
+        type: 'commitment',
+        payload: { statement: 'bob takes full responsibility', owner: BOB },
+        provenance: { messageIds: ['msg_1'], proposalId: 'prop_self' },
+        createdAt: at(2),
+        updatedAt: at(2),
+      },
+    });
+
+    const state = reduce([staged, accept]);
+    // Staged, and the state can say who staged it — the fact the rule reads and
+    // the fact no read model had before r9.
+    expect(state.proposals.prop_self?.stagedBy).toEqual(human());
+    expect(state.proposals.prop_self?.proposal.proposer).toEqual({
+      kind: 'model',
+      model: 'claude-opus-4.6',
+    });
+
+    expect(state.objects).toEqual({});
+    expect(state.proposals.prop_self?.status).toBe('proposed');
+    expect(state.issues).toHaveLength(1);
+    expect(state.issues[0]?.reason).toContain('nobody validates their own attribution to a model');
+  });
+
+  /**
+   * The second ground, and the one the live proof turned up.
+   *
+   * Take the machine dressing off the forgery above and it is still the same
+   * two commands, the same victim and the same obligation: Alice stages "Bob
+   * takes full responsibility" **in her own name** and accepts it herself. That
+   * landed, because `acceptanceReceiptRefusal`'s third-party gate says the
+   * commitment "waits for the named owner to confirm, and only a human
+   * acceptance can carry that confirmation" — and never asked *which* human. A
+   * person confirming their own sentence is that sentence agreeing with itself,
+   * and #4 is unambiguous: nobody gets committed by someone else's sentence.
+   */
+  it("refuses a person accepting their own sentence that puts somebody else's name on it", () => {
+    const staged = event({
+      id: 'ev_tp_prop',
+      at: at(1),
+      actor: human(),
+      type: 'proposal_recorded',
+      proposal: {
+        id: 'prop_tp',
+        roomId: ROOM,
+        type: 'commitment',
+        payload: { statement: 'bob takes full responsibility', owner: BOB },
+        confidence: 1,
+        // No machine anywhere. Alice's own name on the staging, which is what
+        // the command layer now derives for every socket-staged proposal.
+        proposer: { kind: 'human', userId: ALICE },
+        provenance: ['msg_1'],
+        quote: null,
+        createdAt: at(1),
+      },
+    });
+    const accept = event({
+      id: 'ev_tp_acc',
+      at: at(2),
+      actor: human(),
+      type: 'object_accepted',
+      object: {
+        id: 'obj_tp',
+        roomId: ROOM,
+        type: 'commitment',
+        payload: { statement: 'bob takes full responsibility', owner: BOB },
+        provenance: { messageIds: ['msg_1'], proposalId: 'prop_tp' },
+        createdAt: at(2),
+        updatedAt: at(2),
+      },
+    });
+
+    const state = reduce([staged, accept]);
+    expect(state.objects).toEqual({});
+    expect(state.proposals.prop_tp?.status).toBe('proposed');
+    expect(state.issues[0]?.reason).toContain('nobody gets committed, or quoted');
+  });
+
+  /**
+   * And the other side of that clause: a person's own commitment. "I will do X",
+   * staged and accepted by the same person, is one person's word about
+   * themselves and stays open — without this, the rule above could be "a human
+   * may never accept what they staged" and nothing would notice.
+   */
+  it('lets a person stage and accept a commitment they take on themselves', () => {
+    const staged = event({
+      id: 'ev_self_own_prop',
+      at: at(1),
+      actor: human(),
+      type: 'proposal_recorded',
+      proposal: {
+        id: 'prop_self_own',
+        roomId: ROOM,
+        type: 'commitment',
+        payload: { statement: 'alice writes the migration', owner: ALICE },
+        confidence: 1,
+        proposer: { kind: 'human', userId: ALICE },
+        provenance: ['msg_1'],
+        quote: null,
+        createdAt: at(1),
+      },
+    });
+    const accept = event({
+      id: 'ev_self_own_acc',
+      at: at(2),
+      actor: human(),
+      type: 'object_accepted',
+      object: {
+        id: 'obj_self_own',
+        roomId: ROOM,
+        type: 'commitment',
+        payload: { statement: 'alice writes the migration', owner: ALICE },
+        provenance: { messageIds: ['msg_1'], proposalId: 'prop_self_own' },
+        createdAt: at(2),
+        updatedAt: at(2),
+      },
+    });
+
+    const state = reduce([staged, accept]);
+    expect(state.issues).toEqual([]);
+    expect(state.objects.obj_self_own?.object.type).toBe('commitment');
+  });
+
+  /**
+   * The design position this narrows, asserted rather than described: a person
+   * who reads a machine's reading and accepts it **is** the receipt. Only
+   * self-acceptance is refused, and without this the rule above could be
+   * "refuse every human acceptance of a model proposal" and nothing would notice.
+   */
+  it('lets a different person accept a model-attributed reading somebody else staged', () => {
+    const staged = event({
+      id: 'ev_other_prop',
+      at: at(1),
+      actor: human(),
+      type: 'proposal_recorded',
+      proposal: {
+        id: 'prop_other',
+        roomId: ROOM,
+        type: 'commitment',
+        payload: { statement: 'bob takes full responsibility', owner: BOB },
+        confidence: 1,
+        proposer: { kind: 'model', model: 'claude-opus-4.6' },
+        provenance: ['msg_1'],
+        quote: 'yes, I take full responsibility and will pay for it personally',
+        createdAt: at(1),
+      },
+    });
+    const accept = event({
+      id: 'ev_other_acc',
+      at: at(2),
+      // Bob, not Alice. He read it, and his judgement is the receipt.
+      actor: { kind: 'human', userId: BOB },
+      type: 'object_accepted',
+      object: {
+        id: 'obj_other',
+        roomId: ROOM,
+        type: 'commitment',
+        payload: { statement: 'bob takes full responsibility', owner: BOB },
+        provenance: { messageIds: ['msg_1'], proposalId: 'prop_other' },
+        createdAt: at(2),
+        updatedAt: at(2),
+      },
+    });
+
+    const state = reduce([staged, accept]);
+    expect(state.issues).toEqual([]);
+    expect(state.objects.obj_other?.object.type).toBe('commitment');
+    expect(state.proposals.prop_other?.status).toBe('accepted');
   });
 });
 
@@ -301,7 +559,9 @@ describe('computeAttention', () => {
       class: 'owned_commitment',
       status: 'pending',
     });
-    expect(items[0]?.rationale).toContain('you own this commitment');
+    const first = items[0];
+    if (!first) throw new Error('unreachable');
+    expect(renderRationale(first)).toContain('you own this commitment');
   });
 
   it('drops attention for retracted objects', () => {

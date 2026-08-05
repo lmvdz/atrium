@@ -1,0 +1,61 @@
+.replay {
+  display: grid;
+  grid-template-rows: minmax(0, 1fr) auto;
+  height: 100%;
+  min-height: 0;
+}
+
+.controls {
+  align-items: center;
+  background: var(--bg0);
+  border-top: 1px solid var(--line);
+  display: grid;
+  gap: 8px;
+  grid-template-columns: auto auto minmax(180px, 1fr) auto auto;
+  padding: 7px 20px 9px;
+  position: relative;
+  z-index: 20;
+}
+
+.controlLabel {
+  align-self: center;
+  color: var(--tx1);
+  font-family: 'JetBrains Mono Variable', ui-monospace, monospace;
+  font-size: 10.5px;
+}
+
+.controls button {
+  background: var(--bg2);
+  border: 1px solid var(--line);
+  color: var(--tx0);
+  cursor: pointer;
+  font: inherit;
+  min-height: 24px;
+  min-width: 82px;
+}
+
+.controls button:disabled {
+  background: var(--bg1);
+  border-style: dashed;
+  color: var(--tx2);
+  cursor: default;
+}
+
+.controls input {
+  accent-color: var(--amb1);
+}
+
+.position {
+  color: var(--tx1);
+  font-size: 11px;
+  min-width: 250px;
+  text-align: right;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .controls,
+  .controls * {
+    scroll-behavior: auto;
+    transition: none;
+  }
+}

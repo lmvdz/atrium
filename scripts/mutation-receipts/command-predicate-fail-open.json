@@ -1,0 +1,49 @@
+{
+  "mutation": "command-predicate-fail-open",
+  "verdict": "red",
+  "recordedAt": "2026-08-02T00:09:56.544Z",
+  "commit": "1602d0f261a153c22bb4876b86113cd009f94829",
+  "treeDirty": true,
+  "node": "v24.5.0",
+  "mutationHash": "40b821e084601310",
+  "claim": "packages/auth/test/authz.test.ts — and **this is finding D measured**: under round 10 the \"single list of commands\" test passed alone against this stub, because it asserted `isCommand` using `isCommand`'s own definition",
+  "suites": [
+    {
+      "suite": "auth:authz",
+      "verdict": "red",
+      "subjectHash": "9db4a7de0a91a3a3",
+      "suiteFile": "packages/auth/test/authz.test.ts",
+      "suiteHash": "2bd3a3eff2b291d2",
+      "files": [
+        "packages/auth/src/authz.ts"
+      ],
+      "baseline": {
+        "suite": "auth:authz",
+        "builds": [],
+        "command": "pnpm exec vitest run test/authz.test.ts --reporter=json --outputFile=../../node_modules/.cache/ledger-baseline-auth-authz.json",
+        "cwd": "packages/auth",
+        "exitCode": 0,
+        "total": 27,
+        "passed": 27,
+        "failed": 0,
+        "durationMs": 3370
+      },
+      "mutated": {
+        "suite": "auth:authz",
+        "builds": [],
+        "command": "pnpm exec vitest run test/authz.test.ts --reporter=json --outputFile=../../node_modules/.cache/ledger-mutated-command-predicate-fail-open.json",
+        "cwd": "packages/auth",
+        "exitCode": 1,
+        "total": 27,
+        "passed": 24,
+        "failed": 3,
+        "durationMs": 3838
+      },
+      "caught": [
+        "authorize — the denials cannot be tricked by a prototype key",
+        "authorize — the denials denies a command it has never heard of",
+        "the policy table itself authorizes nothing outside that list, whatever the role"
+      ]
+    }
+  ]
+}

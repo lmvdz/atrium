@@ -1,0 +1,202 @@
+/* Glyph, claim text, quotation and system voice — the epistemic primitives.
+   No hex, rgb() or hsl(): every colour is a token from design/tokens.css. */
+
+.glyph {
+  font-family: 'JetBrains Mono Variable', ui-monospace, monospace;
+  font-size: 10.5px;
+  line-height: 1.4;
+  color: var(--tx2);
+  text-align: center;
+  font-variant-ligatures: none;
+}
+
+/* --grn2 is the darkest green in the set. The light-theme step was darkened
+   after the persisted replay measured the former value below the rendered
+   audit's AA safety floor on --bg3. The feed's ✓ keeps that same surface so
+   every verified glyph is measured against one of the audited backgrounds. */
+.verified {
+  color: var(--grn2);
+  background: var(--bg3);
+  border-radius: 2px;
+}
+
+.needs {
+  color: var(--amb2);
+}
+
+/* --red3, not --red2. Measured on the real surfaces: --red2 is 4.21–4.26:1 in
+   the dark theme on --bg1/--bg3, which is under AA at 10.5px. --red3 is the
+   shifted foreground of the ramp and it clears in both — 7.03:1 light, 5.85:1
+   dark — so one token serves both themes and nothing branches. */
+.destructive,
+.failed {
+  color: var(--red3);
+}
+
+.neutral {
+  color: var(--tx2);
+}
+
+/* --- quotation vs system voice ------------------------------------------- */
+
+/* HUMAN VOICE. Italic, quoted, attributed — and only ever real words: the
+   `quote` prop is a `Quotation`, which cannot be minted from page-authored
+   text. See model/quotation.ts. */
+.quote {
+  font-style: italic;
+  font-size: 11px;
+  color: var(--tx0);
+}
+
+.quoteSource {
+  display: block;
+  margin-top: 2px;
+  font-family: 'JetBrains Mono Variable', ui-monospace, monospace;
+  font-size: 10px;
+  color: var(--tx2);
+}
+
+/* SYSTEM VOICE. Mono, muted, no quotation marks, no first person. Visibly not
+   speech — that difference is the whole point of the invariant. */
+.system {
+  font-family: 'JetBrains Mono Variable', ui-monospace, monospace;
+  font-size: 10px;
+  color: var(--tx2);
+  line-height: 1.4;
+  font-style: normal;
+}
+
+/* --- message body -------------------------------------------------------- */
+
+.code {
+  font-family: 'JetBrains Mono Variable', ui-monospace, monospace;
+  font-size: 11px;
+  background: var(--bg7);
+  border: 1px solid var(--line);
+  border-radius: 3px;
+  padding: 0 3px;
+  color: var(--tx1);
+}
+
+.mention {
+  color: var(--blu2);
+  font-weight: 500;
+}
+
+/* --- hold to arm --------------------------------------------------------- */
+/* The destructive control. It wears the red ramp, never the amber one:
+   CONVENTIONS — "amber and red are not interchangeable severities. Amber is a
+   reversible gate that wants an answer; red is destructive or already failed."
+   Round 1: the destructive primary rendered --amb2, byte-identical to the
+   reversible gate's primary, so the one action class the corpus singles out was
+   invisible.
+
+   --bg3 on --red3 measures 7.47:1 light and 5.81:1 dark. --red2 would be
+   4.21:1 dark, under AA, which is the same latent bug CONVENTIONS records for
+   the ■ and ✗ glyphs.
+
+   THE ARMED STATE IS PART OF THE CONTROL AND IS MEASURED TOO. The button
+   switches to --red once the hold completes (below), which is a different
+   foreground pairing and was uncovered by the note above — round 2's gauntlet
+   caught it as a number nobody had written down. --bg3 on --red is 5.36:1 light
+   and 5.10:1 dark: past AA in both, but with less headroom than the resting
+   state, so it is stated here rather than assumed. The rule this encodes: a
+   state a control can enter is a state the contrast note has to cover. Asserted
+   in test/token-contrast.test.ts against the tokens themselves. */
+.hold {
+  position: relative;
+  overflow: hidden;
+  isolation: isolate;
+  font-size: 11.5px;
+  font-weight: 500;
+  padding: 3px 9px 4px;
+  border: 1px solid var(--red3);
+  border-radius: 4px;
+  background: var(--red3);
+  color: var(--bg3);
+  touch-action: none;
+  user-select: none;
+}
+
+.hold:hover {
+  border-color: var(--tx1);
+}
+
+/* The progress bar. Driven by --hold-progress, which HoldToAct writes from the
+   same `performance.now()` clock that gates the action, so what fills is what
+   is being measured. It is a width, not an animation, so
+   `prefers-reduced-motion` — which kills every animation in this app — cannot
+   switch the safety indicator off.
+
+   It is a BAR along the bottom edge rather than a wash behind the label, on
+   purpose: a wash would put the label over two different backgrounds at once
+   and only one of them could be measured. --bg3 on --red3 is 7.47:1 light and
+   5.81:1 dark, well past the 3:1 that non-text contrast needs. */
+.holdFill {
+  position: absolute;
+  left: 0;
+  bottom: 0;
+  height: 3px;
+  width: var(--hold-progress, 0%);
+  background: var(--bg3);
+}
+
+.holdLabel {
+  position: relative;
+}
+
+/* Present to assistive technology, absent from layout and from the page.
+
+   NOT `display: none` and NOT `hidden`: both are also absent from the
+   accessibility tree, and these two elements are the button's `aria-describedby`
+   targets — hiding them that way would delete the description rather than
+   relocate it. Taken out of flow so a flex row of actions measures the same
+   with them as without. */
+.srOnly {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  margin: -1px;
+  padding: 0;
+  border: 0;
+  overflow: hidden;
+  white-space: nowrap;
+  clip-path: inset(50%);
+}
+
+/* armed: --bg3 on --red, 5.36:1 light / 5.10:1 dark — see the note above */
+.hold[data-armed='true'] {
+  background: var(--red);
+  border-color: var(--red);
+}
+
+/* --- tag ----------------------------------------------------------------- */
+
+.tag {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  font-family: 'JetBrains Mono Variable', ui-monospace, monospace;
+  font-size: 10px;
+  border-radius: 3px;
+  padding: 0 5px 1px;
+  margin-left: 6px;
+  vertical-align: 1px;
+  border: 1px solid var(--line);
+  background: var(--bg7);
+  color: var(--tx2);
+}
+
+.tagNeeds {
+  border-color: var(--ambbd);
+  background: var(--ambbg);
+  color: var(--amb2);
+}
+
+/* green text on a green fill fails contrast, so the hue rides the border and
+   the contrast rides --tx1 */
+.tagVerified {
+  border-color: var(--grnbd);
+  background: var(--grnbg);
+  color: var(--tx1);
+}

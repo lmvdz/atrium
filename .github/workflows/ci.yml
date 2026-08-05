@@ -1,0 +1,447 @@
+name: CI
+
+# Every gate a builder runs in a worktree runs here, on every pull request,
+# every merge-queue entry, and every push to main. The design constraint that
+# shaped this file is the fail-open class: a CI run that reports green because
+# the suite never ran. Guarding against it is why the steps below assert on
+# *counts* and *sets* rather than trusting an exit code, and why nothing here is
+# allowed to degrade gracefully.
+#
+# ┌─ WHAT THIS DEFENDS AGAINST ───────────────────────────────────────────────┐
+# │ Accident and drift. A step deleted during a rebase, a floor lowered to    │
+# │ make a red build go green, an action tag that moved under us, a workspace │
+# │ that stopped contributing tests, a suite that skipped its way to silence. │
+# │ Every rule below is aimed at the mistake nobody meant to make.            │
+# │                                                                          │
+# │ NOT a malicious author with write access, and it cannot be. The policy    │
+# │ engine, its self-test, the reporters, the gates and the floors all run    │
+# │ from the revision under test: whoever can edit this file can edit what    │
+# │ checks it. The presence and ratchet rules make that expensive and loud —  │
+# │ they do not make it impossible.                                          │
+# │                                                                          │
+# │ WHERE EXACTLY THAT LINE FALLS. The presence rules pin the *invocation     │
+# │ shape* of each gate — that the script is named, run as a command rather   │
+# │ than mentioned, in the right job, after the steps it depends on and not   │
+# │ backgrounded. Recognition is a parse (scripts/ci/shell-command.mjs), so   │
+# │ `echo node scripts/ci/assert-x.mjs` and                                   │
+# │ `pnpm --version && echo exec node scripts/ci/assert-x.mjs` both read as   │
+# │ absent, and `(git fetch …)`, `sudo …`, `timeout 30 …` and a wrapped line  │
+# │ all read as present. That is the whole claim. Four things it is NOT:      │
+# │                                                                          │
+# │  1. NOT semantics. Replacing assert-x.mjs's body with `process.exit(0)`   │
+# │     satisfies every rule here and always will, because the rule and the   │
+# │     script are read out of the same commit. Nor is reachability           │
+# │     execution: `false && git fetch …` is a genuine invocation in command  │
+# │     position, and this file cannot tell you whether that branch is taken. │
+# │  2. NOT executable provenance. Every rule recognises a command by its     │
+# │     *word*. `no-command-shadowing` bans the obvious ways to make a word   │
+# │     mean something else — a shell function, an alias, `hash -p`, a PATH   │
+# │     assignment, a write to $GITHUB_PATH — and a list of spellings is not  │
+# │     a proof that `git` is git.                                            │
+# │  3. NOT self-reference-proof. The policy engine, its self-test, the       │
+# │     README readback that keeps the prose numbers honest, the reporters    │
+# │     and the floors all execute from the revision under test. A hostile    │
+# │     revision edits the checker and the checked together, and the readback │
+# │     compares a number against prose that came from the same commit.       │
+# │  4. NOT complete about mutation purity. Every mutation must fire its own  │
+# │     rule and declare any other rule it trips; an *extra* violation of the │
+# │     same rule is not detected, and an `also` entry's reason is prose.     │
+# │                                                                          │
+# │ All four are owned by the governance trigger, deliberately and on the     │
+# │ record: required-check rulesets, pull requests, and code-owner review,    │
+# │ before a second contributor gets write access or this repository goes     │
+# │ public — whichever comes first. See "Governance trigger (recorded)" in    │
+# │ the README. They are not chased in YAML, because a check that runs from   │
+# │ the revision it judges cannot close them at any level of effort. Do not   │
+# │ read a green policy run as a claim about any of the four.                 │
+# └───────────────────────────────────────────────────────────────────────────┘
+#
+# ┌───────────────────────────────────────────────────────────────────────────┐
+# │ `gate` IS THE ONLY CHECK THAT MAY BE MARKED REQUIRED.                     │
+# │                                                                           │
+# │ Do not add `verify` or `e2e` — or anything else in this file — to the     │
+# │ repository's required-checks list. GitHub reports a *skipped* required    │
+# │ check as a *successful* one, so a required `verify` can be bypassed       │
+# │ wholesale by a pull request that adds `if: ${{ false }}` to it. `gate`    │
+# │ runs `if: always()`, needs every other job, and fails unless each one     │
+# │ reported literally `success` — a skipped job turns it red instead.        │
+# │ One required check, and it cannot be skipped into a pass.                 │
+# └───────────────────────────────────────────────────────────────────────────┘
+#
+# House rules, enforced by scripts/ci/workflow-policy.mjs over the parsed YAML
+# (not by grep — see that file for why):
+#   - no `continue-on-error`, at any depth
+#   - no `if:` on a job, except `gate`'s mandatory `if: always()`
+#   - no `if:` on a step, except `failure()` on an artifact upload
+#   - no `shell:` override, no step-level `timeout-minutes`
+#   - no `|| true`, `set +e`, or other swallowed exit codes
+#   - every action pinned to a full commit SHA, with the release in a comment
+#   - `gate.needs` must name every other job in the file
+#   - no reusable workflows: a job body that is not in this file cannot be
+#     checked by anything in this file, and a remote one can change without a
+#     commit here
+#   - `verify` and `e2e` must still *contain* the steps that do the checking —
+#     the policy step, both self-tests, and every assert script by name
+#   - no shell function, alias, `hash -p`, PATH assignment or `$GITHUB_PATH`
+#     write that redefines a command word the rules above depend on
+#   - and where a check only means something because of an earlier step, the
+#     policy enforces the *pair*: the prerequisite must be in the same job, run
+#     first, be a command rather than a mention of one, and not be backgrounded.
+#     `assert-floor-ratchet.mjs` without the `git fetch` below it is the case
+#     that named the rule — it still runs, finds no baseline, and exits 0. A
+#     gate whose setup was deleted does not fail; it drifts. A setup quoted into
+#     an `echo` of itself is the same drift wearing the original text, and
+#     `git fetch … &` is the same drift with a race in it, so both halves of
+#     every pair are recognised by parsing the script into simple commands.
+# A new job that forgets any of that fails policy at the edit, not six months
+# later in production.
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  # A merge queue that never receives a run treats the absence of a verdict as
+  # consent. If one is ever turned on, this trigger is what makes it report.
+  merge_group:
+  workflow_dispatch:
+
+# One run per ref; a new push supersedes the old one. main is exempt from
+# cancellation so its history of runs stays complete.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
+
+permissions:
+  contents: read
+
+env:
+  # engines.node in package.json is >=22.12.0. Pinned to the 22 line so a
+  # runner-image bump cannot silently move the compiler out from under us.
+  NODE_VERSION: '22'
+  # Every action below is pinned to a commit SHA; the trailing comment records
+  # which release that SHA is, so the pin stays auditable by eye.
+  ACTIONLINT_VERSION: '1.7.12'
+  ACTIONLINT_SHA256: '8aca8db96f1b94770f1b0d72b6dddcb1ebb8123cb3712530b08cc387b349a3d8'
+
+jobs:
+  verify:
+    name: lint · typecheck · test · build
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+
+    # packages/db and any future integration suite talk to a real Postgres.
+    # Same major as docker-compose.yml so CI and laptops disagree about nothing.
+    # Pinned by digest, not by tag: `postgres:16` is a moving target, and the
+    # schema gate below asserts the server really is major 16 once it is up.
+    services:
+      postgres:
+        image: postgres:16@sha256:33f923b05f64ca54ac4401c01126a6b92afe839a0aa0a52bc5aeb5cc958e5f20
+        env:
+          POSTGRES_USER: atrium
+          POSTGRES_PASSWORD: atrium
+          POSTGRES_DB: atrium
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U atrium -d atrium"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 20
+
+    env:
+      # Exported for every step in the job. drizzle.config.ts deliberately
+      # refuses to invent a connection string, so this is the only thing
+      # standing between the db suite and a loud failure.
+      DATABASE_URL: postgres://atrium:atrium@localhost:5432/atrium
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Set up pnpm
+        # No version input on purpose: the action reads packageManager from
+        # package.json, so the lockfile and CI can never disagree. The action
+        # itself is pinned to a SHA regardless.
+        uses: pnpm/action-setup@0ebf47130e4866e96fce0953f49152a61190b271 # v6.0.9
+
+      - name: Set up Node ${{ env.NODE_VERSION }}
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: pnpm
+
+      - name: Assert toolchain
+        run: |
+          set -euo pipefail
+          node_major="$(node -p 'process.versions.node.split(".")[0]')"
+          if [ "$node_major" != "22" ]; then
+            echo "::error::Expected Node 22, got $(node -v)."
+            exit 1
+          fi
+          command -v pnpm >/dev/null
+          echo "node $(node -v) · pnpm $(pnpm -v)"
+
+      - name: Install dependencies
+        # --frozen-lockfile: a lockfile that drifted from package.json fails the
+        # run instead of resolving something nobody reviewed.
+        run: pnpm install --frozen-lockfile
+
+      - name: Install actionlint
+        # Pinned version, checksum-verified. A linter fetched from a moving URL
+        # is one supply-chain step away from being the thing it should catch.
+        run: |
+          set -euo pipefail
+          archive="$RUNNER_TEMP/actionlint.tar.gz"
+          url="https://github.com/rhysd/actionlint/releases/download/v${ACTIONLINT_VERSION}/actionlint_${ACTIONLINT_VERSION}_linux_amd64.tar.gz"
+          curl --fail --silent --show-error --location --output "$archive" "$url"
+          echo "${ACTIONLINT_SHA256}  ${archive}" | sha256sum --check --strict
+          tar -xzf "$archive" -C "$RUNNER_TEMP" actionlint
+          "$RUNNER_TEMP/actionlint" --version
+
+      - name: Lint workflows with actionlint
+        run: '"$RUNNER_TEMP/actionlint" -color'
+
+      - name: Enforce the workflow policy
+        # actionlint proves the file is a *valid* workflow. This proves it is an
+        # *honest* one: no fail-open construct, no bypassable job, no unpinned
+        # action, and a gate that covers every job in the file.
+        run: node scripts/ci/workflow-policy.mjs .github/workflows/*.yml
+
+      - name: Prove the workflow policy actually rejects things
+        # A policy engine nobody tests is a policy engine that passes everything.
+        # This feeds it mutated copies of the real workflow — the `if: ${{ false }}`
+        # bypass among them — and fails if any mutation goes unnoticed.
+        run: node scripts/ci/workflow-policy-selftest.mjs
+
+      - name: Prove the test gates actually reject things
+        # Same argument, one layer up: synthetic reports carrying a skipped test,
+        # an expected failure, a vanished project and a stale timestamp, each of
+        # which must be caught by the gates that run later in this job.
+        run: node scripts/ci/gate-selftest.mjs
+
+      - name: Assert every workspace is enrolled in the CI manifest
+        # A package added without tests must fail here rather than disappear into
+        # a global count that its neighbours keep above the floor.
+        run: node scripts/ci/assert-workspace-enrollment.mjs
+
+      - name: Fetch the baseline manifest from main
+        # Depth 1 is enough: the ratchet reads one file out of one commit.
+        # actions/checkout leaves a shallow clone with no other branches in it,
+        # so without this there is nothing to compare against — and "nothing to
+        # compare against" must be a fact the next step reports, not a silence
+        # it inherits.
+        #
+        # Deleting this step does not break the ratchet; it neuters it, quietly,
+        # down the green no-baseline path. So the policy engine's
+        # `required-step-prerequisites` rule requires this step to exist and to
+        # come before the ratchet. The pair is the gate, not either half.
+        #
+        # Wrapping the line in an `echo` neuters it exactly as well, which is
+        # what round 4's substring matcher could not tell apart — policy green
+        # and run green over a fetch that never happened. The rule now requires
+        # the command at the start of a line, and the self-test carries the
+        # quoted-into-an-echo mutation for this step and six others.
+        run: git fetch --no-tags --depth=1 origin +refs/heads/main:refs/remotes/origin/main
+
+      - name: Assert the CI floors have not been ratcheted down
+        # The cheapest way to make a failing count gate pass is to lower the
+        # number it counts against. Every floor is compared against the same
+        # file on main; a decrease needs a written justification keyed to
+        # exactly what came down. Until a manifest exists on main there is no
+        # baseline, which this says out loud rather than passing quietly.
+        run: node scripts/ci/assert-floor-ratchet.mjs
+
+      - name: Assert dev toolchain binaries resolve
+        # A missing binary must fail the job, not be quietly stepped over.
+        run: |
+          set -euo pipefail
+          pnpm exec biome --version
+          pnpm exec tsc --version
+          pnpm exec vitest --version
+
+      - name: Lint
+        run: pnpm lint
+
+      - name: Typecheck
+        run: pnpm typecheck
+
+      - name: Wait for Postgres
+        # Uses the workspace's own postgres client rather than pg_isready, so
+        # readiness never depends on what the runner image happens to ship.
+        run: pnpm --filter @atrium/db exec node ../../scripts/ci/wait-for-postgres.mjs
+
+      - name: Apply migrations
+        run: pnpm --filter @atrium/db exec drizzle-kit migrate
+
+      - name: Assert the database matches the schema exactly
+        # Set equality, derived from the built schema export rather than from a
+        # hand-copied list: a missing table and an unexpected thirteenth one both
+        # fail. Proves the service container was genuinely reachable and the
+        # migration did work, rather than a no-op that exits 0 against nothing.
+        run: |
+          set -euo pipefail
+          pnpm --filter "./packages/*" build
+          pnpm --filter @atrium/db exec node ../../scripts/ci/assert-tables.mjs
+
+      - name: Reset the test reports
+        # Deleted immediately before the runner starts, with the start time
+        # recorded: the gate then refuses any report whose mtime predates it. A
+        # leftover report from an earlier step or a restored cache is the
+        # quietest possible way to pass a gate without running a suite.
+        run: |
+          set -euo pipefail
+          rm -f vitest-report.json vitest-ci-report.json
+          echo "VITEST_RUN_START=$(date +%s%3N)" >> "$GITHUB_ENV"
+
+      - name: Unit + integration tests
+        run: >-
+          pnpm vitest run
+          --maxWorkers=2
+          --reporter=default
+          --reporter=github-actions
+          --reporter=json --outputFile.json=vitest-report.json
+          --reporter=./scripts/ci/vitest-ci-reporter.mjs
+
+      - name: Assert the suite actually ran
+        # The fail-open gate. An exit code of 0 from a runner that collected zero
+        # tests, that skipped its way to silence, or that ran a test annotated
+        # `it.fails`, is indistinguishable from a real pass unless someone counts
+        # — per project, against .github/ci-manifest.json. This counts.
+        run: node scripts/ci/assert-vitest-report.mjs
+
+      - name: Build
+        run: pnpm build
+
+      # Hook point for the eval gate (#17 / #24). It plugs in here, as a gate in
+      # this job — not as a separate advisory job whose result nobody reads.
+
+  e2e:
+    name: playwright (chromium)
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Set up pnpm
+        uses: pnpm/action-setup@0ebf47130e4866e96fce0953f49152a61190b271 # v6.0.9
+
+      - name: Set up Node ${{ env.NODE_VERSION }}
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: pnpm
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Build workspace packages
+        # apps/web imports @atrium/core through its built dist/, so the Next dev
+        # server Playwright boots needs the packages compiled first.
+        run: pnpm --filter "./packages/*" build
+
+      - name: Resolve Playwright version
+        id: playwright
+        run: |
+          set -euo pipefail
+          version="$(pnpm --filter @atrium/web exec playwright --version | awk '{ print $2 }')"
+          test -n "$version"
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+
+      - name: Cache Playwright browsers
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ~/.cache/ms-playwright
+          key: ${{ runner.os }}-playwright-${{ steps.playwright.outputs.version }}
+
+      - name: Install Chromium
+        run: pnpm --filter @atrium/web exec playwright install --with-deps chromium
+
+      - name: Assert Chromium is present
+        # The e2e suite skips itself when no browser is installed, which is the
+        # right call on a laptop and a lie in CI. Belt to the spec's braces: if
+        # the download silently failed, stop here rather than report a green run
+        # over zero executed browser tests.
+        run: pnpm --filter @atrium/web exec node ../../scripts/ci/assert-chromium.mjs
+
+      - name: Prepare the e2e database and object store
+        # Playwright starts both application servers before global setup. The
+        # same preparer used by `pnpm test:e2e` must therefore run first on a
+        # clean runner; without it the browser gate is present but cannot boot.
+        run: pnpm --filter @atrium/web exec node e2e/support/ensure-database.mjs
+
+      - name: Reset the e2e report
+        run: |
+          set -euo pipefail
+          rm -f playwright-report.json
+          echo "E2E_RUN_START=$(date +%s%3N)" >> "$GITHUB_ENV"
+
+      - name: Run e2e suite
+        env:
+          # Absolute: the json reporter resolves this against the Playwright
+          # process's own cwd, which is apps/web here, not the repo root.
+          PLAYWRIGHT_JSON_OUTPUT_NAME: ${{ github.workspace }}/playwright-report.json
+        run: pnpm --filter @atrium/web exec playwright test --workers=2 --reporter=list,json
+
+      - name: Assert the e2e suite actually ran
+        # Per project, against .github/ci-manifest.json, and rejecting every
+        # annotation that means "this test proves nothing": skip, fixme, and
+        # test.fail() — which Playwright otherwise reports as `expected`, green.
+        run: node scripts/ci/assert-playwright-report.mjs
+
+      - name: Upload Playwright traces
+        # The only step condition in this file, and it gates an artifact, not a
+        # verdict. playwright.config.ts records a trace on first retry.
+        if: failure()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: playwright-trace-${{ github.run_id }}-${{ github.run_attempt }}
+          path: |
+            apps/web/test-results/
+            apps/web/playwright-report/
+            playwright-report.json
+          retention-days: 7
+          if-no-files-found: ignore
+
+  gate:
+    name: gate
+    # ─── THE ONLY CHECK TO MARK REQUIRED ──────────────────────────────────────
+    # Mark this one required in the branch protection rules / ruleset, and
+    # nothing else in this file. Rationale, at length, at the top of the file:
+    # GitHub scores a skipped required check as a pass, so any job that can be
+    # skipped is a job that can be bypassed. This one cannot be skipped — it
+    # runs `if: always()` — and it fails unless every job it needs reported
+    # literally `success`. `skipped`, `cancelled` and `failure` are all red here.
+    #
+    # `needs` must name every other job in this file; scripts/ci/workflow-policy.mjs
+    # fails the build if a new job is added without being covered here.
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    needs: [verify, e2e]
+    if: always()
+
+    steps:
+      - name: Every needed job must have reported success
+        env:
+          NEEDS: ${{ toJSON(needs) }}
+        run: |
+          set -euo pipefail
+          node --input-type=module -e '
+            const needs = JSON.parse(process.env.NEEDS || "{}");
+            const entries = Object.entries(needs);
+            if (entries.length === 0) {
+              console.error("::error::The gate needs no jobs, so it proves nothing. Add every job to needs.");
+              process.exit(1);
+            }
+            const bad = entries.filter(([, value]) => value.result !== "success");
+            for (const [name, value] of entries) {
+              console.info(name + ": " + value.result);
+            }
+            if (bad.length > 0) {
+              const detail = bad.map(([name, value]) => name + " = " + value.result).join(", ");
+              console.error("::error::Gate failed: " + detail + ". A job that was skipped or cancelled did not pass; it did not run.");
+              process.exit(1);
+            }
+            console.info("Gate passed: " + entries.length + " jobs, all success.");
+          '

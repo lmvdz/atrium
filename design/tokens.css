@@ -1,99 +1,72 @@
 /* ---------------------------------------------------------------------------
  * Atrium design tokens
  *
- * Provenance: extracted verbatim from the `:root` and `html.atr-dark` blocks of
- * "Atrium v6.dc.html" (design-canvas prototype, "Design system for live call
- * interface" corpus), 2026-07-31. Values are byte-identical to the source; the
- * only changes are grouping comments and the ordering of the call-era tokens
- * into their own section. See plans/research-live-call-design-system/BRIEF.md
- * concept 9 for what this system is and why it is adopted wholesale.
- *
- * Light (`:root`) is the default theme - warm paper. Dark is opt-in by putting
- * `atr-dark` on <html>. Both themes define the same token names, so nothing
- * downstream ever branches on theme.
+ * Provenance: the WIRE declaration in the latest design-system handoff
+ * (`CLAUDE.md`) and its full-frame witness, `Atrium v8.dc.html`, 2026-08-03.
+ * WIRE is a near-black operator surface, not the earlier warm-paper/dark pair.
+ * `:root` and `html.atr-dark` deliberately keep the same token contract during
+ * the transition so old persisted theme preferences cannot resurrect the
+ * superseded visual language.
  *
  * Usage conventions (ramps, typography, glyphs, density): design/CONVENTIONS.md
  * ------------------------------------------------------------------------- */
 
-/* light - warm paper (default) */
+/* WIRE — the product surface */
 :root {
-  /* neutral surfaces - bg0 (page) ... bg7; warm paper in light, near-black in dark */
-  --bg0: #e6e2da;
-  --bg1: #f4f1ea;
-  --bg2: #ece8df;
-  --bg3: #faf8f3;
-  --bg4: #eae5da;
-  --bg5: #e2dccf;
-  --bg6: #ddd6c8;
-  --bg7: #efeae0;
-
-  /* neutral rules - line (hairline) / line2 (divider) / line3 (emphatic) */
-  --line: #d4cdbd;
-  --line2: #c8c1b4;
-  --line3: #b0a896;
-
-  /* neutral text - tx0 (primary) ... tx4 (faintest) */
-  --tx0: #171a18;
-  --tx1: #3a362e;
-  --tx2: #57534a;
-  --tx3: #7d7666;
-  --tx4: #a39b89;
-
-  /* green - verified / settled / passing */
-  --grn: #4e9161;
-  --grn2: #3e7b52;
-  --grn3: #5b8a6b;
-  --grnbd: #9dc4a8;
-  --grnbg: #e3ede2;
-  --grnav: #cbe0ce;
-
-  /* amber - needs you / gate awaiting a human */
-  --amb: #b07d2a;
-  --amb2: #8a6220;
-  --ambbd: #d9b36a;
-  --ambbd2: #e3c88f;
-  --ambbg: #f5e9cd;
-  --ambbg2: #f0e2c2;
-  --ambbg3: #ebdab1;
-  --ambbg4: #efdfb9;
-  --ambbg5: #f6edda;
-
-  /* red - destructive / failed */
-  --red: #b3402e;
-  --red2: #a63a28;
-  --red3: #8f3222;
-  --redbd: #dba090;
-  --redbg: #f6dfd7;
-  --redbg2: #f1d3ca;
-  --redbg3: #e4b8ac;
-
-  /* blue - human / person-authored surfaces */
-  --blu: #3d6bb3;
-  --blu2: #2f5590;
-  --blu3: #8a97ac;
-  --replybg: #dfe7f2;
-  --filebg: #dfe9f4;
-  --filebd: #b7cce4;
-
-  /* -------------------------------------------------------------- */
-  /* call-era - unused in v1, kept for Phase 4.                      */
-  /* Live-call chrome from the Atrium fleet-ops era: the pine call   */
-  /* strip (--strip) and its live indicator (--live), plus the       */
-  /* speaker-tile ramp - fill, active fill, border, text, active     */
-  /* text (--stile, --stileac, --stbd, --stx, --stxac). Atrium v1    */
-  /* is human-only with no voice surface, so nothing consumes these  */
-  /* yet; they are kept verbatim for when calls return in Phase 4.   */
-  /* -------------------------------------------------------------- */
-  --live: #9bb3a0;
+  --bg0: #0a0b0c;
+  --bg1: #0c0d0f;
+  --bg2: #0d0f10;
+  --bg3: #101312;
+  --bg4: #121615;
+  --bg5: #151918;
+  --bg6: #1a1f1d;
+  --bg7: #0f1211;
+  --line: #1f2226;
+  --line2: #2a2e33;
+  --line3: #3a3f45;
+  --tx0: #e8eaec;
+  --tx1: #c9ced3;
+  --tx2: #9aa1a8;
+  --tx3: #565b61;
+  --tx4: #3f4348;
+  --grn: #5cb27a;
+  --grn2: #78c991;
+  --grn3: #6fa383;
+  --grnbd: #2e5a40;
+  --grnbg: #14261b;
+  --grnav: #1e3a2a;
+  --amb: #c99a3f;
+  --amb2: #e0c077;
+  --ambbd: #6e5320;
+  --ambbd2: #57431c;
+  --ambbg: #221c0e;
+  --ambbg2: #2a2210;
+  --ambbg3: #332a14;
+  --ambbg4: #332a14;
+  --ambbg5: #201a0e;
+  --red: #d4604a;
+  --red2: #e1725d;
+  --red3: #e06a52;
+  --redbd: #6e3427;
+  --redbg: #261311;
+  --redbg2: #2e1714;
+  --redbg3: #57271e;
+  --blu: #8ab4f8;
+  --blu2: #aecbfa;
+  --blu3: #6b89b3;
+  --replybg: #1c2836;
+  --filebg: #16222f;
+  --filebd: #24435f;
+  --live: #5cb27a;
   --strip: #173a32;
-  --stile: rgba(244, 241, 234, 0.1);
-  --stileac: #f4f1ea;
-  --stbd: rgba(244, 241, 234, 0.25);
-  --stx: #c9d6cb;
-  --stxac: #173a32;
+  --stile: #16241d;
+  --stileac: #1e3a2a;
+  --stbd: #2e5a40;
+  --stx: #9bb3a0;
+  --stxac: #5cb27a;
 }
 
-/* dark - near-black (opt-in via `atr-dark` on <html>) */
+/* Compatibility only: old preferences keep WIRE rather than reviving v6. */
 html.atr-dark {
   /* neutral surfaces - bg0 (page) ... bg7; warm paper in light, near-black in dark */
   --bg0: #0a0b0c;
@@ -119,7 +92,7 @@ html.atr-dark {
 
   /* green - verified / settled / passing */
   --grn: #5cb27a;
-  --grn2: #4ea76b;
+  --grn2: #78c991;
   --grn3: #6fa383;
   --grnbd: #2e5a40;
   --grnbg: #14261b;
@@ -138,7 +111,7 @@ html.atr-dark {
 
   /* red - destructive / failed */
   --red: #d4604a;
-  --red2: #c25340;
+  --red2: #e1725d;
   --red3: #e06a52;
   --redbd: #6e3427;
   --redbg: #261311;
@@ -162,11 +135,11 @@ html.atr-dark {
   /* is human-only with no voice surface, so nothing consumes these  */
   /* yet; they are kept verbatim for when calls return in Phase 4.   */
   /* -------------------------------------------------------------- */
-  --live: #3e5748;
-  --strip: #0e1a15;
+  --live: #5cb27a;
+  --strip: #173a32;
   --stile: #16241d;
   --stileac: #1e3a2a;
   --stbd: #2e5a40;
-  --stx: #7fa98a;
+  --stx: #9bb3a0;
   --stxac: #5cb27a;
 }
