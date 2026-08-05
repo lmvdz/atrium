@@ -26,7 +26,7 @@ A room's conversation, plus a second surface holding what the group actually dec
 Measured on `main`, 2026-08-05, on a 16-core machine:
 
 - `pnpm -r build`, `pnpm typecheck` — pass
-- `pnpm lint` — exit 0 (15 warnings, 51 infos: the known design-harness diagnostics)
+- `pnpm lint` — **exits 1**, and always has. The errors are `design/*.mjs` and `scripts/mutation-ledger.mjs`, the harness files this file's own "Traps" section records as never having passed; no `apps/` or `packages/` source is among them. The Phase 2 receipt records this gate as "exit 0"; that reading came from a pipeline whose last stage was `tail`, so it measured `tail`. Run it as `pnpm lint >/dev/null; echo $?` if you want the real number. **This is not a green gate. It is a known-red one with a known boundary**, and the honest form is to say so rather than to keep quoting a zero nothing produced.
 - `pnpm test --maxWorkers=2` — 3,107/3,107
 - `pnpm test:integration` — 189/189 against the compose-managed database
 - `pnpm test:e2e` at 8 workers — 160/169; the nine failures are timeouts and auth-flow content in the flaky auth/mail set, with zero product-shaped assertion failures
