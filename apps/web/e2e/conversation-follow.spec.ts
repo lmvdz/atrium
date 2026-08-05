@@ -16,10 +16,17 @@ test('the live edge follows a newly sent message in the rendered workspace', asy
   await expect(appended).toContainText('browser follow probe');
   await expect
     .poll(async () => {
-      const [feedBox, rowBox] = await Promise.all([feed.boundingBox(), appended.boundingBox()]);
-      return (rowBox?.y ?? -1000) - (feedBox?.y ?? 0);
+      return feed.evaluate((element, messageText) => {
+        const row = [...element.children].find((child) => child.textContent?.includes(messageText));
+        if (!(row instanceof HTMLElement)) return Number.POSITIVE_INFINITY;
+        const expected = Math.min(
+          element.scrollHeight - element.clientHeight,
+          Math.max(0, row.offsetTop),
+        );
+        return Math.abs(element.scrollTop - expected);
+      }, 'browser follow probe');
     })
-    .toBeGreaterThanOrEqual(0);
+    .toBeLessThanOrEqual(2);
 });
 
 test('a paused conversation marks and counts the oldest unseen boundary', async ({ page }) => {

@@ -138,12 +138,13 @@ describe('conversation follow mode', () => {
     const control = await screen.findByRole('button', { name: '↓ 1 new message' });
     expect(container.querySelector('[data-unread-divider="1"]')?.textContent).toBe('1 new message');
     const row = container.querySelector(`[data-message-id="${appended.id}"]`) as HTMLElement;
-    let request: boolean | ScrollIntoViewOptions | undefined;
-    row.scrollIntoView = (options) => {
-      request = options;
+    Object.defineProperty(row, 'offsetTop', { configurable: true, value: 640 });
+    let request: ScrollToOptions | undefined;
+    feed.scrollTo = (options) => {
+      request = options as ScrollToOptions;
     };
     fireEvent.click(control);
-    expect(request).toEqual({ behavior: 'smooth', block: 'start' });
+    expect(request).toEqual({ behavior: 'smooth', top: 640 });
     expect(screen.queryByRole('button', { name: '↓ 1 new message' })).toBeNull();
   });
 
@@ -163,11 +164,12 @@ describe('conversation follow mode', () => {
     const appended = ENTRIES.at(-1);
     if (appended?.type !== 'message') throw new Error('the feed fixture does not append a message');
     const row = container.querySelector(`[data-message-id="${appended.id}"]`) as HTMLElement;
-    let request: boolean | ScrollIntoViewOptions | undefined;
-    row.scrollIntoView = (options) => {
-      request = options;
+    Object.defineProperty(row, 'offsetTop', { configurable: true, value: 900 });
+    let request: ScrollToOptions | undefined;
+    feed.scrollTo = (options) => {
+      request = options as ScrollToOptions;
     };
-    await waitFor(() => expect(request).toEqual({ behavior: 'smooth', block: 'start' }));
+    await waitFor(() => expect(request).toEqual({ behavior: 'smooth', top: 700 }));
     expect(screen.queryByRole('button', { name: /new message/ })).toBeNull();
   });
 

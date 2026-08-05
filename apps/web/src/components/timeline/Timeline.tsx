@@ -271,7 +271,13 @@ function scrollMessageIntoView(feed: HTMLElement, messageId: string): void {
   const row = Array.from(feed.children).find(
     (child) => child.getAttribute('data-message-id') === messageId,
   );
-  if (row instanceof HTMLElement && typeof row.scrollIntoView === 'function') {
-    row.scrollIntoView({ behavior: 'smooth', block: 'start' });
+  if (!(row instanceof HTMLElement)) return;
+  const furthestDown = Math.max(0, feed.scrollHeight - feed.clientHeight);
+  const firstUnreadAtTop = Math.max(0, row.offsetTop);
+  const target = Math.min(furthestDown, firstUnreadAtTop);
+  if (typeof feed.scrollTo === 'function') {
+    feed.scrollTo({ top: target, behavior: 'smooth' });
+  } else {
+    feed.scrollTop = target;
   }
 }
