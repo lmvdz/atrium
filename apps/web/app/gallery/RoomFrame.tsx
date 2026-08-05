@@ -265,9 +265,20 @@ function WorkspaceSplit({
       ref={root}
       style={{ gridTemplateRows: rows } as CSSProperties}
     >
-      <section aria-label="Current state pane" className={frame.splitState}>
+      {/* THE SPLIT PANES ARE LAYOUT, NOT LANDMARKS.
+          These were labelled regions, and "Conversation pane" contains
+          "Conversation" — which is the accessible name of the feed nested
+          inside it. Playwright matches accessible names by substring, so
+          `getByRole('region', { name: 'Conversation' })` resolved to two
+          elements and every live-message assertion in auth, ws-auth and smoke
+          failed on the ambiguity rather than on anything about messages. A
+          screen-reader user had the same problem in a different form: two
+          nested landmarks describing one surface. The landmark is the feed;
+          the resizable box around it is a div with a handle for the tests and
+          the separator to name. */}
+      <div className={frame.splitState} data-split-pane="current-state">
         {statePane.node}
-      </section>
+      </div>
       <hr
         aria-label="Resize current state and conversation panes"
         aria-orientation="horizontal"
@@ -297,9 +308,9 @@ function WorkspaceSplit({
         tabIndex={0}
         title="drag to resize · Home hides state · End hides conversation · double-click resets"
       />
-      <section aria-label="Conversation pane" className={frame.splitConversation}>
+      <div className={frame.splitConversation} data-split-pane="conversation">
         {conversationPane.node}
-      </section>
+      </div>
     </div>
   );
 }

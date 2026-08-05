@@ -88,6 +88,28 @@ const isCI = !!process.env.CI;
  *
  * Call it inside a `test.describe` body.
  */
+/**
+ * Open the room rail on every frame on the page.
+ *
+ * WHY THIS EXISTS. v8 folds the rail by default and `AppFrame` renders the
+ * control that unfolds it. Any check that reaches a room chip, the roster, or
+ * the presence graphics has to open the fold first — before the control
+ * existed those checks timed out against a button that was in the DOM and
+ * could never be seen, which is what took 76 of 177 browser tests red.
+ *
+ * Every frame, not the first: `/gallery` stacks seven of them, and a helper
+ * that opened one would leave the rest folded while reading as "the rail is
+ * open". Sequential, because each click re-lays out the grid it sits in. A
+ * no-op where there is no fold, so it is safe to call on any route.
+ */
+export async function openRail(page: Page): Promise<void> {
+  const folds = page.getByRole('button', { name: 'Show rooms and people' });
+  const count = await folds.count();
+  for (let i = 0; i < count; i += 1) {
+    await folds.nth(i).click();
+  }
+}
+
 export function requireBrowser(): void {
   test.skip(
     !isCI && !browserAvailable(),

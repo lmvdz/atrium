@@ -12,8 +12,13 @@ test.describe('current state and conversation split', () => {
     await page.goto('/gallery/pin/4');
     const frame = page.locator('[data-frame]').first();
     const split = frame.locator('[data-workspace-split="true"]');
-    const state = frame.getByRole('region', { name: 'Current state pane' });
-    const conversation = frame.getByRole('region', { name: 'Conversation pane' });
+    /* The split panes are layout boxes, not landmarks — see RoomFrame. They
+       were labelled regions, and the conversation one's name contained the
+       feed's own accessible name, so `getByRole('region', { name:
+       'Conversation' })` matched both. Same two boxes, addressed by the handle
+       they carry for exactly this. */
+    const state = frame.locator('[data-split-pane="current-state"]');
+    const conversation = frame.locator('[data-split-pane="conversation"]');
     const separator = frame.getByRole('separator', {
       name: 'Resize current state and conversation panes',
     });

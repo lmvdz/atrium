@@ -843,7 +843,14 @@
    navigate. That fact lives in the group's accessible name. */
 
 .surfaces {
-  display: none;
+  /* THE THIRD CONTROL v8 HID WITH NOTHING PUT IN ITS PLACE, after the room rail
+     and the strip's identity block. These carry the per-surface owed counts and
+     they focus a surface; nothing else on the frame does either. Hidden, they
+     stayed in the DOM and in the accessibility tree — announced to a screen
+     reader, unreachable by eye, and `smoke.spec.ts` timed out clicking one. If
+     v8 means to drop them, they have to be deleted and their counts rehoused,
+     not made invisible while still being announced. */
+  display: flex;
   align-items: center;
   gap: 3px;
   margin-top: 5px;

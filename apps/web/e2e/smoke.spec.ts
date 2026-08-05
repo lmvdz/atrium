@@ -1,5 +1,5 @@
 import { expect, test } from '@playwright/test';
-import { requireBrowser } from './support/flows';
+import { openRail, requireBrowser } from './support/flows';
 
 test.describe('shell', () => {
   requireBrowser();
@@ -21,7 +21,11 @@ test.describe('shell', () => {
       'no automated path may drop a table',
     );
 
-    // the rail is navigation; the roster is not
+    // the rail is navigation; the roster is not — and it is FOLDED until asked
+    // for, so the assertion that it is navigation has to open it first. Before
+    // the fold control existed this line asserted a nav that no reader could
+    // reach, and passed, because the nav was in the DOM the whole time.
+    await openRail(page);
     await expect(page.getByRole('navigation', { name: 'Rooms and people' })).toBeVisible();
   });
 
@@ -208,6 +212,15 @@ test.describe('shell', () => {
     const SELECTOR =
       'button:not([disabled]), a[href], [role="button"]:not([disabled]), input:not([disabled]), textarea:not([disabled]), select:not([disabled])';
 
+    /* THE FOLD IS OPENED BEFORE THE DENOMINATOR IS TAKEN. This sweep's whole
+       claim is that it knows how many controls the page has; with the rail
+       folded, its own floor assertion — more than three room chips — read zero,
+       which is the sweep correctly reporting that it was measuring nothing.
+       Opening the fold is what a person does to reach those chips, so it is
+       what this has to do before counting them. The fold control itself stays
+       in the denominator: it is enumerated like every other control below. */
+    await openRail(page);
+
     const visible = await page.evaluate((selector) => {
       const out: { index: number; name: string }[] = [];
       let index = 0;
@@ -381,6 +394,7 @@ test.describe('shell', () => {
        nothing else; round 7 requires the feed, the pin and the lens to follow,
        and the rail to stop marking the room you left. */
     const feedBefore = await page.locator('[data-row="message"]').count();
+    await openRail(page);
     await page.locator('nav[aria-label="Rooms and people"] button').nth(1).click();
     await expect(note).toContainText('switched to #identity-service');
     await expect(page.locator('header h2')).toContainText('identity-service');
