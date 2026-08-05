@@ -90,6 +90,11 @@ export function Timeline({
   const previousMessageIdsRef = useRef<readonly string[] | null>(null);
   const followingRef = useRef(true);
   const automaticScrollRef = useRef(false);
+  /**
+   * The scroll position this component last PLACED, so a scroll event can be
+   * told from a scroll gesture. See `handleScroll` for the measurement.
+   */
+  const placedRef = useRef(0);
   const scrollFrameRef = useRef<number | null>(null);
   const automaticScrollTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const [unread, setUnread] = useState<{
@@ -109,6 +114,10 @@ export function Timeline({
 
     if (previousMessageIds === null) {
       feed.scrollTop = feed.scrollHeight;
+      /* Read back rather than remember what we asked for: the assignment is
+         clamped to `scrollHeight - clientHeight`, so the position we PLACED is
+         the clamped one and comparing against the request would never match. */
+      placedRef.current = feed.scrollTop;
       return;
     }
 
@@ -127,7 +136,7 @@ export function Timeline({
       automaticScrollRef.current = true;
       if (scrollFrameRef.current !== null) cancelAnimationFrame(scrollFrameRef.current);
       scrollFrameRef.current = requestAnimationFrame(() =>
-        scrollMessageIntoView(feed, firstAppendedId, scrollFrameRef),
+        scrollMessageIntoView(feed, firstAppendedId, scrollFrameRef, placedRef),
       );
       if (automaticScrollTimerRef.current !== null) clearTimeout(automaticScrollTimerRef.current);
       automaticScrollTimerRef.current = setTimeout(() => {
@@ -149,11 +158,43 @@ export function Timeline({
     [],
   );
 
+  /* A SCROLL EVENT IS NOT A SCROLL GESTURE, AND THE GEOMETRY IT ARRIVES WITH IS
+     NOT THE GEOMETRY IT HAPPENED IN.
+
+     Measured at 1280×500 on `/`, with every write to this element recorded:
+
+       t=669  the first-render branch above pins the feed to the bottom —
+              writes 480, clamped to 424, with clientHeight 56
+       t=758  the resulting scroll event is DELIVERED — and by now the composer
+              has grown to hold a 19-line draft, so clientHeight is 22
+
+     A scroll event is dispatched at the next rendering opportunity, not at the
+     moment the position changed. This handler read `clientHeight` at delivery
+     and computed 480 − 424 − 22 = 34 > 12: "the reader scrolled away". The
+     reader had not touched anything. The position was one this component set,
+     and the 34px came entirely from the composer growing underneath it.
+
+     Follow then stayed off, the viewer's own sent message was filed as unread,
+     and the pane never moved — the defect the user had been reporting by eye,
+     and the 70px `conversation-follow.spec.ts` measures: 494 (where the row
+     ended up once the unread divider was inserted above it) − 424 (where the
+     first-render pin left the pane). It reproduces whenever typing begins
+     within ~100ms of hydration, which is why a spec that types immediately sees
+     it every run and a human who pauses first usually does not.
+
+     `scrollTop` is the one quantity the reader actually controls. If it has not
+     moved from the position this component placed, no gesture happened and
+     following is not the reader's to lose. The test derives its expectation
+     from the same write this compares against, so there is no list of layout
+     causes to keep up to date. */
   function handleScroll(): void {
     const feed = feedRef.current;
     if (feed === null) return;
     if (automaticScrollRef.current) return;
-    const atBottom = feed.scrollHeight - feed.scrollTop - feed.clientHeight <= 12;
+    const position = feed.scrollTop;
+    if (position === placedRef.current) return;
+    placedRef.current = position;
+    const atBottom = feed.scrollHeight - position - feed.clientHeight <= 12;
     followingRef.current = atBottom;
     if (atBottom) setUnread(null);
   }
@@ -161,7 +202,7 @@ export function Timeline({
   function scrollToOldestUnread(): void {
     const feed = feedRef.current;
     if (feed === null || unread === null) return;
-    scrollMessageIntoView(feed, unread.oldestId, scrollFrameRef);
+    scrollMessageIntoView(feed, unread.oldestId, scrollFrameRef, placedRef);
     setUnread(null);
   }
 
@@ -278,6 +319,12 @@ function scrollMessageIntoView(
   feed: HTMLElement,
   messageId: string,
   frameRef: { current: number | null },
+  /* Every position this animation places, recorded as this component's own —
+     so the scroll events it generates are never mistaken for the reader
+     scrolling away. `automaticScrollRef` already covers this window with a
+     400ms timer; a timer is a guess about how long the animation takes, and
+     this is the fact. */
+  placedRef: { current: number },
 ): void {
   if (frameRef.current !== null) cancelAnimationFrame(frameRef.current);
   const startedAt = performance.now();
@@ -298,10 +345,12 @@ function scrollMessageIntoView(
     const progress = Math.min(1, (performance.now() - startedAt) / durationMs);
     const eased = 1 - (1 - progress) ** 3;
     feed.scrollTop = startedFrom + (target - startedFrom) * eased;
+    placedRef.current = feed.scrollTop;
     if (progress < 1) {
       frameRef.current = requestAnimationFrame(move);
     } else {
       feed.scrollTop = target;
+      placedRef.current = feed.scrollTop;
       frameRef.current = null;
     }
   };

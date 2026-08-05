@@ -50,6 +50,20 @@ test('a paused conversation marks and counts the oldest unseen boundary', async 
   await page.setViewportSize({ width: 1280, height: 500 });
   await page.goto('/');
   const feed = page.locator('[data-region="conversation"]');
+  /* SCROLL AWAY ONLY ONCE THE FEED HAS TAKEN ITS OWN FIRST POSITION.
+     This scrolled to 0 the moment the locator resolved, which is before the
+     timeline's first-render effect runs. Recorded writes, three runs out of
+     three: the spec wrote 0 at t=449 and `Timeline.useEffect` wrote
+     `scrollHeight` at t=509 — the check's premise was erased 60ms after it was
+     established, the reader was never paused, and the divider it waits for was
+     correctly absent. Same class as the class-filter hydration race.
+     Waiting for the pane to be AT the bottom waits on the product's own
+     first-render branch rather than on a sleep. */
+  await expect
+    .poll(() =>
+      feed.evaluate((element) => element.scrollHeight - element.scrollTop - element.clientHeight),
+    )
+    .toBeLessThanOrEqual(12);
   await feed.evaluate((element) => {
     element.scrollTop = 0;
     element.dispatchEvent(new Event('scroll'));
