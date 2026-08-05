@@ -286,25 +286,23 @@ const LEDGER = [
   {
     name: 'onOpenTag is dropped on the way to the row',
     file: 'src/components/timeline/Timeline.tsx',
-    find: `            <TimelineRow
-              actions={actions}
-              attachmentPreviewUrl={attachmentPreviewUrl}
-              loadAttachmentPreviewUrl={loadAttachmentPreviewUrl}
-              entry={entry}
-              key={entry.id}
-              onOpenAttachment={onOpenAttachment}
-              onDownloadAttachment={onDownloadAttachment}
-              onOpenTag={onOpenTag}
-            />`,
-    replace: `            <TimelineRow
-              actions={actions}
-              attachmentPreviewUrl={attachmentPreviewUrl}
-              loadAttachmentPreviewUrl={loadAttachmentPreviewUrl}
-              entry={entry}
-              key={entry.id}
-              onOpenAttachment={onOpenAttachment}
-              onDownloadAttachment={onDownloadAttachment}
-            />`,
+    find: `              <TimelineRow
+                actions={actions}
+                attachmentPreviewUrl={attachmentPreviewUrl}
+                loadAttachmentPreviewUrl={loadAttachmentPreviewUrl}
+                entry={entry}
+                onOpenAttachment={onOpenAttachment}
+                onDownloadAttachment={onDownloadAttachment}
+                onOpenTag={onOpenTag}
+              />`,
+    replace: `              <TimelineRow
+                actions={actions}
+                attachmentPreviewUrl={attachmentPreviewUrl}
+                loadAttachmentPreviewUrl={loadAttachmentPreviewUrl}
+                entry={entry}
+                onOpenAttachment={onOpenAttachment}
+                onDownloadAttachment={onDownloadAttachment}
+              />`,
     test: 'test/timeline-handlers.test.tsx',
   },
   {

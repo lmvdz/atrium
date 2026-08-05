@@ -135,7 +135,8 @@ describe('conversation follow mode', () => {
         <Timeline entries={ENTRIES} filter={null} />
       </AttributionLedger>,
     );
-    const control = await screen.findByRole('button', { name: '↓ new messages' });
+    const control = await screen.findByRole('button', { name: '↓ 1 new message' });
+    expect(container.querySelector('[data-unread-divider="1"]')?.textContent).toBe('1 new message');
     const row = container.querySelector(`[data-message-id="${appended.id}"]`) as HTMLElement;
     let request: boolean | ScrollIntoViewOptions | undefined;
     row.scrollIntoView = (options) => {
@@ -143,7 +144,7 @@ describe('conversation follow mode', () => {
     };
     fireEvent.click(control);
     expect(request).toEqual({ behavior: 'smooth', block: 'start' });
-    expect(screen.queryByRole('button', { name: '↓ new messages' })).toBeNull();
+    expect(screen.queryByRole('button', { name: '↓ 1 new message' })).toBeNull();
   });
 
   /* CATCHES: an appended message staying below the viewport while the reader is
@@ -153,16 +154,21 @@ describe('conversation follow mode', () => {
     const { container, rerender } = render(<Timeline entries={initial} filter={null} />);
     const feed = container.querySelector('[data-region="conversation"]') as HTMLElement;
     setScrollGeometry(feed, { height: 300, top: 700 });
-    const requests: ScrollToOptions[] = [];
-    feed.scrollTo = (options) => requests.push(options as ScrollToOptions);
     fireEvent.scroll(feed);
     rerender(
       <AttributionLedger messages={f.RECORDS} room="users-migration">
         <Timeline entries={ENTRIES} filter={null} />
       </AttributionLedger>,
     );
-    await waitFor(() => expect(requests.at(-1)).toEqual({ top: 1000, behavior: 'smooth' }));
-    expect(screen.queryByRole('button', { name: '↓ new messages' })).toBeNull();
+    const appended = ENTRIES.at(-1);
+    if (appended?.type !== 'message') throw new Error('the feed fixture does not append a message');
+    const row = container.querySelector(`[data-message-id="${appended.id}"]`) as HTMLElement;
+    let request: boolean | ScrollIntoViewOptions | undefined;
+    row.scrollIntoView = (options) => {
+      request = options;
+    };
+    await waitFor(() => expect(request).toEqual({ behavior: 'smooth', block: 'start' }));
+    expect(screen.queryByRole('button', { name: /new message/ })).toBeNull();
   });
 
   /* CATCHES: loading older history above the rows already on screen being
@@ -182,7 +188,7 @@ describe('conversation follow mode', () => {
     await waitFor(() =>
       expect(feed.querySelectorAll('[data-message-id]').length).toBeGreaterThan(0),
     );
-    expect(screen.queryByRole('button', { name: '↓ new messages' })).toBeNull();
+    expect(screen.queryByRole('button', { name: /new message/ })).toBeNull();
   });
 });
 

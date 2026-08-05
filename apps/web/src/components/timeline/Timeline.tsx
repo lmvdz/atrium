@@ -13,7 +13,7 @@
  * Every handler a child accepts is now reachable from here.
  * ------------------------------------------------------------------------- */
 
-import { useEffect, useMemo, useRef, useState } from 'react';
+import { Fragment, useEffect, useMemo, useRef, useState } from 'react';
 import type { MessageAttachmentRecord } from '../model/quotation';
 import { systemText } from '../model/quotation';
 import type { AttentionClass, TimelineEntry } from '../model/records';
@@ -89,7 +89,12 @@ export function Timeline({
   const feedRef = useRef<HTMLElement>(null);
   const previousMessageIdsRef = useRef<readonly string[] | null>(null);
   const followingRef = useRef(true);
-  const [oldestUnreadId, setOldestUnreadId] = useState<string | null>(null);
+  const automaticScrollRef = useRef(false);
+  const automaticScrollTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const [unread, setUnread] = useState<{
+    readonly oldestId: string;
+    readonly count: number;
+  } | null>(null);
   const messageIds = useMemo(
     () => entries.filter((entry) => entry.type === 'message').map((entry) => entry.id),
     [entries],
@@ -111,40 +116,53 @@ export function Timeline({
       (last, id, index) => (previousIds.has(id) ? index : last),
       -1,
     );
-    const firstAppendedId = messageIds.find(
+    const appendedIds = messageIds.filter(
       (id, index) => index > lastRetainedIndex && !previousIds.has(id),
     );
+    const firstAppendedId = appendedIds[0];
     if (firstAppendedId === undefined) return;
 
     if (followingRef.current) {
-      if (typeof feed.scrollTo === 'function') {
-        feed.scrollTo({ top: feed.scrollHeight, behavior: 'smooth' });
-      } else {
-        feed.scrollTop = feed.scrollHeight;
-      }
+      automaticScrollRef.current = true;
+      requestAnimationFrame(() => scrollMessageIntoView(feed, firstAppendedId));
+      if (automaticScrollTimerRef.current !== null) clearTimeout(automaticScrollTimerRef.current);
+      automaticScrollTimerRef.current = setTimeout(() => {
+        automaticScrollRef.current = false;
+      }, 400);
     } else {
-      setOldestUnreadId((current) => current ?? firstAppendedId);
+      setUnread((current) => ({
+        oldestId: current?.oldestId ?? firstAppendedId,
+        count: (current?.count ?? 0) + appendedIds.length,
+      }));
     }
   }, [messageIds]);
+
+  useEffect(
+    () => () => {
+      if (automaticScrollTimerRef.current !== null) clearTimeout(automaticScrollTimerRef.current);
+    },
+    [],
+  );
 
   function handleScroll(): void {
     const feed = feedRef.current;
     if (feed === null) return;
+    if (automaticScrollRef.current) return;
     const atBottom = feed.scrollHeight - feed.scrollTop - feed.clientHeight <= 12;
     followingRef.current = atBottom;
-    if (atBottom) setOldestUnreadId(null);
+    if (atBottom) setUnread(null);
   }
 
   function scrollToOldestUnread(): void {
     const feed = feedRef.current;
-    if (feed === null || oldestUnreadId === null) return;
-    const row = Array.from(feed.children).find(
-      (child) => child.getAttribute('data-message-id') === oldestUnreadId,
-    );
-    if (row instanceof HTMLElement && typeof row.scrollIntoView === 'function') {
-      row.scrollIntoView({ behavior: 'smooth', block: 'start' });
-    }
-    setOldestUnreadId(null);
+    if (feed === null || unread === null) return;
+    scrollMessageIntoView(feed, unread.oldestId);
+    setUnread(null);
+  }
+
+  function stopAutomaticFollowing(): void {
+    automaticScrollRef.current = false;
+    followingRef.current = false;
   }
 
   /* THE LIFT IS SAID IN WORDS, NOT ONLY IN A BACKGROUND — round 10, D3.
@@ -174,6 +192,8 @@ export function Timeline({
       data-compact={compact ? 'true' : undefined}
       data-region="conversation"
       onScroll={handleScroll}
+      onTouchStart={stopAutomaticFollowing}
+      onWheel={stopAutomaticFollowing}
       ref={feedRef}
     >
       {filter === null ? null : (
@@ -198,16 +218,22 @@ export function Timeline({
                   (messageId: string) => onRowAction(messageId, action.id),
           }));
           return (
-            <TimelineRow
-              actions={actions}
-              attachmentPreviewUrl={attachmentPreviewUrl}
-              loadAttachmentPreviewUrl={loadAttachmentPreviewUrl}
-              entry={entry}
-              key={entry.id}
-              onOpenAttachment={onOpenAttachment}
-              onDownloadAttachment={onDownloadAttachment}
-              onOpenTag={onOpenTag}
-            />
+            <Fragment key={entry.id}>
+              {unread?.oldestId === entry.id ? (
+                <div className={styles.unreadDivider} data-unread-divider={unread.count}>
+                  {plural(unread.count, 'new message')}
+                </div>
+              ) : null}
+              <TimelineRow
+                actions={actions}
+                attachmentPreviewUrl={attachmentPreviewUrl}
+                loadAttachmentPreviewUrl={loadAttachmentPreviewUrl}
+                entry={entry}
+                onOpenAttachment={onOpenAttachment}
+                onDownloadAttachment={onDownloadAttachment}
+                onOpenTag={onOpenTag}
+              />
+            </Fragment>
           );
         }
         if (entry.type === 'system') {
@@ -232,11 +258,20 @@ export function Timeline({
           />
         );
       })}
-      {oldestUnreadId === null ? null : (
+      {unread === null ? null : (
         <button className={styles.newMessages} onClick={scrollToOldestUnread} type="button">
-          ↓ new messages
+          ↓ {plural(unread.count, 'new message')}
         </button>
       )}
     </section>
   );
+}
+
+function scrollMessageIntoView(feed: HTMLElement, messageId: string): void {
+  const row = Array.from(feed.children).find(
+    (child) => child.getAttribute('data-message-id') === messageId,
+  );
+  if (row instanceof HTMLElement && typeof row.scrollIntoView === 'function') {
+    row.scrollIntoView({ behavior: 'smooth', block: 'start' });
+  }
 }

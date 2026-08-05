@@ -45,6 +45,24 @@
   color: var(--tx0);
 }
 
+.unreadDivider {
+  align-items: center;
+  display: flex;
+  gap: 9px;
+  padding: 7px 16px 5px;
+  color: var(--amb2);
+  font: 9.5px / 1 var(--font-mono);
+  letter-spacing: 0.04em;
+}
+
+.unreadDivider::before,
+.unreadDivider::after {
+  background: var(--amb1);
+  content: '';
+  flex: 1;
+  height: 1px;
+}
+
 /* FILTERING LIFTS WHAT MATCHES; it does not fade the rest, and it never hides
    anything. "A row you cannot see is a row you cannot check" was the caption,
    and `opacity: .3` made it false — measured, the row's text landed at
