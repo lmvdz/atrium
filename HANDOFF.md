@@ -167,9 +167,10 @@ full run too.)
 
 Two are **deterministic**:
 
-**`multiplayer.spec.ts` — now red on one precise assertion, not a timeout.**
-Chasing it found **two real composer defects**, both independent of it and both
-now fixed and unit-covered:
+**`multiplayer.spec.ts` — red on a PRODUCT-DESIGN question now, not a defect.**
+
+Chasing it found **two real composer defects**, both independent of it, both
+fixed and unit-covered:
 
 - The reference control inserted a bare `@` at the caret. `mentionMatch` is
   `/(^|\s)@([^\s@]*)$/` — the `@` counts at the start of the draft or after
@@ -181,22 +182,34 @@ now fixed and unit-covered:
   — and broken for an uncontrolled one, where `visibleDraft` falls back to the
   mirror and the component reads a draft predating its own append.
 
-The existing mention checks all type the `@` themselves, which is why neither
-was visible. The spec now types the body and picks the mention last (prefixing
-was tried and rejected: the semantic fixtures are classified from the body, and
-a leading `@Name ` stopped "Open question:" opening its own sentence and failed
-the run on "all eight semantic fixtures to become proposals").
+Every existing mention check types the `@` itself, which is why neither was
+visible. The spec types the body and picks the mention last (prefixing was tried
+and rejected: the semantic fixtures are classified from the body, and a leading
+`@Name ` stopped "Open question:" opening its own sentence).
 
-What is left: the mention attention row IS projected now — it was absent
-entirely before — and the run reaches the equality it was written for. It fails
-there, with the row reading `statement: null` where the check expects the sent
-body, at `subjectKind: 'proposal'`, `proposalStatus: 'accepted'`. The query
-coalesces `statement`/`question`/`title` over both the proposal and the accepted
-object, and `open_question` payloads use `question`
-(`packages/core/src/semantic-command.ts:48`) — so one of those two is not what it
-appears. **Whether a mention row should carry a statement at all is a product
-question about what the pin can show**, and the ground truth is not derivable
-from the spec. That is the next thing to settle here.
+Then two stale assertions, both now correct. A mention row's `statement` was
+read as null because the query coalesced only proposal and object payloads: a
+typed human reference is written straight against the MESSAGE
+(`projections.ts`), with the body on `reason.request`. And `toMatchObject`
+asserted `subjectKind: 'proposal'` / `proposalStatus: 'accepted'`, which is
+`computeMentions`' semantic path, not the typed-reference one.
+
+**What is left is a question for you.** The last assertion requires every
+pending attention row to render IN THE PIN. The mention does not, deliberately:
+`LiveRoomSession` builds `contextualAttentionIds` from `view.referenceAttention`
+and feeds the pin `actionableAttention`, which excludes them — so a typed
+mention becomes a reference marker on its message and an "unfiled direct
+references" line in the state lens, never a pin card. Verified by reading the
+unrendered id back out of the database: `subject_kind` message, `class` mention,
+`status` pending.
+
+Is being mentioned an **obligation** (the pin: what needs THIS person) or a
+**pointer** (a contextual reference on the row it was written in)? The product
+says pointer; the pin's charter says "what needs you", and someone asking for
+you by name is the clearest case of that. Either answer changes the assertion's
+shape, and the dismissal below it too — `actOnAttention` drives the pin, and a
+mention living on a reference marker resolves through `onOpenReferences`. Not
+rewritten blind: 240-second scenario, only a run can verify it.
 
 **`replay.spec.ts` — derives every replay-divider count. Unresolved.** Left
 failing rather than wrapped in a workaround. Measured, and it repeats: the
