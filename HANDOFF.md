@@ -21,7 +21,7 @@ conversation follow. It strictly contains `build/live-multiplayer`,
 | `pnpm lint` | documented as always 1 | **0** — see below |
 | `pnpm test --maxWorkers=2` | — | **3109 / 3109** |
 | `pnpm test:integration` | — | **189 / 189** |
-| `pnpm test:e2e` (8 workers) | 157 passed · 11 failed | **163 passed · 6 failed** — last full run before the composer fixes below; not re-run since |
+| `pnpm test:e2e` (8 workers) | 157 passed · 11 failed | **165 passed · 4 failed** |
 
 **`pnpm lint` exits 0 now.** The previous handoff recorded it as exiting 1 "and
 always has", on `design/*.mjs` and `scripts/mutation-ledger.mjs`. Those files
@@ -154,14 +154,16 @@ check unfolds it first. Reversible in one line.
 a quick direct channel to a person or agent live? That is the gap you named and
 nothing here addresses it.
 
-## Still red — 6, and what each one is
+## Still red — 4, and what each one is
 
-Four are **load flakes**: they pass in isolation at two workers and fail only in
-the 8-worker full run. Verified this session, each of them:
+Two are **load flakes**: they pass in isolation at two workers and fail only in
+the 8-worker full run. Verified this session, repeatedly:
 
 - `auth.spec.ts` — signup/verification/invitation/presence
-- `gallery.spec.ts` — the focus ring 3:1 sweep, light and dark
 - `replay.spec.ts` — reopens an answered question
+
+(`gallery.spec.ts`'s focus-ring sweep was in this set and is now green in the
+full run too.)
 
 Two are **deterministic**:
 
@@ -207,6 +209,12 @@ identical scroll reads does not fix it**, so the scroll is real and is not the
 cause. Copies of the test with extra read-only round-trips pass consistently.
 Fails 3 of 3 in isolation at one worker, so it is not the browser-death mode.
 Everything measured is in the spec's own comment.
+
+Three remedies were tried against it and all three failed 3 of 3, so do not
+spend the time again: positioning the chip mid-pane and waiting for two
+identical scroll reads; `scrollIntoViewIfNeeded()` followed by a no-op poll;
+and `scrollIntoViewIfNeeded()` followed by a real 300ms settle. The 8px scroll
+is real and is NOT the cause.
 
 ## Process notes
 
