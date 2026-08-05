@@ -21,7 +21,7 @@ conversation follow. It strictly contains `build/live-multiplayer`,
 | `pnpm lint` | documented as always 1 | **0** — see below |
 | `pnpm test --maxWorkers=2` | — | **3109 / 3109** |
 | `pnpm test:integration` | — | **189 / 189** |
-| `pnpm test:e2e` **at 4 workers** | — | **167 passed · 2 failed**, twice |
+| `pnpm test:e2e` **at 4 workers** | — | **168 passed · 1 failed** |
 | `pnpm test:e2e` at 8 workers | 157 passed · 11 failed | 162–165 passed, 4–7 failed, *shifting* |
 
 **`pnpm lint` exits 0 now.** The previous handoff recorded it as exiting 1 "and
@@ -175,69 +175,51 @@ default while the test carries 71 awaited steps across two contexts, two
 signups, an attachment round trip and a rich mention. It now sets 120s. That is
 a harness budget, not an assertion — every check in it is unchanged.)
 
-## Still red at 4 workers — 2, and both need a decision
+## Still red at 4 workers — 1
 
-**`multiplayer.spec.ts` — red on a PRODUCT-DESIGN question now, not a defect.**
+`multiplayer.spec.ts`, and the remaining failure is none of the six problems
+fixed on the way to it. It **alternates** between two points in the
+semantic-acceptance stage across identical runs at one worker: "claim <id> has
+no live attention route", and the accepted-object walk below it. That is a
+timing dependency between the interpretation worker and the attention
+projection. Start there; it has nothing to do with mentions, composers or
+locators.
 
-Chasing it found **two real composer defects**, both independent of it, both
-fixed and unit-covered:
+### What was fixed to reach it
+
+Two real **composer defects**, both independent of the scenario, both
+unit-covered:
 
 - The reference control inserted a bare `@` at the caret. `mentionMatch` is
   `/(^|\s)@([^\s@]*)$/` — the `@` counts at the start of the draft or after
-  whitespace — so after any non-space character the token did not match,
-  `selectMention` took its null branch, and picking a target appended a SECOND
-  `@`. Type "who owns this?", click the control, pick a person: `this?@@Grace `.
+  whitespace — so after any non-space character the token did not match and
+  picking a target appended a SECOND `@`: `who owns this?@@Grace `.
 - `insert` wrote the DOM value and called `onChange` but never
-  `setDraftMirror`. Invisible to a CONTROLLED consumer — every route in the app
-  — and broken for an uncontrolled one, where `visibleDraft` falls back to the
-  mirror and the component reads a draft predating its own append.
+  `setDraftMirror` — invisible to a controlled consumer (every route in the
+  app), broken for an uncontrolled one.
 
-Every existing mention check types the `@` itself, which is why neither was
-visible. The spec types the body and picks the mention last (prefixing was tried
-and rejected: the semantic fixtures are classified from the body, and a leading
-`@Name ` stopped "Open question:" opening its own sentence).
+Then four stale assertions in the spec, each retargeted at the register the
+product actually writes: the mention picked AFTER the body so
+`reconcileMessageReferences` keeps the reference; the row's statement read from
+`reason.request`; its subject asserted as `message`, not `proposal`; and the
+certified id read from `message_references` rather than
+`messages.mention_user_ids`.
 
-Then two stale assertions, both now correct. A mention row's `statement` was
-read as null because the query coalesced only proposal and object payloads: a
-typed human reference is written straight against the MESSAGE
-(`projections.ts`), with the body on `reason.request`. And `toMatchObject`
-asserted `subjectKind: 'proposal'` / `proposalStatus: 'accepted'`, which is
-`computeMentions`' semantic path, not the typed-reference one.
+### Two decisions taken, both reversible
 
-**What is left is a question for you.** The last assertion requires every
-pending attention row to render IN THE PIN. The mention does not, deliberately:
-`LiveRoomSession` builds `contextualAttentionIds` from `view.referenceAttention`
-and feeds the pin `actionableAttention`, which excludes them — so a typed
-mention becomes a reference marker on its message and an "unfiled direct
-references" line in the state lens, never a pin card. Verified by reading the
-unrendered id back out of the database: `subject_kind` message, `class` mention,
-`status` pending.
+**A mention is a pointer, not an obligation.** The pin gets
+`actionableAttention`, which excludes `referenceAttention`, so a typed mention
+renders as a marker on its message and an "unfiled direct references" line —
+not a pin card. I took the product as right and the check as stale:
+`referenceAttention` is a built surface, and "you were named here" is answered
+by taking the reader to the message, which a list of things to act on cannot do.
+The check now spans BOTH surfaces. If you want mentions in the pin instead, it
+reverts to a plain equality.
 
-Is being mentioned an **obligation** (the pin: what needs THIS person) or a
-**pointer** (a contextual reference on the row it was written in)? The product
-says pointer; the pin's charter says "what needs you", and someone asking for
-you by name is the clearest case of that. Either answer changes the assertion's
-shape, and the dismissal below it too — `actOnAttention` drives the pin, and a
-mention living on a reference marker resolves through `onOpenReferences`. Not
-rewritten blind: 240-second scenario, only a run can verify it.
-
-**`replay.spec.ts` — derives every replay-divider count. Unresolved.** Left
-failing rather than wrapped in a workaround. Measured, and it repeats: the
-chip's handler is live (a DOM `.click()` and a raw `page.mouse.click()` at its
-own centre both apply the filter); its node is never replaced; only Playwright's
-FIRST `locator.click()` does nothing. During that click the feed scrolls 0 → 8,
-exactly its own `padding-top`, and the chip moves 581 → 573 after the click point
-was fixed at 591 — **but positioning the chip mid-pane and waiting for two
-identical scroll reads does not fix it**, so the scroll is real and is not the
-cause. Copies of the test with extra read-only round-trips pass consistently.
-Fails 3 of 3 in isolation at one worker, so it is not the browser-death mode.
-Everything measured is in the spec's own comment.
-
-Three remedies were tried against it and all three failed 3 of 3, so do not
-spend the time again: positioning the chip mid-pane and waiting for two
-identical scroll reads; `scrollIntoViewIfNeeded()` followed by a no-op poll;
-and `scrollIntoViewIfNeeded()` followed by a real 300ms settle. The 8px scroll
-is real and is NOT the cause.
+**`mention_user_ids` is a second register for the same fact, and it is not
+merely unused.** `attention-projection.ts:93` computes its targets from it while
+the client never fills it. Either the column goes, or something fills it.
+Leaving both is the shape AGENTS.md names. Not touched.
 
 ## Process notes
 
