@@ -59,10 +59,29 @@ export function ObjectiveGroup({
       reference.location.kind === 'objective' && reference.location.id === objective.id,
   );
 
+  /* THE HEADER STATES ITS OWN NAME — the same repair `ObjectRow` carries, for
+     the same reason. v8 lays this out as a six-cell tree row, and every cell
+     declares `data-truncates="name"`, which is a promise that the full string
+     is reachable through an ancestor's accessible name. Composed from content,
+     that name welds adjacent cells together and drops the aria-hidden twisty's
+     neighbours; the cells' own text ("active", "3 objects · 1 need you") went
+     missing from it entirely. Stated here, with separators, so the promise the
+     cells make is one this row actually keeps. */
+  const headName = [
+    systemText(objective.title, 'ObjectiveGroup title'),
+    systemText(objective.status, 'ObjectiveGroup status'),
+    `${plural(mine.length, 'object')} · ${owedHere > 0 ? `${owedHere} need you` : 'all clear'}`,
+    'objective',
+  ]
+    .map((part) => String(part).trim())
+    .filter((part) => part.length > 0)
+    .join(' — ');
+
   return (
     <section className={styles.obj} data-objective-id={objective.id}>
       <button
         aria-expanded={objective.open}
+        aria-label={headName}
         className={styles.objHead}
         onClick={
           objective.status === 'proposed'

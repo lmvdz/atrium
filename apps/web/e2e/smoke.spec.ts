@@ -207,6 +207,10 @@ test.describe('shell', () => {
         name: /^Send$/,
         why: 'Send with an empty draft correctly does nothing; sending a real draft is asserted in "the controls on / actually do something"',
       },
+      {
+        name: /call$/,
+        why: 'the call dock opens on its own tab, so pressing the tab that is already pressed correctly does nothing — the same shape as Send with an empty draft. The files tab beside it is NOT listed, and it is what proves the pair switches',
+      },
     ];
 
     const SELECTOR =
@@ -258,11 +262,30 @@ test.describe('shell', () => {
        one of them was reached. */
     expect(visible.length, 'the page renders almost no controls').toBeGreaterThan(40);
 
+    /* A FORM VALUE IS A CHANGE THIS DIFF COULD NOT SEE.
+       `innerHTML` and `innerText` do not carry a textarea's or input's VALUE —
+       that lives on the DOM property, and setting it leaves both strings byte
+       for byte identical. The composer's "Reference a person or room item"
+       button inserts `@` into the draft and focuses it, and this sweep reported
+       it dead: a working control, called broken, by an instrument that was
+       looking in the two places its effect can never appear. Values and the
+       focused element are part of the signature now, which is also what lets a
+       control whose only job is to move focus be told apart from one that does
+       nothing at all. */
     const snapshot = () =>
       page.evaluate(() => ({
         className: document.documentElement.className,
         length: document.body.innerHTML.length,
         text: document.body.innerText,
+        values: Array.from(
+          document.querySelectorAll<HTMLInputElement | HTMLTextAreaElement>('input, textarea'),
+        )
+          .map((field) => field.value)
+          .join('\u0000'),
+        focus:
+          document.activeElement?.getAttribute('aria-label') ??
+          document.activeElement?.tagName ??
+          '',
       }));
 
     /* THE CONTROLS THAT REPLACE THE PAGE GO LAST.
@@ -314,7 +337,9 @@ test.describe('shell', () => {
       const changed =
         before.className !== after.className ||
         before.length !== after.length ||
-        before.text !== after.text;
+        before.text !== after.text ||
+        before.values !== after.values ||
+        before.focus !== after.focus;
       /* PUT THE BINDING THEME BACK. The toggle is a control like any other and it
          belongs in the denominator; what must not happen is that flipping it once
          measures every control after it in the theme CONVENTIONS does not bind. */
@@ -432,6 +457,16 @@ test.describe('shell', () => {
         await page.setViewportSize({ width, height: 900 });
         await page.goto('/?theme=light');
         await expect(page.locator('[data-region="needs-you"]')).toBeVisible();
+        /* THE ROSTER IS A ROUTE, AND IT LIVES IN THE RAIL. Seven actor columns
+           declare `element:[data-roster-name="…"]` — the feed's short actor
+           name says its way to the full name through the roster. v8 folds the
+           rail, so with it closed those seven routes name a target that is not
+           rendered, and the check correctly says so. A reader reaches the
+           roster in one click, so the route is true; it is only true with the
+           fold open, which is what this does. If the roster ever stops being
+           reachable in one act, these seven need a different route, not a
+           looser check. */
+        await openRail(page);
         if (state === 'receipt-open') {
           /* THE RECEIPT WAS NEVER IN THIS SWEEP EITHER. Round 7 measured all
              three of its `provExcerpt` elements at `scrollHeight 31 /

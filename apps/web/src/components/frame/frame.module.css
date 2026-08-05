@@ -173,7 +173,13 @@
 }
 
 .iconbtn {
-  display: none;
+  /* THE FIFTH, and this one is the theme control. v8 hid it, so the only
+     in-product way to switch light and dark was gone while the button stayed in
+     the page announcing "Switch to the dark theme" to anyone not using their
+     eyes. `smoke.spec.ts` timed out for a full minute clicking it. The suites
+     that sweep both themes drive `?theme=`, which is why nothing else noticed.
+     Restored. */
+  display: grid;
   width: 22px;
   height: 22px;
   border-radius: 5px;
