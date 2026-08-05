@@ -51,11 +51,32 @@
   background: var(--grn2);
 }
 
+/* SCROLLING SOMETHING TO THE EDGE OF THIS BOX SCROLLS IT UNDER THE STICKY BARS.
+   The receipt puts `.rcTop` at `top: 0` and `.rcFoot` at `bottom: 0`, both
+   `z-index: 2`, over this scroller. Anything the browser parks flush against
+   either edge lands UNDERNEATH them: measured on the persisted replay, a
+   provenance button carrying `data-jumps-to="replay-answer-1"` was visible,
+   enabled and stable, and every click on it hit `.rcTop` or `.rcFootNote`
+   instead — twenty-five retries over a minute, never once reaching the button.
+   That is not a driver artifact. `scrollIntoView`, `Element.focus()` and a
+   keyboard tab all park a target the same way, so the control was unreachable
+   by pointer AND by keyboard for anyone whose receipt was long enough to
+   scroll — the "announced but unhittable" class, one container in from the pin's
+   clipped overflow line.
+
+   `scroll-padding` is the property for exactly this: it tells the scroller to
+   treat those bands as occupied, so a scroll-into-view stops short of them and
+   leaves the target in the readable strip between. The numbers are the bars'
+   own box heights — `.rcTop` is 8+10 padding over ~19px of heading and a 1px
+   border, `.rcFoot` 10+10 over a ~24px control row and its border — rounded up
+   so a bar that grows a line still clears. */
 .lensBody {
   overflow-y: auto;
   overflow-x: hidden;
   min-height: 0;
   padding: 0 20px 16px;
+  scroll-padding-top: 52px;
+  scroll-padding-bottom: 60px;
 }
 
 /* --- objective group ----------------------------------------------------- */

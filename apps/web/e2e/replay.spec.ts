@@ -209,7 +209,24 @@ test.describe('persisted three-surface replay', () => {
     expect(bodyWidths.length).toBeGreaterThan(0);
     expect(Math.min(...bodyWidths)).toBeGreaterThanOrEqual(160);
 
+    /* ROOM NAVIGATION IS BEHIND THE FOLD, SO THE CHECK OPENS IT.
+       `1 room · 5 humans` is the rail's `workspaceSub`, and v8 ships the rail
+       folded — `.rail` is `display: none` until `.appRailOpen` is set. This
+       asserted it visible with no interaction, which was true of the pre-v8
+       tree where the rail was a permanent 190px column.
+
+       WHAT THE OLD ONE CAUGHT: the rail's workspace summary being absent, or
+       reporting a room or human count that is not the corpus's.
+       WHAT THIS ONE CATCHES: the same, PLUS the fold control failing to reveal
+       the rail — the exact defect the v8 adoption batch shipped, where the rail
+       was hidden with no control to open it and every check that drove it timed
+       out. The old check could not have caught that; it would simply have gone
+       on failing for the same reason it fails against a rail that is merely
+       missing. The count is still read off the rendered rail. */
+    await page.getByRole('button', { name: 'Show rooms and people' }).click();
+    await expect(page.locator('[data-rail="open"]')).toBeVisible();
     await expect(page.getByText('1 room · 5 humans', { exact: true })).toBeVisible();
+    await page.getByRole('button', { name: 'Hide rooms and people' }).click();
     const controls = page.getByRole('navigation', { name: 'Replay controls' });
     await expect(controls).toContainText('all 111 messages shown · machine read through 111');
     await expect(
@@ -307,6 +324,34 @@ test.describe('persisted three-surface replay', () => {
         continue;
       }
 
+      /* STILL RED, AND NOT YET EXPLAINED. Left failing on purpose rather than
+         wrapped in a workaround that passes for a reason nobody has established.
+
+         What is measured, and repeats:
+           - the chip's handler is live. A DOM `.click()` on it applies the
+             filter immediately, and so does `page.mouse.click()` at the chip's
+             own centre coordinates.
+           - the chip's DOM node is created once and never replaced, so the
+             click is not landing on a node React has swapped out.
+           - `locator.click()` as the FIRST interaction on the page does
+             nothing: aria-pressed stays false, no filter note, feed unfiltered.
+             The same call a moment later works.
+           - during that first click the feed scrolls from scrollTop 0 to 8 —
+             exactly its own `padding-top` — and the chip moves from y=581 to
+             y=573 after the click point was fixed at y=591.
+           - it fails 3 of 3 in isolation at one worker, so it is not the
+             under-load browser-death mode AGENTS.md describes.
+
+         The 8px nudge looked sufficient, but positioning the chip mid-pane and
+         waiting for two identical scroll reads before clicking does NOT fix it —
+         3 of 3 still fail. So the scroll is real but is not the cause, and the
+         cause is unknown. Copies of this test that add read-only `evaluate`
+         round-trips before the click pass consistently, which says the trigger
+         is timing inside the driver rather than anything a person does.
+
+         NOT a product defect on the evidence so far: every way of delivering a
+         click to that button, other than Playwright's own first `locator.click`,
+         applies the filter. */
       await chip.click();
       await expect(page.locator(`[data-filter-note="${attentionClass}"]`)).toContainText(
         `${count} ${count === 1 ? 'row' : 'rows'} lifted`,

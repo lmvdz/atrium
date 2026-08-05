@@ -149,13 +149,21 @@
   flex: none;
 }
 
+/* THE STRUT THAT PUTS THE FOOT OF THE STRIP AT THE FOOT OF THE STRIP.
+   Recorded as the fifth surface v8 hid with no replacement, and as an identity
+   block. Measured on `/` at 1280x900, it is neither. `.wsYou` was never hidden:
+   the `display: none` below it named `.wsYou` too, but `.wsYou`'s own rule sets
+   `display: grid` at the same specificity and later in the file, so it won —
+   the monogram renders, 26px, reading "LA", titled "lars — you". A rule that
+   appears to hide an element it does not hide is its own defect: it is what the
+   handoff read, and it is why this was filed as an identity question.
+   What was actually switched off is this: `flex: 1`, whose only job is to push
+   the theme control and the monogram to the BOTTOM of the column. Without it
+   the strip stacked fold, mark, tile, theme and monogram from y=38 to y=194 and
+   left 700px of empty rail beneath them. It is restored, and `.wsYou` is out of
+   the hiding rule because it was never in effect there. */
 .wsSpacer {
   flex: 1;
-}
-
-.wsSpacer,
-.wsYou {
-  display: none;
 }
 
 .wsYou {

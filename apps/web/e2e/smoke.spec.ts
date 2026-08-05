@@ -746,4 +746,57 @@ test.describe('shell', () => {
     await toggle.click();
     await expect.poll(() => html.evaluate((el) => el.classList.contains('atr-dark'))).toBe(!before);
   });
+
+  /* CATCHES: `display: none` on `.wsSpacer`, or dropping its `flex: 1`.
+     The strip has two groups — what this workspace IS at the top (fold control,
+     mark, tile) and what YOU are at the foot (theme control, viewer monogram) —
+     separated by a strut that is nothing but `flex: 1`. That strut was switched
+     off, so measured on `/` at 1280x900 the whole strip stacked from y=38 to
+     y=194 with roughly 700px of empty rail beneath it: the two groups read as
+     one list and the monogram sat under the workspace tile as though it were
+     another workspace.
+
+     This is the check the handoff correctly said did not exist. It asserts the
+     grouping rather than the pixel: the monogram is below the midpoint of the
+     strip and the tile is above it, so a strut of any size passes and no strut
+     at all fails. `.wsYou` itself was never hidden — its own rule sets
+     `display: grid` later at equal specificity and wins — which is why the
+     monogram is asserted as visible here rather than restored. */
+  test('the strip separates what this workspace is from who you are', async ({ page }) => {
+    await page.goto('/');
+    await expect(page.locator('[data-region="conversation"]')).toBeVisible();
+    const measured = await page.evaluate(() => {
+      const strip = document.querySelector('aside');
+      if (strip === null) return null;
+      const box = (selector: string) => {
+        const el = strip.querySelector(selector);
+        return el === null ? null : el.getBoundingClientRect();
+      };
+      const spacer = [...strip.children].find(
+        (child) => getComputedStyle(child).flexGrow === '1' && child.textContent === '',
+      );
+      return {
+        strip: strip.getBoundingClientRect(),
+        tile: box('[title$="this workspace"]'),
+        you: box('[title$="— you"]'),
+        spacerDisplay: spacer === undefined ? 'absent' : getComputedStyle(spacer).display,
+      };
+    });
+    expect(measured, 'the workspace strip is not in the DOM').not.toBeNull();
+    expect(measured?.tile, 'the strip does not say which workspace this is').toBeTruthy();
+    expect(measured?.you, 'the strip does not say who you are').toBeTruthy();
+    /* Present AND laid out. A strut that is in the DOM at `display: none` is the
+       state this catches, and it has a box of zero either way. */
+    expect(measured?.spacerDisplay, 'the strip has no strut between its groups').not.toBe('none');
+
+    const middle = (measured?.strip.top ?? 0) + (measured?.strip.height ?? 0) / 2;
+    expect(
+      measured?.tile?.bottom ?? Number.POSITIVE_INFINITY,
+      'the workspace tile is not in the top group',
+    ).toBeLessThan(middle);
+    expect(
+      measured?.you?.top ?? 0,
+      'the viewer monogram is stacked under the workspace tile instead of at the foot of the strip',
+    ).toBeGreaterThan(middle);
+  });
 });
