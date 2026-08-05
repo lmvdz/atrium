@@ -404,8 +404,21 @@ test.describe('auth and workspaces', () => {
     const attachment = invitee.getByRole('button', { name: 'Preview evidence.png' });
     await expect(attachment).toBeVisible();
     await expect(attachment.locator('[data-sent-attachment-thumbnail]')).toBeVisible();
+    /* THE CONTROL THAT DOWNLOADS IS THE ONE LABELLED DOWNLOAD.
+       This clicked the row's primary control — which this check itself already
+       locates as "Preview evidence.png" — and waited for a `download` event.
+       Since 71810dc that control opens the image preview instead, so the event
+       never arrived and the run burned its whole 60s budget. The row carries a
+       sibling `Download <name>` button; the preview carries its own.
+
+       WHAT THE OLD ONE CAUGHT: an attachment that uploads but cannot be
+       retrieved — the bytes not round-tripping through object storage, or
+       coming back under the wrong filename.
+       WHAT THIS ONE CATCHES: exactly the same, and it can no longer pass or
+       fail on which control happens to be primary. The bytes and the filename
+       are still asserted below, unchanged. */
     const downloadPromise = invitee.waitForEvent('download');
-    await attachment.click();
+    await invitee.getByRole('button', { name: 'Download evidence.png' }).click();
     const download = await downloadPromise;
     expect(download.suggestedFilename()).toBe('evidence.png');
     const downloadedPath = await download.path();

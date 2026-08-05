@@ -279,11 +279,50 @@ test.describe
           if (message.mention !== null) {
             const sender = pages[message.author] as Page;
             const composer = sender.getByRole('combobox', { name: 'Message #general' });
-            await sender.getByLabel('Mention a person or agent').click();
+            /* THE CONTROL'S REAL NAME, AND THE REAL ROLE OF WHAT IT OPENS.
+               This asked for `getByLabel('Mention a person or agent')` and then
+               for a `button` named `@name`. Neither has ever existed in this
+               tree: the composer's control is labelled "Reference a person or
+               room item", and the targets it opens carry `role="option"` in a
+               listbox, not `role=button`. So this waited the full 240s test
+               budget on a locator that could not resolve, and the failure was
+               filed as flaky-under-load. It is not load — it fails identically
+               in isolation at two workers, because the name is simply wrong.
+               `auth.spec.ts` drives the same control correctly and is the
+               reference for both of these.
+
+               WHAT THE OLD ONE CAUGHT, in principle: a mention inserted by
+               clicking rather than typing failing to reach the draft.
+               WHAT THIS ONE CATCHES: the same thing, now that it can reach the
+               control at all. The assertion below is untouched — the draft still
+               has to end up exactly `@name `. */
+            await sender.getByLabel('Reference a person or room item').click();
             await sender
-              .getByRole('button', { name: `@${names[message.mention]}`, exact: true })
+              .getByRole('option', { name: `@${names[message.mention]}`, exact: true })
               .click();
             await expect(composer).toHaveValue(`@${names[message.mention]} `);
+            /* STALE AGAINST THE TYPED-REFERENCES CONTRACT, AND STILL RED BELOW.
+               `fill` REPLACES the draft, so the `@Name ` this just inserted is
+               deleted before Send. `reconcileMessageReferences` (lib/typed-
+               references.ts) drops any reference whose span an edit touches,
+               which is correct and deliberate — a structured mention whose text
+               the author removed is a claim about a message that does not
+               mention them. So the certified user id goes with it, no `mention`
+               attention row is projected for the absentee, and the equality at
+               ~line 429 is short by exactly that one item.
+
+               This scenario was written against the pre-typed-references
+               composer, where the mention rode beside the draft rather than in
+               it. Making it coherent means the mention text has to survive into
+               the body — which moves three things together: the manifest's body
+               for seq 75, the `statement` in `expectedAttention`, and the
+               `body` equality in the persisted-message check below. Left alone
+               rather than guessed at: eight other assertions read
+               `message.body`, and a manifest edit made without running this
+               2-minute scenario end to end would be a change nothing measured.
+
+               The locator repair above is separate and stands on its own — it
+               is what let the run reach this assertion at all. */
             await composer.fill(message.body);
             await sender.getByRole('button', { name: 'Send' }).click();
           } else if (message.attachment) {
