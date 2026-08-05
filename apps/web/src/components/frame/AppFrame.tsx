@@ -30,6 +30,14 @@ export interface AppFrameProps {
    */
   readonly boxed?: boolean;
   readonly label?: string;
+  /**
+   * Whether the room rail starts unfolded. Folded is the v8 default and stays
+   * the default here; this exists so a gallery still can put the OPEN canvas on
+   * record. A state reachable in one click that no still ever shows is a state
+   * nobody reviews — and three of the six registered non-text graphics live in
+   * that column, so it is also the difference between measuring them and not.
+   */
+  readonly railOpen?: boolean;
 }
 
 /**
@@ -51,7 +59,15 @@ export interface AppFrameProps {
  */
 export const MINIMUM_WIDTH = 1280;
 
-export function AppFrame({ strip, rail, workspace, lens, boxed = false, label }: AppFrameProps) {
+export function AppFrame({
+  strip,
+  rail,
+  workspace,
+  lens,
+  boxed = false,
+  label,
+  railOpen: railOpenInitial = false,
+}: AppFrameProps) {
   /* THE FOLD IS A CONTROL, NOT A COMMENT.
      v8 folds the room rail by default, and the batch that adopted v8 shipped
      that as `display: none` with a comment promising the affordance "will return
@@ -62,7 +78,7 @@ export function AppFrame({ strip, rail, workspace, lens, boxed = false, label }:
      control to open it is not a folded rail; it is a deleted one with the markup
      still in the page, which also means assistive technology still finds it.
      Folded is the default, so the v8 canvas is what the reader gets first. */
-  const [railOpen, setRailOpen] = useState(false);
+  const [railOpen, setRailOpen] = useState(railOpenInitial);
   return (
     <>
       {/* THE FLOOR, STATED — r8 D10. Below the floor the shell is wider than the

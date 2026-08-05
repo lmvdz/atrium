@@ -156,6 +156,17 @@ const FRAMES: readonly GalleryFrame[] = [
       label: 'zero-owed',
     },
   },
+  {
+    id: 'rail-open',
+    title: 'Rooms and people, unfolded',
+    note: 'v8 folds the room rail, so every other still on this page shows the canvas without it. This is the same frame one click later. It is here because a state a person can reach and no still ever shows is a state nobody reviews — and because three of the six registered non-text graphics live in this column: the here presence fill, the idle/away presence ring, and the disabled count chip’s dashed border. With the rail folded they render nowhere, and a sweep that measured none of them still reported a pass.',
+    props: {
+      ...base,
+      entries: f.FRESH_TIMELINE,
+      railOpen: true,
+      label: 'rail-open',
+    },
+  },
 ];
 
 export default function GalleryPage() {
@@ -165,10 +176,10 @@ export default function GalleryPage() {
         <div>
           <h1>Atrium · component gallery</h1>
           <p className={styles.headNote}>
-            Six states of the app frame, one <strong>full frame</strong> each — never a component on
-            its own, because density and hairlines only mean anything against a whole screen. Both
-            themes are the same markup under one class on <code>&lt;html&gt;</code>; use the switch
-            to see the other one.
+            Seven states of the app frame, one <strong>full frame</strong> each — never a component
+            on its own, because density and hairlines only mean anything against a whole screen.
+            Both themes are the same markup under one class on <code>&lt;html&gt;</code>; use the
+            switch to see the other one.
           </p>
         </div>
         <span className={styles.headSpacer} />

@@ -130,7 +130,12 @@
 .lensCell,
 .spendCell,
 .ageCell {
-  color: var(--tx3);
+  /* --tx3 measured 2.43:1 here. It cannot reach AA on any WIRE surface (2.13
+     to 2.43) and could not on the pre-v8 palette either (2.59 to 2.87) — it is
+     a token for rules and glyph fills, not for text a person has to read. These
+     are the tree's per-row values, so they take the quietest token that clears
+     the floor. */
+  color: var(--tx2);
   text-align: right;
 }
 

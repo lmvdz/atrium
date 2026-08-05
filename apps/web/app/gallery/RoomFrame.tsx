@@ -200,6 +200,8 @@ export interface RoomFrameProps {
   /** Product routes recover this space; historical gallery frames may still exhibit the old state. */
   readonly hideEmptyAttention?: boolean;
   readonly boxed?: boolean;
+  /** start with the room rail unfolded — see AppFrame's `railOpen` */
+  readonly railOpen?: boolean;
   readonly label?: string;
   readonly handlers?: RoomFrameHandlers;
 }
@@ -307,6 +309,7 @@ function Frame(props: RoomFrameProps) {
   return (
     <AppFrame
       boxed={props.boxed ?? true}
+      railOpen={props.railOpen ?? false}
       label={props.label ?? 'atrium'}
       lens={slot(<CallDock humans={props.humans} key="dock" roomName={props.room.name} />)}
       rail={slot(

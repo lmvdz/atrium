@@ -14,6 +14,41 @@
   overflow: hidden;
 }
 
+/* THE FOLD, OPEN. The base grid above is the v8 default — strip, fluid
+   workspace, dock — and this is the same canvas with the rail's 190px inserted
+   after the strip. The width is the pre-v8 rail's own, which is what its rows
+   were measured and clipped-string-checked at; inventing a new one here would
+   put every one of those measurements out of date at once. */
+.appRailOpen {
+  grid-template-columns: 44px 190px minmax(0, 1fr) 300px;
+}
+
+.appRailOpen .rail {
+  display: grid;
+}
+
+/* The strip's fold control. A flat terminal instrument like every other v8
+   control: no radius, the strip's own palette, and it states which way it goes
+   through its accessible name rather than through a rotation nobody can read. */
+.railFold {
+  background: transparent;
+  border: 1px solid var(--grnbd);
+  color: var(--grn2);
+  cursor: pointer;
+  display: grid;
+  flex: none;
+  font-family: 'JetBrains Mono Variable', ui-monospace, monospace;
+  font-size: 12px;
+  height: 28px;
+  place-items: center;
+  width: 28px;
+}
+
+.railFold[aria-expanded='true'] {
+  background: var(--grnav);
+  color: var(--grn);
+}
+
 /* WIRE controls are flat terminal instruments. Human avatars retain their
    circles; actionable chrome and text fields do not inherit the rounded v6
    card language. */
@@ -365,8 +400,14 @@
   margin: 10px 20px 4px;
   padding-bottom: 4px;
   border-bottom: 1px solid var(--line);
-  color: var(--tx4);
-  font-size: 8.5px;
+  /* --tx4 MEASURED 1.95:1 HERE, and it cannot do better anywhere: against every
+     WIRE surface it lands between 1.74 and 1.99, so no usage of it as text
+     reaches AA's 4.5. --tx2 is the quietest token that does (4.68 on --bg0),
+     and CONVENTIONS calls it secondary prose, which is what a column label is.
+     The token's value is untouched — the usage picks a different token, which
+     is the rule CONVENTIONS states for exactly this repair. */
+  color: var(--tx2);
+  font-size: 10px;
   letter-spacing: 0.14em;
 }
 
@@ -382,41 +423,6 @@
 }
 
 .splitState,
-/* THE FOLD, OPEN. The base grid is the v8 default — strip, fluid workspace,
-   dock — and this is the same canvas with the rail's 190px inserted after the
-   strip. The width is the pre-v8 rail's own, which is what its rows were
-   measured and clipped-string-checked at; inventing a new one here would put
-   every one of those measurements out of date at the same time. */
-.appRailOpen {
-  grid-template-columns: 44px 190px minmax(0, 1fr) 300px;
-}
-
-.appRailOpen .rail {
-  display: grid;
-}
-
-/* The strip's fold control. A flat terminal instrument like every other v8
-   control: no radius, the strip's own palette, and it states which way it goes
-   through its accessible name rather than through a rotation nobody can read. */
-.railFold {
-  background: transparent;
-  border: 1px solid var(--grnbd);
-  color: var(--grn2);
-  cursor: pointer;
-  display: grid;
-  flex: none;
-  font-family: 'JetBrains Mono Variable', ui-monospace, monospace;
-  font-size: 12px;
-  height: 28px;
-  place-items: center;
-  width: 28px;
-}
-
-.railFold[aria-expanded='true'] {
-  background: var(--grnav);
-  color: var(--grn);
-}
-
 .splitConversation {
   display: flex;
   flex-direction: column;
@@ -535,7 +541,7 @@
   border-radius: 50%;
   color: var(--tx1);
   display: grid;
-  font-size: 8px;
+  font-size: 10px;
   height: 20px;
   margin-left: -4px;
   place-items: center;
@@ -580,7 +586,8 @@
   color: var(--grn);
 }
 .foldPane {
-  color: var(--tx3);
+  /* --tx3 is 2.28:1 on this surface; see the note on .lensCell. */
+  color: var(--tx2);
   display: grid;
   flex: none;
   place-items: center;
@@ -626,7 +633,7 @@
   color: var(--tx2);
   display: flex;
   flex: none;
-  font-size: 9.5px;
+  font-size: 10px;
   gap: 6px;
   min-height: 38px;
   padding: 0 14px 8px;
@@ -637,7 +644,7 @@
   color: #9fc1e8;
   display: inline-grid;
   flex: 0 0 22px;
-  font-size: 9px;
+  font-size: 10px;
   font-weight: 600;
   height: 22px;
   place-items: center;
@@ -675,8 +682,9 @@
   padding: 10px 14px;
 }
 .callTranscript small {
-  color: var(--tx3);
-  font-size: 9px;
+  /* --tx3 is 2.38:1 on this surface; see the note on .lensCell. */
+  color: var(--tx2);
+  font-size: 10px;
 }
 .callTranscript p {
   color: var(--tx2);
@@ -706,7 +714,7 @@
 .filesPane {
   color: var(--tx3);
   flex: 1;
-  font-size: 9px;
+  font-size: 10px;
   letter-spacing: 0.12em;
   padding: 10px 14px;
 }
@@ -761,7 +769,7 @@
 
 .hereCount {
   color: var(--tx2);
-  font-size: 9.5px;
+  font-size: 10px;
 }
 
 .workCounts {
@@ -824,7 +832,10 @@
   font-family: 'JetBrains Mono Variable', ui-monospace, monospace;
   font-size: 10px;
   font-weight: 600;
-  color: var(--tx2);
+  /* --tx2 on --bg5 measured 4.49:1 — under AA by one hundredth, which is still
+     under. These are the initials that say WHO is in the room, so the brighter
+     body token is the honest pick rather than a rounding argument. */
+  color: var(--tx1);
 }
 
 /* --- surface indicators -------------------------------------------------- */
@@ -994,7 +1005,7 @@
   border: 1px solid transparent;
   color: var(--blu2);
   font: inherit;
-  font-size: 9.5px;
+  font-size: 10px;
   padding: 5px 8px;
   text-align: left;
   width: 100%;
@@ -1011,7 +1022,7 @@
 }
 .mentionMenu > span {
   color: var(--tx2);
-  font-size: 9.5px;
+  font-size: 10px;
 }
 
 .attachmentChips {
@@ -1026,7 +1037,7 @@
   border: 1px solid var(--line);
   color: var(--tx1);
   display: inline-flex;
-  font-size: 9.5px;
+  font-size: 10px;
   gap: 6px;
   padding: 1px 8px;
 }
@@ -1063,7 +1074,7 @@
 .commandMenu > div {
   border-bottom: 1px solid var(--line);
   color: var(--tx3);
-  font-size: 9px;
+  font-size: 10px;
   letter-spacing: 0.14em;
   padding: 5px 12px;
 }
@@ -1085,7 +1096,7 @@
 }
 .commandMenu small {
   color: var(--tx2);
-  font-size: 9.5px;
+  font-size: 10px;
   margin-left: auto;
 }
 
@@ -1351,7 +1362,7 @@
 }
 
 .composer .cfoot {
-  font-size: 9px;
+  font-size: 10px;
   margin-top: 3px;
 }
 

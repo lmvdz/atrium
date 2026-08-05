@@ -24,6 +24,7 @@ const FRAMES = [
   'receipt-open',
   'cross-room-jump',
   'zero-owed',
+  'rail-open',
 ] as const;
 
 /**
@@ -311,6 +312,16 @@ test.describe('gallery', () => {
    * ever been swept. "The gallery covers it" is a claim about six stills, not
    * about the app.
    * ------------------------------------------------------------------- */
+  /* Every frame on the page, not the first — `/gallery` stacks six of them and
+     a sweep that opened one fold would report the other five as folded. Clicks
+     are sequential because each one re-lays out the grid it sits in. */
+  async function openFolds(page: import('@playwright/test').Page): Promise<void> {
+    const folds = page.getByRole('button', { name: 'Show rooms and people' });
+    for (let i = 0; i < (await folds.count()); i += 1) {
+      await folds.nth(i).click();
+    }
+  }
+
   const ROUTES = [
     { path: '/gallery', ready: '[data-gallery-frame]' },
     { path: '/', ready: '[data-region="needs-you"]' },
@@ -329,6 +340,18 @@ test.describe('gallery', () => {
           // Audit the page, not a dev server still compiling it.
           await expect(page.locator(route.ready).first()).toBeVisible();
           await page.waitForLoadState('networkidle');
+
+          /* THE FOLD IS OPENED BEFORE THE SWEEP, on every frame that has one.
+             v8 folds the room rail by default, and the rail is where three of
+             the six registered non-text graphics live — the `here` presence
+             fill, the idle/away presence ring, and the disabled count chip's
+             dashed border. With it folded, the pin routes rendered ONE
+             registered kind and the coverage guard failed at every width in
+             both themes; worse, three registry entries were being measured
+             nowhere at all while the run still reported a contrast pass.
+             A state a person can reach in one click is a state this sweep has
+             to reach too. `openFolds` is a no-op on routes with no fold. */
+          await openFolds(page);
 
           const audit = (await page.evaluate(AUDIT)) as AuditResult;
           expect(audit.elementsChecked, 'the audit found almost nothing to check').toBeGreaterThan(
@@ -428,6 +451,11 @@ test.describe('gallery', () => {
       await page.setViewportSize({ width: 1440, height: 900 });
       await page.goto(`${route.path}?theme=light`);
       await expect(page.locator(route.ready).first()).toBeVisible();
+      /* Same reason as the per-route sweep: the presence fill, the presence ring
+         and the disabled count chip's dashed border all live in the folded rail,
+         and this is the check whose whole job is to prove no registry entry is
+         being measured nowhere. */
+      await openFolds(page);
       const audit = (await page.evaluate(AUDIT)) as AuditResult;
       registrySize = audit.registrySize;
       for (const kind of audit.graphicKinds) seen.add(kind.replace(/ ×\d+$/, ''));
