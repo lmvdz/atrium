@@ -1,4 +1,5 @@
 import { randomUUID } from 'node:crypto';
+import { DEFAULT_ACCEPTANCE_RULES } from '@atrium/core';
 import { expect, type Page, test } from '@playwright/test';
 import postgres from 'postgres';
 import { databaseUrl, serverPort } from './support/config.mjs';
@@ -100,13 +101,28 @@ async function sendManifestMessage(page: Page, roomId: string, message: Scenario
   });
 }
 
+/**
+ * Wait for an asynchronous fold to converge.
+ *
+ * Every use of this polls for something the interpretation worker or the
+ * attention projection produces on its own schedule — proposals reaching the
+ * accepted fold, an attention row being written, a status leaving `pending`.
+ * What is under test is that they CONVERGE, never how fast.
+ *
+ * The budget was 30s and that is not enough for the heaviest scenario in this
+ * suite while three other workers compete for the same server: it holds five
+ * browser contexts and 200 messages, passes 3 of 3 in isolation in ~50s, and
+ * lost the accepted-fold poll at 4 workers. A budget is a harness parameter,
+ * not a property of the product — a fold that never converges still fails,
+ * a minute later instead of thirty seconds.
+ */
 async function eventually<T>(
   read: () => Promise<T>,
   accepts: (value: T) => boolean,
   label: string,
 ) {
   await expect
-    .poll(async () => accepts(await read()), { timeout: 30_000, message: label })
+    .poll(async () => accepts(await read()), { timeout: 90_000, message: label })
     .toBe(true);
 }
 
@@ -687,7 +703,35 @@ test.describe
         if (objectiveIds.some((id) => !id)) {
           throw new Error('both authored objectives did not reach the accepted fold');
         }
-        for (const proposal of pending.filter((candidate) => candidate.type !== 'objective')) {
+        /* ONLY WHAT SOMEBODY IS ACTUALLY OWED, AND THE POLICY SAYS WHICH.
+           This demanded a live attention route for every non-objective staged
+           proposal. Two of the five types do not have one and never will:
+           `DEFAULT_ACCEPTANCE_RULES` marks `claim` and `open_question`
+           `autoAccept: true`, so they reach the fold without anyone accepting
+           them, and nothing is owed to a person. Measured across the whole
+           room: claim proposals have ZERO attention rows in either status,
+           and an open_question's `receipt_review` rows are gone once it
+           auto-accepts — which is why this failed on the claim in one run and
+           the open_question in the next, and read as a race.
+
+           The filter is READ FROM THE POLICY rather than listed here, so a type
+           whose `autoAccept` changes moves this check with it instead of
+           leaving a stale list behind. This spec's own `expectedAttention`
+           above already excludes both types; the two halves disagreed.
+
+           WHAT THE OLD ONE CAUGHT: a staged proposal that reaches nobody. Kept
+           for every type that IS owed to someone, and now polled, because
+           staging and projecting the route are separate steps.
+           WHAT IT NO LONGER DOES: demand a human route for a proposal the
+           policy accepts on its own. Those still have to reach the accepted
+           fold — the count of eight accepted objects below holds them to it. */
+        const owedProposals = pending.filter(
+          (candidate) =>
+            candidate.type !== 'objective' &&
+            DEFAULT_ACCEPTANCE_RULES[candidate.type as keyof typeof DEFAULT_ACCEPTANCE_RULES]
+              ?.autoAccept === false,
+        );
+        for (const proposal of owedProposals) {
           const fixture = manifest.messages.find(
             (message) => sentBody(message) === proposal.statement,
           );
@@ -699,11 +743,39 @@ test.describe
           const expectedObjectiveId =
             fixture.objective === null ? null : (objectiveIds[fixture.objective] as string);
           const actorId = proposal.type === 'commitment' ? users[manifest.absentee] : users[0];
-          const [attention] = await sql<{ id: string }[]>`
-            SELECT id::text FROM attention_items
-            WHERE room_id=${roomId}::uuid AND subject_id=${proposal.id}::uuid
-              AND user_id=${actorId}::uuid AND status='pending'
-          `;
+          /* THE ATTENTION ROUTE IS PROJECTED ASYNCHRONOUSLY, SO WAIT FOR IT.
+             This read once, immediately after the proposal was staged, and
+             threw if the row was not there yet. Staging a proposal and
+             projecting the attention item that routes it to a person are
+             separate steps, so the read was racing the projection: identical
+             runs at ONE worker alternated between failing here on the claim and
+             getting through to the accepted-object walk below. Nothing about
+             the room differed between them.
+
+             WHAT THE OLD ONE CAUGHT: a staged proposal that never reaches
+             anybody — a real and important guard, since a proposal nobody is
+             routed to is a proposal that cannot be accepted or refused.
+             WHAT THIS ONE CATCHES: the same thing, and only that. It still
+             fails if the route never arrives; it no longer fails because the
+             route had not arrived *yet*. Every other assertion in the loop —
+             the receipt, the action, the fold — is untouched. */
+          let attention: { id: string } | undefined;
+          await expect
+            .poll(
+              async () => {
+                [attention] = await sql<{ id: string }[]>`
+                  SELECT id::text FROM attention_items
+                  WHERE room_id=${roomId}::uuid AND subject_id=${proposal.id}::uuid
+                    AND user_id=${actorId}::uuid AND status='pending'
+                `;
+                return attention?.id ?? null;
+              },
+              {
+                timeout: 30_000,
+                message: `${proposal.type} ${proposal.id} to reach a live attention route`,
+              },
+            )
+            .not.toBeNull();
           if (!attention)
             throw new Error(`${proposal.type} ${proposal.id} has no live attention route`);
           await actOnAttention(
@@ -917,7 +989,7 @@ test.describe
           .toBeGreaterThanOrEqual(reconnectThrough);
         const conversation = disconnectedPage.getByRole('region', { name: 'Conversation' });
         for (const message of manifest.messages.slice(170, 180)) {
-          await expect(conversation.getByText(message.body, { exact: true })).toHaveCount(1);
+          await expect(conversation.getByText(sentBody(message), { exact: true })).toHaveCount(1);
         }
         let finalMessageThrough = reconnectThrough;
         for (const message of manifest.messages.slice(180)) {
@@ -949,9 +1021,12 @@ test.describe
           name: 'Conversation',
         });
         for (const message of manifest.messages) {
-          await expect(connectedConversation.getByText(message.body, { exact: true })).toHaveCount(
-            1,
-          );
+          /* `sentBody`: the mentioned message is on screen with its `@Name` in
+             the text, because that is what was sent. Exact-matching the
+             manifest body would look for a row that was never written. */
+          await expect(
+            connectedConversation.getByText(sentBody(message), { exact: true }),
+          ).toHaveCount(1);
         }
 
         const persisted = await sql<
@@ -962,8 +1037,11 @@ test.describe
       `;
         expect(persisted).toHaveLength(200);
         expect(persisted.map(({ body, authorId }) => ({ body, authorId }))).toEqual(
+          /* `sentBody`: the persisted body of a mentioned message carries its
+             `@Name`, because the reference has to be IN the text to survive
+             `reconcileMessageReferences`. Every other message is unchanged. */
           manifest.messages.map((message) => ({
-            body: message.body,
+            body: sentBody(message),
             authorId: users[message.author],
           })),
         );
