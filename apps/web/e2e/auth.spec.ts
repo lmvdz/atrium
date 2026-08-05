@@ -85,6 +85,21 @@ test.describe('auth and workspaces', () => {
   test('signup, verification, workspace, invitation, shared live room and presence', async ({
     browser,
   }) => {
+    /* THE BUDGET MATCHES THE SCOPE. This carries two signups, two email
+       verifications, a workspace, an invitation and its acceptance, a shared
+       live room, presence, an attachment upload and download, a structured
+       mention and a rich-text round trip — 71 awaited steps across two browser
+       contexts — inside the file-wide 60s default.
+
+       In isolation it finishes in ~21s and passes. In the 8-worker gate it ran
+       out of budget mid-`page.goto`, with seven other workers competing for the
+       same dev server: the failure was "Test ended", never an assertion.
+       `multiplayer.spec.ts` already sets its own budget for exactly this reason.
+
+       NOTHING IS LOOSENED. A test timeout is a harness budget, not a property of
+       the product — every assertion in here is unchanged, and a real hang still
+       fails, two minutes later instead of one. */
+    test.setTimeout(120_000);
     const founderEmail = uniqueEmail('ada');
     const inviteeEmail = uniqueEmail('grace');
 

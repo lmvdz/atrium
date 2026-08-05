@@ -21,7 +21,8 @@ conversation follow. It strictly contains `build/live-multiplayer`,
 | `pnpm lint` | documented as always 1 | **0** — see below |
 | `pnpm test --maxWorkers=2` | — | **3109 / 3109** |
 | `pnpm test:integration` | — | **189 / 189** |
-| `pnpm test:e2e` (8 workers) | 157 passed · 11 failed | **165 passed · 4 failed** |
+| `pnpm test:e2e` **at 4 workers** | — | **167 passed · 2 failed**, twice |
+| `pnpm test:e2e` at 8 workers | 157 passed · 11 failed | 162–165 passed, 4–7 failed, *shifting* |
 
 **`pnpm lint` exits 0 now.** The previous handoff recorded it as exiting 1 "and
 always has", on `design/*.mjs` and `scripts/mutation-ledger.mjs`. Those files
@@ -154,18 +155,27 @@ check unfolds it first. Reversible in one line.
 a quick direct channel to a person or agent live? That is the gap you named and
 nothing here addresses it.
 
-## Still red — 4, and what each one is
+## EIGHT WORKERS IS OVERSUBSCRIBED ON THIS MACHINE — run the gate at 4
 
-Two are **load flakes**: they pass in isolation at two workers and fail only in
-the 8-worker full run. Verified this session, repeatedly:
+This is the single most useful thing measured this session, and it corrects the
+brief. At **8 workers** the suite reports 4–7 failures and **the population
+moves between runs**: one run lost `auth` + `replay reopen`, the next lost four
+`gallery` specs that had just passed and kept `replay reopen`. Every one of them
+passes in isolation. One died with `Protocol error (Runtime.callFunctionOn):
+Internal server error, session closed` — the browser-death mode `AGENTS.md`
+describes verbatim.
 
-- `auth.spec.ts` — signup/verification/invitation/presence
-- `replay.spec.ts` — reopens an answered question
+At **4 workers the suite is stable**: 167 passed · 2 failed, run twice, the same
+two failures both times, and they are the only two that are deterministic.
 
-(`gallery.spec.ts`'s focus-ring sweep was in this set and is now green in the
-full run too.)
+So the count at 8 workers is not a measure of the product. Run the gate at 4.
+Anything that fails at 8 and passes at 4 is the machine — do not spend a session
+on it. (`auth.spec.ts` did get a real repair: its budget was the file-wide 60s
+default while the test carries 71 awaited steps across two contexts, two
+signups, an attachment round trip and a rich mention. It now sets 120s. That is
+a harness budget, not an assertion — every check in it is unchanged.)
 
-Two are **deterministic**:
+## Still red at 4 workers — 2, and both need a decision
 
 **`multiplayer.spec.ts` — red on a PRODUCT-DESIGN question now, not a defect.**
 
@@ -231,7 +241,9 @@ is real and is NOT the cause.
 
 ## Process notes
 
-- Browser suites: 8 workers on 16 cores. `pnpm test:integration` and
+- Browser suites: **4 workers**, not 8 — see the section above; 8 is
+  oversubscribed on this machine and its failure list is not reproducible.
+  `pnpm test:integration` and
   `pnpm test:e2e` manage their own containers. Preserve `atrium-postgres-1` and
   `atrium-minio-1`; `atrium-e2e-*` are removed after a run.
 - `test/timeline-handlers.test.tsx` now separates "the box has this shape" from
