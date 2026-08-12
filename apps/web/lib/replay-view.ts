@@ -479,6 +479,36 @@ const CERTIFY_REFUSAL_AUTHOR =
   'This claim rests on a message you wrote — certifying is a second pair of eyes, so the author of its source may not vouch it is true. It waits for another member to verify it.';
 
 /**
+ * The AUTHENTICATED viewer for the certify/remove gate — resolved STRICTLY from
+ * the room's own participant snapshot, never `replayView`'s spectator substitute
+ * (an attention owner / the first participant / a literal `human`, chosen only to
+ * render a page for an identity that isn't in the room).
+ *
+ * #110 finding 2, and the third time the #99/#101 pattern surfaced: an affordance
+ * gate that reads a substituted identity fails OPEN to a person — it would offer
+ * certify/remove to a spectator the server refuses. This resolves the viewer by
+ * the authenticated `viewerId`, and when that id is NOT a participant in THIS
+ * snapshot it returns a fail-closed `unknown`-kind viewer, so the human-only
+ * allowlist in `ReceiptView` offers neither act. The server enforces every act
+ * regardless of this; the gate's only job is to never offer one it would refuse.
+ * It keeps the fallback's NAME for display but overrides id + kind, so a
+ * spectator is rendered honestly rather than as somebody they are not.
+ */
+export function authenticatedViewerGate(
+  participants: readonly ParticipantSummary[],
+  viewerId: string,
+  fallback: ParticipantSummary,
+): ParticipantSummary {
+  return (
+    participants.find((person) => person.id === viewerId) ?? {
+      ...fallback,
+      id: viewerId,
+      kind: 'unknown',
+    }
+  );
+}
+
+/**
  * Build the inspectable record for one persisted semantic row.
  *
  * The excerpt is minted from the message register, never copied out of a
@@ -622,13 +652,25 @@ export function replayReceipt(
   // #102-gated `amend {verification:'verified'}` moves. A retracted row is
   // withdrawn, so it is neither certifiable nor removable.
   const isActive = accepted !== undefined && accepted.retractedAt === null;
+  // Certify is the `~`→`✓` vouch, so it is offered ONLY on a genuinely `~` claim
+  // — one whose acceptance is still a machine's reading (`self_reported`). The
+  // old `!== 'verified'` also admitted `accepted` (a human-accepted claim that
+  // already renders `✓`), so a settled reading was offered "Certify … (~→✓)"
+  // that misdescribed it (#110 finding 3). `self_reported` is the ONLY `~` claim
+  // state — `accepted` and `verified` are both `✓` — so this is the exact gate.
   const certifiable =
-    isActive && object.state.kind === 'claim' && object.state.verification !== 'verified';
-  // An auto-accepted `~` reading (claim or open_question, #4/#8) a person may
-  // retract — the covenant's removal act. Decisions/commitments are corrected by
-  // other verbs; this exposes the one the live route needs for the two
-  // auto-accept types.
-  const removable = isActive && (object.state.kind === 'claim' || object.state.kind === 'question');
+    isActive && object.state.kind === 'claim' && object.state.verification === 'self_reported';
+  // Remove withdraws a `~` reading — the covenant's removal act, on a reading no
+  // person has stood behind. It must NOT be offered on a `✓` (#110 finding 1):
+  // withdrawing another person's certified reading is a judgement act the server
+  // now refuses (`retractConfirmedRefusal`), and the button must not invite what
+  // the covenant forbids. The `~` states are exactly `self_reported` for a claim
+  // and `open`/`proposed` for a question (answered-and-confirmed is `accepted`,
+  // the `✓`); every `✓` state is excluded here, matching the server gate.
+  const removable =
+    isActive &&
+    ((object.state.kind === 'claim' && object.state.verification === 'self_reported') ||
+      (object.state.kind === 'question' && object.state.verification !== 'accepted'));
 
   const viewer = changes.viewer;
   let certifyRefusal: string | null = null;

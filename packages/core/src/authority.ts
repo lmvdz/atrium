@@ -813,6 +813,54 @@ export function ownerConfirmRefusal(input: { actor: Actor; owner: string }): str
 }
 
 /**
+ * A disinterested `✓ verified` vouch is not unmade by a silent `retract`
+ * (#68/#95, #110).
+ *
+ * `retract` withdraws an accepted object from current state, kept on the
+ * append-only record. The established correction model (see
+ * `authority-matrix.test.ts`) lets a member retract a *confirmed* object —
+ * withdrawing a colleague's accepted commitment or decision is a legitimate room
+ * correction, and the attribution gates already refuse the parts that rename or
+ * reword. What that model never contained is the act #110's certify flow
+ * introduced: a claim a **second, disinterested pair of eyes verified** true
+ * (`verification === 'verified'`, #68). That vouch is the weightiest thing a
+ * person puts on a sentence, and the round-1 build let ANY member silently
+ * withdraw it — including another person's — with no precondition. That is the
+ * covenant breach: unmaking a person's verification is itself a judgement act
+ * (#95), the mirror of #96's rule that a member may not retire a confirmed
+ * object by superseding it.
+ *
+ * The complete, safe answer is that `retract` is not the door verification
+ * leaves by. A `✓ verified` claim is not withdrawn silently by anyone — the
+ * scenario never needs it (its removal act is on a `~`, #110), and unmaking a
+ * verification is done in the open through re-verification (`amend`), which
+ * `selfVerificationRefusal` already gates. This refuses every `retract` of a
+ * verified claim rather than guess an unrecorded verifier (the reducer records
+ * `humanTouchedAt` but never *which* human — see `selfVerificationRefusal`'s
+ * header), the same safe-complete stance the `✓`-lapse in `applyObjectCorrected`
+ * takes. A `~` reading and a confirmed-but-unverified object stay retractable, so
+ * the correction model is untouched; only the verification vouch is protected.
+ *
+ * The species gate is one layer up (`applyObjectCorrected` refuses every
+ * non-human correction), so this is only the relation question for the humans it
+ * admits.
+ */
+export function retractVerifiedClaimRefusal(input: {
+  actor: Actor;
+  /** The object being retracted. Only a claim's `verification` bears on this. */
+  object: AcceptedObject;
+}): string | null {
+  const { actor, object } = input;
+  // Non-humans are refused correcting at all one layer up; nothing to add here.
+  if (actor.kind !== 'human') return null;
+  // Only a claim carries a verification vouch. Everything else — including a
+  // confirmed commitment or decision — stays retractable under the established
+  // correction model.
+  if (object.type !== 'claim' || object.payload.verification !== 'verified') return null;
+  return `${actorName(actor)} would withdraw a ✓ verified claim by retracting it — a claim a second, disinterested member vouched is true (#68, #95). Unmaking that verification is a judgement act, the mirror of the rule that a member may not retire a confirmed object by superseding it (#96), and it is not done by a silent withdrawal: the vouch stays on the record and is unmade in the open through a re-verification. A machine's unconfirmed reading (\`~\`) or an unverified object may still be removed`;
+}
+
+/**
  * #81/H3, and it is `correctionAttributionRefusal`'s clause two moved one act
  * earlier — to acceptance. A human accepting somebody else's staged reading may
  * fix its wording (that is much of what acceptance is for) but may not mint a

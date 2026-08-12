@@ -1553,9 +1553,13 @@ describe('the receipt exposes certify + remove for a `~` reading', () => {
     expect(receipt.certifyRefusal).toBeNull();
   });
 
-  /* CATCHES: still offering certify after the claim is `✓ verified` — the act is
-     done, and re-certifying is a no-op the server would reject. */
-  it('a human-verified claim is no longer certifiable, but stays removable', () => {
+  /* CATCHES (#110 finding 1): the round-1 build offered Remove on a `✓ verified`
+     claim — INCLUDING another person's certified reading — because `removable`
+     omitted the `~`-only check. Withdrawing another's verified reading is a
+     judgement act the server now refuses (`retractConfirmedRefusal`); the button
+     must not invite it. A `✓ verified` claim is neither certifiable (done) nor
+     removable (a person's reading, not a machine's `~`). */
+  it('a human-verified claim is offered NEITHER certify NOR remove', () => {
     const snapshot = data();
     snapshot.objects.push({
       id: 'claim-verified',
@@ -1581,6 +1585,74 @@ describe('the receipt exposes certify + remove for a `~` reading', () => {
       viewer: { id: 'bob', kind: 'human' },
     });
     expect(receipt.certifiable).toBe(false);
-    expect(receipt.removable).toBe(true);
+    expect(receipt.removable).toBe(false);
+  });
+
+  /* CATCHES (#110 finding 3 + finding 1): a human-ACCEPTED claim that is not yet
+     verified still renders `✓` — a person has touched it. The round-1
+     `certifiable = verification !== 'verified'` offered Certify on it (a `~`→`✓`
+     label that misdescribes an already-`✓` reading), and `removable` offered
+     Remove on it (another person's `✓`). Both must now be false: `✓ accepted` is
+     a confirmed reading, not a machine's `~`. */
+  it('a human-accepted (but unverified) `✓` claim is neither certifiable nor removable', () => {
+    const snapshot = data();
+    snapshot.objects.push({
+      id: 'claim-accepted',
+      roomId: 'room',
+      type: 'claim',
+      payload: { statement: CLAIM_TEXT, claimant: 'alice', verification: 'unverified' },
+      objectiveId: null,
+      proposalId: null,
+      revision: 0,
+      retractedAt: null,
+      supersededById: null,
+      acceptedBy: 'bob',
+      acceptedByKind: 'human',
+      humanTouchedAt: at,
+      createdAt: at,
+      updatedAt: at,
+    } as unknown as ReplayData['objects'][number]);
+    const view = replayView(snapshot, 'alice');
+    const claim = view.objects.find((object) => object.id === 'claim-accepted');
+    if (!claim) throw new Error('the accepted claim did not reach the view');
+    expect(glyphFor(claim.state)).toBe('✓');
+    const receipt = replayReceipt(snapshot, view.records, claim, {
+      viewer: { id: 'bob', kind: 'human' },
+    });
+    expect(receipt.certifiable).toBe(false);
+    expect(receipt.removable).toBe(false);
+  });
+
+  /* CATCHES (#110 finding 1): a `~` open_question that a person answered but
+     nobody certified is still a machine's reading — removable. But once a person
+     certifies the answer (`✓`, verification 'accepted'), it is a confirmed
+     reading and Remove must not be offered. */
+  it('an answered-and-certified `✓` question is not removable', () => {
+    const snapshot = data();
+    snapshot.objects.push({
+      id: 'q-certified',
+      roomId: 'room',
+      type: 'open_question',
+      payload: { question: QUESTION_TEXT, status: 'answered' },
+      objectiveId: null,
+      proposalId: null,
+      revision: 0,
+      retractedAt: null,
+      supersededById: null,
+      acceptedBy: 'bob',
+      acceptedByKind: 'human',
+      humanTouchedAt: at,
+      createdAt: at,
+      updatedAt: at,
+    } as unknown as ReplayData['objects'][number]);
+    const view = replayView(snapshot, 'alice');
+    const question = view.objects.find((object) => object.id === 'q-certified');
+    if (!question) throw new Error('the certified question did not reach the view');
+    expect(glyphFor(question.state)).toBe('✓');
+    const receipt = replayReceipt(snapshot, view.records, question, {
+      viewer: { id: 'bob', kind: 'human' },
+    });
+    expect(receipt.certifiable).toBe(false);
+    expect(receipt.removable).toBe(false);
   });
 });

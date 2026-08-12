@@ -1089,6 +1089,123 @@ describe('epistemic state — `~` until a person touches it', () => {
   });
 });
 
+describe('a `✓ verified` vouch is not unmade by a silent retract (#68/#95, #110)', () => {
+  /* A claim BOB minted (claimant BOB, `✓ unverified`) that ALICE — a
+     disinterested second pair of eyes — then verified true. That is the exact
+     state the #110 certify flow produces, and the one the round-1 `retract`
+     left ungated. */
+  function verifiedClaim(): AuthoredEvent[] {
+    return [
+      ...sampleLog(),
+      event({
+        id: 'ev_bob_claim',
+        at: at(9),
+        actor: human(BOB),
+        type: 'object_accepted',
+        object: {
+          id: 'obj_verified_claim',
+          roomId: ROOM,
+          type: 'claim',
+          payload: { statement: 'the migration ran clean on staging', claimant: BOB },
+          createdAt: at(9),
+          updatedAt: at(9),
+        },
+      }),
+      corrected({
+        id: 'ev_alice_verify',
+        at: at(10),
+        actor: human(ALICE),
+        objectId: 'obj_verified_claim',
+        action: 'amend',
+        patch: { verification: 'verified' },
+      }),
+    ];
+  }
+
+  it('the fixture reaches `✓ verified` through a disinterested member', () => {
+    const record = reduce(verifiedClaim()).objects.obj_verified_claim;
+    if (!record) throw new Error('fixture changed');
+    expect(epistemicGlyph(record)).toBe('✓');
+    expect(record.object.type === 'claim' && record.object.payload.verification).toBe('verified');
+  });
+
+  /* CATCHES (#110 finding 1, the server half): the round-1 `retract` refused only
+     a re-retract, so ANY member could silently withdraw a disinterestedly-verified
+     `✓` — another person's vouched reading. This is the mutation pin for
+     `retractVerifiedClaimRefusal`: deleting the gate lets this retract land, which
+     these assertions catch. A third party is refused… */
+  it('refuses a third party retracting a verified claim', () => {
+    const state = reduce([
+      ...verifiedClaim(),
+      corrected({
+        id: 'ev_alice_retract',
+        at: at(11),
+        actor: human(ALICE),
+        objectId: 'obj_verified_claim',
+        action: 'retract',
+      }),
+    ]);
+    expect(objectHistory(state, 'obj_verified_claim')?.retractedAt).toBeNull();
+    expect(state.issues.at(-1)?.reason).toContain('verified claim');
+  });
+
+  /* …and so is the claimant: `retract` is not the door a verification leaves by
+     for anyone. Unmaking it is done in the open through a re-verification. */
+  it('refuses even the claimant retracting their own verified claim', () => {
+    const state = reduce([
+      ...verifiedClaim(),
+      corrected({
+        id: 'ev_bob_retract',
+        at: at(11),
+        actor: human(BOB),
+        objectId: 'obj_verified_claim',
+        action: 'retract',
+      }),
+    ]);
+    expect(objectHistory(state, 'obj_verified_claim')?.retractedAt).toBeNull();
+    expect(state.issues.at(-1)?.reason).toContain('verified claim');
+  });
+
+  it('still lets any member withdraw a machine’s `~` reading — the covenant’s invited removal', () => {
+    // it starts as a `~` (unconfirmed) reading — the state the #110 scenario removes
+    const before = reduce(modelAcceptedClaim()).objects.obj_model_claim;
+    if (!before) throw new Error('fixture changed');
+    expect(epistemicStateOf(before)).toBe('unconfirmed');
+
+    const state = reduce([
+      ...modelAcceptedClaim(),
+      corrected({
+        id: 'ev_disinterested_retract',
+        at: at(3),
+        actor: human(BOB),
+        objectId: 'obj_model_claim',
+        action: 'retract',
+      }),
+    ]);
+    expect(objectHistory(state, 'obj_model_claim')?.retractedAt).toBe(at(3));
+    expect(state.issues).toEqual([]);
+  });
+
+  it('does not touch the correction model: a confirmed commitment stays retractable', () => {
+    // The established rule (authority-matrix): a member may withdraw a colleague's
+    // accepted commitment — a legitimate room correction. `obj_commitment_1` in
+    // `sampleLog` is a `✓` confirmed object; the verification gate is claim-only,
+    // so this is untouched.
+    const state = reduce([
+      ...sampleLog(),
+      corrected({
+        id: 'ev_commitment_retract',
+        at: at(9),
+        actor: human(ALICE),
+        objectId: 'obj_commitment_1',
+        action: 'retract',
+      }),
+    ]);
+    expect(objectHistory(state, 'obj_commitment_1')?.retractedAt).toBe(at(9));
+    expect(state.issues).toEqual([]);
+  });
+});
+
 describe('counterexamples for the interpretation prompt', () => {
   function correctedState(): CoreState {
     return reduce([

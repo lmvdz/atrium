@@ -24,6 +24,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 import * as f from '../app/gallery/fixtures';
 import { RoomFrame } from '../app/gallery/RoomFrame';
 import { railFor } from '../app/gallery/rooms';
+import { authenticatedViewerGate } from '../lib/replay-view';
 import type { EpistemicState, ParticipantSummary, ReceiptRecord } from '../src/components/model';
 
 afterEach(cleanup);
@@ -164,16 +165,128 @@ describe('a human may certify a `~` claim and remove a `~` reading', () => {
     expect(container.querySelector('[data-remove="ready"]')).toBeNull();
   });
 
-  it('a claim already `✓ verified` is not certifiable, but remains removable', () => {
+  it('a claim already `✓ verified` is offered NEITHER certify NOR remove', () => {
+    // #110 finding 1: the round-1 build offered Remove on a `✓` — including
+    // another person's certified reading — because `removable` omitted the
+    // `~`-only check `certifiable` has. Withdrawing another's verified reading is
+    // a judgement act the server now refuses (`retractConfirmedRefusal`), and the
+    // button must not invite what the covenant forbids. A settled `✓` is neither
+    // certifiable (it is already verified) nor removable (it is a person's
+    // reading, not a machine's `~`), so the receipt shows a plain record.
     const { container } = frame({
       viewer: f.VIEWER,
       receipt: claimReceipt({
         certifiable: false,
+        removable: false,
         state: { ...CLAIM_STATE, verification: 'verified' },
       }),
+      onCertifyReceipt: vi.fn(),
+      onRemoveReceipt: vi.fn(),
+    });
+    expect(container.querySelector('[data-receipt-id="obj-claim"]')).not.toBeNull();
+    expect(container.querySelector('[data-certify="ready"]')).toBeNull();
+    expect(container.querySelector('[data-certify="refused"]')).toBeNull();
+    expect(container.querySelector('[data-remove="ready"]')).toBeNull();
+  });
+
+  it('a `~` reading IS removable — the covenant’s invited removal', () => {
+    // The complement of the case above: a machine's `~` reading no person has
+    // stood behind is the one Remove is FOR. The first test drives the full
+    // two-stage act; this one pins that the affordance is present for a `~`
+    // claim, so a regression that over-narrows `removable` is caught here too.
+    const { container } = frame({
+      viewer: f.VIEWER,
+      receipt: claimReceipt({ certifiable: true, removable: true }),
+      onRemoveReceipt: vi.fn(),
+    });
+    expect(container.querySelector('[data-remove="ready"]')).not.toBeNull();
+  });
+});
+
+describe('the certify/remove gate reads the AUTHENTICATED viewer, failing closed (#110 finding 2)', () => {
+  /* #110 finding 2: the live route substitutes a spectator identity (an attention
+     owner / the first participant / a literal `human`) when the authenticated
+     viewer is absent from the snapshot, and round-1 fed THAT into the
+     certify/remove gate — the #99/#101 fail-open-to-person pattern a third time.
+     `authenticatedViewerGate` resolves the viewer STRICTLY by the authenticated
+     id from the participant snapshot, failing CLOSED to `unknown` (no affordance)
+     when it is not a participant here. These drive the gate through the SHIPPING
+     path: the resolved viewer feeds `RoomFrame`'s human-only allowlist. */
+
+  it('an authenticated viewer absent from the snapshot resolves to unknown, and is offered NEITHER act', () => {
+    // `alice` is the spectator substitute `replayView` would hand back; the
+    // authenticated viewer `mallory` is not in the room at all.
+    const alice: ParticipantSummary = {
+      id: 'alice',
+      kind: 'human',
+      name: 'alice',
+      presence: 'here',
+      note: null,
+      isViewer: true,
+    };
+    const gated = authenticatedViewerGate([alice], 'mallory-not-in-room', alice);
+    expect(gated.kind, 'the gate failed OPEN to a person').toBe('unknown');
+    expect(gated.id).toBe('mallory-not-in-room');
+
+    const { container } = frame({
+      viewer: gated,
+      receipt: claimReceipt({ certifiable: true, removable: true }),
+      onCertifyReceipt: vi.fn(),
+      onRemoveReceipt: vi.fn(),
+    });
+    // the receipt still renders — only the affordances are withheld
+    expect(container.querySelector('[data-receipt-id="obj-claim"]')).not.toBeNull();
+    expect(container.querySelector('[data-certify="ready"]')).toBeNull();
+    expect(container.querySelector('[data-certify="refused"]')).toBeNull();
+    expect(container.querySelector('[data-remove="ready"]')).toBeNull();
+  });
+
+  it('a RESOLVED authenticated human is offered both — the gate is not simply off', () => {
+    // The positive control: when the authenticated id IS a participant, the gate
+    // reads that participant's real kind and the affordances appear — so the
+    // negative case above is fail-closed, not a blanket disable.
+    const bob: ParticipantSummary = {
+      id: 'bob',
+      kind: 'human',
+      name: 'bob',
+      presence: 'here',
+      note: null,
+      isViewer: true,
+    };
+    const gated = authenticatedViewerGate([bob], 'bob', bob);
+    expect(gated.kind).toBe('human');
+
+    const { container } = frame({
+      viewer: gated,
+      receipt: claimReceipt({ certifiable: true, removable: true }),
+      onCertifyReceipt: vi.fn(),
+      onRemoveReceipt: vi.fn(),
+    });
+    expect(container.querySelector('[data-certify="ready"]')).not.toBeNull();
+    expect(container.querySelector('[data-remove="ready"]')).not.toBeNull();
+  });
+
+  it('an authenticated AGENT that IS in the snapshot is still offered neither — the allowlist holds', () => {
+    // Resolving the authenticated identity must not weaken #102's species gate: a
+    // real agent viewer, correctly resolved, is still refused both acts.
+    const atrium: ParticipantSummary = {
+      id: 'atrium',
+      kind: 'agent',
+      name: 'atrium',
+      presence: 'here',
+      note: null,
+      isViewer: true,
+    };
+    const gated = authenticatedViewerGate([atrium], 'atrium', atrium);
+    expect(gated.kind).toBe('agent');
+
+    const { container } = frame({
+      viewer: gated,
+      receipt: claimReceipt({ certifiable: true, removable: true }),
+      onCertifyReceipt: vi.fn(),
       onRemoveReceipt: vi.fn(),
     });
     expect(container.querySelector('[data-certify="ready"]')).toBeNull();
-    expect(container.querySelector('[data-remove="ready"]')).not.toBeNull();
+    expect(container.querySelector('[data-remove="ready"]')).toBeNull();
   });
 });
