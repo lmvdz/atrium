@@ -23,6 +23,7 @@
 import { useState } from 'react';
 import type { EpistemicState, NoGlyph, ObjectKind } from '../model/glyph';
 import { GLYPHS, glyphMeaning } from '../model/glyph';
+import type { ParticipantKind } from '../model/kind';
 import { useAttribution, useCitedLocation, useHere } from '../model/ledger';
 import { quotationRef, sourceLocation, systemText } from '../model/quotation';
 import type { CorrectionEntry, ProvenanceEntry, ReceiptRecord } from '../model/records';
@@ -51,6 +52,17 @@ export type ReceiptViewProps = {
   }[];
   readonly pendingReplacementId?: string;
   readonly onSupersede?: (retiredObjectId: string, replacementObjectId: string) => void;
+  /**
+   * The reader's kind. Certify and remove are HUMAN acts — a machine may never
+   * certify (the covenant, #102). Gated here as an ALLOWLIST (`=== 'human'`), so
+   * an agent viewer, or the fail-closed `'unknown'`, never sees either affordance.
+   * This is presentation; the server enforces the same rule and is the authority.
+   */
+  readonly viewerKind?: ParticipantKind;
+  /** Move a `~` claim to `✓ verified` (#102). Refusal surfaced via `receipt.certifyRefusal`. */
+  readonly onCertify?: (receiptId: string) => void;
+  /** Retract an accepted `~` reading (claim or open_question) from current state. */
+  readonly onRemove?: (receiptId: string) => void;
 } & NoGlyph;
 
 export function ReceiptView({
@@ -65,10 +77,22 @@ export function ReceiptView({
   supersessionCandidates = [],
   pendingReplacementId,
   onSupersede,
+  viewerKind,
+  onCertify,
+  onRemove,
 }: ReceiptViewProps) {
   const [replacementId, setReplacementId] = useState<string | null>(pendingReplacementId ?? null);
   const [acceptObjectiveId, setAcceptObjectiveId] = useState('');
   const replacement = supersessionCandidates.find((candidate) => candidate.id === replacementId);
+  // Certifying is a person putting their name on a sentence, and removing an
+  // accepted reading withdraws it — neither is a casual click. Both are two-stage
+  // (trigger → confirm), so `pendingAct` is which one is armed. The component is
+  // keyed on the receipt id upstream, so switching subjects disarms it.
+  const [pendingAct, setPendingAct] = useState<'certify' | 'remove' | null>(null);
+  const viewerIsHuman = viewerKind === 'human';
+  const certifyOffered = viewerIsHuman && receipt.certifiable === true && onCertify !== undefined;
+  const certifyRefusal = certifyOffered ? (receipt.certifyRefusal ?? null) : null;
+  const removeOffered = viewerIsHuman && receipt.removable === true && onRemove !== undefined;
   return (
     <section
       aria-label="Receipt"
@@ -188,7 +212,23 @@ export function ReceiptView({
 
       <div className={styles.rcFoot}>
         <span className={styles.rcFootNote}>
-          {systemText(receipt.reopenNote, 'ReceiptView reopenNote')}
+          {pendingAct === 'certify' ? (
+            <span className={styles.rcCovenantPrompt} data-confirm-prompt="certify">
+              Your name goes on this. You are vouching this claim is true — checked by someone other
+              than the person it quotes. Confirm to certify it.
+            </span>
+          ) : pendingAct === 'remove' ? (
+            <span className={styles.rcCovenantPrompt} data-confirm-prompt="remove">
+              This withdraws the reading from current state. It stays on the record and can be
+              restored. Confirm to remove it.
+            </span>
+          ) : certifyRefusal !== null ? (
+            <span className={styles.rcCovenantRefusal} data-certify-refused="true">
+              {systemText(certifyRefusal, 'ReceiptView certify refusal')}
+            </span>
+          ) : (
+            systemText(receipt.reopenNote, 'ReceiptView reopenNote')
+          )}
         </span>
         <span>
           {receipt.acceptable === true && onAccept !== undefined ? (
@@ -250,6 +290,87 @@ export function ReceiptView({
             >
               Reopen
             </button>
+          ) : null}
+          {/* CERTIFY — `~` → `✓ verified` (#102). Reserved-colour grammar: green is
+              the settled STATE, never the button that produces it, so the trigger
+              and its confirm stay NEUTRAL and the tick turns green only once the
+              claim is verified. Disabled with the reason when the viewer is the
+              claimant/stager/source-author; the server refuses the same, and is
+              the authority. An agent viewer never reaches this branch. */}
+          {certifyOffered && pendingAct !== 'remove' ? (
+            pendingAct === 'certify' ? (
+              <>
+                <button
+                  className="atr-btn atr-btn-sm"
+                  data-confirm-certify="true"
+                  onClick={() => {
+                    onCertify?.(receipt.id);
+                    setPendingAct(null);
+                  }}
+                  type="button"
+                >
+                  Confirm — verify this claim
+                </button>
+                <button
+                  className="atr-btn atr-btn-sm atr-btn-ghost"
+                  onClick={() => setPendingAct(null)}
+                  type="button"
+                >
+                  Cancel
+                </button>
+              </>
+            ) : certifyRefusal !== null ? (
+              // The reason is shown in full beside it (the footnote, through the
+              // system-voice door) — a raw caller string in `title` would be a
+              // second, untraced register saying the same thing.
+              <button className="atr-btn atr-btn-sm" data-certify="refused" disabled type="button">
+                Certify as verified
+              </button>
+            ) : (
+              <button
+                className="atr-btn atr-btn-sm"
+                data-certify="ready"
+                onClick={() => setPendingAct('certify')}
+                type="button"
+              >
+                Certify as verified…
+              </button>
+            )
+          ) : null}
+          {/* REMOVE — retract an accepted `~` reading. Destructive, so it wears the
+              reserved red and confirms before it withdraws. */}
+          {removeOffered && pendingAct !== 'certify' ? (
+            pendingAct === 'remove' ? (
+              <>
+                <button
+                  className="atr-btn atr-btn-sm atr-btn-danger"
+                  data-confirm-remove="true"
+                  onClick={() => {
+                    onRemove?.(receipt.id);
+                    setPendingAct(null);
+                  }}
+                  type="button"
+                >
+                  Confirm — remove this reading
+                </button>
+                <button
+                  className="atr-btn atr-btn-sm atr-btn-ghost"
+                  onClick={() => setPendingAct(null)}
+                  type="button"
+                >
+                  Cancel
+                </button>
+              </>
+            ) : (
+              <button
+                className="atr-btn atr-btn-sm atr-btn-danger"
+                data-remove="ready"
+                onClick={() => setPendingAct('remove')}
+                type="button"
+              >
+                Remove
+              </button>
+            )
           ) : null}
         </span>
       </div>

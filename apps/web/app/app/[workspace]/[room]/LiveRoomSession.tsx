@@ -255,8 +255,12 @@ export function LiveRoomSession({ data, viewerId }: { data: ReplayData; viewerId
   const receiptObject = replayReceiptSubject(data, view.objects, receiptId);
   const receipt = receiptObject
     ? // Live receipts are derived only from the refreshed persisted projection.
-      // No semantic command is rendered optimistically.
-      replayReceipt(data, view.records, receiptObject)
+      // No semantic command is rendered optimistically. The viewer rides along so
+      // the certify affordance can name a #102 self-verification refusal ahead of
+      // the server; the server still enforces it.
+      replayReceipt(data, view.records, receiptObject, {
+        viewer: { id: view.viewer.id, kind: view.viewer.kind },
+      })
     : undefined;
   const acceptedActiveIds = new Set(
     data.objects
@@ -571,6 +575,20 @@ export function LiveRoomSession({ data, viewerId }: { data: ReplayData; viewerId
           onRetypeToClaim: (objectId) =>
             clientRef.current?.correctObject(roomId, objectId, 'retype', { toType: 'claim' }),
           onReopen: (objectId) => clientRef.current?.correctObject(roomId, objectId, 'reopen'),
+          // Certify a `~` claim → `✓ verified`. The one door: an `amend` whose
+          // patch sets `verification: 'verified'` (#102). The reducer refuses a
+          // self-verifying claimant/stager and a machine; the command layer
+          // refuses the source-message author. A refusal comes back as a nack and
+          // surfaces in `error` — the covenant enforced, not bypassed.
+          onCertifyReceipt: (objectId) =>
+            clientRef.current?.correctObject(roomId, objectId, 'amend', {
+              patch: { verification: 'verified' },
+            }),
+          // Remove an accepted `~` reading — the correction retract path. Human-
+          // only server-side; the object is withdrawn from current state and kept
+          // on the append-only record (restorable), never erased.
+          onRemoveReceipt: (objectId) =>
+            clientRef.current?.correctObject(roomId, objectId, 'retract'),
           onAnswerReceipt: (objectId) => {
             const object = view.objects.find((candidate) => candidate.id === objectId);
             if (!object) return;

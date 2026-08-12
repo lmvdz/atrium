@@ -1048,6 +1048,24 @@ export interface ReceiptRecord {
   /** Explicit capability; a decision glyph alone does not grant authority. */
   readonly retypeable: boolean;
   readonly reopenable: boolean;
+  /**
+   * A `~` claim a human may CERTIFY — move to `✓ verified` (#102). Certification
+   * is a second pair of eyes: the covenant's `~`→`✓` promotion, gated server-side
+   * against self-verification. This flag says the SUBJECT qualifies (an accepted
+   * claim not yet `verified`); whether the VIEWER may is `certifyRefusal`, and
+   * whether an agent may is the viewer-kind gate in `ReceiptView` — never here.
+   */
+  readonly certifiable?: boolean;
+  /**
+   * If the viewer cannot certify this claim — they are its claimant, staged its
+   * reading, or authored a message it rests on — the reason, in the covenant's
+   * own words. Present ⇒ the certify affordance is disabled and states it. The
+   * server (#102) remains the authority; this only surfaces the refusal early and
+   * legibly, and never enables a certification the server would refuse.
+   */
+  readonly certifyRefusal?: string | null;
+  /** An accepted `~` reading (claim or open_question) a human may retract/remove. */
+  readonly removable?: boolean;
   readonly reopenNote: string;
 }
 

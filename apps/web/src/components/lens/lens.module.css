@@ -631,6 +631,18 @@
   line-height: 1.4;
 }
 
+/* the covenant, said before the click that commits it — a person is about to put
+   their name on a sentence, or withdraw one the room accepted */
+.rcCovenantPrompt {
+  color: var(--tx1);
+}
+
+/* #102 surfaced honestly: why THIS reader may not certify THIS claim. Amber, the
+   reserved "a gate is waiting on a human" hue — the gate is another member */
+.rcCovenantRefusal {
+  color: var(--amb);
+}
+
 .rcAccept,
 .rcAccept label {
   display: inline-flex;

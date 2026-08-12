@@ -968,7 +968,11 @@ export interface RealtimeClient {
   correctObject: (
     roomId: string,
     objectId: string,
-    action: 'retype' | 'amend' | 'reattribute' | 'reject' | 'reopen',
+    // The core/server `CorrectionAction` enum (packages/core/src/events.ts) — the
+    // wire validator this string is checked against. `retract` withdraws an
+    // accepted reading; `amend {verification:'verified'}` is the #102-gated verify
+    // act. Both reach here now that the live route exposes certify + remove.
+    action: 'retype' | 'amend' | 'reattribute' | 'reject' | 'reopen' | 'retract',
     options?: {
       patch?: Record<string, unknown>;
       toType?: 'decision' | 'commitment' | 'open_question' | 'claim' | 'objective' | null;
