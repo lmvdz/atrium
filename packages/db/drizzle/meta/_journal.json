@@ -127,6 +127,13 @@
       "when": 1786358400002,
       "tag": "0017_an_identified_agent_may_be_a_member",
       "breakpoints": true
+    },
+    {
+      "idx": 18,
+      "version": "7",
+      "when": 1786358400003,
+      "tag": "0018_an_unknown_principal_kind_fails_closed",
+      "breakpoints": true
     }
   ]
 }

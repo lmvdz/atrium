@@ -33,6 +33,7 @@ import { canonicalJson } from './state.js';
  * | **Decisions never auto-accept**                          | human   | **here**  |
  * | A claim becomes `verified`                               | human   | **here**  |
  * | Supersession, split by the type being retired            | per policy | **here** |
+ * | **Retiring anything a person has confirmed** (#95, r2)   | human   | **here**  |
  * | **Corrections (amend / retract / restore / …)**          | human   | **here**  |
  * | **Acceptance citing no proposal at all**                 | human   | **here**  |
  * | **Declaring a question answered**                        | human   | **here**  |
@@ -151,6 +152,43 @@ export type HumanOnlyGate =
   | 'claim_verification'
   /** `supersedes` pointed at a type the supersession policy reserves to people. */
   | 'supersession'
+  /**
+   * `supersedes` pointed at an object a **person has already touched**,
+   * whatever its type. **#95, #96 r2.**
+   *
+   * The gate above keys on the *type* being retired, which is #4's split and is
+   * the whole of what the reducer asked until now. #90's audit found what that
+   * leaves standing once a machine can hold an account: `decideSupersession`
+   * says a claim and an open question `auto_accept`, so an authenticated agent
+   * could retire a claim **a person had accepted** — a `✓` deleted on a
+   * machine's word, which is the covenant read backwards. Both foreign-lineage
+   * critics found it independently and this build's own authority matrix pinned
+   * it as correct.
+   *
+   * #95 decided the rule this enforces, and it is a *relation* rule rather than
+   * a type rule: **a non-human may never retire anything
+   * `epistemicStateOf(record) === 'confirmed'`.** Kind answers *may this species
+   * certify at all*; the epistemic state answers *has a person already put their
+   * name to this one*. Both must pass.
+   *
+   * It is deliberately the narrow interim of #95's table — #102 owns the full
+   * relation matrix (who verified, who stated, who owns). This is the one row
+   * that had to land here, because #96 is what first gives a machine a session
+   * to retire from.
+   *
+   * Ordered *after* `supersession` on purpose: a machine retiring a confirmed
+   * decision is refused by the type rule and hears the type rule's reason, which
+   * is the more specific answer. This one fires on exactly the cells the type
+   * table calls `auto_accept` — a confirmed claim and a confirmed open question
+   * — which are exactly the cells that were open.
+   *
+   * What stays open, and must: a machine may still retire an **unconfirmed**
+   * claim or open question, which is one reading replacing an older one with no
+   * person's word destroyed. And it may always draft a superseding reading and
+   * let a person retire the old one. That is the covenant's left-hand side and
+   * nothing here narrows it.
+   */
+  | 'confirmed_supersession'
   /** An `answers` edge — declaring a question settled. */
   | 'answer_relation'
   /** `object_corrected`, every verb. */
@@ -274,6 +312,8 @@ export function humanOnlyRefusal(
       return `${subject} would become a verified claim on ${a} ${kind} actor's word — only a human may move a claim to "verified"; ${a} ${kind} actor may accept it as unverified or disputed`;
     case 'supersession':
       return `${subject} retires an accepted ${retiredType ?? 'object'} on ${a} ${kind} actor's word — ${retiredType ? decideSupersession(retiredType).reason : 'this type needs a human'}; ${a} ${kind} actor may propose the replacement and let a person retire it`;
+    case 'confirmed_supersession':
+      return `${subject} retires an object a person has already confirmed, on a ${kind} actor's word — a non-human may never retire anything the room has confirmed (#95), whatever its type: the ✓ is a person's judgement and unmaking it is the same act as making it; a ${kind} actor may draft a superseding reading (~) and let a person retire the old one`;
     case 'answer_relation':
       return `${subject} declares an open question answered on ${a} ${kind} actor's word — only a human may bind an answer (#4: a decision reaches the room through answer-binding or an explicit accept, never through inference); ${a} ${kind} actor may propose the answer and let a person bind it`;
     case 'correction':

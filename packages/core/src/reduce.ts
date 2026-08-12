@@ -19,6 +19,10 @@ import { type Actor, instantKey } from './common.js';
 // from `./corrections.js` is therefore re-pointed, not dropped — same binding,
 // its new home, one line up.
 import { retypeCarryOver } from './corrections.js';
+// The `~`/`✓` predicate itself, not a second reading of it: the supersession
+// gate below refuses a machine retiring what the room is shown as confirmed, so
+// it has to ask the same function the glyph is rendered from.
+import { epistemicStateOf } from './epistemic.js';
 import { type AuthoredEvent, CoreEvent, type TrustedContext } from './events.js';
 import { normalizeForReceipt } from './matching.js';
 import {
@@ -1766,6 +1770,32 @@ function applyRelationAdded(
         state,
         event.id,
         humanOnlyRefusal('supersession', actor, `relation "${relation.id}"`, retired),
+      );
+      return false;
+    }
+    // …and the rule the type table cannot express, because it is not about the
+    // type. #95: **a non-human may never retire anything a person has already
+    // confirmed.** `decideSupersession` calls a claim and an open question
+    // `auto_accept` — cheap to correct, one reading replacing another — and that
+    // reading is right for a `~`. It is wrong for a `✓`: a person accepted that
+    // sentence, and unmaking a person's judgement is the same act as making one.
+    //
+    // Harmless while every non-human was anonymous and could not hold a room
+    // membership. #96 gives a machine a session, and both of that round's blind
+    // critics walked an authenticated agent straight through here to retire
+    // human-accepted claims and open questions. The matrix in
+    // `authority-matrix.test.ts` asserted that was correct.
+    //
+    // `epistemicStateOf` is the predicate the product renders `✓` from — one
+    // definition, so the thing a room is shown and the thing this refuses cannot
+    // drift into two answers. #90's audit asked for exactly this check and this
+    // is where it became a product consumer of `epistemic.ts` rather than a
+    // renderer's private opinion.
+    if (!isHuman(actor) && epistemicStateOf(target) === 'confirmed') {
+      fail(
+        state,
+        event.id,
+        humanOnlyRefusal('confirmed_supersession', actor, `relation "${relation.id}"`, retired),
       );
       return false;
     }

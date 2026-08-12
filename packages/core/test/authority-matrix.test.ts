@@ -120,6 +120,12 @@ const GATES = {
   claim_verification: 'would become a verified claim',
   direct_acceptance: 'only a human may accept an object directly',
   supersession: 'retires an accepted',
+  // #95, #96 r2. A second supersession gate, on the other axis: the one above
+  // asks what TYPE is being retired, this one asks whether a person has already
+  // put their name to THIS ONE. The markers have no overlap, so a cell that
+  // reaches the wrong one is a failing cell rather than a silently satisfied
+  // assertion.
+  confirmed_supersession: 'retires an object a person has already confirmed',
   answer_relation: 'declares an open question answered',
   correction: 'corrections (amend, retract, restore)',
   // #4's sentence has two halves and so does the correction gate: a name
@@ -175,7 +181,22 @@ const FLOOR: Record<AcceptedObjectType, number> = {
   objective: Number.POSITIVE_INFINITY,
 };
 
-/** Supersession authority, restated from #4's split by what is retired. */
+/**
+ * Supersession authority, restated from #4's split by what is retired.
+ *
+ * **This table is only half of the rule, and until #96 r2 the matrix behaved as
+ * though it were all of it.** `claim: false` and `open_question: false` are #4's
+ * words and they are right about the *type*: retiring a reading is cheap to
+ * correct. What the two `false`s said, cell for cell, was that an authenticated
+ * agent may retire a claim a **person accepted** — and a passing test asserting
+ * that is exactly the class this repository's own rules warn about. Both of
+ * #96's blind critics found it, from opposite lineages, in the source rather
+ * than here.
+ *
+ * The other half is `RETIRING_A_CONFIRMED_OBJECT_NEEDS_HUMAN` below. Both are
+ * restated from #4 and #95 rather than imported, like everything else in this
+ * oracle.
+ */
 const SUPERSESSION_NEEDS_HUMAN: Record<AcceptedObjectType, boolean> = {
   decision: true,
   commitment: true,
@@ -183,6 +204,33 @@ const SUPERSESSION_NEEDS_HUMAN: Record<AcceptedObjectType, boolean> = {
   claim: false,
   open_question: false,
 };
+
+/**
+ * #95's rule, restated: **a non-human may never retire anything the room has
+ * confirmed**, whatever the type table above says about its type.
+ *
+ * Not a `Record` because it is not keyed by type — that is the whole point of
+ * it. Kind answers *may this species certify at all*; this answers *has a person
+ * already put their name to this particular object*. Both must pass.
+ *
+ * And "confirmed" is restated here too, rather than read from `epistemicStateOf`
+ * — an object is confirmed once a person has accepted or corrected it. The cells
+ * below build the two states the only two ways the reducer allows: a human
+ * acceptance (confirmed) and a model acceptance of a cited proposal at θ
+ * (unconfirmed).
+ */
+const RETIRING_A_CONFIRMED_OBJECT_NEEDS_HUMAN = true;
+
+/**
+ * The types a machine can put on the board at all, so the only ones that have an
+ * unconfirmed state to be retired from.
+ *
+ * Everything else is human-only to accept (`FLOOR` is unreachable for three of
+ * them), so a machine-accepted decision, commitment or objective is not a thing
+ * this matrix can build — which is itself one of the rules above, and is why the
+ * enumeration below is not a plain cross-product.
+ */
+const MACHINE_MINTABLE: AcceptedObjectType[] = ['claim', 'open_question'];
 
 /**
  * Restated, not imported. One kind is a person; everything else is a machine,
@@ -337,16 +385,18 @@ function expectedForCorrection(actor: ActorKind): Gate | 'allowed' {
 function expectedForRelation(
   actor: ActorKind,
   kind: RelationKind,
-  retires: AcceptedObjectType | null,
+  retires: { type: AcceptedObjectType; confirmed: boolean } | null,
 ): Gate | 'allowed' {
   if (kind === 'answers' && !isHumanKind(actor)) return 'answer_relation';
-  if (
-    kind === 'supersedes' &&
-    retires !== null &&
-    SUPERSESSION_NEEDS_HUMAN[retires] &&
-    !isHumanKind(actor)
-  ) {
-    return 'supersession';
+  if (kind === 'supersedes' && retires !== null && !isHumanKind(actor)) {
+    // The type row first: it is the more specific answer, and a machine retiring
+    // a decision should hear "a decision needs the hand that accepted one"
+    // rather than the general rule.
+    if (SUPERSESSION_NEEDS_HUMAN[retires.type]) return 'supersession';
+    // Then #95's row, which is what the two `false`s above were leaving open.
+    if (RETIRING_A_CONFIRMED_OBJECT_NEEDS_HUMAN && retires.confirmed) {
+      return 'confirmed_supersession';
+    }
   }
   return 'allowed';
 }
@@ -1329,18 +1379,71 @@ describe('authority matrix — relation_added, every actor × kind × retired ty
       // at, so it is the only one enumerated over the target's type — and since
       // round 2 that enumeration has to cover the whole policy table, not just
       // the decision row of it.
-      const targets: AcceptedObjectType[] =
+      //
+      // **#96 r2 adds the second axis: the epistemic state of the thing being
+      // retired.** Every cell here used to build its target with a *human*
+      // acceptance, so every one of them retired a `✓` — and the ones the type
+      // table calls `auto_accept` asserted that a machine may unmake a person's
+      // judgement. One dimension, and it moves fifty cells from "allowed" to a
+      // refusal. The unconfirmed half is enumerated too, because the rule this
+      // closes is not "a machine may not supersede": a machine replacing its own
+      // `~` reading with a newer one is the covenant's left-hand side and has to
+      // stay open, which only a cell can prove.
+      const targets: { type: AcceptedObjectType; confirmed: boolean }[] =
         kind === 'supersedes'
-          ? ['decision', 'commitment', 'objective', 'claim', 'open_question']
-          : ['decision'];
+          ? (['decision', 'commitment', 'objective', 'claim', 'open_question'] as const).flatMap(
+              (type) => [
+                { type, confirmed: true },
+                // Only where a machine can mint one at all — see MACHINE_MINTABLE.
+                ...(MACHINE_MINTABLE.includes(type) ? [{ type, confirmed: false }] : []),
+              ],
+            )
+          : [{ type: 'decision' as AcceptedObjectType, confirmed: true }];
 
       for (const target of targets) {
-        it(`${actor} adds "${kind}"${kind === 'supersedes' ? ` retiring a ${target}` : ''}`, () => {
-          const suffix = `${actor}_${kind}_${target}`;
-          const fromType: AcceptedObjectType = kind === 'answers' ? 'open_question' : target;
-          const toType: AcceptedObjectType = kind === 'answers' ? 'decision' : target;
+        const label = `${actor} adds "${kind}"${kind === 'supersedes' ? ` retiring ${target.confirmed ? 'a confirmed' : 'an unconfirmed'} ${target.type}` : ''}`;
+        it(label, () => {
+          const suffix = `${actor}_${kind}_${target.type}_${target.confirmed ? 'c' : 'u'}`;
+          const fromType: AcceptedObjectType = kind === 'answers' ? 'open_question' : target.type;
+          const toType: AcceptedObjectType = kind === 'answers' ? 'decision' : target.type;
           const fromId = `obj_from_${suffix}`;
           const toId = `obj_to_${suffix}`;
+
+          // The object being retired, in the state the cell names.
+          //
+          //  - confirmed: a person accepted it outright, which is the one act
+          //    that makes an object the room's word rather than a reading.
+          //  - unconfirmed: a model staged a reading and accepted its own at θ,
+          //    which is the only route to an object no person has touched. It
+          //    needs the receipt window and a proposal, so it is two events.
+          const retiredProposalId = `prop_t_${suffix}`;
+          const retiredSetup: AuthoredEvent[] = target.confirmed
+            ? [
+                acceptEvent({
+                  id: `t_${suffix}`,
+                  objectId: toId,
+                  type: toType,
+                  actor: 'human',
+                  proposalId: null,
+                  setup: true,
+                }),
+              ]
+            : [
+                proposalEvent({
+                  id: retiredProposalId,
+                  type: toType,
+                  proposer: 'model_a',
+                  confidence: 0.95,
+                  recordedBy: 'model_proposer',
+                }),
+                acceptEvent({
+                  id: `t_${suffix}`,
+                  objectId: toId,
+                  type: toType,
+                  actor: 'model_proposer',
+                  proposalId: retiredProposalId,
+                }),
+              ];
 
           const events: AuthoredEvent[] = [
             acceptEvent({
@@ -1351,14 +1454,7 @@ describe('authority matrix — relation_added, every actor × kind × retired ty
               proposalId: null,
               setup: true,
             }),
-            acceptEvent({
-              id: `t_${suffix}`,
-              objectId: toId,
-              type: toType,
-              actor: 'human',
-              proposalId: null,
-              setup: true,
-            }),
+            ...retiredSetup,
             row(
               {
                 id: `ev_rel_${suffix}`,
@@ -1381,10 +1477,23 @@ describe('authority matrix — relation_added, every actor × kind × retired ty
           ];
 
           const state = reduce(events);
+          // The setup has to have produced both objects, or a refusal below
+          // would be the setup failing rather than the rule firing — which is
+          // how a matrix cell quietly stops testing anything.
+          expect(Object.keys(state.objects).sort()).toEqual([fromId, toId].sort());
+
           const expected = expectedForRelation(actor, kind, kind === 'supersedes' ? target : null);
           expect(verdictOf(state, `ev_rel_${suffix}`)).toBe(expected);
           expect(state.relations.map((relation) => relation.id)).toEqual(
             expected === 'allowed' ? [`rel_${suffix}`] : [],
+          );
+          // And the fold, not the verdict: a refused supersession leaves the
+          // object standing. `issues: []` with the row already retired is the
+          // shape this round is closing.
+          const retiredRecord = state.objects[toId];
+          if (!retiredRecord) throw new Error('setup did not produce the retired object');
+          expect(retiredRecord.supersededById).toBe(
+            expected === 'allowed' && kind === 'supersedes' ? fromId : null,
           );
         });
       }

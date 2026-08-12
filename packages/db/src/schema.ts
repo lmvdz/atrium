@@ -191,6 +191,15 @@ export const eventType = pgEnum('event_type', [
  * `users.principal_kind` for the id in `actor_id` and refuses a row whose
  * `actor_kind` disagrees with it, so an agent's session cannot append history
  * that reads as a person's, nor the reverse.
+ *
+ * **Which of these labels is an *identity* is not written down anywhere as a
+ * list** (drizzle/0018). The append boundary derives the identified set from the
+ * `principal_kind` enum below — a label that names a `users` row is checked for
+ * membership and kind agreement, `model` and `system` are the two enumerated
+ * exemptions, and a label that is neither is refused outright. So adding a value
+ * here does not silently exempt it from the boundary the way it did while 0017
+ * spelled the set as `IN ('human','agent')`; it fails closed at the first
+ * append, which is the only direction this gate may fail in.
  */
 export const actorKind = pgEnum('actor_kind', ['human', 'agent', 'model', 'system']);
 
@@ -249,6 +258,14 @@ export const users = pgTable(
      * UPDATE trigger (drizzle/0017) refuses any change, because changing it
      * would silently re-read every `core_events` row this identity ever
      * appended as having been written by the other sort of participant.
+     *
+     * "Never afterwards" is a property of the **row**, and until drizzle/0018 it
+     * was only a property of the UPDATE statement: delete the row and insert the
+     * same uuid under the other kind and the trigger never fired, while the
+     * re-attribution it exists to prevent happened in full. A BEFORE INSERT
+     * companion (`users_principal_kind_matches_history`) now refuses a row whose
+     * kind disagrees with what that uuid has already appended, so the two
+     * triggers together bind every route that leaves history behind.
      *
      * Exposed to Better Auth as a user `additionalField` with `input: false`
      * (`auth-schema.ts`), so it rides on the session the library already
@@ -859,6 +876,17 @@ export const coreEvents = pgTable(
     ),
     check('core_events_actor_id_not_blank', sql`${t.actorId} IS NULL OR length(${t.actorId}) > 0`),
     index('core_events_actor_idx').on(t.actorKind, t.actorId),
+    /**
+     * "Anything at all under this uuid, of any kind" — which the composite index
+     * above cannot answer without a scan, because `actor_kind` leads it.
+     *
+     * Its one caller is `atrium_users_principal_kind_matches_history`
+     * (drizzle/0018), which runs on every `users` INSERT and asks exactly that
+     * question: has this uuid already appended history as the other sort of
+     * participant? Without this index that guard turns each signup into a
+     * sequential scan of the ledger.
+     */
+    index('core_events_actor_id_idx').on(t.actorId),
   ],
 );
 

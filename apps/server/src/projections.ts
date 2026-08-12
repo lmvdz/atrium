@@ -1,4 +1,10 @@
-import type { AcceptedObject, Actor, CoreState, Relation } from '@atrium/core';
+import {
+  type AcceptedObject,
+  type Actor,
+  actorUserId,
+  type CoreState,
+  type Relation,
+} from '@atrium/core';
 import {
   acceptedObjects,
   attentionItems,
@@ -124,6 +130,17 @@ type EventOf<T extends RoomEvent['type']> = Extract<RoomEvent, { type: T }>;
  * worse falsehood than an unattributed row. The two land together, in the ticket
  * that gives the renderer a kind to read; this function is where that ticket
  * starts, and it does not start here.
+ *
+ * ## What this function is NOT for, learned the expensive way
+ *
+ * It answers "which person", so every caller must be asking that question.
+ * `projectAttentionResolved` was calling it to answer "**whose** item is this",
+ * which is a question about *ownership*, and ownership is not a thing only
+ * people have. Getting `null` back, it dropped the owner predicate from its
+ * UPDATE and resolved anybody's item — a wildcard, from a gate. It asks
+ * `actorUserId` now; see the note there. If a call site here means "which
+ * identity", it is the wrong function, and the two only look interchangeable
+ * because for every actor kind that existed before `agent` they agreed.
  */
 function humanId(actor: Actor): string | null {
   return actor.kind === 'human' ? actor.userId : null;
@@ -489,7 +506,42 @@ async function projectAttentionResolved(
   { tx, roomId, actor }: ProjectionContext<RoomEvent>,
   event: EventOf<'attention_resolved'>,
 ): Promise<void> {
-  const owner = humanId(actor);
+  // ── Whose item, and the wildcard that used to be here ─────────────────────
+  //
+  // **#96 r2, finding 2 — both blind critics, independently.** This read
+  // `humanId(actor)`, and a null owner *dropped the `userId` predicate from the
+  // UPDATE altogether*. While every non-human was anonymous that branch was
+  // unreachable in practice; the moment an agent holds a session and a room
+  // membership — which is what #96 is — it became a live wildcard: one
+  // `resolve_attention` frame from an agent member dismissed **anybody's**
+  // Needs-you item, and the ack came back clean.
+  //
+  // The rule is now the one the command always meant: **an actor may resolve
+  // only attention it owns.** It is scoped by identity rather than by humanity,
+  // because owning an attention item is not a thing only people do — an agent is
+  // an attention target (`attention_items.user_id` is a `users` id, and an agent
+  // has one) and resolving its own routed work is ordinary participation, which
+  // is why the command layer leaves `resolve_attention` open to it.
+  //
+  // `actorUserId` is @atrium/core's "does this actor have an identity" predicate,
+  // deliberately not `humanId`: this is the one place in this file where the two
+  // questions differ and the identity one is the right one. Every other call
+  // site here writes a `decided_by` / `accepted_by` / `by_user_id` column, which
+  // means "the person whose judgement this was" and stays `humanId`.
+  //
+  // An **anonymous** actor is refused outright rather than falling through to a
+  // wildcard. A `model` or `system` actor owns nothing here — there is no
+  // `attention_items` row that could point at it — so the honest answer is that
+  // it has no item to resolve, not that it may resolve every one. That is the
+  // fail-closed direction, and it is what the null branch should always have
+  // said.
+  const owner = actorUserId(actor);
+  if (owner === null) {
+    throw new CommandError(
+      'invalid',
+      `a ${actor.kind} actor carries no identity and so owns no attention item; "${event.attentionId}" in room "${roomId}" belongs to somebody, and only its owner may resolve it`,
+    );
+  }
   const touched = await tx
     .update(attentionItems)
     .set({ status: event.status, resolvedAt: new Date(event.at) })
@@ -497,14 +549,14 @@ async function projectAttentionResolved(
       and(
         eq(attentionItems.id, event.attentionId),
         eq(attentionItems.roomId, roomId),
-        ...(owner === null ? [] : [eq(attentionItems.userId, owner)]),
+        eq(attentionItems.userId, owner),
       ),
     )
     .returning({ id: attentionItems.id });
   if (touched.length === 0) {
     throw new CommandError(
       'invalid',
-      `no pending attention item "${event.attentionId}" for this person in room "${roomId}"`,
+      `no pending attention item "${event.attentionId}" for this actor in room "${roomId}"`,
     );
   }
 }

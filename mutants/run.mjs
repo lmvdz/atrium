@@ -106,7 +106,27 @@ const suiteFilter = args.includes('--suite') ? args[args.indexOf('--suite') + 1]
 
 const ledger = JSON.parse(readFileSync(LEDGER, 'utf8'));
 let mutants = ledger.mutants;
-if (only) mutants = mutants.filter((m) => m.id === only);
+/**
+ * `--only` takes one id or a comma-separated list.
+ *
+ * A list rather than repeated invocations, because the runner establishes a
+ * **baseline suite run** before any mutation and refuses to proceed if it is not
+ * green. Running N mutants as N invocations therefore pays for N baselines, and
+ * a fix round that touches a dozen mutants pays forty minutes to re-measure the
+ * same green suite twelve times. One invocation, one baseline, N mutations — the
+ * per-mutant measurement is identical either way, and each is still applied and
+ * restored on its own.
+ */
+if (only) {
+  const wanted = only.split(',').map((id) => id.trim());
+  const known = new Set(mutants.map((m) => m.id));
+  const missing = wanted.filter((id) => !known.has(id));
+  if (missing.length > 0) {
+    console.error(`no mutant with id ${missing.map((id) => `"${id}"`).join(', ')}`);
+    process.exit(1);
+  }
+  mutants = mutants.filter((m) => wanted.includes(m.id));
+}
 if (suiteFilter) mutants = mutants.filter((m) => m.suite === suiteFilter);
 if (mutants.length === 0) {
   console.error(only ? `no mutant with id "${only}"` : 'nothing selected');

@@ -9,13 +9,14 @@ import {
 import type { DatabaseHandle } from '@atrium/db';
 import {
   acceptedObjects,
+  attentionItems,
   coreEvents,
   memberships,
   messages,
   users,
   workspaceMembers,
 } from '@atrium/db';
-import { and, eq } from 'drizzle-orm';
+import { and, eq, sql } from 'drizzle-orm';
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it } from 'vitest';
 import type { CommandInput } from '../../apps/server/src/commands.js';
 import { createLogger } from '../../apps/server/src/logger.js';
@@ -361,9 +362,18 @@ describe('the certify boundary, against a session-borne non-human', () => {
      * subscribed, fully provisioned room member that happens not to be a person —
      * which is the configuration #90 calls campaign-stopping if it is wrong.
      *
-     * Judged on `accepted_objects` and on the ack's `issues`, in that order: the
-     * refusal convention here is an `ack` with a non-empty `issues` array, so a
-     * test that read only the frame type would call this a success.
+     * ## The shape of the refusal changed in #96 r2, and the change is the point
+     *
+     * This used to assert an `ack` carrying one issue — the reducer's verdict,
+     * folded. That verdict was right and the shape was wrong: the `core_events`
+     * row was **still inserted**, and the frame that came back said `ack`. #96's
+     * gauntlet: *"'writes nothing' is overstated"*. A certification by a machine
+     * is refused at the command layer now, before the append, so what lands is
+     * nothing at all and what comes back is a `nack`.
+     *
+     * Judged in three places, in this order: the object table (was anything
+     * certified), the ledger (was anything written at all), and only then the
+     * frame. The first two are facts; the third is a claim about them.
      */
     const agent = await agentInTheRoom();
     const person = await personInTheRoom();
@@ -403,13 +413,77 @@ describe('the certify boundary, against a session-borne non-human', () => {
     // The fold first: nothing was certified.
     expect(await handle.db.select().from(acceptedObjects)).toEqual([]);
 
-    // Then the reason, which must be the humanity gate rather than a membership
-    // miss or a malformed frame — an agent IS a member, and this refusal has to
-    // come from what it is, not from where it is.
-    const issues = issuesOf(attempt);
-    expect(issues).toHaveLength(1);
-    expect(issues[0]).toContain('a decision never auto-accepts');
-    expect(issues[0]).toContain('an agent actor');
+    // Then the ledger: no durable row for the attempt either. This is the
+    // assertion the old version could not make — `object_accepted` was in this
+    // list, refused, and history all the same.
+    expect((await actorRows()).map((row) => row.type)).toEqual(['proposal_recorded']);
+
+    // Then the frame, and the reason, which must be the humanity gate rather
+    // than a membership miss or a malformed frame — an agent IS a member, and
+    // this refusal has to come from what it is, not from where it is.
+    expect(attempt.type).toBe('nack');
+    const said = JSON.stringify(attempt);
+    expect(said).toContain('accept_proposal');
+    expect(said).toContain('is a certification');
+    expect(said).toContain('agent principal');
+    expect(said).toContain('may draft a reading');
+  });
+
+  /**
+   * Every command a machine may not perform, driven from a real agent session,
+   * asserted on the ledger rather than on the ack.
+   *
+   * **#96 r2, finding 3.** The list is `certificationClassOf`'s `'certifies'`
+   * row, and the reason it is a list here rather than one example is that the
+   * finding was never about `accept_proposal` in particular — it was that the
+   * refusal ran as a *fold* for the whole class, so each of these wrote a
+   * `core_events` row and acked. `answer_message` and `supersede_object` already
+   * carried `requireClean: true` and so aborted their batches; `accept_proposal`,
+   * `correct`, `answer_bind` and `reject_proposal` did not.
+   *
+   * Catches: `certificationClassOf` returning `'open'` for any of these, and the
+   * gate in `execute` being removed or moved below the append.
+   */
+  it('refuses every certification-class command from an agent, before anything is appended', async () => {
+    const agent = await agentInTheRoom();
+    const scribe = await connectWithCookie(agent.userId, agent.session.cookie);
+    await scribe.subscribe(room.roomId);
+
+    // Ids that do not exist: the point is that the refusal comes BEFORE
+    // anything is looked up, so a command naming nothing real must still be
+    // refused for being a certification rather than for being unresolvable. A
+    // test using real ids could not tell the two apart.
+    const nowhere = randomUUID();
+    const certifying: CommandInput[] = [
+      { name: 'accept_proposal', roomId: room.roomId, proposalId: nowhere },
+      { name: 'reject_proposal', roomId: room.roomId, proposalId: nowhere },
+      { name: 'correct', roomId: room.roomId, objectId: nowhere, action: 'retract' },
+      {
+        name: 'answer_bind',
+        roomId: room.roomId,
+        questionId: nowhere,
+        answerObjectId: nowhere,
+      },
+      {
+        name: 'answer_message',
+        roomId: room.roomId,
+        questionId: nowhere,
+        body: 'the answer is yes',
+        clientMessageId: randomUUID(),
+        attachments: [],
+      },
+    ] as unknown as CommandInput[];
+
+    for (const command of certifying) {
+      const attempt = await scribe.command(command);
+      expect(attempt.type, `${command.name} must be a hard refusal`).toBe('nack');
+      expect(JSON.stringify(attempt)).toContain('is a certification');
+    }
+
+    // The whole point, and the assertion the old shape could not make: five
+    // refused certifications and not one row of history.
+    expect(await actorRows()).toEqual([]);
+    expect(await handle.db.select().from(acceptedObjects)).toEqual([]);
   });
 
   it('refuses an agent’s attempt to stage a proposal rather than recording it as a person’s', async () => {
@@ -464,6 +538,327 @@ describe('the certify boundary, against a session-borne non-human', () => {
       const ack = await client.command(command);
       expect(issuesOf(ack), `${command.name} should be open to an agent`).toEqual([]);
     }
+  });
+});
+
+/**
+ * **#96 r2, finding 2** — both blind critics, independently, ship-blocking.
+ *
+ * `projectAttentionResolved` scoped its UPDATE with `humanId(actor)`, and a null
+ * owner **dropped the owner predicate entirely**. Every non-human was anonymous
+ * until #96, so that branch had no live caller; the moment an agent holds a
+ * session and a room membership it is a wildcard, and `resolve_attention` is
+ * deliberately open to an agent (it is participation, not certification), so the
+ * wildcard is reachable from an ordinary authenticated socket.
+ *
+ * Three cases, because the rule has three sides and only asserting the refusal
+ * would be satisfied by refusing an agent everything: somebody else's item is
+ * refused, its own item works, and the item somebody else owns is *still there*
+ * afterwards.
+ */
+describe('attention resolves by ownership, not by humanity', () => {
+  /**
+   * A pending item belonging to `targetId`, made the way the product makes one:
+   * `sender` posts a message that mentions them.
+   *
+   * Through the real path rather than an INSERT, because an item this test
+   * fabricated could carry a shape the product never produces — and the routing
+   * side of attention is exactly what the owner predicate is scoping.
+   */
+  async function pendingItemFor(sender: TestClient, targetId: string): Promise<string> {
+    const surface = '@you';
+    const body = `${surface} could you take a look`;
+    const ack = await sender.command({
+      name: 'send_message',
+      roomId: room.roomId,
+      body,
+      references: [{ ordinal: 0, kind: 'human', targetId, start: 0, end: surface.length, surface }],
+    } as unknown as CommandInput);
+    expect(issuesOf(ack)).toEqual([]);
+    const rows = await handle.db
+      .select({ id: attentionItems.id })
+      .from(attentionItems)
+      .where(and(eq(attentionItems.roomId, room.roomId), eq(attentionItems.userId, targetId)));
+    expect(rows, 'the mention must have routed exactly one item').toHaveLength(1);
+    return (rows[0] as { id: string }).id;
+  }
+
+  const statusOf = async (id: string) => {
+    const [row] = await handle.db
+      .select({ status: attentionItems.status })
+      .from(attentionItems)
+      .where(eq(attentionItems.id, id));
+    return (row as { status: string } | undefined)?.status;
+  };
+
+  it('refuses an agent resolving a person’s attention item, and leaves it pending', async () => {
+    const agent = await agentInTheRoom();
+    const person = await personInTheRoom();
+    const scribe = await connectWithCookie(agent.userId, agent.session.cookie);
+    await scribe.subscribe(room.roomId);
+    // The agent mentions the person, which routes an item to THEM. Posting is
+    // open to an agent; resolving what the post created is not its to resolve.
+    const theirs = await pendingItemFor(scribe, person.userId);
+
+    const attempt = await scribe.command({
+      name: 'resolve_attention',
+      roomId: room.roomId,
+      attentionId: theirs,
+      status: 'dismissed',
+    } as CommandInput);
+
+    // The fold first, and it is the whole finding: before this fix the UPDATE
+    // matched and this row read `dismissed`.
+    expect(await statusOf(theirs)).toBe('pending');
+    // The projection throws, which aborts the append transaction, so there is no
+    // ledger row either — the same "nothing durable" property the certification
+    // gate has, arrived at by a different route.
+    expect(attempt.type).toBe('nack');
+    expect((await actorRows()).filter((row) => row.type === 'attention_resolved')).toEqual([]);
+  });
+
+  it('lets an agent resolve its own — the half a refuse-everything fix would break', async () => {
+    const agent = await agentInTheRoom();
+    const person = await personInTheRoom();
+    const scribe = await connectWithCookie(agent.userId, agent.session.cookie);
+    await scribe.subscribe(room.roomId);
+    const human = await connectWithCookie(person.userId, person.session.cookie);
+    await human.subscribe(room.roomId);
+
+    const mine = await pendingItemFor(human, agent.userId);
+    const theirs = await pendingItemFor(scribe, person.userId);
+
+    const ack = await scribe.command({
+      name: 'resolve_attention',
+      roomId: room.roomId,
+      attentionId: mine,
+      status: 'resolved',
+    } as CommandInput);
+
+    expect(issuesOf(ack)).toEqual([]);
+    expect(await statusOf(mine)).toBe('resolved');
+    // And it touched exactly one row: the wildcard would have taken both.
+    expect(await statusOf(theirs)).toBe('pending');
+  });
+
+  it('scopes a person the same way it always did — the behaviour that must not move', async () => {
+    const alice = await personInTheRoom('alice');
+    const bob = await personInTheRoom('bob');
+    const client = await connectWithCookie(alice.userId, alice.session.cookie);
+    await client.subscribe(room.roomId);
+    const other = await connectWithCookie(bob.userId, bob.session.cookie);
+    await other.subscribe(room.roomId);
+
+    const hers = await pendingItemFor(other, alice.userId);
+    const his = await pendingItemFor(client, bob.userId);
+
+    expect(
+      issuesOf(
+        await client.command({
+          name: 'resolve_attention',
+          roomId: room.roomId,
+          attentionId: hers,
+        } as CommandInput),
+      ),
+    ).toEqual([]);
+    expect(await statusOf(hers)).toBe('resolved');
+
+    const trespass = await client.command({
+      name: 'resolve_attention',
+      roomId: room.roomId,
+      attentionId: his,
+    } as CommandInput);
+    expect(trespass.type).toBe('nack');
+    expect(await statusOf(his)).toBe('pending');
+  });
+});
+
+/**
+ * **#96 r2, finding 1** — both blind critics, ship-blocking, and the one this
+ * build's own authority matrix asserted was correct.
+ *
+ * `decideSupersession` puts `claim` and `open_question` in #4's auto-accept row,
+ * and the reducer human-gated only the rows that say `requires_human`. So an
+ * authenticated agent could retire a claim **a person had accepted** — a `✓`
+ * unmade on a machine's word. #95's decided rule: a non-human may never retire
+ * anything `epistemicStateOf(record) === 'confirmed'`.
+ *
+ * Driven end to end here rather than only in the reducer's own suite, because
+ * what made this reachable was the session, and a session is what this file has.
+ */
+describe('an agent may not retire what a person confirmed', () => {
+  /** A claim in the room, accepted by a person: a `✓`. */
+  async function confirmedClaim(person: { userId: string; session: { cookie: string } }) {
+    const client = await connectWithCookie(person.userId, person.session.cookie);
+    await client.subscribe(room.roomId);
+    const staged = await client.command({
+      name: 'record_proposal',
+      roomId: room.roomId,
+      proposal: {
+        type: 'claim',
+        payload: {
+          statement: 'The migration ran clean.',
+          claimant: person.userId,
+          verification: 'unverified',
+        },
+        confidence: 1,
+        provenance: [],
+        quote: null,
+        interpretationId: null,
+      },
+    } as unknown as CommandInput);
+    expect(issuesOf(staged)).toEqual([]);
+    const [recorded] = await handle.db
+      .select({ payload: coreEvents.payload })
+      .from(coreEvents)
+      .where(and(eq(coreEvents.roomId, room.roomId), eq(coreEvents.type, 'proposal_recorded')));
+    const proposalId = (recorded as { payload: { proposal: { id: string } } }).payload.proposal.id;
+    const accepted = await client.command({
+      name: 'accept_proposal',
+      roomId: room.roomId,
+      proposalId,
+    } as CommandInput);
+    expect(issuesOf(accepted)).toEqual([]);
+    const rows = await handle.db
+      .select({ id: acceptedObjects.id, acceptedBy: acceptedObjects.acceptedBy })
+      .from(acceptedObjects);
+    expect(rows).toHaveLength(1);
+    // The premise of the whole test, checked rather than assumed: this object is
+    // confirmed BECAUSE a person accepted it, which is what `acceptedBy` records.
+    expect((rows[0] as { acceptedBy: string | null }).acceptedBy).toBe(person.userId);
+    return { client, objectId: (rows[0] as { id: string }).id };
+  }
+
+  it('refuses an agent’s supersession of a human-accepted claim, and the claim stands', async () => {
+    const agent = await agentInTheRoom();
+    const person = await personInTheRoom();
+    const { client, objectId } = await confirmedClaim(person);
+
+    // A replacement, minted by the person, so the only thing under test is who
+    // may point the `supersedes` edge.
+    const replacement = await client.command({
+      name: 'record_proposal',
+      roomId: room.roomId,
+      proposal: {
+        type: 'claim',
+        payload: {
+          statement: 'The migration needed a retry.',
+          claimant: person.userId,
+          verification: 'unverified',
+        },
+        confidence: 1,
+        provenance: [],
+        quote: null,
+        interpretationId: null,
+      },
+    } as unknown as CommandInput);
+    expect(issuesOf(replacement)).toEqual([]);
+    const staged = await handle.db
+      .select({ payload: coreEvents.payload })
+      .from(coreEvents)
+      .where(and(eq(coreEvents.roomId, room.roomId), eq(coreEvents.type, 'proposal_recorded')))
+      // ORDER BY, because `.at(-1)` below means "the one staged last" and a
+      // SELECT with no ORDER BY has no last. Without it this picks whichever row
+      // the planner returned first and the test cites the already-accepted
+      // proposal — which it did, intermittently, before this line existed.
+      .orderBy(coreEvents.seq);
+    const secondProposal = (staged.at(-1) as { payload: { proposal: { id: string } } }).payload
+      .proposal.id;
+    expect(
+      issuesOf(
+        await client.command({
+          name: 'accept_proposal',
+          roomId: room.roomId,
+          proposalId: secondProposal,
+        } as CommandInput),
+      ),
+    ).toEqual([]);
+    const objects = await handle.db.select({ id: acceptedObjects.id }).from(acceptedObjects);
+    const replacementId = objects.map((row) => row.id).find((id) => id !== objectId) as string;
+
+    const scribe = await connectWithCookie(agent.userId, agent.session.cookie);
+    await scribe.subscribe(room.roomId);
+    const attempt = await scribe.command({
+      name: 'supersede_object',
+      roomId: room.roomId,
+      replacementObjectId: replacementId,
+      retiredObjectId: objectId,
+      clientSupersessionId: randomUUID(),
+    } as CommandInput);
+
+    // The fold: the claim is still live. Before this round it was retired, with
+    // `supersededById` set and the ack clean.
+    const [after] = await handle.db
+      .select({ superseded: acceptedObjects.supersededById })
+      .from(acceptedObjects)
+      .where(eq(acceptedObjects.id, objectId));
+    expect((after as { superseded: string | null }).superseded).toBeNull();
+
+    expect(attempt.type).toBe('nack');
+    const said = JSON.stringify(attempt);
+    expect(said).toContain('has been confirmed by a person');
+    expect(said).toContain('agent principal');
+    // And nothing durable: no `relation_added` row for the attempt.
+    expect((await actorRows()).filter((row) => row.type === 'relation_added')).toEqual([]);
+  });
+
+  it('lets the person retire it — the rule is about who, not about whether', async () => {
+    const person = await personInTheRoom();
+    const { client, objectId } = await confirmedClaim(person);
+    const second = await client.command({
+      name: 'record_proposal',
+      roomId: room.roomId,
+      proposal: {
+        type: 'claim',
+        payload: {
+          statement: 'The migration needed a retry.',
+          claimant: person.userId,
+          verification: 'unverified',
+        },
+        confidence: 1,
+        provenance: [],
+        quote: null,
+        interpretationId: null,
+      },
+    } as unknown as CommandInput);
+    expect(issuesOf(second)).toEqual([]);
+    const staged = await handle.db
+      .select({ payload: coreEvents.payload })
+      .from(coreEvents)
+      .where(and(eq(coreEvents.roomId, room.roomId), eq(coreEvents.type, 'proposal_recorded')))
+      // ORDER BY, because `.at(-1)` below means "the one staged last" and a
+      // SELECT with no ORDER BY has no last. Without it this picks whichever row
+      // the planner returned first and the test cites the already-accepted
+      // proposal — which it did, intermittently, before this line existed.
+      .orderBy(coreEvents.seq);
+    const secondProposal = (staged.at(-1) as { payload: { proposal: { id: string } } }).payload
+      .proposal.id;
+    expect(
+      issuesOf(
+        await client.command({
+          name: 'accept_proposal',
+          roomId: room.roomId,
+          proposalId: secondProposal,
+        } as CommandInput),
+      ),
+    ).toEqual([]);
+    const objects = await handle.db.select({ id: acceptedObjects.id }).from(acceptedObjects);
+    const replacementId = objects.map((row) => row.id).find((id) => id !== objectId) as string;
+
+    const ack = await client.command({
+      name: 'supersede_object',
+      roomId: room.roomId,
+      replacementObjectId: replacementId,
+      retiredObjectId: objectId,
+      clientSupersessionId: randomUUID(),
+    } as CommandInput);
+    expect(issuesOf(ack)).toEqual([]);
+
+    const [after] = await handle.db
+      .select({ superseded: acceptedObjects.supersededById })
+      .from(acceptedObjects)
+      .where(eq(acceptedObjects.id, objectId));
+    expect((after as { superseded: string | null }).superseded).toBe(replacementId);
   });
 });
 
@@ -574,6 +969,162 @@ describe('the database does not take the application’s word for the kind', () 
       .from(users)
       .where(eq(users.id, agent.userId));
     expect(row).toEqual({ name: 'scribe mk ii', kind: 'agent' });
+  });
+
+  /**
+   * **#96 r2, finding 4, second half.** `users_principal_kind_immutable` is a
+   * BEFORE UPDATE trigger, and the route around a BEFORE UPDATE trigger is not
+   * to update. Delete the row and insert the same uuid under the other kind and
+   * every `core_events` row that identity ever appended reads back as the other
+   * sort of participant — which is exactly what the trigger exists to prevent,
+   * reached by going around it.
+   *
+   * drizzle/0018 states the property the append boundary actually depends on,
+   * which is not about UPDATE at all: no `users` row may exist whose
+   * `principal_kind` disagrees with the `actor_kind` of anything that uuid has
+   * already appended.
+   *
+   * Catches: the BEFORE INSERT companion being dropped, and the mutant
+   * `principal_kind_survives_a_reinsert` in the root ledger.
+   */
+  it('refuses re-creating a deleted identity under the other kind — history is what it is checked against', async () => {
+    const agent = await agentInTheRoom();
+    const scribe = await connectWithCookie(agent.userId, agent.session.cookie);
+    await scribe.subscribe(room.roomId);
+    expect(
+      issuesOf(await scribe.command({ name: 'send_message', roomId: room.roomId, body: 'hello' })),
+    ).toEqual([]);
+    // The history that makes the uuid's kind a fact rather than a setting.
+    expect((await actorRows()).map((row) => row.kind)).toEqual(['agent']);
+
+    await scribe.close();
+    const email = `revived-${randomUUID()}@example.test`;
+    await handle.db.delete(users).where(eq(users.id, agent.userId));
+
+    const revived = await handle.db
+      .insert(users)
+      .values({
+        id: agent.userId,
+        email,
+        displayName: 'definitely a person',
+        emailVerified: true,
+        principalKind: 'human',
+      })
+      .then(
+        () => null,
+        (error: unknown) => error,
+      );
+    expect(revived, 'the reinsert under the other kind must be refused').not.toBeNull();
+    expect(describeDatabaseError(revived)).toMatch(/users_principal_kind_immutable/);
+    expect(describeDatabaseError(revived)).toMatch(/already appended history as a/);
+
+    // The control, and it matters: this is a guard on the DISAGREEMENT, not a
+    // ban on reusing a uuid. The same identity coming back as what it was is
+    // fine, because nothing it wrote is re-read as anything else.
+    await handle.db.insert(users).values({
+      id: agent.userId,
+      email,
+      displayName: 'scribe again',
+      emailVerified: true,
+      principalKind: 'agent',
+    });
+    const [back] = await handle.db
+      .select({ kind: users.principalKind })
+      .from(users)
+      .where(eq(users.id, agent.userId));
+    expect(back).toEqual({ kind: 'agent' });
+  });
+
+  /**
+   * **#96 r2, finding 4, first half.** 0017 opened the membership gate with
+   * `IF NEW."actor_kind"::text IN ('human','agent')`, which is a denylist wearing
+   * an allowlist's clothes: a sixth `actor_kind` is not *refused* by that line,
+   * it is not *reached* by it, and it appends durable history into any room with
+   * no membership check, no identity resolution and no kind agreement — silently.
+   *
+   * 0018 derives the identified set from `principal_kind` itself and refuses
+   * anything that is neither identified nor one of the two enumerated anonymous
+   * kinds. This asserts that against the two **deployed** enums rather than
+   * against the drizzle constants, because the drift that matters is SQL the
+   * TypeScript never sees (the same lesson `ledger-constraints.test.ts` records
+   * about `event_type`).
+   *
+   * It is a live-coverage assertion, and it is what goes red the day somebody
+   * adds a label: the union of `principal_kind` and the two anonymous kinds must
+   * be exactly `actor_kind`. An unclassified label makes this fail here rather
+   * than making the append boundary fail open there.
+   *
+   * ## The half that cannot be a committed test, and how it was measured
+   *
+   * The `ELSE` branch itself — an append by a kind nobody has classified — needs
+   * a sixth `actor_kind` to exist, and `ALTER TYPE … ADD VALUE` **cannot be
+   * undone**, so a test that added one would leak it into every later file in
+   * the run. `ledger-constraints.test.ts` records the same limit for
+   * `event_type` and answers it the same way: by hand, on a throwaway database,
+   * written down. #96 r2, both directions, same database and same probe:
+   *
+   *  1. `ALTER TYPE public.actor_kind ADD VALUE 'probe_unclassified'`, a real
+   *     workspace and room, then `atrium_append_core_event(...)` through the real
+   *     function (a direct INSERT proves nothing — `core_events_append_guard`
+   *     refuses it first, for a different reason).
+   *  2. With **0017's spelling** deployed (restored from the
+   *     `identified_set_is_a_denylist_again` mutant): **APPENDED.** Durable
+   *     history in a real room, from a kind with no membership, no identity and
+   *     no agreement check — nothing raised anywhere.
+   *  3. With **0018's spelling** restored, same probe, same database:
+   *     **REFUSED**, `actor_kind "probe_unclassified" is neither an identity …
+   *     nor one of the anonymous kinds`.
+   *
+   * The database was then destroyed, because it now carries a label that cannot
+   * be removed. What stays committed is the coverage assertion below, which is
+   * what turns "somebody added a label" into a red test before it can become a
+   * silent exemption.
+   */
+  it('classifies every deployed actor_kind as identified or anonymous, with nothing left over', async () => {
+    const labelsOf = async (type: string): Promise<string[]> => {
+      const rows = await handle.db.execute(
+        sql`SELECT en.enumlabel::text AS label
+            FROM pg_enum en
+            JOIN pg_type t ON t.oid = en.enumtypid
+            JOIN pg_namespace n ON n.oid = t.typnamespace
+            WHERE n.nspname = 'public' AND t.typname = ${type}
+            ORDER BY en.enumsortorder`,
+      );
+      return (rows as unknown as { label: string }[]).map((row) => row.label);
+    };
+
+    const actorKinds = await labelsOf('actor_kind');
+    const principalKinds = await labelsOf('principal_kind');
+    // The two the boundary EXCUSES, written out here exactly as the migration
+    // writes them out — an exemption is the thing that must be enumerated.
+    const anonymous = ['model', 'system'];
+
+    expect(actorKinds.length).toBeGreaterThan(0);
+    expect(principalKinds).toEqual(['human', 'agent']);
+    expect([...actorKinds].sort()).toEqual([...principalKinds, ...anonymous].sort());
+    // …and the two sets do not overlap, or a label would be both checked and
+    // excused and the ELSE branch would be measuring nothing.
+    expect(principalKinds.filter((kind) => anonymous.includes(kind))).toEqual([]);
+  });
+
+  it('derives that set in the deployed function rather than listing it', async () => {
+    // Reading the function the database is actually running, not the migration
+    // file — a stale anchor reads as green, and this whole chain of migrations
+    // is `CREATE OR REPLACE`.
+    //
+    // Catches: 0018 being reverted to 0017's literal, and the ELSE branch being
+    // deleted so an unclassified kind is silently excused again.
+    const rows = await handle.db.execute(
+      sql`SELECT pg_get_functiondef('public.atrium_core_events_invariants()'::regprocedure) AS def`,
+    );
+    const definition = (rows as unknown as { def: string }[])[0]?.def ?? '';
+    expect(definition).toContain("typname = 'principal_kind'");
+    expect(definition).toMatch(/IN \('model', 'system'\)/);
+    expect(definition).toMatch(/neither an identity/);
+    expect(
+      definition,
+      'the identified set must be derived from principal_kind, not written out',
+    ).not.toMatch(/IN \('human', 'agent'\)/);
   });
 
   it('leaves the anonymous kinds exactly where 0004 left them — no identity to look up', async () => {
