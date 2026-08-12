@@ -1663,6 +1663,87 @@
       "find": "  superseded_by_later_message: 'the_window',",
       "replace": "  superseded_by_later_message: 'the_proposal',",
       "catches": ["reports the refusal as a fact about the window, never about the reading"]
+    },
+    {
+      "id": "self_verification_gate_disabled_at_acceptance",
+      "why": "#68/H2, #95: verification is a second pair of eyes — a claim reaches `verified` only through a human who is neither its claimant nor its stager. #102 keys it on the relation, not only the kind. Deleting the acceptance-path relation check lets the claimant mint their own `✓ verified` claim (the self-exculpatory hole), which the kind gate at reduce.ts:728 does not see because the actor is a human.",
+      "file": "src/reduce.ts",
+      "find": "    const refusal = selfVerificationRefusal({\n      actor,\n      claimant: object.payload.claimant,\n      stagedBy: proposal?.stagedBy ?? actor,\n    });",
+      "replace": "    const refusal = null;",
+      "catches": [
+        "refuses the claimant minting their own claim verified — self-verification (#68/#95)",
+        "refuses the claimant verifying their own claim at acceptance"
+      ]
+    },
+    {
+      "id": "self_verification_gate_disabled_at_correction",
+      "why": "The same #68/#95 rule on the correction that mints a `✓ verified`: an `amend {verification: 'verified'}`. Deleting the relation check lets the claimant verify their own claim, or the stager verify the reading they staged, through a correction — `correctionAttributionRefusal` has nothing to say because verification moves no name and no text.",
+      "file": "src/reduce.ts",
+      "find": "    const refusal = selfVerificationRefusal({\n      actor,\n      claimant: after.payload.claimant,\n      stagedBy,\n    });",
+      "replace": "    const refusal = null;",
+      "catches": [
+        "refuses the claimant self-verifying via a later amend",
+        "refuses the stager verifying the reading they staged (via a later amend)"
+      ]
+    },
+    {
+      "id": "owner_confirm_gate_disabled",
+      "why": "#67/#95: a third-party commitment is confirmed by its named owner, not by any member on their behalf. The kind gate (`commitment_acceptance`) refuses a machine minting one; deleting this relation check lets any human confirm a colleague's obligation, which is #4's `nobody gets committed by someone else's sentence` one step removed.",
+      "file": "src/reduce.ts",
+      "find": "    const refusal = ownerConfirmRefusal({ actor, owner: object.payload.owner });",
+      "replace": "    const refusal = null;",
+      "catches": ["refuses a non-owner confirming a third party’s commitment"]
+    },
+    {
+      "id": "owner_confirm_gate_disabled_at_correction",
+      "why": "#102 finding 1's round-1 gauntlet: `ownerConfirmRefusal` ran only at acceptance, so a correction that transitions an object INTO a commitment minted an obligation with no owner-confirm. `retypeCarryOver` carries a claim's `claimant` onto the new `owner`, so no *foreign* name arrives and `correctionAttributionRefusal` waves it through — a non-owner retyping BOB's claim into a BOB-owned commitment BOB never confirmed. Deleting the correction-path owner-confirm restores that hole; the `after.payload.owner` reference (vs the acceptance path's `object.payload.owner`) is what keys this to the correction site.",
+      "file": "src/reduce.ts",
+      "find": "    const refusal = ownerConfirmRefusal({ actor, owner: after.payload.owner });",
+      "replace": "    const refusal = null;",
+      "catches": ["refuses a non-owner MINTING a commitment via retype (#102 finding 2)"]
+    },
+    {
+      "id": "verified_survives_material_change_disabled",
+      "why": "#102 finding 3: a ✓ is verification of a specific sentence under a specific name, and `becomesVerified` only re-gates the *transition* to verified — so an edit to an already-verified claim was not re-checked. The reset drops verification to `unverified` when a verified claim's statement or claimant materially changes under a correction, forcing a fresh disinterested verification. Neutralising the lapse (holding the payload at its current `verified` value, so `lapsedPayload`/`after` stay referenced and tsc is silent) lets ALICE verify BOB's claim, reattribute it to herself, and keep a ✓ on her own reworded sentence no second party ever verified.",
+      "file": "src/reduce.ts",
+      "find": "    const lapsedPayload = { ...after.payload, verification: 'unverified' as const };",
+      "replace": "    const lapsedPayload = { ...after.payload, verification: after.payload.verification };",
+      "catches": [
+        "drops verification when a verified claim is reattributed to the verifier",
+        "will not let the new claimant re-verify their own now-self claim",
+        "drops verification when the claimant rewords their own verified sentence",
+        "lapses verification when a verified claim is reworded to a genuinely different sentence (#102 finding 2)",
+        "lapses the correction RECEIPT too, not only the folded object (#102 finding 1)"
+      ]
+    },
+    {
+      "id": "verified_lapse_receipt_stays_stale",
+      "why": "#102 finding 1: the lapse resets the folded object to `unverified` but the correction log's `after` must lapse with it. `commitPlan` writes `plan.after` into the correction chain and the projection persists it into `corrections.after`; leaving it at the pre-lapse `verified` payload makes `accepted_objects.payload` (unverified) and `corrections.after` (verified) contradict — a replay reads two answers to whether the ✓ survived. Deleting the `plan.after` assignment (the `after = {...payload: lapsedPayload}` binding keeps `lapsedPayload` referenced, so tsc is silent) restores the self-contradicting record.",
+      "file": "src/reduce.ts",
+      "find": "    outcome.plan.after = lapsedPayload;",
+      "replace": "    void lapsedPayload;",
+      "catches": ["lapses the correction RECEIPT too, not only the folded object (#102 finding 1)"]
+    },
+    {
+      "id": "material_change_uses_raw_string_equality",
+      "why": "#102 finding 2: materiality of a statement change is decided under `normalizeForReceipt` — the same 'same sentence' fold r8 verifies a quote under — not raw string equality. Reverting to exact `!==` over-lapses: a receipt-equivalent edit (a collapsed whitespace run, a typographic apostrophe) is the same sentence, so the ✓ still covers it and must not lapse. The exact comparison drops verification on `\"deploy clean\" → \"deploy  clean\"`, destroying a legitimate ✓ on an unchanged sentence.",
+      "file": "src/reduce.ts",
+      "find": "    (normalizeForReceipt(after.payload.statement) !==\n      normalizeForReceipt(before.payload.statement) ||",
+      "replace": "    (after.payload.statement !== before.payload.statement ||",
+      "catches": [
+        "keeps verification when a verified claim is edited to a receipt-equivalent sentence (#102 finding 2)"
+      ]
+    },
+    {
+      "id": "amended_acceptance_attribution_disabled",
+      "why": "#81/H3: a human acceptance skips payload binding, so an accepter may reword a reading — but only into a sentence that names nobody but themselves, or accept it verbatim. Deleting this check lets an accepter mint a different sentence under a third party's name (the driven case: BOB stages a green-build claim, ALICE accepts it as a kickbacks confession still claimant BOB), which the correction gate would only catch one act later.",
+      "file": "src/reduce.ts",
+      "find": "    const refusal = acceptanceAttributionRefusal({\n      actor,\n      objectId: object.id,\n      proposalId,\n      staged,\n      object,\n    });",
+      "replace": "    const refusal = null;",
+      "catches": [
+        "refuses an accepter rewording a sentence that stands under a third party’s name",
+        "refuses an accepter adding a third party’s name that the reading did not carry"
+      ]
     }
   ]
 }

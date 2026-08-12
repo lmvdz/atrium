@@ -5,6 +5,7 @@ import {
   AcceptedObjectType as AcceptedObjectTypeSchema,
   type Actor,
   type AuthoredEvent,
+  acceptanceAttributionRefusal,
   acceptanceReceiptRefusal,
   authored,
   type CoreEvent,
@@ -118,6 +119,14 @@ const GATES = {
   commitment_acceptance: 'writes an obligation onto a named person',
   objective_acceptance: 'what everything else in the room is filed under',
   claim_verification: 'would become a verified claim',
+  // #68/#95, the relation twin of `claim_verification` (#102). The kind gate
+  // above refuses a *machine* verifying; this refuses the human #95 forbids — the
+  // claimant vouching for their own claim. grok's round-1 coverage gap: every
+  // claim cell in the acceptance loop names BOB and accepts as ALICE, so
+  // accepter≠claimant throughout and this relation was never reached here even as
+  // its kind twin was. A direct probe below reaches it. The marker is the
+  // claimant clause, which appears in no other refusal.
+  self_verification: 'names them as its claimant',
   direct_acceptance: 'only a human may accept an object directly',
   supersession: 'retires an accepted',
   // #95, #96 r2. A second supersession gate, on the other axis: the one above
@@ -169,6 +178,21 @@ const GATES = {
   // Both grounds of the r9 gate, which is one gate: the marker is the clause the
   // two refusals share, not the tail either of them ends in.
   self_staged_reading: 'which they staged themselves',
+  // #67/#95, closed by #102. The relation twin of `third_party_confirm`: that
+  // gate is the machine path (a model may not mint a commitment for somebody who
+  // did not write it); this is the human path (a member may not *confirm* a
+  // commitment they do not own — only the named owner may). Until #102 this cell
+  // was `allowed`, which pinned the #67 hole as a passing test. Distinct marker,
+  // so a cell that reaches the wrong gate fails rather than passing quietly.
+  owner_confirm: 'a third-party commitment is confirmed by the person it names',
+  // #81/H3, closed by #102. `correctionAttributionRefusal`'s two clauses moved one
+  // act earlier, to a human acceptance that amends the reading: a name arriving on
+  // a sentence the staged reading did not carry, and a sentence restated under a
+  // foreign name. Markers are disjoint from the correction gates' ('putting user'
+  // / 'rewording a sentence') on purpose — the two acts are refused for the same
+  // #4 sentence but a cell that reaches the correction gate instead must fail.
+  acceptance_attribution: 'a sentence the staged reading did not carry',
+  acceptance_quotation: 'restating a sentence that stands under',
 } as const;
 type Gate = keyof typeof GATES;
 
@@ -333,6 +357,13 @@ function expectedForAcceptance(testCase: AcceptanceCase): Gate | 'allowed' {
     const namesSomebodyElse = NAMES[testCase.type] !== null && NAMES[testCase.type] !== ALICE;
     if (testCase.cited === 'model_a' || namesSomebodyElse) return 'self_staged_reading';
   }
+  // #67/#95 owner-confirm (#102). A human accepting a commitment it does not own
+  // is refused — the confirmation must be the named owner's. This matrix owns
+  // BOB and accepts as ALICE, so the owner is never the accepter, and every human
+  // commitment acceptance not already caught as self-staged is `owner_confirm`.
+  // Ordered after the self-staged clause so a member who *staged* the reading
+  // hears that more specific reason, exactly as the reducer orders the two.
+  if (human && testCase.type === 'commitment') return 'owner_confirm';
   if (testCase.cited !== 'none' && !human && testCase.confidence === 'below') {
     return 'confidence_floor';
   }
@@ -373,7 +404,18 @@ const RECEIPT_SHAPES: ReceiptShape[] = [
  */
 function expectedForReceipt(actor: ActorKind, shape: ReceiptShape): Gate | 'allowed' {
   if (!ownsProposal(actor, 'model_a')) return 'acceptance_binding';
-  if (isHumanKind(actor)) return 'allowed';
+  if (isHumanKind(actor)) {
+    // #81/H3 (#102). The human path skips receipt binding — a person's acceptance
+    // is a receipt — but not the right to mint a *different sentence under a third
+    // party's name*. The `payload` shape rewrites the claim's statement while its
+    // claimant stays BOB: exactly #81, and now refused as an amended acceptance
+    // (clause two, the sentence restated under BOB's name). **Until #102 this cell
+    // was `allowed`** — a false-green that pinned the hole open. Every other shape
+    // leaves BOB's sentence and name intact (`citations`, `no_window`,
+    // `wrong_author`) or rewrites proposal and object together (`uncertifiable`,
+    // `uncertified_type`), so the human still runs none of them.
+    return shape === 'payload' ? 'acceptance_quotation' : 'allowed';
+  }
   switch (shape) {
     case 'payload':
       return 'payload_binding';
@@ -810,6 +852,39 @@ describe('authority matrix — object_accepted, every actor × type × citation 
       expect(Object.keys(state.objects)).toEqual(expected === 'allowed' ? [`obj_${suffix}`] : []);
     });
   }
+
+  it('refuses the accepter verifying a claim that names THEM as its claimant (#68/#95, #102)', () => {
+    // grok's coverage gap, direct: the loop above names every claim for BOB and
+    // accepts as ALICE, so `self_verification` — the relation #102 adds beside the
+    // `claim_verification` kind gate — is never reached there. Here a model stages
+    // a born-verified claim and the human accepter mints it under their OWN name:
+    // the sentence agreeing with itself, refused, no object minted. (The accepter
+    // taking their own name onto the reading is #81-legal — a person may reword
+    // under their own name — so what fires is the verification relation, not the
+    // amended-acceptance one.)
+    const proposalId = 'prop_self_verify';
+    const state = reduce([
+      proposalEvent({
+        id: proposalId,
+        type: 'claim',
+        proposer: 'model_a',
+        confidence: 0.95,
+        verified: true,
+        recordedBy: 'model_proposer',
+      }),
+      acceptEvent({
+        id: 'acc_self_verify',
+        objectId: 'obj_self_verify',
+        type: 'claim',
+        actor: 'human',
+        proposalId,
+        verified: true,
+        names: ALICE,
+      }),
+    ]);
+    expect(verdictOf(state, 'ev_acc_self_verify')).toBe('self_verification');
+    expect(state.objects.obj_self_verify).toBeUndefined();
+  });
 });
 
 describe('authority matrix — the receipt, every actor × shape', () => {
@@ -923,6 +998,38 @@ describe('authority matrix — the receipt, every actor × shape', () => {
       messages: WRONG_AUTHOR_WINDOW,
     });
     expect(refusal?.gate).toBe('third_party_confirm');
+  });
+
+  it('keeps the acceptance-attribution gate live — a name arriving at acceptance (#81)', () => {
+    // No cell in the matrix mints an object naming somebody the staged reading did
+    // not, so clause one of `acceptanceAttributionRefusal` — a foreign name
+    // *arriving* at acceptance — is reached here rather than through the matrix
+    // door, the acceptance twin of `correctionAttributionRefusal`'s clause one.
+    // ALICE stages a claim naming only herself and accepts it minting one that
+    // puts BOB's name on it: #81, one act before the correction gate would catch
+    // it. (Clause two — a sentence restated under a foreign name — is exercised by
+    // the human `payload` receipt cell above.)
+    const stamp = nextAt();
+    const staged = AcceptedObjectSchema.parse({
+      id: 'obj_aa',
+      roomId: ROOM,
+      type: 'claim',
+      payload: { statement: TEXT.claim, claimant: ALICE, verification: 'unverified' },
+      provenance: { messageIds: [MSG_FOR.claim], proposalId: 'prop_aa' },
+      createdAt: stamp,
+      updatedAt: stamp,
+    });
+    const refusal = acceptanceAttributionRefusal({
+      actor: { kind: 'human', userId: ALICE },
+      objectId: 'obj_aa',
+      proposalId: 'prop_aa',
+      staged,
+      object: AcceptedObjectSchema.parse({
+        ...staged,
+        payload: { statement: TEXT.claim, claimant: BOB, verification: 'unverified' },
+      }),
+    });
+    expect(refusal).toContain('a sentence the staged reading did not carry');
   });
 });
 
@@ -1605,13 +1712,32 @@ describe('the matrix as a whole', () => {
       humanRow.filter((entry) => onlyJudgementInTheRoom(entry) && entry.cited === 'none').length,
     ).toBeGreaterThan(0);
 
+    // **#102 narrows the human row again, by #95's relation matrix, and the
+    // partition grows two more exceptions rather than the claim weakening.** A
+    // person's judgement is still the receipt; what it may not be is a receipt for
+    // *someone else's* obligation or *someone else's* reworded sentence. So a human
+    // accepting a commitment they do not own is `owner_confirm` (#67), and a human
+    // amending a reading at acceptance to name or reword a third party is refused
+    // (#81) — the receipt matrix's `payload` shape is that second one. Everything
+    // that names nobody but the accepter, accepted verbatim, stays open.
     for (const testCase of humanRow) {
-      expect(expectedForAcceptance(testCase)).toBe(
-        onlyJudgementInTheRoom(testCase) ? 'self_staged_reading' : 'allowed',
-      );
+      const expected = onlyJudgementInTheRoom(testCase)
+        ? 'self_staged_reading'
+        : testCase.type === 'commitment'
+          ? 'owner_confirm'
+          : 'allowed';
+      expect(expectedForAcceptance(testCase)).toBe(expected);
     }
+    // The commitment exception is populated, so the partition is not trivially
+    // satisfied over an empty set.
+    expect(
+      humanRow.filter((entry) => !onlyJudgementInTheRoom(entry) && entry.type === 'commitment')
+        .length,
+    ).toBeGreaterThan(0);
     for (const shape of RECEIPT_SHAPES) {
-      expect(expectedForReceipt('human', shape)).toBe('allowed');
+      expect(expectedForReceipt('human', shape)).toBe(
+        shape === 'payload' ? 'acceptance_quotation' : 'allowed',
+      );
     }
   });
 
@@ -1647,10 +1773,16 @@ describe('the matrix as a whole', () => {
     // earlier. It is not deleted, and it is not quietly excused either: the test
     // above calls `acceptanceReceiptRefusal` directly and pins that it still
     // fires, so "unreachable through this door" never becomes "gone".
-    const behindATypeRow: Gate[] = ['third_party_confirm'];
+    // `acceptance_attribution` (a foreign name *arriving* at acceptance) is the
+    // acceptance twin of `third_party_confirm`: no cell in this matrix mints an
+    // object naming somebody the staged reading did not, so it is reached by a
+    // dedicated probe below rather than through this door. `acceptance_quotation`
+    // (its clause two — a sentence *restated* under a foreign name) is reached by
+    // the human `payload` receipt cell, so it stays in the observed set.
+    const reachedByADirectProbe: Gate[] = ['third_party_confirm', 'acceptance_attribution'];
     expect([...observed].sort()).toEqual(
       [
-        ...Object.keys(GATES).filter((gate) => !behindATypeRow.includes(gate as Gate)),
+        ...Object.keys(GATES).filter((gate) => !reachedByADirectProbe.includes(gate as Gate)),
         'allowed',
       ].sort(),
     );

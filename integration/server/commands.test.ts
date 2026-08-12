@@ -2028,3 +2028,249 @@ describe('live ≡ replay', () => {
     }
   });
 });
+
+/**
+ * #102 finding 1 — self-verification anchors to the REAL source author, which
+ * only this layer can resolve.
+ *
+ * `@atrium/core`'s `selfVerificationRefusal` compares the actor to the claim's
+ * payload `claimant`. Nothing holds `claimant` equal to the author of the
+ * message the claim was read out of (a claim's receipt attribution is `null`),
+ * and the reducer has no message window on the human path — so a claim carrying
+ * `claimant: bob` drawn from a message ALICE wrote lets ALICE verify her own
+ * sentence, the reducer seeing actor≠claimant. The command layer resolves the
+ * author from `object_sources`/`proposal_sources → messages.author_id` and
+ * refuses it. Driven against a real Postgres and real sockets, because the whole
+ * point of the rule is a fact that lives in the database, not in core state.
+ */
+describe('#102 finding 1 — self-verification vs the source author', () => {
+  let carol: string;
+  beforeEach(async () => {
+    // The default room is alice+bob; this rule needs a third, disinterested
+    // member to show the flip. The server started in the outer hook serves any
+    // room in the same database, so reseeding is enough.
+    room = await seedRoom(handle, ['alice', 'bob', 'carol']);
+    carol = room.people.carol as string;
+  });
+
+  async function postMessage(client: TestClient, body: string): Promise<string> {
+    const ack = await client.command(send(room.roomId, body));
+    expect(ack.type).toBe('ack');
+    return (await lastEvent<{ messageId: string }>(room.roomId)).messageId;
+  }
+
+  const SENTENCE = 'the deploy went out clean at noon';
+
+  /**
+   * ALICE writes the source message; a claim is staged as BOB's (BOB the stager,
+   * so neither the claimant gate nor the stager gate has anything to say when
+   * ALICE later verifies) and accepted verbatim by the disinterested CAROL. The
+   * claim's provenance therefore points at a message ALICE — not BOB — wrote.
+   */
+  async function claimFromAlicesMessageAboutBob(): Promise<string> {
+    const alice = await connect(room.people.alice as string);
+    const bob = await connect(room.people.bob as string);
+    const carolClient = await connect(carol);
+    const source = await postMessage(alice, SENTENCE);
+    await bob.command({
+      name: 'record_proposal',
+      roomId: room.roomId,
+      proposal: {
+        type: 'claim',
+        payload: {
+          statement: SENTENCE,
+          claimant: room.people.bob as string,
+          verification: 'unverified',
+        },
+        confidence: 0.7,
+        provenance: [source],
+        quote: SENTENCE,
+        interpretationId: null,
+      },
+    });
+    const proposalId = (await lastEvent<{ proposal: { id: string } }>(room.roomId)).proposal.id;
+    const accepted = await carolClient.command({
+      name: 'accept_proposal',
+      roomId: room.roomId,
+      proposalId,
+      objectiveId: null,
+    });
+    expect(accepted.type).toBe('ack');
+    return (await lastEvent<{ object: { id: string } }>(room.roomId)).object.id;
+  }
+
+  const verify = (objectId: string) =>
+    ({
+      name: 'correct',
+      roomId: room.roomId,
+      objectId,
+      action: 'amend',
+      patch: { verification: 'verified' },
+      toType: null,
+      provenance: { messageIds: [], proposalId: null, interpretationId: null },
+      note: null,
+    }) satisfies Extract<Command, { name: 'correct' }>;
+
+  async function verificationOf(objectId: string): Promise<string | undefined> {
+    const [row] = await handle.db
+      .select()
+      .from(acceptedObjects)
+      .where(eq(acceptedObjects.id, objectId));
+    return (row?.payload as { verification?: string } | undefined)?.verification;
+  }
+
+  it('refuses the author of the claim’s source message from verifying it, though claimant ≠ author', async () => {
+    const objectId = await claimFromAlicesMessageAboutBob();
+    // The reducer would wave ALICE through: actor ALICE ≠ claimant BOB, and the
+    // stager was BOB. The command layer is the only thing that knows ALICE wrote
+    // the message the claim rests on.
+    const alice = await connect(room.people.alice as string);
+    const refused = await alice.command(verify(objectId));
+    expect(refused.type).toBe('nack');
+    expect(refused).toMatchObject({ code: 'invalid' });
+    expect((refused as { message: string }).message).toContain('a message they wrote');
+    // The fold is the fact: nothing durable moved.
+    expect(await verificationOf(objectId)).toBe('unverified');
+  });
+
+  it('lets a member who wrote none of the source verify it', async () => {
+    const objectId = await claimFromAlicesMessageAboutBob();
+    // CAROL accepted it but wrote none of its source, and is neither the claimant
+    // nor the stager — the disinterested second reader #68 is for.
+    const carolClient = await connect(carol);
+    const ack = await carolClient.command(verify(objectId));
+    expect(ack.type).toBe('ack');
+    expect(await verificationOf(objectId)).toBe('verified');
+  });
+
+  it('refuses accepting a BORN-verified proposal when the accepter wrote its source (#102 finding 4)', async () => {
+    // The verification act at ACCEPTANCE via `proposal_sources`, not a later amend.
+    // ALICE writes the source; BOB stages a `verification:'verified'` claim about
+    // himself citing it; ALICE accepts — minting a ✓ she is the author behind. The
+    // reducer waves her through (actor ALICE ≠ claimant BOB, stager BOB); the guard
+    // reads the proposal's committed payload and refuses via `proposal_sources`.
+    const alice = await connect(room.people.alice as string);
+    const bob = await connect(room.people.bob as string);
+    const source = await postMessage(alice, SENTENCE);
+    await bob.command({
+      name: 'record_proposal',
+      roomId: room.roomId,
+      proposal: {
+        type: 'claim',
+        payload: {
+          statement: SENTENCE,
+          claimant: room.people.bob as string,
+          verification: 'verified',
+        },
+        confidence: 0.7,
+        provenance: [source],
+        quote: SENTENCE,
+        interpretationId: null,
+      },
+    });
+    const proposalId = (await lastEvent<{ proposal: { id: string } }>(room.roomId)).proposal.id;
+    const refused = await alice.command({
+      name: 'accept_proposal',
+      roomId: room.roomId,
+      proposalId,
+      objectiveId: null,
+    });
+    expect(refused.type).toBe('nack');
+    expect((refused as { message: string }).message).toContain('a message they wrote');
+  });
+
+  it('refuses a verifier who wrote only the NON-FIRST cited source (#102 finding 4)', async () => {
+    // The guard compares the session user against EVERY source author, not just the
+    // first row. BOB writes source 1, ALICE writes source 2; a claim about CAROL
+    // cites both and CAROL accepts it verbatim (disinterested). ALICE then verifies —
+    // she authored only the second source, but a ✓ from ANY source author is the
+    // hole, so she is still refused and nothing durable moves.
+    const alice = await connect(room.people.alice as string);
+    const bob = await connect(room.people.bob as string);
+    const carolClient = await connect(carol);
+    const first = await postMessage(bob, SENTENCE);
+    const second = await postMessage(alice, `${SENTENCE} — confirmed`);
+    await bob.command({
+      name: 'record_proposal',
+      roomId: room.roomId,
+      proposal: {
+        type: 'claim',
+        payload: { statement: SENTENCE, claimant: carol, verification: 'unverified' },
+        confidence: 0.7,
+        provenance: [first, second],
+        quote: SENTENCE,
+        interpretationId: null,
+      },
+    });
+    const proposalId = (await lastEvent<{ proposal: { id: string } }>(room.roomId)).proposal.id;
+    const accepted = await carolClient.command({
+      name: 'accept_proposal',
+      roomId: room.roomId,
+      proposalId,
+      objectiveId: null,
+    });
+    expect(accepted.type).toBe('ack');
+    const objectId = (await lastEvent<{ object: { id: string } }>(room.roomId)).object.id;
+    const refused = await alice.command(verify(objectId));
+    expect(refused.type).toBe('nack');
+    expect((refused as { message: string }).message).toContain('a message they wrote');
+    expect(await verificationOf(objectId)).toBe('unverified');
+  });
+
+  it('lets the claim’s own author amend statement+verified — it LAPSES, not a self-verification nack (#102 finding 3)', async () => {
+    // The over-refusal finding #3 fixes: the guard used to fire on the mere
+    // presence of `verification:'verified'` in the patch. BOB authors a claim about
+    // himself; CAROL verifies it disinterestedly; BOB then amends
+    // `{statement:'corrected wording', verification:'verified'}`. The reducer accepts
+    // this and LAPSES the ✓ (a material reword) — so it is NOT a verification act and
+    // must not be nacked. The command guard now keys on the transition: the claim is
+    // already verified, so `becomesVerified` is false and the guard skips.
+    const bob = await connect(room.people.bob as string);
+    const carolClient = await connect(carol);
+    const source = await postMessage(bob, SENTENCE);
+    await bob.command({
+      name: 'record_proposal',
+      roomId: room.roomId,
+      proposal: {
+        type: 'claim',
+        payload: {
+          statement: SENTENCE,
+          claimant: room.people.bob as string,
+          verification: 'unverified',
+        },
+        confidence: 0.7,
+        provenance: [source],
+        quote: SENTENCE,
+        interpretationId: null,
+      },
+    });
+    const proposalId = (await lastEvent<{ proposal: { id: string } }>(room.roomId)).proposal.id;
+    const accepted = await carolClient.command({
+      name: 'accept_proposal',
+      roomId: room.roomId,
+      proposalId,
+      objectiveId: null,
+    });
+    expect(accepted.type).toBe('ack');
+    const objectId = (await lastEvent<{ object: { id: string } }>(room.roomId)).object.id;
+    // CAROL, disinterested (wrote none of the source, not claimant/stager), verifies.
+    const verified = await carolClient.command(verify(objectId));
+    expect(verified.type).toBe('ack');
+    expect(await verificationOf(objectId)).toBe('verified');
+    // BOB — the claimant AND the source author — rewords and re-asserts verified.
+    // The old guard would nack this on field-presence; the reshaped guard lets it
+    // through, and the reducer lapses the ✓ because the sentence materially changed.
+    const amended = await bob.command({
+      name: 'correct',
+      roomId: room.roomId,
+      objectId,
+      action: 'amend',
+      patch: { statement: 'the rollback ran clean at midnight', verification: 'verified' },
+      toType: null,
+      provenance: { messageIds: [], proposalId: null, interpretationId: null },
+      note: null,
+    });
+    expect(amended.type).toBe('ack');
+    expect(await verificationOf(objectId)).toBe('unverified');
+  });
+});

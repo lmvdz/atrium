@@ -918,6 +918,11 @@ describe('replay after an arbitrary correction chain', () => {
         objectId: 'obj_decision_2',
         action: 'amend',
         patch: { verification: 'verified' },
+        // ev_c4 retyped this to a claim with claimant ALICE, so ALICE verifying it
+        // would be self-verification (#68/#95, #102): the claimant may not vouch
+        // their own claim is true. BOB is the second pair of eyes, which is what
+        // verification is. (Until #102 any human — including ALICE — could.)
+        actor: human(BOB),
       }),
     ];
   }
