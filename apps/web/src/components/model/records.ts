@@ -1203,13 +1203,18 @@ export const PIN_COMPACT_BUDGET = 4;
  * ladder both take. There is no belt literal in the stylesheet to disagree with.
  *
  *   available = min(beltMax, beltShare × viewport)   ← and the container's room
- *   needed(b) = card + cardGrowth + b × (row + gap)
+ *   needed(b) = fixed + b × (row + gap)
  *
- * Every term of `needed` is a box INSIDE `.pinList`. What makes the two agree is
- * not this comment: `test/pin-bound.test.tsx` asserts the rendered custom
- * property is built from these fields, and e2e/pin-bound.spec.ts asserts
- * `scrollHeight <= clientHeight` at five viewport heights, so a card that grows
- * a line fails the suite rather than silently clipping a row off the bottom.
+ * Every term of `needed` is a box INSIDE `.pinList`, and `fixed` is the two of
+ * them the pin can READ — the open card and the clean summary — whenever it has
+ * a laid-out page to read them from (`pinFixedCost`). `card + cardGrowth` is
+ * what answers before there is one: the server, and the first paint.
+ *
+ * What makes the two agree is not this comment:
+ * `test/pin-bound.test.tsx` asserts the rendered custom property is built from
+ * these fields, and e2e/pin-bound.spec.ts asserts `scrollHeight <=
+ * clientHeight` at five viewport heights, so a card that grows a line fails the
+ * suite rather than silently clipping a row off the bottom.
  * ------------------------------------------------------------------------- */
 export const PIN_GEOMETRY = {
   /** the open card with a single-line title. Measured in Chromium at 1280,
@@ -1224,7 +1229,8 @@ export const PIN_GEOMETRY = {
       measured as 14.3px. */
   titleLine: 14.3,
   /**
-   * How many extra title lines the belt carries before a grown card costs a row.
+   * How many extra title lines the belt carries before a grown card costs a row
+   * — IN THE PASS THAT HAS NOT MEASURED ANYTHING YET, and only there.
    *
    * Round 6 REMOVED the two-line clamp on `.acardTitle` on purpose (see the
    * `.why` block in attention.module.css: a clip at the end of the route a
@@ -1235,10 +1241,16 @@ export const PIN_GEOMETRY = {
    *
    * This is the headroom that used to be spelled `overflow: 46` and described as
    * the "N more owed" control — a control that has been a SIBLING of the clipped
-   * list since round 5 and was never in this box at all. The allowance is real;
-   * only the thing it was attributed to was wrong. Three lines is what the
-   * measured belt actually carries at every rung of the ladder: at a 900px
-   * viewport the four-row list comes to 229.15px inside a 306px belt.
+   * list since round 5 and was never in this box at all. The allowance was real;
+   * only the thing it was attributed to was wrong.
+   *
+   * ROUND 10 (gauntlet finding 1): it was still an ALLOWANCE STANDING WHERE A
+   * MEASUREMENT EXISTS — the 46px disease one level down. At `measure()` time the
+   * open card is in the DOM with the height the browser gave it, growth and all,
+   * so the pin does not have to reserve three lines against a card it can read.
+   * `pinFixedCost` takes the real boxes when it has them and this pair only
+   * answers the server render and the first paint, where there is no layout to
+   * read and guessing a viewport would be a number nothing measured.
    */
   cardGrowthLines: 3,
   /** `.pinList`'s max-height, both halves of it — the ONLY place either half is
@@ -1273,14 +1285,54 @@ export function pinBeltFor(viewportHeight: number): number {
   return Math.min(g.beltMax, viewportHeight * g.beltShare);
 }
 
-/** How many compressed rows fit beside the open card in a belt this tall. */
-export function pinBudgetForBelt(available: number): number {
+/**
+ * The boxes inside the belt that are not compressed rows, as the browser laid
+ * them out. `Pin` reads them off the DOM in the same `measure()` that reads the
+ * viewport and the container's room.
+ *
+ * Both are children of `.pinList` and neither moves with the answer: the open
+ * card is drawn whatever the budget is, and clean items compress to a count and
+ * never take a row, so charging for them cannot feed back into what they cost.
+ * That is why the compressed ROW is not here and stays a constant: a row's
+ * height is only readable for the rows that are already drawn, and the ladder
+ * has to price a row that is not on screen yet.
+ */
+export interface PinBeltBoxes {
+  /** the belt's first child — the open card, or the empty state that replaces it */
+  readonly open: number;
+  /** the clean-item summary, or 0 when nothing clean is in the room */
+  readonly clean: number;
+}
+
+/**
+ * What the belt owes before it has paid for a single compressed row.
+ *
+ * With measured boxes it is those boxes, plus the flex gap the clean summary
+ * costs when it is there. Without them — the server, and the first paint before
+ * the effect has run — it is the allowance: a common-case card plus room for
+ * three wrapped title lines, because an unmeasured card that grows would
+ * otherwise clip a row the fold still counts as visible.
+ *
+ * A box that reports zero height has not been laid out (jsdom reports zeros for
+ * everything, and so does an element in a container that has not been laid out
+ * yet). That is not "the card is free"; it is the same "nothing was measured"
+ * the container's room reads as unconstrained, so it falls back rather than
+ * charging nothing.
+ */
+export function pinFixedCost(boxes?: PinBeltBoxes | null): number {
   const g = PIN_GEOMETRY;
-  /* Both terms are boxes inside `.pinList`: the open card, and the headroom for
-     the card growing past its measured height. The "N more owed" control is not
-     here because it is not in there. */
-  const fixed = g.card + g.titleLine * g.cardGrowthLines;
-  const rows = Math.floor((available - fixed) / (g.row + g.gap));
+  if (boxes === undefined || boxes === null || boxes.open <= 0) {
+    return g.card + g.titleLine * g.cardGrowthLines;
+  }
+  return boxes.open + (boxes.clean > 0 ? g.gap + boxes.clean : 0);
+}
+
+/** How many compressed rows fit beside the open card in a belt this tall. */
+export function pinBudgetForBelt(available: number, boxes?: PinBeltBoxes | null): number {
+  const g = PIN_GEOMETRY;
+  /* Every term is a box inside `.pinList`. The "N more owed" control is not
+     here because it is not in there — it is a sibling of the clipped list. */
+  const rows = Math.floor((available - pinFixedCost(boxes)) / (g.row + g.gap));
   return Math.max(0, Math.min(PIN_COMPACT_BUDGET, rows));
 }
 

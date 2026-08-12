@@ -36,7 +36,7 @@
  * ------------------------------------------------------------------------- */
 
 import type { CSSProperties } from 'react';
-import { useEffect, useRef, useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 import { needsViewer } from '../model/glyph';
 import type { AttentionItem, GlyphCount, PinFold, TrailerSummary } from '../model/records';
 import {
@@ -137,7 +137,9 @@ export function Pin({
 
      The server renders the full budget and the effect corrects it, because
      there is no viewport on the server and guessing one would be a number
-     nothing measured. */
+     nothing measured. The correction is not a one-off either: `measure` runs
+     after every commit and on every box the pin is made of, because a budget
+     measured once is a cache of a layout that has since changed. */
   const [budget, setBudget] = useState(PIN_COMPACT_BUDGET);
   const [measured, setMeasured] = useState(false);
   /* AND THE BOX IT IS ACTUALLY IN, which is not the viewport.
@@ -158,49 +160,122 @@ export function Pin({
   const rootRef = useRef<HTMLElement>(null);
   const listRef = useRef<HTMLDivElement>(null);
   const [belt, setBelt] = useState<number | null>(null);
-  useEffect(() => {
-    const measure = () => {
-      const fromViewport = pinBeltFor(window.innerHeight);
-      const root = rootRef.current;
-      const list = listRef.current;
-      const container = root?.parentElement ?? null;
-      /* The pin's own chrome — head, the overflow control, padding — is
-         everything it is that the list is not, so it holds whatever the list's
-         height happens to be at the moment it is read. */
-      const chrome =
-        root === null || list === null
-          ? 0
-          : root.getBoundingClientRect().height - list.getBoundingClientRect().height;
-      /* A box that reports no height has not told us anything — jsdom gives
-         every rect zeros, and so does a container that has not been laid out
-         yet. Reading that as "no room" would fold the pin to nothing on the
-         evidence of a measurement that did not happen, which is the same error
-         as the server guessing a viewport. It constrains only when it has a
-         height to constrain with. */
-      const room = container === null ? 0 : container.clientHeight - chrome;
-      const fromContainer =
-        container === null || container.clientHeight <= 0 ? Number.POSITIVE_INFINITY : room;
-      const available = Math.max(0, Math.min(fromViewport, fromContainer));
-      setBelt(available);
-      setBudget(pinBudgetForBelt(available));
-      setMeasured(true);
-    };
-    measure();
-    window.addEventListener('resize', measure);
-    /* The pane resizes without the window doing so — the split's own divider,
-       and the conversation floor binding as the frame shortens. */
-    const container = rootRef.current?.parentElement ?? null;
-    const observer =
-      container === null || typeof ResizeObserver === 'undefined'
+  /* WHAT THE LAST MEASUREMENT SAW, so a measurement that has learned nothing
+     new can stop rather than commit. See the convergence note on `measure`. */
+  const settledRef = useRef<{ key: string; belt: number; budget: number } | null>(null);
+  /* Everything about the pin's content that the BUDGET does not decide — the
+     items, which one is open, which page, whether the pin is folded. A change
+     here is news from outside, and it ends the settling episode below. */
+  const contentRef = useRef('');
+
+  const measure = useCallback(() => {
+    const root = rootRef.current;
+    const list = listRef.current;
+    const container = root?.parentElement ?? null;
+    const viewport = window.innerHeight;
+    const fromViewport = pinBeltFor(viewport);
+    const px = (element: Element | null | undefined) =>
+      element === null || element === undefined ? 0 : element.getBoundingClientRect().height;
+    /* The pin's own chrome — head, the overflow control, padding — is
+       everything it is that the list is not, so it holds whatever the list's
+       height happens to be at the moment it is read. */
+    const chrome = root === null || list === null ? 0 : px(root) - px(list);
+    /* A box that reports no height has not told us anything — jsdom gives
+       every rect zeros, and so does a container that has not been laid out
+       yet. Reading that as "no room" would fold the pin to nothing on the
+       evidence of a measurement that did not happen, which is the same error
+       as the server guessing a viewport. It constrains only when it has a
+       height to constrain with. */
+    const containerHeight = container === null ? 0 : container.clientHeight;
+    const fromContainer =
+      containerHeight <= 0 ? Number.POSITIVE_INFINITY : containerHeight - chrome;
+    const available = Math.max(0, Math.min(fromViewport, fromContainer));
+    /* THE BELT'S FIXED COST, READ RATHER THAN ALLOWED FOR.
+       The open card is the list's first child — `Pin` draws it before any
+       compressed row, and the empty state that replaces it sits in the same
+       place — and the clean summary carries `data-pin-clean`, written a dozen
+       lines below. Both are in the DOM by the time this runs, with the height
+       the browser gave them, so the ladder charges what is there instead of the
+       three-title-line allowance that answers before there is a page to read.
+       `pinFixedCost` falls back to that allowance when the card has no box. */
+    const boxes =
+      list === null
         ? null
-        : new ResizeObserver(measure);
-    observer?.observe(container as Element);
-    return () => {
-      window.removeEventListener('resize', measure);
-      observer?.disconnect();
-    };
+        : { open: px(list.firstElementChild), clean: px(list.querySelector('[data-pin-clean]')) };
+    const computed = pinBudgetForBelt(available, boxes);
+
+    /* WHY THIS TERMINATES.
+       Setting the budget changes what the pin renders, which changes the pin's
+       height, which the observers below are watching — so this can call itself.
+       The key is every input the budget does not move: the viewport, the
+       container, the two boxes, and the content signature. While it holds, the
+       applied budget is only ever lowered (`Math.min`) and it is bounded below
+       by 0, so at most PIN_COMPACT_BUDGET passes can change it. The belt needs
+       no ratchet of its own: it is a function of the container's room and the
+       chrome, and the chrome is a function of the budget — once the budget stops
+       moving, so does the belt. When the key changes the episode is over and the
+       measurement is taken at face value, so a card that SHRANK raises the
+       budget again rather than being held down by a ratchet with no reset.
+       `test/pin-bound.test.tsx` drives the loop and asserts it commits nothing
+       once it has settled; assuming convergence is how a render loop ships. */
+    const key = [
+      Math.round(viewport),
+      Math.round(containerHeight),
+      Math.round(boxes?.open ?? 0),
+      Math.round(boxes?.clean ?? 0),
+      contentRef.current,
+    ].join('|');
+    const settled = settledRef.current;
+    const settling = settled !== null && settled.key === key;
+    const budget = settling ? Math.min(computed, settled.budget) : computed;
+    if (settling && settled.belt === available && settled.budget === budget) return;
+    settledRef.current = { key, belt: available, budget };
+    setBelt(available);
+    setBudget(budget);
+    setMeasured(true);
   }, []);
+
   const fold = foldPin(items, { openId, page, budget });
+
+  useEffect(() => {
+    window.addEventListener('resize', measure);
+    return () => window.removeEventListener('resize', measure);
+  }, [measure]);
+
+  /* AFTER EVERY COMMIT, AND ON EVERY BOX THE PIN IS MADE OF.
+     Round 9 observed the CONTAINER and nothing else, so `chrome` was a cache of
+     the pin's children as they stood at the last window or pane resize: the
+     overflow control appearing, a page turning, the pin folding, or the open
+     card growing a title line all changed the pin's height with no
+     re-measurement, and the belt kept dividing a room that no longer existed.
+     A commit covers everything React causes; the observer covers what it does
+     not — a reflow at a new width, a font arriving late, a title that grows
+     inside a list whose own height is pinned by the clip and therefore reports
+     no change at all. That last one is why the card is observed directly.
+     This is the pin's own bound and nothing else's: Timeline's removed
+     bottom-re-pin observer is not being reintroduced here. */
+  useEffect(() => {
+    contentRef.current = [
+      items.length,
+      fold.open?.id ?? '',
+      fold.page,
+      fold.clean.length,
+      folded ? 'folded' : 'open',
+    ].join('/');
+    measure();
+    if (typeof ResizeObserver === 'undefined') return;
+    const observer = new ResizeObserver(() => measure());
+    const list = listRef.current;
+    for (const target of [
+      rootRef.current?.parentElement,
+      rootRef.current,
+      list,
+      list?.firstElementChild,
+    ]) {
+      if (target !== null && target !== undefined) observer.observe(target);
+    }
+    return () => observer.disconnect();
+  });
   /* The items the head glyph is about: what still needs this person. */
   const owedItems = items.filter((item) => needsViewer(item.state));
 

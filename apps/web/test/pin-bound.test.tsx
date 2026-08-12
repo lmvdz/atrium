@@ -10,8 +10,8 @@
 
 import { existsSync, readFileSync } from 'node:fs';
 import { dirname, resolve } from 'node:path';
-import { cleanup, fireEvent, render, screen } from '@testing-library/react';
-import { afterEach, describe, expect, it } from 'vitest';
+import { act, cleanup, fireEvent, render, screen } from '@testing-library/react';
+import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import * as f from '../app/gallery/fixtures';
 import { nextPageLabel, Pin } from '../src/components';
 import type { AttentionItem, TrailerSummary } from '../src/components/model';
@@ -23,6 +23,7 @@ import {
   pinBeltFor,
   pinBudgetFor,
   pinBudgetForBelt,
+  pinFixedCost,
   rationale,
   trailerFor,
 } from '../src/components/model';
@@ -473,6 +474,55 @@ describe('the belt is one value', () => {
     expect(pinBudgetFor(900)).toBe(before.budget);
   });
 
+  /* AND THE PIXEL ARM IS FLIPPED WHERE IT IS THE ONE THAT BINDS.
+     Round 1's gauntlet, finding 3: the flip above moves both fields at a
+     viewport where the SHARE arm binds on both sides — 34vh of 900 is 306 and
+     20vh of 900 is 180, both under their own `beltMax` — so `beltMax` never
+     reaches the pixel belt at all. A mutant hard-coding `Math.min(340,
+     viewportHeight * g.beltShare)` inside `pinBeltFor` passed the entire suite:
+     `beltCss` reads the field honestly and masked it, and every rung of the
+     ladder still landed where it does because the share was doing the work.
+
+     Two cases, one each way, so both arms of the `min()` are load-bearing:
+     `beltMax` binding at a tall viewport, and `beltShare` binding at a short
+     one. Belt AND budget move in both. */
+  it.each([
+    // beltMax binds: 34vh of 2000 is 680, so the 200px cap is the limiter
+    { viewport: 2000, max: 200, share: 0.34, css: 'min(200px, 34vh)', belt: 200, budget: 2 },
+    // beltShare binds: 20vh of 900 is 180, under the 340px cap
+    { viewport: 900, max: 340, share: 0.2, css: 'min(340px, 20vh)', belt: 180, budget: 1 },
+  ])('the belt is $css at $viewportpx, and the ladder divides that number', (flip) => {
+    cleanup();
+    const after = withBelt(flip.max, flip.share, () => ({
+      css: beltCss(),
+      belt: pinBeltFor(flip.viewport),
+      budget: pinBudgetForBelt(pinBeltFor(flip.viewport)),
+      rendered: renderedBelt(),
+    }));
+    expect(after).toEqual({
+      css: flip.css,
+      belt: flip.belt,
+      budget: flip.budget,
+      rendered: flip.css,
+    });
+  });
+
+  /* THE MUTANT, WRITTEN OUT, so what the case above is for is not a claim about
+     a case. `Math.min(340, viewportHeight * g.beltShare)` — the literal the old
+     flip could not distinguish from the field — answers 340 where the field
+     answers 200, and the ladder built on it allows two rows that do not fit.
+     The ledger applies the same edit to the source and runs this file. */
+  it('a pixel belt hard-coded at 340 answers a different number where beltMax binds', () => {
+    const hardCoded = (viewportHeight: number) =>
+      Math.min(340, viewportHeight * PIN_GEOMETRY.beltShare);
+    withBelt(200, 0.34, () => {
+      expect(pinBeltFor(2000)).toBe(200);
+      expect(hardCoded(2000)).toBe(340);
+      expect(pinBudgetForBelt(pinBeltFor(2000))).toBe(2);
+      expect(pinBudgetForBelt(hardCoded(2000))).toBe(4);
+    });
+  });
+
   /* CATCHES: `beltCss` shipping binary floating point into a stylesheet.
      `0.34 * 100` is 34.000000000000004, and `min(340px, 34.000000000000004vh)`
      is a valid but embarrassing declaration. */
@@ -510,7 +560,7 @@ describe('the belt is one value', () => {
      outside the box. The headroom the belt carries is the open card growing —
      round 6 removed `.acardTitle`'s clamp on purpose — and it is three measured
      title lines, not an unattributed 46. */
-  it('the fixed cost is the open card and its measured growth, and nothing else', () => {
+  it('the pre-measure fixed cost is the open card and its allowed growth, and nothing else', () => {
     expect(PIN_GEOMETRY).not.toHaveProperty('overflow');
     expect(PIN_GEOMETRY.titleLine * PIN_GEOMETRY.cardGrowthLines).toBeCloseTo(42.9, 5);
 
@@ -545,6 +595,290 @@ describe('the belt is one value', () => {
     const bare = Math.floor((belt - PIN_GEOMETRY.card) / perRow);
     expect(bare).toBe(4);
     expect(pinBudgetFor(768)).toBe(3);
+  });
+});
+
+/* ---------------------------------------------------------------------------
+ * ROUND 10 — THE BELT CHARGES FOR BOXES IT READ, NOT FOR BOXES IT ALLOWED FOR.
+ *
+ * Round 1's gauntlet, finding 1: `card + titleLine × cardGrowthLines` is an
+ * ALLOWANCE standing where a MEASUREMENT exists. At `measure()` time the open
+ * card is in the DOM with the height the browser gave it, growth and all, and
+ * so is the clean-item summary — which is also a child of `.pinList` and was
+ * charged nothing at all. That is the 46px disease one level down: a stated
+ * number standing in for a box that could be read, and a box in the belt that
+ * nothing was paying for.
+ *
+ * The allowance is not deleted. It is what answers on the server and in the
+ * first paint, where there is no layout to read; `pinFixedCost` says which of
+ * the two is speaking, and a box reporting zero height is "not laid out" rather
+ * than "free".
+ * ------------------------------------------------------------------------- */
+describe('the belt charges for the boxes the browser drew', () => {
+  const perRow = PIN_GEOMETRY.row + PIN_GEOMETRY.gap;
+  const ALLOWANCE = PIN_GEOMETRY.card + PIN_GEOMETRY.titleLine * PIN_GEOMETRY.cardGrowthLines;
+  /* Chromium at 1280/1340/1440, the same pass the constants come from. */
+  const CARD = 72.27;
+
+  /* CATCHES: the allowance answering where a measurement was available — and
+     equally, a zero-height box being read as a card that costs nothing, which
+     would hand the ladder the whole belt on the render before layout. */
+  it('the allowance answers only where nothing has been measured', () => {
+    expect(pinFixedCost()).toBeCloseTo(ALLOWANCE, 6);
+    expect(pinFixedCost(null)).toBeCloseTo(ALLOWANCE, 6);
+    expect(pinFixedCost({ open: 0, clean: 0 })).toBeCloseTo(ALLOWANCE, 6);
+    expect(pinFixedCost({ open: CARD, clean: 0 })).toBeCloseTo(CARD, 6);
+  });
+
+  /* CATCHES: the clean summary staying uncharged. It is a child of `.pinList`,
+     inside the clip, and it was not in the sum — the same shape as the control
+     that was in the sum without being in the box, pointing the other way. */
+  it('the clean summary is inside the belt, so the belt pays for it', () => {
+    expect(pinFixedCost({ open: CARD, clean: 40 })).toBeCloseTo(CARD + PIN_GEOMETRY.gap + 40, 6);
+    expect(pinBudgetForBelt(306, { open: CARD, clean: 0 })).toBe(4);
+    expect(pinBudgetForBelt(306, { open: CARD, clean: 100 })).toBe(3);
+  });
+
+  /* CATCHES: the ladder ignoring the boxes it was handed. A card that grew five
+     title lines costs a row; the allowance cannot see the difference, because
+     an allowance is the same number whatever the card did. */
+  it('a card that grew costs a row, and the allowance cannot tell', () => {
+    const grown = CARD + 5 * PIN_GEOMETRY.titleLine;
+    expect(pinBudgetForBelt(306, { open: CARD, clean: 0 })).toBe(4);
+    expect(pinBudgetForBelt(306, { open: grown, clean: 0 })).toBe(3);
+    expect(pinBudgetForBelt(306)).toBe(4);
+    expect(pinBudgetForBelt(306, { open: 40 + CARD, clean: 0 })).toBe(4);
+  });
+
+  /* CATCHES the failure the round-9 receipt recorded against its own first
+     attempt: naming the terms without checking the ladder DIVIDES them. The
+     cost is read back out of `pinBudgetForBelt` by bisecting for the belt at
+     which it first allows a row, which is `fixed + perRow`. */
+  it('the ladder divides the measured boxes rather than merely naming them', () => {
+    const boxes = { open: 91.4, clean: 33.6 };
+    let low = 0;
+    let high = 2000;
+    for (let i = 0; i < 60; i += 1) {
+      const mid = (low + high) / 2;
+      if (pinBudgetForBelt(mid, boxes) >= 1) high = mid;
+      else low = mid;
+    }
+    expect(high - perRow, 'the belt is not charging what it was handed').toBeCloseTo(
+      boxes.open + PIN_GEOMETRY.gap + boxes.clean,
+      6,
+    );
+  });
+});
+
+/* ---------------------------------------------------------------------------
+ * ROUND 10 — `chrome` WAS A CACHE, AND THE PIN'S OWN CONTENT NEVER INVALIDATED IT.
+ *
+ * Round 1's gauntlet, finding 2: `measure()` re-ran on a window resize and on a
+ * CONTAINER resize, and on nothing else. The overflow control mounting, a page
+ * turning, the pin folding and the open card growing a line all change the pin's
+ * height without moving the container an inch, so the room the belt was dividing
+ * was the room as it stood at the last resize. The card is the worst case: the
+ * list's own height is pinned by the clip, so a card growing inside it changes
+ * no box the old observer was watching.
+ *
+ * jsdom lays nothing out and has no ResizeObserver, so a small layout is
+ * supplied here — and it is a layout with the FEEDBACK IN IT, because that is
+ * what has to be shown to settle. The pin's chrome carries the overflow control
+ * when there is one, so lowering the budget can change the room the budget is
+ * derived from: `budget → rows → the control → chrome → belt → budget`. A stub
+ * where the pin's height ignores its own content would let a loop through.
+ * ------------------------------------------------------------------------- */
+describe('the pin re-measures when its own boxes change', () => {
+  interface FakeObserver {
+    readonly targets: Element[];
+    live: boolean;
+    fire: () => void;
+  }
+  /** the pane the pin sits in, the only room there is */
+  const CONTAINER = 300;
+  /** the pin head and the trailer: chrome that is there whatever the budget is */
+  const CHROME = 50;
+  /** the "N more owed" control: chrome that is there only when rows were cut */
+  const CONTROL = 40;
+  const PER_ROW = PIN_GEOMETRY.row + PIN_GEOMETRY.gap;
+  const observers: FakeObserver[] = [];
+  let cardHeight = 72;
+  let realRect: () => DOMRect;
+  let realObserver: typeof ResizeObserver | undefined;
+  let realHeight: number;
+
+  /** what the browser would have made of the pin as it currently stands */
+  function laidOut(element: Element): number {
+    if (element.tagName === 'ARTICLE') return cardHeight;
+    if (element.hasAttribute('data-pin-list')) {
+      const rows = element.querySelectorAll('[data-attention-id]').length - 1;
+      const content = cardHeight + Math.max(0, rows) * PER_ROW;
+      /* the clip is real: the list is never taller than the belt it wears */
+      const cap = /max-height:\s*([\d.]+)px/.exec(element.getAttribute('style') ?? '');
+      return cap === null ? content : Math.min(Number(cap[1]), content);
+    }
+    if (element.getAttribute('data-region') === 'needs-you') {
+      const list = element.querySelector('[data-pin-list]');
+      const control = element.querySelector('[data-pin-overflow]');
+      return CHROME + (list === null ? 0 : laidOut(list)) + (control === null ? 0 : CONTROL);
+    }
+    return 0;
+  }
+
+  beforeEach(() => {
+    observers.length = 0;
+    cardHeight = 72;
+    realHeight = window.innerHeight;
+    Object.defineProperty(window, 'innerHeight', { configurable: true, value: 900 });
+    /* the pane. `clientHeight` is what `measure` reads for the room it has. */
+    Object.defineProperty(HTMLElement.prototype, 'clientHeight', {
+      configurable: true,
+      get(this: HTMLElement) {
+        return this.firstElementChild?.getAttribute('data-region') === 'needs-you' ? CONTAINER : 0;
+      },
+    });
+    realRect = Element.prototype.getBoundingClientRect;
+    Element.prototype.getBoundingClientRect = function rect(this: Element): DOMRect {
+      const height = laidOut(this);
+      return {
+        height,
+        width: 0,
+        top: 0,
+        left: 0,
+        right: 0,
+        bottom: height,
+        x: 0,
+        y: 0,
+        toJSON: () => ({}),
+      } as DOMRect;
+    };
+    realObserver = globalThis.ResizeObserver;
+    globalThis.ResizeObserver = class {
+      private readonly record: FakeObserver;
+      constructor(callback: () => void) {
+        this.record = { targets: [], live: true, fire: callback };
+        observers.push(this.record);
+      }
+      observe(target: Element) {
+        this.record.targets.push(target);
+      }
+      unobserve() {}
+      disconnect() {
+        this.record.live = false;
+      }
+    } as unknown as typeof ResizeObserver;
+  });
+
+  afterEach(() => {
+    Element.prototype.getBoundingClientRect = realRect;
+    delete (HTMLElement.prototype as { clientHeight?: number }).clientHeight;
+    if (realObserver === undefined) {
+      (globalThis as { ResizeObserver?: typeof ResizeObserver }).ResizeObserver = undefined;
+    } else {
+      globalThis.ResizeObserver = realObserver;
+    }
+    Object.defineProperty(window, 'innerHeight', { configurable: true, value: realHeight });
+  });
+
+  /** everything currently observing, fired once each, as a reshape would */
+  function reshape() {
+    act(() => {
+      for (const observer of [...observers].filter((o) => o.live)) observer.fire();
+    });
+  }
+
+  function budgetOf(container: HTMLElement): string | null {
+    return container.querySelector('[data-pin-list]')?.getAttribute('data-pin-budget') ?? null;
+  }
+
+  /* CATCHES the finding exactly: a card that grows while the window and the
+     pane hold still. Under round 9 nothing fired (the observer watched the
+     container) and nothing would have moved if it had (the card was an
+     allowance), so the pin kept drawing four rows into a belt that now holds
+     three — rows the fold counts as visible and the clip eats. */
+  it('a card that grows costs a row without the window or the pane moving', () => {
+    const { container } = render(
+      <Pin items={f.manyOwed(34)} lastCheck="12:29" trailer={TRAILER} viewer="lars" />,
+    );
+    const drawn = () => container.querySelectorAll('[data-pin-list] [data-attention-id]').length;
+    /* 300px of pane less 90px of chrome is a 210px belt; a 72px card leaves
+       three rows of 41. */
+    const settled = pinBudgetForBelt(CONTAINER - CHROME - CONTROL, { open: 72, clean: 0 });
+    expect(settled).toBe(3);
+    expect(budgetOf(container)).toBe(String(settled));
+    expect(drawn()).toBe(settled + 1);
+
+    // the title wraps five more lines. Nothing outside the pin has moved.
+    cardHeight = 72 + 5 * PIN_GEOMETRY.titleLine;
+    reshape();
+    const grown = pinBudgetForBelt(CONTAINER - CHROME - CONTROL, { open: cardHeight, clean: 0 });
+    expect(grown, 'a card that grew 71px did not cost a row').toBeLessThan(settled);
+    expect(budgetOf(container), 'the grown card cost nothing').toBe(String(grown));
+    expect(drawn()).toBe(grown + 1);
+
+    /* and it RECOVERS: the ratchet that makes the settling loop terminate has a
+       reset, so a card that shrank raises the budget again rather than pinning
+       the pin to the worst thing it ever measured. */
+    cardHeight = 72;
+    reshape();
+    expect(budgetOf(container), 'the budget never came back').toBe(String(settled));
+    expect(drawn()).toBe(settled + 1);
+  });
+
+  /* CATCHES: the observer going back to watching the container alone. The list
+     is watched for its own sake and the card because the clip pins the list's
+     height, so a card growing inside it moves no box further out. */
+  it('the observer watches the pin’s own boxes, not only the pane it sits in', () => {
+    const { container } = render(
+      <Pin items={f.manyOwed(34)} lastCheck="12:29" trailer={TRAILER} viewer="lars" />,
+    );
+    const watched = new Set([...observers].filter((o) => o.live).flatMap((o) => o.targets));
+    const root = container.querySelector('[data-region="needs-you"]');
+    const list = container.querySelector('[data-pin-list]');
+    const card = container.querySelector('[data-pin-list] article');
+    expect(card, 'the pin drew no open card').not.toBeNull();
+    expect(watched.has(root as Element), 'nothing is watching the pin').toBe(true);
+    expect(watched.has(list as Element), 'nothing is watching the list').toBe(true);
+    expect(watched.has(card as Element), 'nothing is watching the card that grows').toBe(true);
+    expect(watched.has(root?.parentElement as Element), 'nothing is watching the pane').toBe(true);
+  });
+
+  /* CONVERGENCE, ASSERTED RATHER THAN ASSUMED. Measuring the pin's own height
+     and then changing it is a feedback loop, and a loop that settles is a claim
+     until something drives it. One observer is constructed per commit here, so
+     the count of observers IS the count of commits: a reshape that changes
+     nothing must commit nothing, and one that does must stop. */
+  it('the settling loop reaches a fixed point and stops committing', () => {
+    const { container } = render(
+      <Pin items={f.manyOwed(34)} lastCheck="12:29" trailer={TRAILER} viewer="lars" />,
+    );
+    /* THE LOOP RAN: the pin was serving the full budget, measured, found the
+       control in its own chrome, and came down. That is the feedback edge. */
+    expect(budgetOf(container)).not.toBe(String(PIN_COMPACT_BUDGET));
+
+    /* AND IT IS A FIXED POINT, not a resting place: re-derive the budget from
+       the pin as it now stands and get the same answer back. */
+    const root = container.querySelector('[data-region="needs-you"]') as HTMLElement;
+    const list = container.querySelector('[data-pin-list]') as HTMLElement;
+    const chrome = root.getBoundingClientRect().height - list.getBoundingClientRect().height;
+    expect(chrome, 'the overflow control is not in the pin’s chrome').toBe(CHROME + CONTROL);
+    expect(budgetOf(container)).toBe(
+      String(pinBudgetForBelt(CONTAINER - chrome, { open: cardHeight, clean: 0 })),
+    );
+
+    const settled = observers.length;
+    for (let i = 0; i < 10; i += 1) reshape();
+    expect(observers.length, 'the pin re-rendered itself on a reshape it had already seen').toBe(
+      settled,
+    );
+
+    /* one input moves; the loop takes a bounded number of passes and stops */
+    cardHeight = 240;
+    for (let i = 0; i < 10; i += 1) reshape();
+    const after = observers.length;
+    expect(after - settled, 'the pin did not settle after the card changed').toBeLessThanOrEqual(3);
+    for (let i = 0; i < 10; i += 1) reshape();
+    expect(observers.length, 'the pin never stopped re-measuring').toBe(after);
   });
 });
 
