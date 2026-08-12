@@ -2,6 +2,7 @@ import {
   ClaimPayload,
   CommitmentPayload,
   DecisionPayload,
+  epistemicStateFromAcceptance,
   ObjectivePayload,
   OpenQuestionPayload,
 } from '@atrium/core';
@@ -194,7 +195,12 @@ export function replayView(data: ReplayData, viewerId?: string) {
     .map((object) => ({
       id: object.id,
       kind: objectKind(object.type),
-      state: stateForObject(object.type, object.payload, pendingBySubject.has(object.id), true),
+      state: stateForObject(
+        object.type,
+        object.payload,
+        pendingBySubject.has(object.id),
+        acceptanceOf(object),
+      ),
       text: payloadText(object.type, object.payload),
       facts: [
         ...objectFacts(object.type, object.payload, participantName, object.createdAt),
@@ -212,7 +218,7 @@ export function replayView(data: ReplayData, viewerId?: string) {
         proposal.type,
         proposal.payload,
         pendingBySubject.has(proposal.id),
-        false,
+        null,
       ),
       text: payloadText(proposal.type, proposal.payload),
       facts: [
@@ -351,16 +357,18 @@ export function replayView(data: ReplayData, viewerId?: string) {
     const source = sourceFor(item.subjectKind, item.subjectId);
     const subjectState =
       (acceptedFromProposal
-        ? stateForObject(acceptedFromProposal.type, acceptedFromProposal.payload, true, true)
+        ? stateForObject(
+            acceptedFromProposal.type,
+            acceptedFromProposal.payload,
+            true,
+            acceptanceOf(acceptedFromProposal),
+          )
         : subject
           ? { ...subject.state, owedToViewer: true }
           : proposalSubject
-            ? stateForObject(
-                proposalSubject.type,
-                proposalSubject.payload,
-                true,
-                proposalSubject.status === 'accepted',
-              )
+            ? // A proposal still staged here (its accepted object, if any, was
+              // caught by `acceptedFromProposal` above): a machine's reading, `~`.
+              stateForObject(proposalSubject.type, proposalSubject.payload, true, null)
             : undefined) ??
       ({
         kind: item.class === 'blocking_question' ? 'question' : 'decision',
@@ -613,7 +621,12 @@ export function replayReceiptSubject(
       return {
         id: acceptedFromProposal.id,
         kind: 'objective',
-        state: stateForObject('objective', acceptedFromProposal.payload, false, true),
+        state: stateForObject(
+          'objective',
+          acceptedFromProposal.payload,
+          false,
+          acceptanceOf(acceptedFromProposal),
+        ),
         text: payloadText('objective', acceptedFromProposal.payload),
         facts: objectFacts(
           'objective',
@@ -635,7 +648,7 @@ export function replayReceiptSubject(
     return {
       id: proposal.id,
       kind: 'objective',
-      state: stateForObject('objective', proposal.payload, false, false),
+      state: stateForObject('objective', proposal.payload, false, null),
       text: payloadText('objective', proposal.payload),
       facts: [
         proposal.proposerKind === 'model'
@@ -652,7 +665,7 @@ export function replayReceiptSubject(
   return {
     id: accepted.id,
     kind: 'objective',
-    state: stateForObject('objective', accepted.payload, false, true),
+    state: stateForObject('objective', accepted.payload, false, acceptanceOf(accepted)),
     text: payloadText('objective', accepted.payload),
     facts: objectFacts('objective', accepted.payload, participantName, accepted.createdAt),
     objectives: [],
@@ -754,11 +767,30 @@ function objectKind(type: ReplayData['objects'][number]['type']): StateObject['k
   return type;
 }
 
+/**
+ * The two projected columns core's one certification predicate reads, or `null`
+ * for a thing no acceptance has touched (a staged proposal). Passing the row's
+ * own `accepted_by_kind` and `human_touched_at` — rather than the old "does a
+ * row exist" boolean — is what makes the rendered `✓` the ENFORCED one.
+ */
+type ObjectAcceptance = {
+  readonly acceptedByKind: ReplayData['objects'][number]['acceptedByKind'];
+  readonly humanTouchedAt: string | null;
+};
+
+/** The acceptance descriptor for a persisted accepted-object row. */
+function acceptanceOf(object: ReplayData['objects'][number]): ObjectAcceptance {
+  return {
+    acceptedByKind: object.acceptedByKind,
+    humanTouchedAt: object.humanTouchedAt === null ? null : object.humanTouchedAt.toISOString(),
+  };
+}
+
 function stateForObject(
   type: ReplayData['objects'][number]['type'],
   payload: ReplayData['objects'][number]['payload'],
   owedToViewer: boolean,
-  accepted: boolean,
+  acceptance: ObjectAcceptance | null,
 ): EpistemicState {
   if (type === 'open_question') {
     const question = OpenQuestionPayload.parse(payload);
@@ -778,9 +810,19 @@ function stateForObject(
       irreversible: false,
     };
   }
+  // `~` vs `✓` is core's one predicate, read off the projected columns via
+  // `epistemicStateFromAcceptance` — which delegates to `epistemicStateOf`, the
+  // SAME function the reducer's supersession gate enforces. A machine's
+  // acceptance is `~` (unconfirmed) and stays `~` until a person touches it;
+  // there is no second answer derived from row existence anymore. A thing with
+  // no acceptance (`null`, a staged proposal) is a machine's reading, `~`.
+  const confirmed =
+    acceptance !== null &&
+    epistemicStateFromAcceptance(acceptance.acceptedByKind, acceptance.humanTouchedAt) ===
+      'confirmed';
   return {
     kind: objectKind(type),
-    verification: accepted ? 'accepted' : 'proposed',
+    verification: confirmed ? 'accepted' : 'proposed',
     owedToViewer,
     irreversible: false,
   };

@@ -13,6 +13,7 @@ import {
   replayView,
 } from '../lib/replay-view';
 import { needsViewer, withFilter } from '../src/components';
+import { glyphFor } from '../src/components/model';
 import type { RoomView } from '../src/lib/realtime';
 import { workspacePath } from './support/workspace-path';
 
@@ -77,6 +78,8 @@ describe('contextual direct-reference placement', () => {
         retractedAt: null,
         supersededById: null,
         acceptedBy: 'alice',
+        acceptedByKind: 'human',
+        humanTouchedAt: at,
         createdAt: at,
         updatedAt: at,
       },
@@ -91,6 +94,8 @@ describe('contextual direct-reference placement', () => {
         retractedAt: null,
         supersededById: null,
         acceptedBy: 'alice',
+        acceptedByKind: 'human',
+        humanTouchedAt: at,
         createdAt: at,
         updatedAt: at,
       },
@@ -254,6 +259,55 @@ describe('persisted replay view', () => {
     expect(view.entries.find((entry) => entry.id === 'm1')).toMatchObject({ tag: null });
   });
   /**
+   * H5/H6, M5/M7 — the rendered ✓ IS core's one certification predicate.
+   *
+   * Two decisions with identical words differ in exactly one thing: who accepted
+   * them. The human-accepted one renders ✓; the machine-accepted one renders ~,
+   * and it does so because `epistemicStateOf` — the SAME function the reducer's
+   * gate reads — says `unconfirmed`, derived from the projected
+   * `accepted_by_kind`/`human_touched_at` columns and nothing else.
+   *
+   * MUTATION (M5): flip `epistemic.ts`'s `epistemicStateOf` to `return
+   * 'confirmed'` and the machine-accepted decision below renders ✓ — this
+   * assertion fails. Before this ticket, only `packages/core`'s own
+   * `corrections.test.ts` noticed that flip; the glyph a user sees was derived
+   * from row existence and did not move. It moves now.
+   */
+  it('renders a machine-accepted object ~ and the same sentence human-accepted ✓', () => {
+    const snapshot = data();
+    const decision = (id: string, accepter: 'human' | 'model') =>
+      ({
+        id,
+        roomId: 'room',
+        type: 'decision' as const,
+        payload: { statement: 'Regenerate in the background.', decidedBy: null, status: 'active' },
+        objectiveId: null,
+        proposalId: null,
+        revision: 0,
+        retractedAt: null,
+        supersededById: null,
+        acceptedBy: accepter === 'human' ? 'alice' : null,
+        acceptedByKind: accepter,
+        humanTouchedAt: accepter === 'human' ? at : null,
+        createdAt: at,
+        updatedAt: at,
+      }) as ReplayData['objects'][number];
+    snapshot.objects.push(decision('by-person', 'human'), decision('by-machine', 'model'));
+
+    const view = replayView(snapshot, 'alice');
+    const byPerson = view.objects.find((object) => object.id === 'by-person');
+    const byMachine = view.objects.find((object) => object.id === 'by-machine');
+    if (!byPerson || !byMachine) throw new Error('both accepted decisions must render');
+
+    // The rendered glyph — the character on screen — moves with the accepter.
+    expect(glyphFor(byPerson.state)).toBe('✓');
+    expect(glyphFor(byMachine.state)).toBe('~');
+    // And it is the covenant's verification vocabulary underneath, not a coincidence.
+    expect(byPerson.state.verification).toBe('accepted');
+    expect(byMachine.state.verification).toBe('proposed');
+  });
+
+  /**
    * Mutation: retain final worker rows while scrubbing an earlier message
    * prefix. The replay then presents a conclusion before its source was read.
    */
@@ -309,6 +363,8 @@ describe('persisted replay view', () => {
       retractedAt: null,
       supersededById: null,
       acceptedBy: 'alice',
+      acceptedByKind: 'human',
+      humanTouchedAt: at,
       createdAt: at,
       updatedAt: at,
     });
@@ -428,6 +484,8 @@ describe('persisted replay view', () => {
         retractedAt: null,
         supersededById: null,
         acceptedBy: 'alice',
+        acceptedByKind: 'human',
+        humanTouchedAt: at,
         createdAt: at,
         updatedAt: at,
       },
@@ -449,6 +507,8 @@ describe('persisted replay view', () => {
         retractedAt: null,
         supersededById: null,
         acceptedBy: 'alice',
+        acceptedByKind: 'human' as const,
+        humanTouchedAt: at,
         createdAt: at,
         updatedAt: at,
       })),
@@ -621,6 +681,8 @@ describe('persisted replay view', () => {
         retractedAt: null,
         supersededById: 'decision',
         acceptedBy: 'alice',
+        acceptedByKind: 'human',
+        humanTouchedAt: at,
         createdAt: at,
         updatedAt: at,
       },
@@ -635,6 +697,8 @@ describe('persisted replay view', () => {
         retractedAt: null,
         supersededById: null,
         acceptedBy: 'alice',
+        acceptedByKind: 'human',
+        humanTouchedAt: at,
         createdAt: at,
         updatedAt: changedAt,
       },
@@ -653,6 +717,8 @@ describe('persisted replay view', () => {
         retractedAt: null,
         supersededById: null,
         acceptedBy: 'alice',
+        acceptedByKind: 'human',
+        humanTouchedAt: at,
         createdAt: at,
         updatedAt: at,
       },
@@ -772,6 +838,8 @@ describe('persisted replay view', () => {
       retractedAt: null,
       supersededById: null,
       acceptedBy: 'alice',
+      acceptedByKind: 'human',
+      humanTouchedAt: at,
       createdAt: at,
       updatedAt: at,
     });

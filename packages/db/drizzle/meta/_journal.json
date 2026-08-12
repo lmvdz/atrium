@@ -134,6 +134,13 @@
       "when": 1786358400003,
       "tag": "0018_an_unknown_principal_kind_fails_closed",
       "breakpoints": true
+    },
+    {
+      "idx": 19,
+      "version": "7",
+      "when": 1786358400004,
+      "tag": "0019_the_read_model_names_who_certified",
+      "breakpoints": true
     }
   ]
 }

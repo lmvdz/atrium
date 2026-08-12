@@ -290,8 +290,14 @@ export function modelMintingGate(type: AcceptedObjectType): HumanOnlyGate | null
  * started returning true for it, and every gate below would have opened at once.
  * One kind passes; anything the union gains is a machine until this line says
  * otherwise.
+ *
+ * Takes only the `kind` — the whole question is which kind, and nothing else on
+ * an actor bears on it. Narrowing the parameter is what lets the read model ask
+ * the same predicate off a projected `accepted_by_kind` column (via
+ * `epistemicStateFromAcceptance`) without reconstructing a whole Actor: the
+ * rendered `✓` and the enforced gate then read one function, not two.
  */
-export function isHuman(actor: Actor): boolean {
+export function isHuman(actor: Pick<Actor, 'kind'>): boolean {
   return actor.kind === 'human';
 }
 
