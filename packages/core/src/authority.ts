@@ -165,22 +165,24 @@ export type HumanOnlyGate =
    * critics found it independently and this build's own authority matrix pinned
    * it as correct.
    *
-   * #95 decided the rule this enforces, and it is a *relation* rule rather than
-   * a type rule: **a non-human may never retire anything
-   * `epistemicStateOf(record) === 'confirmed'`.** Kind answers *may this species
-   * certify at all*; the epistemic state answers *has a person already put their
-   * name to this one*. Both must pass.
+   * #95 decided the rule this enforces: **a non-human may never retire an
+   * accepted object via supersession at all** — confirmed or not — it may only
+   * draft a superseding reading. Kind answers *may this species certify at all*;
+   * the answer for retirement is simply no. `epistemicStateOf(target)` is read
+   * only to choose *which* reason the refusal carries (`confirmed_supersession`
+   * vs `unconfirmed_supersession`), never to decide whether to refuse.
    *
-   * It is deliberately the narrow interim of #95's table — #102 owns the full
-   * relation matrix (who verified, who stated, who owns). This is the one row
-   * that had to land here, because #96 is what first gives a machine a session
-   * to retire from.
+   * (The first cut of this gate keyed the refusal on `confirmed` alone — the
+   * narrow interim of #95's table. #96 round 3 broadened it after a blind critic
+   * found that left a non-human free to retire another machine's unconfirmed
+   * `~`, which — since an agent owns no proposal — is always foreign. #102 still
+   * owns the full HUMAN relation matrix: who verified, who stated, who owns.)
    *
    * Ordered *after* `supersession` on purpose: a machine retiring a confirmed
-   * decision is refused by the type rule and hears the type rule's reason, which
-   * is the more specific answer. This one fires on exactly the cells the type
-   * table calls `auto_accept` — a confirmed claim and a confirmed open question
-   * — which are exactly the cells that were open.
+   * decision is refused by the type rule and hears the type rule's more specific
+   * reason. This general gate then catches every remaining non-human
+   * retirement — the `auto_accept` types (claim, open question) at any epistemic
+   * state — which are exactly the cells the type table left open.
    *
    * What stays open, and must: a machine may always **draft** a superseding
    * reading and let a person retire the old one. That is the covenant's

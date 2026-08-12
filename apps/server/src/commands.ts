@@ -365,13 +365,16 @@ export type Command = z.infer<typeof Command>;
  *    which is authority. If `Proposer` ever gains an agent variant, this row
  *    moves to `conditional` and the condition is `actorMatchesProposer`.
  *
- * `supersede_object` is the one that is genuinely **conditional** and must not
- * be blanket-refused: #4 says retiring a `~` claim or open question is cheap to
- * correct and a machine may do it, and #95 says a machine may never retire
- * anything *confirmed*. That is a fact about the object, not about the verb, so
- * it cannot be answered here — it is answered in the command's own `prepare`,
- * where the object is in hand, from the same `epistemicStateOf` the reducer
- * reads.
+ * `supersede_object` is classified `conditional` because it retires an object,
+ * and retirement is human-only — but a non-human is refused it outright: #95
+ * says a machine may never retire an accepted object at all (confirmed or not),
+ * only draft a superseding reading. The `prepare` guard therefore refuses every
+ * non-human; `epistemicStateOf` is read there only to name *which* rule refused
+ * (`confirmed_supersession` vs `unconfirmed_supersession`) so the room hears the
+ * reason, not to decide *whether* to refuse. (The earlier interim keyed the
+ * refusal on `confirmed` alone; #96 round 3 broadened it after a blind critic
+ * found a non-human could retire another machine's unconfirmed `~`.) A human
+ * still supersedes freely, subject to #4's type rules.
  *
  * Everything else is participation, and an agent is a participant: posting,
  * resolving **its own** attention (scoped in `projections.ts`, #96 finding 2),
