@@ -67,6 +67,11 @@ import type { Authorizer, MembershipPair, Session } from './session.js';
  * sentence as a machine's reading (see `draftBase`). A proposal staged here is a
  * human proposal by the session's own user, full stop; #21 will need a seam of
  * its own, and whatever it is, `stagedBy` will record which one was used.
+ *
+ * "Full stop" is now enforced rather than merely intended: a session belonging
+ * to an agent principal is refused here instead of having its reading recorded
+ * as a person's, because `Proposer` has no agent variant to record it as. See
+ * `draftToProposal`.
  */
 
 const AttachmentList = z
@@ -456,8 +461,40 @@ export function createCommandService({
     return membership;
   }
 
+  /**
+   * The session, as the actor core will fold under. The one derivation.
+   *
+   * It returned the literal `{ kind: 'human', userId }` until agents existed,
+   * which was correct for exactly as long as holding an account implied being a
+   * person. It does not any more, and the substitution is not cosmetic: `kind`
+   * is what every certification gate in `@atrium/core` reads, so a seam that
+   * keeps answering `'human'` for an agent's session does not fail a test — it
+   * quietly certifies on a machine's behalf while every gate reports green.
+   *
+   * `session.principalKind` is required (`session.ts`), so there is no absent
+   * case to default and no `?? 'human'` anywhere on this path. The switch is
+   * exhaustive over `PrincipalKind`, so a third kind of principal does not
+   * compile until somebody has said what actor it makes.
+   *
+   * Both branches carry `userId`, and that is the shape the rest of the system
+   * needs: an agent that is a room member, an attention target and an author has
+   * to be nameable by the same id `memberships` and `attention_items` use. What
+   * separates the two branches downstream is `isHuman`, and nothing else.
+   */
   function actorOf(session: Session): Actor {
-    return { kind: 'human', userId: session.userId };
+    switch (session.principalKind) {
+      case 'human':
+        return { kind: 'human', userId: session.userId };
+      case 'agent':
+        return { kind: 'agent', userId: session.userId };
+      default: {
+        const exhaustive: never = session.principalKind;
+        throw new CommandError(
+          'invalid',
+          `session carries an unknown principal kind ${JSON.stringify(exhaustive)}`,
+        );
+      }
+    }
   }
 
   /**
@@ -1073,6 +1110,30 @@ function describeCause(error: unknown): string {
  * needs a human other than its stager to accept it, and `ProposalRecord.stagedBy`
  * is what makes that answerable. Neither half is sufficient alone; see the note
  * on that function.
+ *
+ * ## And why an agent session is refused here rather than attributed
+ *
+ * `Proposer` is `human | model`. It has no agent variant, and widening it is not
+ * a rename: `acceptance.ts` reads the proposer to decide whether the reading
+ * needs a receipt window checked against the messages it cites (`:663`), whether
+ * θ applies at all (`:828`), and whether a commitment naming somebody else waits
+ * for that person. Those are acceptance-semantics questions about how much a
+ * given sort of reading is trusted, and nothing about "an agent holds an
+ * account" answers any of them.
+ *
+ * So the two available moves were to record an agent's proposal as a human's, or
+ * to refuse it. Recording it as a human's is precisely the r9 defect with a new
+ * author: a reading that is not a person's, stored as a person's, skipping the
+ * receipt gate a human acceptance skips. It is refused instead, by name, and the
+ * refusal says what is missing rather than pretending the command was malformed.
+ * When `Proposer` gains an agent variant with the two questions above answered,
+ * this refusal is what a reviewer deletes, and `actorMatchesProposer` in
+ * `@atrium/core` is the other end that has to move with it.
+ *
+ * Note what is NOT restricted: an agent may post messages, answer, resolve
+ * attention, set presence and advance its seen cursor. Staging a `~` reading is
+ * the one participant act whose meaning depends on a vocabulary that has not
+ * been extended yet.
  */
 function draftToProposal(
   draft: ProposalDraft,
@@ -1080,6 +1141,12 @@ function draftToProposal(
   at: string,
   session: Session,
 ): Proposal {
+  if (session.principalKind !== 'human') {
+    throw new CommandError(
+      'invalid',
+      `a ${session.principalKind} principal may not stage a proposal over this socket — a proposal's proposer decides whether the reading is checked against the messages it cites and whether θ applies, and there is no proposer vocabulary for this kind yet; recording it as a person's would be an attribution nobody made`,
+    );
+  }
   return {
     id: randomUUID(),
     roomId,

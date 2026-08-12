@@ -132,7 +132,7 @@ async function insertMessage(userId: string, body: string): Promise<string> {
 
 async function say(userId: string, body: string): Promise<string> {
   const result = await commands.execute(
-    { userId },
+    { userId, principalKind: 'human' },
     Command.parse({ name: 'send_message', roomId: room.roomId, body }),
   );
   if (result.kind !== 'appended' || result.event.type !== 'message_posted') {
@@ -308,7 +308,7 @@ describe('the enqueue shares the message insert’s transaction', () => {
 
     await expect(
       failing.execute(
-        { userId: room.people.alice as string },
+        { userId: room.people.alice as string, principalKind: 'human' },
         Command.parse({ name: 'send_message', roomId: room.roomId, body: 'lost?' }),
       ),
     ).rejects.toThrow(/the queue is down/);
@@ -330,7 +330,7 @@ describe('the enqueue shares the message insert’s transaction', () => {
   it('a rolled-back append leaves no job behind', async () => {
     await expect(
       commands.execute(
-        { userId: room.people.alice as string },
+        { userId: room.people.alice as string, principalKind: 'human' },
         Command.parse({ name: 'send_message', roomId: room.roomId, body: 'from a stranger' }),
       ),
     ).resolves.toBeTruthy();
@@ -340,7 +340,7 @@ describe('the enqueue shares the message insert’s transaction', () => {
     // lock and before anything is minted.
     await expect(
       commands.execute(
-        { userId: '99999999-9999-4999-8999-999999999999' },
+        { userId: '99999999-9999-4999-8999-999999999999', principalKind: 'human' },
         Command.parse({ name: 'send_message', roomId: room.roomId, body: 'from a stranger' }),
       ),
     ).rejects.toThrow();
@@ -720,7 +720,7 @@ describe('per-job settlement', () => {
     // worker would fetch them together.
     await say(room.people.alice as string, 'poison for one room');
     await commands.execute(
-      { userId: other.people.carol as string },
+      { userId: other.people.carol as string, principalKind: 'human' },
       Command.parse({ name: 'send_message', roomId: other.roomId, body: 'perfectly fine' }),
     );
 
@@ -855,7 +855,7 @@ describe('in-job acceptance', () => {
     ]);
 
     const accepted = await commands.execute(
-      { userId: owner },
+      { userId: owner, principalKind: 'human' },
       Command.parse({
         name: 'accept_proposal',
         roomId: room.roomId,

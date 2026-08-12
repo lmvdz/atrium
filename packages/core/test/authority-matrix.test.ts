@@ -60,14 +60,39 @@ const ROOM = 'room_1';
 const MODEL_A = 'model-a';
 const MODEL_B = 'model-b';
 
-/** The four kinds of actor the matrix ranges over. */
-type ActorKind = 'human' | 'model_proposer' | 'model_other' | 'system';
-const ACTOR_KINDS: ActorKind[] = ['human', 'model_proposer', 'model_other', 'system'];
+/**
+ * The five kinds of actor the matrix ranges over.
+ *
+ * `agent` is the identified non-human: it carries a user id exactly as `human`
+ * does, and it is a machine exactly as `model` is. Adding it to this list rather
+ * than writing agent cases by hand is the point — the whole case space is
+ * re-enumerated against it, every event type, every object type, every receipt
+ * shape, every correction verb, every relation kind. The oracle below says what
+ * each cell should do, restated from #4 rather than imported from `authority.ts`,
+ * so an implementation that let an agent through anywhere is a failing cell
+ * rather than a missing test.
+ *
+ * The mutation this closes: `isHuman` written as `kind !== 'model' && kind !==
+ * 'system'`. That spelling passes every cell of this matrix as it stood before
+ * `agent` existed, and opens every gate in it for the one kind that was added.
+ */
+type ActorKind = 'human' | 'agent' | 'model_proposer' | 'model_other' | 'system';
+const ACTOR_KINDS: ActorKind[] = ['human', 'agent', 'model_proposer', 'model_other', 'system'];
+
+/**
+ * A `users` row that is not a person. Distinct from ALICE and BOB because the
+ * attribution gates compare ids: an agent sharing ALICE's id would make "the
+ * accepter is the person this names" true by accident and hide whichever gate
+ * that made unreachable.
+ */
+const SCRIBE = 'user_scribe';
 
 function actorOf(kind: ActorKind): Actor {
   switch (kind) {
     case 'human':
       return { kind: 'human', userId: ALICE };
+    case 'agent':
+      return { kind: 'agent', userId: SCRIBE };
     case 'model_proposer':
       return { kind: 'model', model: MODEL_A };
     case 'model_other':
@@ -159,9 +184,23 @@ const SUPERSESSION_NEEDS_HUMAN: Record<AcceptedObjectType, boolean> = {
   open_question: false,
 };
 
+/**
+ * Restated, not imported. One kind is a person; everything else is a machine,
+ * including the one that holds an account — an agent's identity buys it
+ * membership and attribution, and buys it nothing at any gate below.
+ */
 const isHumanKind = (kind: ActorKind) => kind === 'human';
 
-/** "A model may act only on its own proposals; a human on any; the system on none." */
+/**
+ * "A model may act only on its own proposals; a human on any; the system on
+ * none — and an agent on none, because no proposal is staged by one."
+ *
+ * `Proposer` is `human | model`. There is no agent proposer to match, so an
+ * agent owns nothing and every binding gate refuses it. This is a fact about the
+ * proposal vocabulary rather than a policy about agents, and it is why the
+ * command layer refuses to stage an agent's proposal at all instead of writing
+ * one down as somebody else's.
+ */
 function ownsProposal(kind: ActorKind, proposer: 'model_a' | 'human'): boolean {
   if (kind === 'human') return true;
   if (kind === 'model_proposer') return proposer === 'model_a';
@@ -1354,7 +1393,7 @@ describe('authority matrix — relation_added, every actor × kind × retired ty
 });
 
 describe('the matrix as a whole', () => {
-  it('enumerates every cell it claims to — 4 actors × 5 types × 9 citation/staging/confidence shapes', () => {
+  it('enumerates every cell it claims to — 5 actors × 5 types × 9 citation/staging/confidence shapes', () => {
     // Per actor, per type: two cited proposals × two confidence bands × two
     // stagers, plus the one direct shape (with nothing cited there is no band and
     // no staging) = 9. Five types, of which `claim` is doubled for
@@ -1364,7 +1403,14 @@ describe('the matrix as a whole', () => {
     // here used to be recorded by `model_proposer`, so the whole *human*-staged
     // half of the space — where D1 lives — was outside the enumeration while the
     // file's own header claimed the case space was enumerated.
-    expect(acceptanceCases).toHaveLength(4 * (4 * 9 + 9 * 2));
+    //
+    // Five actors since `agent`, and the leading factor is written out rather
+    // than read from `ACTOR_KINDS.length` on purpose: derived from the same list
+    // the loops range over, this assertion would agree with itself no matter what
+    // that list held, which is precisely the vacuity it exists to rule out. The
+    // number is the claim in the title, and both move by hand when a kind is
+    // added.
+    expect(acceptanceCases).toHaveLength(5 * (4 * 9 + 9 * 2));
     const distinct = new Set(
       acceptanceCases.map(
         (entry) =>

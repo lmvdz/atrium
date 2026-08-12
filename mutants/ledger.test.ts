@@ -42,9 +42,14 @@ interface Mutant {
   find?: string;
   replace?: string;
   apply?: string;
-  restoreFrom?: string[];
+  /**
+   * A bare marker reads from `restoreMigration`; `{ migration, marker }` names
+   * its own file, for the markers whose newest definition is somewhere else. See
+   * `resolveMarker` in `run.mjs`.
+   */
+  restoreFrom?: (string | { migration: string; marker: string })[];
   restorePrelude?: string[];
-  /** Which migration a `sql` mutant's restore statements come from. */
+  /** Which migration a `sql` mutant's bare restore markers come from. */
   restoreMigration?: string;
   /** `tests` (default), `build`, or `load` — which mechanism must refuse it. */
   caughtBy?: 'tests' | 'build' | 'load';
@@ -152,10 +157,17 @@ describe('the mutant ledger still describes this code', () => {
       // marker that matches nothing would leave the database mutated for every
       // subsequent test in the run — and one that matches two would re-deploy an
       // ambiguous pair. Either way the *next* mutant's result is meaningless.
-      const file = mutant.restoreMigration ?? DEFAULT_RESTORE_MIGRATION;
-      const statements = statementsOf(file);
-      for (const marker of mutant.restoreFrom ?? []) {
-        const matched = statements.filter((statement) => statement.startsWith(marker));
+      // Per marker, in the one file that marker names. A marker that resolved
+      // across a set of files would be ambiguous exactly where it matters most:
+      // `atrium_core_events_invariants` is defined in 0008 and redefined in 0017,
+      // and taking either match would sometimes re-deploy the superseded one.
+      for (const entry of mutant.restoreFrom ?? []) {
+        const marker = typeof entry === 'string' ? entry : entry.marker;
+        const file =
+          typeof entry === 'string'
+            ? (mutant.restoreMigration ?? DEFAULT_RESTORE_MIGRATION)
+            : entry.migration;
+        const matched = statementsOf(file).filter((statement) => statement.startsWith(marker));
         expect({ marker, file, matched: matched.length }).toEqual({ marker, file, matched: 1 });
       }
     },

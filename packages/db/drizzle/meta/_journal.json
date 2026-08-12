@@ -120,6 +120,13 @@
       "when": 1786358400001,
       "tag": "0016_durable_typed_references",
       "breakpoints": true
+    },
+    {
+      "idx": 17,
+      "version": "7",
+      "when": 1786358400002,
+      "tag": "0017_an_identified_agent_may_be_a_member",
+      "breakpoints": true
     }
   ]
 }

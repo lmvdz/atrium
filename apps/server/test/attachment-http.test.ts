@@ -47,7 +47,9 @@ async function start(options: { authenticated?: boolean; member?: boolean } = {}
     ledger: { head: async () => 0 } as unknown as Ledger,
     session: {
       authenticateUpgrade: async () =>
-        options.authenticated === false ? null : { userId: 'user-1', method: 'test' },
+        options.authenticated === false
+          ? null
+          : { userId: 'user-1', principalKind: 'human', method: 'test' },
     },
     allowedOrigins: [ORIGIN],
     attachments,

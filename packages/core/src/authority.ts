@@ -222,7 +222,18 @@ export function modelMintingGate(type: AcceptedObjectType): HumanOnlyGate | null
   }
 }
 
-/** The one predicate every gate is built from. */
+/**
+ * The one predicate every gate is built from.
+ *
+ * Written as an allowlist of the single kind that passes, and that spelling is
+ * now load-bearing rather than stylistic. An `agent` actor holds a `users` row,
+ * a session and a room membership — everything that used to be sufficient to be
+ * treated as a person by anything downstream of a session. Written as
+ * `kind !== 'model' && kind !== 'system'` this function would have silently
+ * started returning true for it, and every gate below would have opened at once.
+ * One kind passes; anything the union gains is a machine until this line says
+ * otherwise.
+ */
 export function isHuman(actor: Actor): boolean {
   return actor.kind === 'human';
 }
@@ -240,23 +251,33 @@ export function humanOnlyRefusal(
   retiredType?: AcceptedObjectType,
 ): string {
   const kind = actor.kind;
+  /**
+   * "a model actor", "a human actor", "a system actor" — and "an agent actor".
+   *
+   * A refusal is prose the room reads. Interpolating the discriminant straight
+   * into `a ${kind}` was correct for every kind the union had when it was
+   * written and is wrong for the first one that starts with a vowel, so the
+   * article is derived from the word rather than assumed. Every existing message
+   * is byte-identical; only the new kind reads differently, which is the point.
+   */
+  const a = /^[aeiou]/.test(kind) ? 'an' : 'a';
   switch (gate) {
     case 'direct_acceptance':
-      return `${subject} was accepted with no proposal by a ${kind} actor — only a human may accept an object directly; a ${kind} actor must record a proposal and have it accepted`;
+      return `${subject} was accepted with no proposal by ${a} ${kind} actor — only a human may accept an object directly; ${a} ${kind} actor must record a proposal and have it accepted`;
     case 'decision_acceptance':
-      return `${subject} is a decision accepted by a ${kind} actor — a decision never auto-accepts (issue #4): a ${kind} actor may propose one, but only a human may accept it`;
+      return `${subject} is a decision accepted by ${a} ${kind} actor — a decision never auto-accepts (issue #4): ${a} ${kind} actor may propose one, but only a human may accept it`;
     case 'commitment_acceptance':
-      return `${subject} is a commitment accepted by a ${kind} actor — accepting it writes an obligation onto a named person who never agreed to it, and #4's rule is that nobody gets committed by someone else's sentence; a ${kind} actor may propose the commitment and let the person named, or a person in the room, accept it`;
+      return `${subject} is a commitment accepted by ${a} ${kind} actor — accepting it writes an obligation onto a named person who never agreed to it, and #4's rule is that nobody gets committed by someone else's sentence; ${a} ${kind} actor may propose the commitment and let the person named, or a person in the room, accept it`;
     case 'objective_acceptance':
-      return `${subject} is an objective accepted by a ${kind} actor — an objective is what everything else in the room is filed under, and retiring one already needs a person (#4's supersession split), so minting one does too; a ${kind} actor may propose it and let a person accept`;
+      return `${subject} is an objective accepted by ${a} ${kind} actor — an objective is what everything else in the room is filed under, and retiring one already needs a person (#4's supersession split), so minting one does too; ${a} ${kind} actor may propose it and let a person accept`;
     case 'claim_verification':
-      return `${subject} would become a verified claim on a ${kind} actor's word — only a human may move a claim to "verified"; a ${kind} actor may accept it as unverified or disputed`;
+      return `${subject} would become a verified claim on ${a} ${kind} actor's word — only a human may move a claim to "verified"; ${a} ${kind} actor may accept it as unverified or disputed`;
     case 'supersession':
-      return `${subject} retires an accepted ${retiredType ?? 'object'} on a ${kind} actor's word — ${retiredType ? decideSupersession(retiredType).reason : 'this type needs a human'}; a ${kind} actor may propose the replacement and let a person retire it`;
+      return `${subject} retires an accepted ${retiredType ?? 'object'} on ${a} ${kind} actor's word — ${retiredType ? decideSupersession(retiredType).reason : 'this type needs a human'}; ${a} ${kind} actor may propose the replacement and let a person retire it`;
     case 'answer_relation':
-      return `${subject} declares an open question answered on a ${kind} actor's word — only a human may bind an answer (#4: a decision reaches the room through answer-binding or an explicit accept, never through inference); a ${kind} actor may propose the answer and let a person bind it`;
+      return `${subject} declares an open question answered on ${a} ${kind} actor's word — only a human may bind an answer (#4: a decision reaches the room through answer-binding or an explicit accept, never through inference); ${a} ${kind} actor may propose the answer and let a person bind it`;
     case 'correction':
-      return `${subject} was corrected by a ${kind} actor — corrections (amend, retract, restore) are human-only in v1: a correction rewrites what the room already accepted`;
+      return `${subject} was corrected by ${a} ${kind} actor — corrections (amend, retract, restore) are human-only in v1: a correction rewrites what the room already accepted`;
     default: {
       const exhaustive: never = gate;
       return `unknown authority gate ${JSON.stringify(exhaustive)}`;
@@ -293,6 +314,15 @@ export type ProposalBindingGate =
  * nothing the system emits was ever staged by the system, so there is no
  * proposal it can own. It may still do everything a system actor could do
  * before — this closes a door that was never open.
+ *
+ * An **agent** actor never matches, for the same structural reason and with the
+ * same consequence: `Proposer` has no agent variant either, so no proposal in
+ * any room was ever staged by an agent and there is none for it to own. This is
+ * not a policy choice about agents made here — it follows from `Proposer`, and
+ * it stops following the day `Proposer` gains an agent variant, which is exactly
+ * when somebody has to come back to this function and decide on purpose. Until
+ * then `apps/server` refuses to stage an agent's proposal at all rather than
+ * writing it down as a human's, so the two ends agree.
  */
 export function actorMatchesProposer(actor: Actor, proposer: Proposer): boolean {
   if (actor.kind === 'human') return true;
@@ -621,6 +651,12 @@ export function actorName(actor: Actor): string {
   switch (actor.kind) {
     case 'human':
       return `user "${actor.userId}"`;
+    // Named by its identity, like a person, and labelled as a machine, like a
+    // model. Both halves matter in a refusal: the room needs to know which
+    // participant was refused, and it needs to know the refusal was about what
+    // that participant *is* rather than about which account it holds.
+    case 'agent':
+      return `agent "${actor.userId}"`;
     case 'model':
       return `model "${actor.model}"`;
     case 'system':
@@ -687,7 +723,9 @@ export function uncertifiedTypeRefusal(
   type: AcceptedObjectType,
   subject: string,
 ): string {
-  return `${subject} was accepted as a ${type} by a ${actor.kind} actor, and the quoted words read as something somebody is undertaking to do as easily as something they are asserting — a receipt proves who wrote a sentence, not what kind of act it was, so which of the two this is is the proposal's own word; a ${actor.kind} actor may propose it and let a person accept it as a ${type} or as a commitment`;
+  // Same article rule as `humanOnlyRefusal`; see the note there.
+  const a = /^[aeiou]/.test(actor.kind) ? 'an' : 'a';
+  return `${subject} was accepted as a ${type} by ${a} ${actor.kind} actor, and the quoted words read as something somebody is undertaking to do as easily as something they are asserting — a receipt proves who wrote a sentence, not what kind of act it was, so which of the two this is is the proposal's own word; ${a} ${actor.kind} actor may propose it and let a person accept it as a ${type} or as a commitment`;
 }
 
 /* ─────────────────────────────────────────────────────────────────────────

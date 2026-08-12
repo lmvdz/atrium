@@ -271,13 +271,67 @@ export function instantKey(at: string): string {
   return `${String(biased).padStart(16, '0')}.${sub}`;
 }
 
-/** Who did a thing. Mirrors `proposals.proposer_kind` / `corrections.by_*`. */
+/**
+ * Who did a thing. Mirrors `core_events.actor_kind` / `actor_id`.
+ *
+ * ## Four kinds, and the axis that separates them is not the one it looks like
+ *
+ * The union splits twice, along two different lines, and reading it as one line
+ * is how a gate goes blind:
+ *
+ *  - **Identity.** `human` and `agent` carry a `userId` — a row in `users`, and
+ *    therefore something that can hold a `memberships` row, be named by an
+ *    attention item, and be pointed at by an attribution column. `model` and
+ *    `system` carry no identity at all: a model is named by the model string it
+ *    reported and a system actor is named by nothing.
+ *  - **Humanity.** `human` alone is a person. `agent`, `model` and `system` are
+ *    all machines, and `isHuman` (`authority.ts`) is false for every one of
+ *    them, so every certification gate in `reduce.ts` refuses all three by the
+ *    same predicate it always did.
+ *
+ * Before the `agent` variant existed those two lines coincided, and code could
+ * read "carries a `userId`" as "is a person" and be accidentally right. It is
+ * not right any more. `kind === 'human'` means *a person*; if what a call site
+ * wants is *an identity*, it must ask for the `userId` and take `agent` with it.
+ *
+ * ## What `agent` is for
+ *
+ * A non-human participant that the room can actually address: it holds an
+ * account, a workspace membership and a room membership, it speaks over the same
+ * authenticated socket a person does, and its writes are attributed to its own
+ * `users` row rather than landing anonymous. What it may not do is certify —
+ * accept a decision, a commitment or an objective, verify a claim, correct an
+ * accepted object, bind an answer, or retire one. Those refusals are not new
+ * code; they are the existing `isHuman` gates, which now have an identified
+ * machine to refuse instead of only an anonymous one.
+ *
+ * `Proposer` (`proposal.ts`) is deliberately **not** widened alongside this. A
+ * proposal's proposer decides whether the acceptance engine asks for a receipt
+ * window and whether θ applies, and those are acceptance-semantics questions
+ * this variant does not answer. Until they are answered, `apps/server` refuses
+ * to stage a proposal from an agent session rather than mislabelling it human.
+ */
 export const Actor = z.discriminatedUnion('kind', [
   z.object({ kind: z.literal('human'), userId: Id }),
+  z.object({ kind: z.literal('agent'), userId: Id }),
   z.object({ kind: z.literal('model'), model: z.string().min(1) }),
   z.object({ kind: z.literal('system') }),
 ]);
 export type Actor = z.infer<typeof Actor>;
+
+/**
+ * The kinds that name a row in `users`, and the only ones a `userId` can be
+ * read off.
+ *
+ * A predicate rather than a `kind === 'human' || kind === 'agent'` written at
+ * each call site: the question "does this actor have an identity?" is asked in
+ * four packages, and a list repeated four times is a list that will disagree
+ * with itself the next time the union grows. Deliberately *not* named anything
+ * with "human" in it — the whole point is that it is not that question.
+ */
+export function actorUserId(actor: Actor): string | null {
+  return actor.kind === 'human' || actor.kind === 'agent' ? actor.userId : null;
+}
 
 /**
  * Where a fact came from. Every accepted object points back at the messages it

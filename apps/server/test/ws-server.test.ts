@@ -21,6 +21,7 @@ const ada: AtriumSession = {
   email: 'ada@example.com',
   displayName: 'ada',
   emailVerified: true,
+  principalKind: 'human',
   activeWorkspaceId: null,
 };
 
@@ -30,6 +31,7 @@ const grace: AtriumSession = {
   email: 'grace@example.com',
   displayName: 'grace',
   emailVerified: true,
+  principalKind: 'human',
   activeWorkspaceId: null,
 };
 

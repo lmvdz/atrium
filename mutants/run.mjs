@@ -142,6 +142,35 @@ function statementsOf(file) {
   return migrationCache.get(file);
 }
 
+/**
+ * A restore marker, resolved to the one file it should be read from.
+ *
+ * A `restoreFrom` entry may be a bare marker — read from the mutant's
+ * `restoreMigration` — or `{ migration, marker }`, which names its own file.
+ *
+ * The second form exists because of a real split rather than for convenience:
+ * the *newest definition* of `atrium_append_core_event` lives in 0008 and the
+ * newest definition of `atrium_core_events_invariants` now lives in 0017, and
+ * one mutant replaces both. Restoring either from the wrong one re-deploys a
+ * superseded definition as a restore that "worked" — the exact failure this
+ * whole mechanism exists to prevent, and the one AGENTS.md records as having
+ * shipped once already.
+ *
+ * Per-marker rather than a list of files, because the marker for the invariants
+ * trigger matches in BOTH 0008 and 0017: searching a set of files would make it
+ * ambiguous, and resolving an ambiguity by taking the first match is how the
+ * superseded definition gets deployed in the first place. Each marker names one
+ * file and must match exactly one statement in it.
+ */
+function resolveMarker(mutant, entry) {
+  const marker = typeof entry === 'string' ? entry : entry.marker;
+  const file =
+    typeof entry === 'string'
+      ? (mutant.restoreMigration ?? DEFAULT_RESTORE_MIGRATION)
+      : entry.migration;
+  return { marker, file };
+}
+
 /** Every statement in `file` whose first non-comment line starts with `marker`. */
 function statementsFor(marker, file) {
   return statementsOf(file).filter((statement) => {
@@ -272,8 +301,8 @@ function readOnce(file) {
 }
 
 async function restoreSql(mutant) {
-  const file = mutant.restoreMigration ?? DEFAULT_RESTORE_MIGRATION;
-  const statements = (mutant.restoreFrom ?? []).flatMap((marker) => {
+  const statements = (mutant.restoreFrom ?? []).flatMap((entry) => {
+    const { marker, file } = resolveMarker(mutant, entry);
     const found = statementsFor(marker, file);
     if (found.length !== 1) {
       throw new Error(

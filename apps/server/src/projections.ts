@@ -95,7 +95,8 @@ export async function projectRoomEvent(
 type EventOf<T extends RoomEvent['type']> = Extract<RoomEvent, { type: T }>;
 
 /**
- * The user id when a human acted, `null` for a model or the system.
+ * The user id when a **person** acted, `null` for an agent, a model or the
+ * system.
  *
  * The actor comes off the `ProjectionContext` now, not off the event: #21 took
  * it out of the payload, so `event.actor` no longer exists and these columns are
@@ -103,6 +104,26 @@ type EventOf<T extends RoomEvent['type']> = Extract<RoomEvent, { type: T }>;
  * `accepted_by`, `by_user_id` and `author_id` in this file is therefore an
  * authenticated identity or NULL — which is what those columns were always
  * supposed to mean.
+ *
+ * ## An agent has a user id and still gets NULL here, on purpose
+ *
+ * The name is the specification: this is the *human's* id, and the columns it
+ * feeds all mean "the person whose judgement this was" — `decided_by`,
+ * `accepted_by`, `by_user_id`. An agent never reaches those columns at all,
+ * because the reducer refuses every event that would write one before a
+ * projection runs.
+ *
+ * `author_id` on `messages` is the one column where an agent legitimately could
+ * be written and is not, and that is a deferral rather than an oversight. Making
+ * an agent's message carry its author is the *front half* of a change whose back
+ * half is a voice register — AGENTS.md's "no synthesized speech" rule says
+ * nothing rendered as a person's words may be words they did not write, and the
+ * feed's attribution cell is unkinded today (`MessageRecord.actor` is a display
+ * name string). Filling in `author_id` alone would render an agent's sentences
+ * as a participant's typed words with nothing to distinguish them, which is a
+ * worse falsehood than an unattributed row. The two land together, in the ticket
+ * that gives the renderer a kind to read; this function is where that ticket
+ * starts, and it does not start here.
  */
 function humanId(actor: Actor): string | null {
   return actor.kind === 'human' ? actor.userId : null;
@@ -161,13 +182,20 @@ async function projectMessagePosted(
 }
 
 /**
- * The polymorphic actor id: the user id for a human, the model id for a model,
- * NULL for the system actor — the shape `core_events.actor_id` already uses, and
- * what `proposals_staged_by_id_matches_kind` requires.
+ * The polymorphic actor id: the user id for a human or an agent, the model id
+ * for a model, NULL for the system actor — the shape `core_events.actor_id`
+ * already uses, and what `proposals_staged_by_id_matches_kind` requires.
+ *
+ * Distinct from `humanId` above and not a variant of it: this one answers "which
+ * identity, of whatever sort" and that one answers "which person". They agreed
+ * for every kind that existed before agents did, which is why the difference is
+ * worth spelling out now that they do not.
  */
 function actorId(actor: Actor): string | null {
   switch (actor.kind) {
     case 'human':
+      return actor.userId;
+    case 'agent':
       return actor.userId;
     case 'model':
       return actor.model;
