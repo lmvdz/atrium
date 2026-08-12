@@ -446,6 +446,62 @@ test.describe('the pin bounds itself', () => {
     });
   }
 
+  /* ROUND 11, FINDING 1(b) — A GROWN CARD MOVES THE COUNT THE READER READS.
+   *
+   * The round-2 receipt claimed a grown card dropped a row and took the overflow
+   * from 29 to 30; the blind page critic drove the real page and watched the
+   * count SIT STILL — the budget stayed 4, the overflow stayed 29, and a tall
+   * enough card clipped compressed rows in silence while the control still read
+   * "29 more owed." The card is grown by an inline `min-height` rather than by
+   * injected text on purpose: React reconciles the title back to its prop on the
+   * very re-render the growth triggers, so a textContent stretch reverts before
+   * it can be read, but a style the component never set survives. The card
+   * growing must lower `data-pin-budget`, raise `data-pin-overflow` by the rows
+   * it cost, and then SETTLE — no oscillation. */
+  test('a card that grows drops rows and moves the overflow count, then settles', async ({
+    page,
+  }) => {
+    await page.setViewportSize({ width: 1280, height: 900 });
+    await page.goto('/gallery/pin/34?theme=light');
+    const list = page.locator('[data-pin-list]');
+    await expect(list).toHaveAttribute('data-pin-measured', 'true');
+
+    const budget = async () => Number(await list.getAttribute('data-pin-budget'));
+    const overflow = async () =>
+      Number(await page.locator('[data-pin-overflow]').getAttribute('data-pin-overflow'));
+    const budget0 = await budget();
+    const overflow0 = await overflow();
+    expect(budget0, 'the pin is not showing rows to drop').toBeGreaterThan(1);
+
+    /* grow the open card past the belt with a style the component does not own,
+       so the growth is not clobbered on the re-render it causes */
+    await page.evaluate(() => {
+      const card = document.querySelector('[data-pin-list] article') as HTMLElement | null;
+      if (card === null) throw new Error('no open card to grow');
+      card.style.minHeight = '260px';
+    });
+
+    /* the budget comes down and the overflow goes up by exactly the rows the
+       grown card cost — the count is not stale */
+    await expect.poll(budget, { timeout: 2000 }).toBeLessThan(budget0);
+    const budget1 = await budget();
+    const overflow1 = await overflow();
+    expect(overflow1, 'the overflow count did not move when the card grew').toBe(
+      overflow0 + (budget0 - budget1),
+    );
+    expect(overflow0 + budget0, 'a row was lost between the fold and the count').toBe(
+      overflow1 + budget1,
+    );
+
+    /* AND IT SETTLED: the grown card is a fixed point, not a flicker. Read the
+       budget across a spell in which the observers have every chance to fire. */
+    await page.waitForTimeout(250);
+    expect(await budget(), 'the pin never stopped re-folding after the card grew').toBe(budget1);
+    console.info(
+      `grown card @900: budget ${budget0}→${budget1}, overflow ${overflow0}→${overflow1}, settled`,
+    );
+  });
+
   /* The keyboard reaches the same places the pointer does, and focusing a row
      does not scroll the list out from under everything else — the r2 expanded
      pin clipped three rows off the top when a keyboard user tabbed into it. */

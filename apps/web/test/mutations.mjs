@@ -680,16 +680,39 @@ const LEDGER = [
       rootRef.current,
       list,
       list?.firstElementChild,
+      list?.querySelector('[data-pin-clean]'),
     ]) {`,
     replace: '    for (const target of [rootRef.current?.parentElement]) {',
     test: 'test/pin-bound.test.tsx',
   },
   {
+    /* Round 11, finding 2: the card was watched but the clean summary — a child
+       of the same clipped list — was not, so a late font wrap of the clean line
+       went unmeasured. This drops ONLY the clean box from the observe set. */
+    name: 'the clean summary drops out of the observe set and its late wrap clips',
+    file: 'src/components/attention/Pin.tsx',
+    find: `      list?.firstElementChild,
+      list?.querySelector('[data-pin-clean]'),`,
+    replace: '      list?.firstElementChild,',
+    test: 'test/pin-bound.test.tsx',
+  },
+  {
+    /* Round 11, finding 1(a): the open card the budget is priced against must be
+       the reference (shown whenever a row shows), not the paged-to card at budget
+       0 — pricing against `firstElementChild` reintroduces the two-cycle the
+       gauntlet saw the pin oscillate through at a boundary belt. */
+    name: 'the budget is priced against the paged-to card and chases itself',
+    file: 'src/components/attention/Pin.tsx',
+    find: '    const openHeight = openHeightRef.current > 0 ? openHeightRef.current : firstChildHeight;',
+    replace: '    const openHeight = firstChildHeight;',
+    test: 'test/pin-bound.test.tsx',
+  },
+  {
     name: 'the pin measures once and lets every later commit go unmeasured',
     file: 'src/components/attention/Pin.tsx',
-    find: `    ].join('/');
+    find: `    openIsReferenceRef.current = budget >= 1 || fold.page === 0;
     measure();`,
-    replace: `    ].join('/');`,
+    replace: `    openIsReferenceRef.current = budget >= 1 || fold.page === 0;`,
     test: 'test/pin-bound.test.tsx',
   },
   {

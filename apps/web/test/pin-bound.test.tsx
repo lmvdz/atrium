@@ -703,16 +703,30 @@ describe('the pin re-measures when its own boxes change', () => {
   const PER_ROW = PIN_GEOMETRY.row + PIN_GEOMETRY.gap;
   const observers: FakeObserver[] = [];
   let cardHeight = 72;
+  /* PER-CARD heights, so the open card is not one global number. The oscillation
+     the round-2 gauntlet found only exists when the reference card and a paged-to
+     card differ in height — a fixture with one card height cannot see it. */
+  let cardHeights: Record<string, number> = {};
+  /* the clean-item summary's own height, so a late font wrap of it can be driven */
+  let cleanHeight = 0;
   let realRect: () => DOMRect;
   let realObserver: typeof ResizeObserver | undefined;
   let realHeight: number;
 
   /** what the browser would have made of the pin as it currently stands */
   function laidOut(element: Element): number {
-    if (element.tagName === 'ARTICLE') return cardHeight;
+    if (element.hasAttribute('data-pin-clean')) return cleanHeight;
+    if (element.tagName === 'ARTICLE') {
+      const id = element.getAttribute('data-attention-id');
+      return id !== null && cardHeights[id] !== undefined ? cardHeights[id] : cardHeight;
+    }
     if (element.hasAttribute('data-pin-list')) {
       const rows = element.querySelectorAll('[data-attention-id]').length - 1;
-      const content = cardHeight + Math.max(0, rows) * PER_ROW;
+      const article = element.querySelector('article');
+      const card = article === null ? 0 : laidOut(article);
+      const clean = element.querySelector('[data-pin-clean]');
+      const content =
+        card + Math.max(0, rows) * PER_ROW + (clean === null ? 0 : PIN_GEOMETRY.gap + cleanHeight);
       /* the clip is real: the list is never taller than the belt it wears */
       const cap = /max-height:\s*([\d.]+)px/.exec(element.getAttribute('style') ?? '');
       return cap === null ? content : Math.min(Number(cap[1]), content);
@@ -728,6 +742,8 @@ describe('the pin re-measures when its own boxes change', () => {
   beforeEach(() => {
     observers.length = 0;
     cardHeight = 72;
+    cardHeights = {};
+    cleanHeight = 0;
     realHeight = window.innerHeight;
     Object.defineProperty(window, 'innerHeight', { configurable: true, value: 900 });
     /* the pane. `clientHeight` is what `measure` reads for the room it has. */
@@ -787,8 +803,25 @@ describe('the pin re-measures when its own boxes change', () => {
     });
   }
 
+  /** ONLY the observers watching `target`, as a resize of that one box would
+      fire — a box that nothing is observing fires nothing, which is the whole
+      point of watching the clean summary and the card directly. */
+  function reshapeOnly(target: Element | null) {
+    act(() => {
+      for (const observer of [...observers].filter(
+        (o) => o.live && o.targets.includes(target as Element),
+      ))
+        observer.fire();
+    });
+  }
+
   function budgetOf(container: HTMLElement): string | null {
     return container.querySelector('[data-pin-list]')?.getAttribute('data-pin-budget') ?? null;
+  }
+
+  function overflowOf(container: HTMLElement): number {
+    const control = container.querySelector('[data-pin-overflow]');
+    return control === null ? 0 : Number(control.getAttribute('data-pin-overflow'));
   }
 
   /* CATCHES the finding exactly: a card that grows while the window and the
@@ -879,6 +912,117 @@ describe('the pin re-measures when its own boxes change', () => {
     expect(after - settled, 'the pin did not settle after the card changed').toBeLessThanOrEqual(3);
     for (let i = 0; i < 10; i += 1) reshape();
     expect(observers.length, 'the pin never stopped re-measuring').toBe(after);
+  });
+
+  /* ROUND 11, FINDING 1(b) — THE OVERFLOW COUNT MOVES WHEN THE OPEN CARD GROWS.
+     The round-2 receipt claimed a grown card drops a row and takes the overflow
+     from 29 to 30; the page critic drove the real page and saw the overflow
+     count SIT STILL. This drives the same feedback in jsdom and reads the control
+     the reader reads: growing the open card must increment `data-pin-overflow`,
+     not just some internal budget. CATCHES: the ladder ignoring the measured card
+     (the allowance mutant), which leaves the count reporting a page that is no
+     longer true. */
+  it('growing the open card moves the overflow count the reader sees', () => {
+    const { container } = render(
+      <Pin items={f.manyOwed(34)} lastCheck="12:29" trailer={TRAILER} viewer="lars" />,
+    );
+    /* 210px belt (300 pane − 90 chrome), a 72px card: three rows, 30 owed off the
+       page. */
+    expect(budgetOf(container)).toBe('3');
+    const drawn = () => container.querySelectorAll('[data-pin-list] [data-attention-id]').length;
+    expect(drawn()).toBe(4);
+    expect(overflowOf(container)).toBe(30);
+
+    /* grow ONLY the open card — the reference, at budget ≥ 1 — not every card. */
+    const refId = container
+      .querySelector('[data-pin-list] article')
+      ?.getAttribute('data-attention-id') as string;
+    expect(refId, 'the pin drew no open card').toBeTruthy();
+    cardHeights[refId] = 100;
+    reshape();
+
+    expect(budgetOf(container), 'the grown card cost no row').toBe('2');
+    expect(drawn()).toBe(3);
+    expect(overflowOf(container), 'the count still reads the page before the card grew').toBe(31);
+  });
+
+  /* ROUND 11, FINDING 1(a) — THE CIRCULAR DEPENDENCY THAT OSCILLATED.
+     `foldPin`'s budget-0 branch pages the OPEN CARD so every owed item stays
+     reachable at a viewport with no room for a row. That makes the card the pin
+     draws a function of the budget — and if the budget is then priced against
+     that card, the two chase each other: a tall reference card says "no room for
+     a row" (budget 0), which pages to a SHORT card, which says "a row fits"
+     (budget 1), which draws the tall reference again… forever, the episode key
+     changing every pass so the ratchet never engages. A fixture with one global
+     card height cannot see this — the reference and the paged card have to
+     DIFFER. The budget must be priced against the reference (the card shown
+     whenever a row shows), never the paging artifact.
+     CATCHES: pricing the open card against `firstElementChild` — the paged-to
+     card — instead of the cached reference height. */
+  it('a tall reference and a short paged card do not chase each other at the boundary', () => {
+    const items = f.manyOwed(34);
+    const refId = foldPin(items, { budget: 0, page: 0 }).open?.id as string;
+    const pagedId = foldPin(items, { budget: 0, page: 1 }).open?.id as string;
+    expect(refId).not.toBe(pagedId);
+    /* 210px belt: no room for a row beside a 180px card, room for one beside a
+       168px card. Under the defect, paging from ref to paged flips the budget
+       0→1→0→… without anything outside the pin moving. */
+    cardHeights[refId] = 180;
+    cardHeights[pagedId] = 168;
+    const { container } = render(
+      <Pin items={items} lastCheck="12:29" trailer={TRAILER} viewer="lars" />,
+    );
+    /* priced against the reference, there is no room for a compressed row */
+    expect(budgetOf(container)).toBe('0');
+    const before = observers.length;
+
+    /* page to the short card. The budget is priced against the reference still,
+       so it must not move — and the loop must stop. */
+    const control = container.querySelector('[data-pin-overflow]') as HTMLElement;
+    fireEvent.click(control);
+    expect(
+      container.querySelector('[data-pin-list] article')?.getAttribute('data-attention-id'),
+      'the click did not page the card',
+    ).toBe(pagedId);
+    expect(budgetOf(container), 'the paged-to card fed the budget that pages it').toBe('0');
+
+    const afterClick = observers.length;
+    expect(afterClick - before, 'paging to a shorter card churned commits').toBeLessThanOrEqual(3);
+    for (let i = 0; i < 12; i += 1) reshape();
+    expect(
+      observers.length,
+      'the pin never stopped re-measuring — the open card and the budget are chasing each other',
+    ).toBe(afterClick);
+  });
+
+  /* ROUND 11, FINDING 2 — THE CLEAN SUMMARY IS OBSERVED.
+     The clean-item line is a child of the clipped list, so a late font load that
+     wraps it changes no box further out and fires no React commit — only a
+     ResizeObserver on the clean box itself can catch it. Round 9 watched the
+     pane, the pin, the list and the card, but not this. CATCHES: dropping the
+     clean box from the observe set, which lets a wrapped clean line clip in
+     silence. */
+  it('the observer watches the clean summary, so a late wrap of it is measured', () => {
+    const items = [...f.manyOwed(6), settled('done-1'), settled('done-2')];
+    cleanHeight = 20;
+    const { container } = render(
+      <Pin items={items} lastCheck="12:29" trailer={TRAILER} viewer="lars" />,
+    );
+    const cleanBox = container.querySelector('[data-pin-clean]');
+    expect(cleanBox, 'the pin drew no clean summary').not.toBeNull();
+
+    const watched = new Set([...observers].filter((o) => o.live).flatMap((o) => o.targets));
+    expect(watched.has(cleanBox as Element), 'nothing is watching the clean summary').toBe(true);
+
+    /* the clean line wraps to five more lines on a late font load. Nothing else
+       moves: the list is pinned by its clip, the card is unchanged. Only the
+       clean box's own observer can carry this. */
+    const before = budgetOf(container);
+    cleanHeight = 120;
+    reshapeOnly(cleanBox);
+    expect(Number(budgetOf(container)), 'the wrapped clean line went unmeasured').toBeLessThan(
+      Number(before),
+    );
   });
 });
 

@@ -36,7 +36,7 @@
  * ------------------------------------------------------------------------- */
 
 import type { CSSProperties } from 'react';
-import { useCallback, useEffect, useRef, useState } from 'react';
+import { useCallback, useEffect, useLayoutEffect, useRef, useState } from 'react';
 import { needsViewer } from '../model/glyph';
 import type { AttentionItem, GlyphCount, PinFold, TrailerSummary } from '../model/records';
 import {
@@ -53,6 +53,17 @@ import { AttentionCard } from './AttentionCard';
 import { AttentionCompact } from './AttentionCompact';
 import styles from './attention.module.css';
 import { Trailer } from './Trailer';
+
+/* The measurement has to land BEFORE the browser paints the hydrated frame, or
+   the pin paints once at the server's viewport-only belt (`min(340px, 34vh)` =
+   306px at 900) and then jumps to the measured, container-limited px — a visible
+   hop on load. A layout effect runs synchronously after the DOM is committed and
+   before paint, so the corrected height is the first thing shown; a plain effect
+   runs after paint, which is where the hop lived. `useLayoutEffect` warns when it
+   runs on the server (it does nothing there), so it degrades to `useEffect` where
+   there is no `window` — the server render stays the bounded vh expression it
+   already was. */
+const useIsomorphicLayoutEffect = typeof window === 'undefined' ? useEffect : useLayoutEffect;
 
 export interface PinProps {
   readonly items: readonly AttentionItem[];
@@ -167,6 +178,23 @@ export function Pin({
      items, which one is open, which page, whether the pin is folded. A change
      here is news from outside, and it ends the settling episode below. */
   const contentRef = useRef('');
+  /* THE REFERENCE OPEN CARD'S HEIGHT, AND WHETHER IT IS WHAT IS DRAWN.
+     The budget is "how many compressed rows fit BESIDE THE OPEN CARD", and the
+     open card that shows whenever a row shows is the hardest owed item (or
+     `openId`) — a pure function of the items, NOT of the budget. At budget 0 the
+     pin has no room for a row, so it PAGES the single card it can show for
+     reachability (records.ts `foldPin`); that paged-to card is a paging artifact
+     and must not be what the budget is priced against, or the budget depends on
+     the card, which depends on the budget: at a boundary belt with the reference
+     card tall and a paged card short, `measure` reads tall→0 rows, renders the
+     short paged card, reads short→1 row, renders the reference, reads tall→0 …
+     forever, and the episode key changes every pass so the ratchet never bites.
+     So `measure` reads the first child's height only while the reference is what
+     is drawn — page 0, or any budget ≥ 1 — and reuses the last reference height
+     it saw otherwise. Page 0 always draws the reference, so the cache is seeded
+     before the user can ever page away from it. */
+  const openHeightRef = useRef(0);
+  const openIsReferenceRef = useRef(true);
 
   const measure = useCallback(() => {
     const root = rootRef.current;
@@ -198,26 +226,41 @@ export function Pin({
        the browser gave them, so the ladder charges what is there instead of the
        three-title-line allowance that answers before there is a page to read.
        `pinFixedCost` falls back to that allowance when the card has no box. */
+    const firstChildHeight = px(list?.firstElementChild);
+    /* Price the open card against the REFERENCE, not the paged-to one. Cache the
+       first child's height only while the reference is what is drawn; otherwise
+       (budget 0, paged off page 0) reuse the last reference height, so the card
+       the budget decides cannot feed back into the budget. See `openHeightRef`. */
+    if (openIsReferenceRef.current && firstChildHeight > 0) {
+      openHeightRef.current = firstChildHeight;
+    }
+    const openHeight = openHeightRef.current > 0 ? openHeightRef.current : firstChildHeight;
     const boxes =
       list === null
         ? null
-        : { open: px(list.firstElementChild), clean: px(list.querySelector('[data-pin-clean]')) };
+        : { open: openHeight, clean: px(list.querySelector('[data-pin-clean]')) };
     const computed = pinBudgetForBelt(available, boxes);
 
     /* WHY THIS TERMINATES.
        Setting the budget changes what the pin renders, which changes the pin's
        height, which the observers below are watching — so this can call itself.
-       The key is every input the budget does not move: the viewport, the
-       container, the two boxes, and the content signature. While it holds, the
-       applied budget is only ever lowered (`Math.min`) and it is bounded below
-       by 0, so at most PIN_COMPACT_BUDGET passes can change it. The belt needs
-       no ratchet of its own: it is a function of the container's room and the
-       chrome, and the chrome is a function of the budget — once the budget stops
-       moving, so does the belt. When the key changes the episode is over and the
-       measurement is taken at face value, so a card that SHRANK raises the
-       budget again rather than being held down by a ratchet with no reset.
-       `test/pin-bound.test.tsx` drives the loop and asserts it commits nothing
-       once it has settled; assuming convergence is how a render loop ships. */
+       Every input the budget divides is now budget-INDEPENDENT: the viewport and
+       the container are the room, and `boxes.open` is the REFERENCE card, not
+       whichever card the budget happened to page to (that decoupling is the
+       whole of `openHeightRef` above — without it the open box moved with the
+       budget at a boundary belt and the loop had a genuine two-cycle). So the
+       only feedback left is `budget → the overflow control → chrome → belt →
+       budget`, and it is monotone: lowering the budget can only ADD the control,
+       which only lowers the belt further. The episode key is those same
+       budget-independent inputs plus the content signature; while it holds the
+       applied budget is only ever lowered (`Math.min`) and bounded below by 0,
+       so at most PIN_COMPACT_BUDGET passes can change it. When the key changes —
+       a genuine reshape, or the reference card actually growing or shrinking —
+       the episode is over and the measurement is taken at face value, so a card
+       that SHRANK raises the budget again rather than being pinned to the worst
+       thing ever measured. `test/pin-bound.test.tsx` drives the loop with cards
+       of DIFFERENT heights and asserts it commits nothing once settled; assuming
+       convergence is how a render loop ships. */
     const key = [
       Math.round(viewport),
       Math.round(containerHeight),
@@ -251,10 +294,15 @@ export function Pin({
      A commit covers everything React causes; the observer covers what it does
      not — a reflow at a new width, a font arriving late, a title that grows
      inside a list whose own height is pinned by the clip and therefore reports
-     no change at all. That last one is why the card is observed directly.
-     This is the pin's own bound and nothing else's: Timeline's removed
-     bottom-re-pin observer is not being reintroduced here. */
-  useEffect(() => {
+     no change at all. That last one is why the card and the clean summary are
+     observed directly: both are children of the clipped list, so a title that
+     wraps or a clean line that wraps on a late font load moves no box further
+     out. This is the pin's own bound and nothing else's: Timeline's removed
+     bottom-re-pin observer is not being reintroduced here.
+
+     It is a LAYOUT effect so the first measurement lands before paint — see
+     `useIsomorphicLayoutEffect`. */
+  useIsomorphicLayoutEffect(() => {
     contentRef.current = [
       items.length,
       fold.open?.id ?? '',
@@ -262,6 +310,11 @@ export function Pin({
       fold.clean.length,
       folded ? 'folded' : 'open',
     ].join('/');
+    /* Whether the card currently drawn is the reference the budget is priced
+       against: the reference is drawn at any budget ≥ 1 and at page 0. When it
+       is not (budget 0, paged off page 0), `measure` reuses the cached reference
+       height rather than the paging artifact's. See `openHeightRef`. */
+    openIsReferenceRef.current = budget >= 1 || fold.page === 0;
     measure();
     if (typeof ResizeObserver === 'undefined') return;
     const observer = new ResizeObserver(() => measure());
@@ -271,6 +324,7 @@ export function Pin({
       rootRef.current,
       list,
       list?.firstElementChild,
+      list?.querySelector('[data-pin-clean]'),
     ]) {
       if (target !== null && target !== undefined) observer.observe(target);
     }
