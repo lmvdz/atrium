@@ -1060,3 +1060,19 @@ while an upgraded database would silently skip it. The journal timestamp is now
 strictly newer and a schema test pins that property for the newest migration.
 Lesson kept: **test migrations from the previous head as well as from empty;
 upgrade visibility lives in the journal timestamp, not the filename.**
+
+---
+
+## #94 — the pin belt is one number (closed 2026-08-11, 4 rounds)
+
+**Rounds**: 4. Chartered goal (one belt value; remove the stale `overflow: 46`; reconcile `PIN_GEOMETRY` with `attention.module.css`) met at round 2. Rounds 3–4 closed a convergence-loop fragility the gauntlet surfaced *beyond* that scope.
+
+**What each round caught**:
+- R1 (codex source): three registers, not one — the belt lived in `PIN_GEOMETRY` (340/34vh), the stylesheet (260/30vh), and an inline `max-height` that silently beat the class rule, so the "two constants agreeing" was one live register and one dead one. The 46px charge was attributed to a control that had been a sibling since round 5.
+- R2 (codex re-verify + page-driving critic): the flip test couldn't catch a hardcoded-340 mutant (share arm bound at the tested viewport); `chrome` was a stale cache. The page critic **mis-reported two fixed defects as live by reading docblocks** (the removed 260 CSS and 46 constant survive only in comments) — refuted by opening the citations. But its pixel finding (card growth drops no row) **converged with codex's static finding 2** — the real bug.
+- R3 (codex): the round-2 fix corrected the measured height but left the convergence episode key carrying budget-DEPENDENT terms (`fold.open.id`, `fold.page`), so a boundary belt with a wrapping overflow control still oscillated. Named the root: the key must not contain any budget-moved quantity.
+- R4: key rebuilt from budget-independent inputs only; oscillation impossible by construction (verified by the orchestrator against the source, not a fifth critic round).
+
+**Findings refuted (with evidence)**: the page critic's two verdict-3 caveats (260 CSS still present; `overflow:46` still a constant) — both stale-comment reads; opened the citations, the `.pinList` rule is `var(--pin-belt)` and the `overflow` field is gone. Also its "two registers" (custom property + inline px) is the documented server-expression/client-measured split, not a defect.
+
+**The one process lesson**: **a self-measuring layout loop (measure → set budget → relayout → measure) is a convergence problem, and a gauntlet will find a new boundary every round until the fix is by-construction, not by-case.** Three rounds each fixed the specific oscillation instance codex constructed and each left an adjacent one; only removing every budget-dependent term from the episode key ended it. When a reviewer keeps finding narrower instances of the same class, stop patching instances and fix the invariant — and when the fix is a structural claim ("no term can swing"), the orchestrator can verify it by reading the key rather than spending another critic round. Corollary already known, re-confirmed: a rendered-artifact critic must drive the page (it caught the row-drop bug source review under-weighted) AND its static caveats need the same citation-opening as any other prose (it mis-read two comments as live code).
