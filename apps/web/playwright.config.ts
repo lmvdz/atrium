@@ -31,6 +31,10 @@ const FRAME_FLOOR = { width: 1280, height: 900 } as const;
 
 export default defineConfig({
   testDir: './e2e',
+  // The destination scenario (#103) runs ONLY against a production build, from
+  // its own config (`playwright.destination.config.ts`, `test:e2e:destination`).
+  // The dev suite ignores it so the fast gate is not asked to boot `next build`.
+  testIgnore: /destination-scenario\.spec\.ts/,
   fullyParallel: true,
   forbidOnly: !!process.env.CI,
   retries: process.env.CI ? 1 : 0,
