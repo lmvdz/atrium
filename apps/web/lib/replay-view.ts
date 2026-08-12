@@ -2,6 +2,7 @@ import {
   ClaimPayload,
   CommitmentPayload,
   DecisionPayload,
+  epistemicStateFromAcceptance,
   ObjectivePayload,
   OpenQuestionPayload,
 } from '@atrium/core';
@@ -194,7 +195,12 @@ export function replayView(data: ReplayData, viewerId?: string) {
     .map((object) => ({
       id: object.id,
       kind: objectKind(object.type),
-      state: stateForObject(object.type, object.payload, pendingBySubject.has(object.id), true),
+      state: stateForObject(
+        object.type,
+        object.payload,
+        pendingBySubject.has(object.id),
+        acceptanceOf(object),
+      ),
       text: payloadText(object.type, object.payload),
       facts: [
         ...objectFacts(object.type, object.payload, participantName, object.createdAt),
@@ -212,7 +218,7 @@ export function replayView(data: ReplayData, viewerId?: string) {
         proposal.type,
         proposal.payload,
         pendingBySubject.has(proposal.id),
-        false,
+        null,
       ),
       text: payloadText(proposal.type, proposal.payload),
       facts: [
@@ -351,16 +357,18 @@ export function replayView(data: ReplayData, viewerId?: string) {
     const source = sourceFor(item.subjectKind, item.subjectId);
     const subjectState =
       (acceptedFromProposal
-        ? stateForObject(acceptedFromProposal.type, acceptedFromProposal.payload, true, true)
+        ? stateForObject(
+            acceptedFromProposal.type,
+            acceptedFromProposal.payload,
+            true,
+            acceptanceOf(acceptedFromProposal),
+          )
         : subject
           ? { ...subject.state, owedToViewer: true }
           : proposalSubject
-            ? stateForObject(
-                proposalSubject.type,
-                proposalSubject.payload,
-                true,
-                proposalSubject.status === 'accepted',
-              )
+            ? // A proposal still staged here (its accepted object, if any, was
+              // caught by `acceptedFromProposal` above): a machine's reading, `~`.
+              stateForObject(proposalSubject.type, proposalSubject.payload, true, null)
             : undefined) ??
       ({
         kind: item.class === 'blocking_question' ? 'question' : 'decision',
@@ -613,7 +621,12 @@ export function replayReceiptSubject(
       return {
         id: acceptedFromProposal.id,
         kind: 'objective',
-        state: stateForObject('objective', acceptedFromProposal.payload, false, true),
+        state: stateForObject(
+          'objective',
+          acceptedFromProposal.payload,
+          false,
+          acceptanceOf(acceptedFromProposal),
+        ),
         text: payloadText('objective', acceptedFromProposal.payload),
         facts: objectFacts(
           'objective',
@@ -635,7 +648,7 @@ export function replayReceiptSubject(
     return {
       id: proposal.id,
       kind: 'objective',
-      state: stateForObject('objective', proposal.payload, false, false),
+      state: stateForObject('objective', proposal.payload, false, null),
       text: payloadText('objective', proposal.payload),
       facts: [
         proposal.proposerKind === 'model'
@@ -652,7 +665,7 @@ export function replayReceiptSubject(
   return {
     id: accepted.id,
     kind: 'objective',
-    state: stateForObject('objective', accepted.payload, false, true),
+    state: stateForObject('objective', accepted.payload, false, acceptanceOf(accepted)),
     text: payloadText('objective', accepted.payload),
     facts: objectFacts('objective', accepted.payload, participantName, accepted.createdAt),
     objectives: [],
@@ -754,35 +767,123 @@ function objectKind(type: ReplayData['objects'][number]['type']): StateObject['k
   return type;
 }
 
+/**
+ * The two projected columns core's one certification predicate reads, or `null`
+ * for a thing no acceptance has touched (a staged proposal). Passing the row's
+ * own `accepted_by_kind` and `human_touched_at` — rather than the old "does a
+ * row exist" boolean — is what makes the rendered `✓` the ENFORCED one.
+ */
+type ObjectAcceptance = {
+  readonly acceptedByKind: ReplayData['objects'][number]['acceptedByKind'];
+  readonly humanTouchedAt: string | null;
+};
+
+/** The acceptance descriptor for a persisted accepted-object row. */
+function acceptanceOf(object: ReplayData['objects'][number]): ObjectAcceptance {
+  return {
+    acceptedByKind: object.acceptedByKind,
+    humanTouchedAt: object.humanTouchedAt === null ? null : object.humanTouchedAt.toISOString(),
+  };
+}
+
+/**
+ * `~` vs `✓` — CERTIFICATION — is core's one predicate for EVERY type, read off
+ * the projected columns via `epistemicStateFromAcceptance`, which delegates to
+ * `epistemicStateOf`, the SAME function the reducer's supersession gate enforces.
+ * A machine's acceptance is `~` (unconfirmed) and stays `~` until a person
+ * touches it; a thing with no acceptance (`null`, a staged proposal) is a
+ * machine's reading, `~`. `confirmed` is derived here FIRST, before any type
+ * branches, so it governs the glyph uniformly.
+ */
+function certified(acceptance: ObjectAcceptance | null): boolean {
+  return (
+    acceptance !== null &&
+    epistemicStateFromAcceptance(acceptance.acceptedByKind, acceptance.humanTouchedAt) ===
+      'confirmed'
+  );
+}
+
+/**
+ * The three axes of a semantic object, kept apart on purpose (init.md §5,
+ * `@atrium/core`'s `epistemic.ts`):
+ *
+ *   1. CERTIFICATION (`~`/`✓`) — did a PERSON take this? The predicate, and the
+ *      ONLY source of the tick. Governs every type here.
+ *   2. CLAIM-TRUTH (`verified`/`self_reported`) — has anything OUTSIDE the
+ *      claimant checked the claim? Orthogonal to (1). A machine cannot mint a
+ *      `verified` claim (the reducer's `claim_verification` gate), so `verified`
+ *      only ever refines an already-certified `✓` — it rides SUBORDINATE to the
+ *      glyph (a green "verified" flavour of the tick), never a second `✓` source.
+ *   3. QUESTION-STATUS (`open`/`answered`) — the `?` glyph is for a question with
+ *      no answer yet. Answeredness never mints the tick either: an ANSWERED
+ *      question is `✓` only when a person certified it, and `~` otherwise.
+ *
+ * Before this, a `claim` read its own `verification` and an `open_question` its
+ * own `status` in branches that RETURNED before the predicate — so exactly the
+ * two types a machine can accept (`modelMintingGate`) rendered the tick from
+ * payload, never from who accepted. That was the covenant breach, both ways:
+ * an answered-but-uncertified question showed `✓`, a human-confirmed claim `~`.
+ */
 function stateForObject(
   type: ReplayData['objects'][number]['type'],
   payload: ReplayData['objects'][number]['payload'],
   owedToViewer: boolean,
-  accepted: boolean,
+  acceptance: ObjectAcceptance | null,
 ): EpistemicState {
+  const confirmed = certified(acceptance);
   if (type === 'open_question') {
     const question = OpenQuestionPayload.parse(payload);
+    // A question with no answer is `?` — that is question-STATUS, not the tick.
+    // Once answered, CERTIFICATION alone decides `✓` vs `~`: an answer a person
+    // did not take stays a machine's reading.
+    if (question.status !== 'answered') {
+      return { kind: 'question', verification: 'open', owedToViewer, irreversible: false };
+    }
     return {
       kind: 'question',
-      verification: question.status === 'answered' ? 'accepted' : 'open',
+      verification: confirmed ? 'accepted' : 'proposed',
       owedToViewer,
       irreversible: false,
     };
   }
   if (type === 'claim') {
     const claim = ClaimPayload.parse(payload);
+    // CERTIFICATION gates the tick FIRST. `verified` only distinguishes the
+    // FLAVOUR of an already-certified `✓` (checked-by-another vs merely taken);
+    // it is never reached for an uncertified claim, so it cannot be the tick.
     return {
       kind: 'claim',
-      verification: claim.verification === 'verified' ? 'verified' : 'self_reported',
+      verification: confirmed
+        ? claim.verification === 'verified'
+          ? 'verified'
+          : 'accepted'
+        : 'self_reported',
       owedToViewer,
       irreversible: false,
     };
   }
   return {
     kind: objectKind(type),
-    verification: accepted ? 'accepted' : 'proposed',
+    verification: confirmed ? 'accepted' : 'proposed',
     owedToViewer,
     irreversible: false,
+  };
+}
+
+/**
+ * A human's local, optimistic acceptance in the replay UI, run through the ONE
+ * predicate so the rendered `✓` has a single source. `ReplaySession` used to
+ * hand-set `verification: 'accepted'` on accept — a second tick source that
+ * agreed with the covenant only by luck. Routing an explicit `human` acceptance
+ * through `epistemicStateFromAcceptance` means a mutation of `epistemicStateOf`
+ * moves this glyph the same way it moves every other.
+ */
+export function locallyAcceptedState(state: EpistemicState, at: string): EpistemicState {
+  const confirmed = epistemicStateFromAcceptance('human', at) === 'confirmed';
+  return {
+    ...state,
+    verification: confirmed ? 'accepted' : state.verification,
+    owedToViewer: false,
   };
 }
 

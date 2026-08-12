@@ -114,6 +114,35 @@ export function isClaim(state: EpistemicState): boolean {
 }
 
 /**
+ * THE TRUTH AXIS AS ONE PREDICATE — "nothing outside the claimant has checked
+ * this" — read by EVERY consumer that speaks about unverified claims: the row's
+ * dotted underline (`ClaimText`), the lens's "unverified" count (`StateLens`),
+ * and the trailer's "everything is verified" copy (`trailerFor`). It is the
+ * CLAIM-TRUTH axis, orthogonal to the `✓`/`~` CERTIFICATION glyph.
+ *
+ * After #98 split certification from truth, a person accepting a self-reported
+ * claim CERTIFIES it (`accepted`, `✓`) without anything fact-checking its truth
+ * — a settled certification that is still an unchecked claim. `isClaim` alone
+ * misses it (`accepted` is settled), and it cannot simply be widened, because a
+ * decision or an answered question is `accepted` too and carries no truth axis
+ * to leave open. So the truth-unchecked set is the unsettled claim states
+ * (`isClaim`: proposed/unverified/self_reported) PLUS a claim certified but not
+ * `verified`; a `verified` claim (checked by another) and any certified
+ * non-claim stay checked.
+ *
+ * ROUND 4 ROOT SWEEP (#98): this used to be a PRIVATE copy in `ClaimText`, while
+ * `StateLens` and `trailerFor` open-coded `['proposed','unverified',
+ * 'self_reported'].includes(...)` — `isClaim` by another name, blind to the
+ * certified-unverified claim the row already dotted. So the row said "unchecked"
+ * and the aggregate copy said "everything is verified" about the SAME object.
+ * One predicate now, and the count and the copy match the row.
+ */
+export function truthUnchecked(state: EpistemicState): boolean {
+  if (isClaim(state)) return true;
+  return state.kind === 'claim' && state.verification === 'accepted';
+}
+
+/**
  * The colour class a glyph wears. Derived from the glyph, so a component never
  * picks a hue: green = verified, amber = needs you, red = destructive/failed,
  * neutral = claim/routine (the dotted underline is what flags a claim).
@@ -179,7 +208,14 @@ export const GLYPHS: readonly Glyph[] = (Object.keys(GLYPH_HARDNESS) as Glyph[])
  * already knows that, and until r9 the type did not say it.
  */
 const GLYPH_MEANING = {
-  '✓': 'verified — checked by something other than the claimant',
+  // CERTIFICATION, not fact-check. After the axes split (#98) a single `✓` is
+  // minted by the one predicate — a person accepted or corrected the reading —
+  // for every type, so the tooltip describes that and nothing else. "Verified —
+  // checked by something other than the claimant" was false for the common case:
+  // a person accepting their own self-reported claim certifies it (`✓`) while
+  // nothing has fact-checked it. Whether the claim's TRUTH was independently
+  // checked is the separate axis the dotted underline still shows.
+  '✓': 'certified — a person has accepted this reading',
   '~': "a claim — the claimant's own account, nothing has checked it",
   '?': 'an open question — explicitly unverified',
   '·': 'routine — no attention owed',

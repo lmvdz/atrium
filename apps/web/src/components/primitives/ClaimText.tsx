@@ -14,7 +14,7 @@
  * ------------------------------------------------------------------------- */
 
 import type { EpistemicState, NoGlyph } from '../model/glyph';
-import { isClaim } from '../model/glyph';
+import { truthUnchecked } from '../model/glyph';
 import type { Slot } from '../model/slot';
 
 export type ClaimTextProps = {
@@ -23,8 +23,18 @@ export type ClaimTextProps = {
   readonly className?: string;
 } & NoGlyph;
 
+/**
+ * The underline flags "nothing outside the claimant has checked this" — the
+ * TRUTH axis, independent of the `✓`/`~` CERTIFICATION glyph. After #98 split
+ * the two, a person accepting a self-reported claim certifies it (`accepted`,
+ * `✓`) without anything fact-checking its truth; that is a settled certification
+ * but still an unchecked claim, so the underline must stay. That predicate,
+ * `truthUnchecked`, lived here as a private copy until the round-4 root sweep
+ * moved it to `model/glyph` so `StateLens`'s count and `trailerFor`'s copy speak
+ * of the SAME set the row underlines — one truth predicate, every consumer.
+ */
 export function ClaimText({ state, content, className }: ClaimTextProps) {
-  const claim = isClaim(state);
+  const claim = truthUnchecked(state);
   return (
     <span
       className={[claim ? 'atr-claim' : null, className].filter(Boolean).join(' ')}

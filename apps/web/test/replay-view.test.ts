@@ -1,4 +1,12 @@
 import { readFileSync } from 'node:fs';
+import {
+  type Actor,
+  type AuthoredEvent,
+  authored,
+  CoreEvent,
+  type ProvenanceMessage,
+  reduce,
+} from '@atrium/core';
 import { describe, expect, it } from 'vitest';
 import { contextualReferenceAttention } from '../lib/contextual-reference-attention';
 import { liveRoomView, shouldRefreshLiveRoute } from '../lib/live-room-view';
@@ -13,6 +21,7 @@ import {
   replayView,
 } from '../lib/replay-view';
 import { needsViewer, withFilter } from '../src/components';
+import { glyphFor } from '../src/components/model';
 import type { RoomView } from '../src/lib/realtime';
 import { workspacePath } from './support/workspace-path';
 
@@ -77,6 +86,8 @@ describe('contextual direct-reference placement', () => {
         retractedAt: null,
         supersededById: null,
         acceptedBy: 'alice',
+        acceptedByKind: 'human',
+        humanTouchedAt: at,
         createdAt: at,
         updatedAt: at,
       },
@@ -91,6 +102,8 @@ describe('contextual direct-reference placement', () => {
         retractedAt: null,
         supersededById: null,
         acceptedBy: 'alice',
+        acceptedByKind: 'human',
+        humanTouchedAt: at,
         createdAt: at,
         updatedAt: at,
       },
@@ -201,6 +214,260 @@ function data(): ReplayData {
   };
 }
 
+/* ───────────────────────────────────────────────────────────────────────────
+ * REACHABLE machine acceptances — folded through @atrium/core, not hand-built.
+ *
+ * #98 r2, finding 3: a machine may NOT accept directly. The reducer refuses
+ * every non-human acceptance whose object carries `proposalId: null`
+ * (`reduce.ts` ~733) — a machine's one door to a fact is to stage a proposal and
+ * accept THAT proposal, and only one it itself staged (`actorMatchesProposer`).
+ * The round-2 M5 rows set `acceptedByKind: 'model'` with `proposalId: null`, an
+ * impossible state the engine can never reach, so the fixture proved nothing
+ * about the machine path it claimed to cover. These fold real
+ * `proposal_recorded` + `object_accepted` events and read the resulting
+ * `ObjectRecord` off the reduced state, so every fixture is exactly a state the
+ * reducer produces — and the predicate still governs the rendered glyph.
+ * ─────────────────────────────────────────────────────────────────────────── */
+const ROOM = 'room';
+const MODEL: Actor = { kind: 'model', model: 'replay/precomputed-v1' };
+const HUMAN: Actor = { kind: 'human', userId: 'alice' };
+const CLAIM_TEXT = 'Background regeneration keeps the old page live.';
+const QUESTION_TEXT = 'Should regeneration happen in the background?';
+const ANSWER_TEXT = 'Yes — the old page stays live during regeneration.';
+/** The room the receipts are judged against; every cited message is ALICE's own. */
+const WINDOW: readonly ProvenanceMessage[] = [
+  { id: 'mc', authorId: 'alice', body: CLAIM_TEXT },
+  { id: 'mq', authorId: 'alice', body: QUESTION_TEXT },
+  { id: 'ma', authorId: 'alice', body: ANSWER_TEXT },
+];
+let seq = 0;
+function ts(): string {
+  seq += 1;
+  return new Date(Date.UTC(2026, 7, 2, 12, 0, seq)).toISOString();
+}
+
+function ev(raw: Record<string, unknown>, actor: Actor): AuthoredEvent {
+  return authored(CoreEvent.parse(raw), { actor, messages: WINDOW });
+}
+
+/** Fold a log and project the resulting `ObjectRecord` into the read-model row shape. */
+function foldObjectRow(
+  events: readonly AuthoredEvent[],
+  objectId: string,
+): ReplayData['objects'][number] {
+  const state = reduce(events);
+  const record = state.objects[objectId];
+  if (!record) {
+    throw new Error(
+      `fold did not produce object ${objectId}; issues: ${JSON.stringify(state.issues)}`,
+    );
+  }
+  const acceptedBy =
+    record.acceptedBy.kind === 'human' || record.acceptedBy.kind === 'agent'
+      ? record.acceptedBy.userId
+      : null;
+  return {
+    id: record.object.id,
+    roomId: record.object.roomId,
+    type: record.object.type,
+    payload: record.object.payload,
+    objectiveId: record.object.objectiveId ?? null,
+    proposalId: record.object.provenance.proposalId,
+    revision: record.revision,
+    retractedAt: record.retractedAt === null ? null : new Date(record.retractedAt),
+    supersededById: record.supersededById,
+    acceptedBy,
+    acceptedByKind: record.acceptedBy.kind,
+    humanTouchedAt: record.humanTouchedAt === null ? null : new Date(record.humanTouchedAt),
+    createdAt: new Date(record.object.createdAt),
+    updatedAt: new Date(record.updatedAt),
+  } as ReplayData['objects'][number];
+}
+
+/** A human directly accepts a claim — the `✓` case, reachable with `proposalId: null`. */
+function foldHumanClaim(id: string): ReplayData['objects'][number] {
+  return foldObjectRow(
+    [
+      ev(
+        {
+          id: `ev_${id}`,
+          at: ts(),
+          type: 'object_accepted',
+          object: {
+            id,
+            roomId: ROOM,
+            type: 'claim',
+            payload: { statement: CLAIM_TEXT, claimant: 'alice' },
+            provenance: { messageIds: ['mc'], proposalId: null },
+            createdAt: ts(),
+            updatedAt: ts(),
+          },
+        },
+        HUMAN,
+      ),
+    ],
+    id,
+  );
+}
+
+/** A model stages a claim proposal and accepts its OWN proposal — the reachable `~` case. */
+function foldMachineClaim(id: string): ReplayData['objects'][number] {
+  const proposalId = `prop_${id}`;
+  return foldObjectRow(
+    [
+      ev(
+        {
+          id: `evp_${id}`,
+          at: ts(),
+          type: 'proposal_recorded',
+          proposal: {
+            id: proposalId,
+            roomId: ROOM,
+            type: 'claim',
+            payload: { statement: CLAIM_TEXT, claimant: 'alice' },
+            confidence: 0.95,
+            proposer: MODEL,
+            provenance: ['mc'],
+            quote: CLAIM_TEXT,
+            createdAt: ts(),
+          },
+        },
+        MODEL,
+      ),
+      ev(
+        {
+          id: `eva_${id}`,
+          at: ts(),
+          type: 'object_accepted',
+          object: {
+            id,
+            roomId: ROOM,
+            type: 'claim',
+            payload: { statement: CLAIM_TEXT, claimant: 'alice' },
+            provenance: { messageIds: ['mc'], proposalId },
+            createdAt: ts(),
+            updatedAt: ts(),
+          },
+        },
+        MODEL,
+      ),
+    ],
+    id,
+  );
+}
+
+/**
+ * An answered open_question whose ACCEPTANCE was `accepter`'s. Answeredness comes
+ * from a human `answers` relation (the only actor that may bind one) onto a
+ * human-accepted answer claim — and it never touches the QUESTION's acceptance,
+ * so a machine-accepted question stays `~` even once answered: the covenant's
+ * point that answeredness never mints the tick.
+ */
+function foldAnsweredQuestion(
+  id: string,
+  accepter: 'human' | 'model',
+): ReplayData['objects'][number] {
+  const answerId = `${id}-answer`;
+  const events: AuthoredEvent[] = [];
+  if (accepter === 'model') {
+    const proposalId = `prop_${id}`;
+    events.push(
+      ev(
+        {
+          id: `evp_${id}`,
+          at: ts(),
+          type: 'proposal_recorded',
+          proposal: {
+            id: proposalId,
+            roomId: ROOM,
+            type: 'open_question',
+            payload: { question: QUESTION_TEXT },
+            confidence: 0.95,
+            proposer: MODEL,
+            provenance: ['mq'],
+            quote: QUESTION_TEXT,
+            createdAt: ts(),
+          },
+        },
+        MODEL,
+      ),
+      ev(
+        {
+          id: `eva_${id}`,
+          at: ts(),
+          type: 'object_accepted',
+          object: {
+            id,
+            roomId: ROOM,
+            type: 'open_question',
+            payload: { question: QUESTION_TEXT },
+            provenance: { messageIds: ['mq'], proposalId },
+            createdAt: ts(),
+            updatedAt: ts(),
+          },
+        },
+        MODEL,
+      ),
+    );
+  } else {
+    events.push(
+      ev(
+        {
+          id: `eva_${id}`,
+          at: ts(),
+          type: 'object_accepted',
+          object: {
+            id,
+            roomId: ROOM,
+            type: 'open_question',
+            payload: { question: QUESTION_TEXT },
+            provenance: { messageIds: ['mq'], proposalId: null },
+            createdAt: ts(),
+            updatedAt: ts(),
+          },
+        },
+        HUMAN,
+      ),
+    );
+  }
+  events.push(
+    ev(
+      {
+        id: `evans_${id}`,
+        at: ts(),
+        type: 'object_accepted',
+        object: {
+          id: answerId,
+          roomId: ROOM,
+          type: 'claim',
+          payload: { statement: ANSWER_TEXT, claimant: 'alice' },
+          provenance: { messageIds: ['ma'], proposalId: null },
+          createdAt: ts(),
+          updatedAt: ts(),
+        },
+      },
+      HUMAN,
+    ),
+    ev(
+      {
+        id: `evrel_${id}`,
+        at: ts(),
+        type: 'relation_added',
+        relation: {
+          id: `rel_${id}`,
+          roomId: ROOM,
+          kind: 'answers',
+          fromObjectId: id,
+          to: { kind: 'object', objectId: answerId },
+          createdAt: ts(),
+        },
+      },
+      HUMAN,
+    ),
+  );
+  return foldObjectRow(events, id);
+}
+
 describe('persisted replay view', () => {
   /** CATCHES: hiding a persisted semantic message after staging failed, leaving no retry. */
   it('marks an unstaged authored semantic message for idempotent retry', () => {
@@ -253,6 +520,75 @@ describe('persisted replay view', () => {
     });
     expect(view.entries.find((entry) => entry.id === 'm1')).toMatchObject({ tag: null });
   });
+  /**
+   * H5/H6, M5/M7 — the rendered ✓ IS core's one certification predicate, for the
+   * TWO types a machine can actually accept.
+   *
+   * `modelMintingGate` lets a machine accept exactly a `claim` and an
+   * `open_question` — and those were the two types whose glyph `stateForObject`
+   * read from their own payload (`claim.verification`, `question.status`) in a
+   * branch that returned before the predicate. So the round-1 M5 test was a
+   * false-green: it used a machine-accepted DECISION, a state the reducer
+   * refuses, which fell through to the predicate and could never have exposed
+   * the bug. This exercises the reachable ones.
+   *
+   * MUTATION (M5): flip `epistemic.ts`'s `epistemicStateOf` to `return
+   * 'confirmed'` and BOTH machine acceptances below render ✓ — every `~`
+   * assertion here fails. The character a user sees moves with the predicate,
+   * for a claim and for an answered question, off the projected
+   * `accepted_by_kind`/`human_touched_at` columns and nothing else.
+   */
+  it('renders a machine-accepted claim and answered question ~, and the predicate moves the glyph', () => {
+    const snapshot = data();
+    // Every row below is FOLDED THROUGH THE REDUCER (see foldObjectRow): the
+    // machine acceptances cite a same-model staged proposal, exactly as the
+    // reducer demands, so no fixture is a hand-built impossibility. A machine may
+    // only mint an UNVERIFIED claim (the reducer's `claim_verification` gate is
+    // human-only), which is the state the fold produces.
+    snapshot.objects.push(
+      foldHumanClaim('claim-by-person'),
+      foldMachineClaim('claim-by-machine'),
+      foldAnsweredQuestion('answer-by-person', 'human'),
+      foldAnsweredQuestion('answer-by-machine', 'model'),
+    );
+
+    // The reachability the fixtures now assert, made explicit: the machine claim
+    // and the machine-accepted answered question both cite a real staged
+    // proposal, and the answered question really did flip to `answered`.
+    const machine = snapshot.objects.find((object) => object.id === 'claim-by-machine');
+    expect(machine?.acceptedByKind).toBe('model');
+    expect(machine?.proposalId).not.toBeNull();
+    const machineQuestion = snapshot.objects.find((object) => object.id === 'answer-by-machine');
+    if (!machineQuestion) throw new Error('machine answered question must fold');
+    expect(machineQuestion.acceptedByKind).toBe('model');
+    expect(machineQuestion.proposalId).not.toBeNull();
+    expect((machineQuestion.payload as { status?: string }).status).toBe('answered');
+
+    const view = replayView(snapshot, 'alice');
+    const glyph = (id: string) => {
+      const object = view.objects.find((candidate) => candidate.id === id);
+      if (!object) throw new Error(`object ${id} must render`);
+      return glyphFor(object.state);
+    };
+
+    // ── Covenant, DIRECTION ONE: a human-confirmed claim renders ✓ (was ~,
+    //    finding 3: the fold said `confirmed`, replay emitted `self_reported`).
+    expect(glyph('claim-by-person')).toBe('✓');
+    // ── Covenant, DIRECTION TWO: an unconfirmed ANSWERED question renders ~ (was
+    //    ✓, finding 2: `status='answered'` minted the tick with no human touch).
+    expect(glyph('answer-by-machine')).toBe('~');
+    // A human-certified answered question is ✓; a machine-accepted claim is ~.
+    expect(glyph('answer-by-person')).toBe('✓');
+    expect(glyph('claim-by-machine')).toBe('~');
+
+    // MUTATION anchor: these two `~` come SOLELY from `epistemicStateOf`
+    // returning `unconfirmed`. Flip it to `confirmed` and both become `✓`.
+    const machineClaim = view.objects.find((object) => object.id === 'claim-by-machine');
+    const machineAnswer = view.objects.find((object) => object.id === 'answer-by-machine');
+    expect(machineClaim?.state.verification).toBe('self_reported');
+    expect(machineAnswer?.state.verification).toBe('proposed');
+  });
+
   /**
    * Mutation: retain final worker rows while scrubbing an earlier message
    * prefix. The replay then presents a conclusion before its source was read.
@@ -309,6 +645,8 @@ describe('persisted replay view', () => {
       retractedAt: null,
       supersededById: null,
       acceptedBy: 'alice',
+      acceptedByKind: 'human',
+      humanTouchedAt: at,
       createdAt: at,
       updatedAt: at,
     });
@@ -428,6 +766,8 @@ describe('persisted replay view', () => {
         retractedAt: null,
         supersededById: null,
         acceptedBy: 'alice',
+        acceptedByKind: 'human',
+        humanTouchedAt: at,
         createdAt: at,
         updatedAt: at,
       },
@@ -449,6 +789,8 @@ describe('persisted replay view', () => {
         retractedAt: null,
         supersededById: null,
         acceptedBy: 'alice',
+        acceptedByKind: 'human' as const,
+        humanTouchedAt: at,
         createdAt: at,
         updatedAt: at,
       })),
@@ -621,6 +963,8 @@ describe('persisted replay view', () => {
         retractedAt: null,
         supersededById: 'decision',
         acceptedBy: 'alice',
+        acceptedByKind: 'human',
+        humanTouchedAt: at,
         createdAt: at,
         updatedAt: at,
       },
@@ -635,6 +979,8 @@ describe('persisted replay view', () => {
         retractedAt: null,
         supersededById: null,
         acceptedBy: 'alice',
+        acceptedByKind: 'human',
+        humanTouchedAt: at,
         createdAt: at,
         updatedAt: changedAt,
       },
@@ -653,6 +999,8 @@ describe('persisted replay view', () => {
         retractedAt: null,
         supersededById: null,
         acceptedBy: 'alice',
+        acceptedByKind: 'human',
+        humanTouchedAt: at,
         createdAt: at,
         updatedAt: at,
       },
@@ -772,6 +1120,8 @@ describe('persisted replay view', () => {
       retractedAt: null,
       supersededById: null,
       acceptedBy: 'alice',
+      acceptedByKind: 'human',
+      humanTouchedAt: at,
       createdAt: at,
       updatedAt: at,
     });

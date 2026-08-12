@@ -56,6 +56,7 @@ describe('live supersession request state', () => {
         retractedAt: null,
         supersededById: 'new',
         humanTouchedAt: null,
+        acceptedByKind: 'human' as const,
         revision: 0,
         acceptedBy: 'alice',
         createdAt: new Date(0),

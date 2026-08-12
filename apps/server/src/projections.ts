@@ -322,6 +322,14 @@ async function projectObjectAccepted(
     proposalId: object.provenance.proposalId,
     revision: record.revision,
     acceptedBy: humanId(actor),
+    // The two projected halves of core's one certification predicate. Read off
+    // the fold's record, not `context.actor` (rule 2 at the top of this file):
+    // `acceptedBy.kind` answers `isHuman` where the `accepted_by` uuid cannot
+    // (an agent carries one too, 0017), and `humanTouchedAt` is `null` for a
+    // machine acceptance and the acceptance instant for a human one. `~` vs `✓`
+    // is derived from exactly these downstream — see `epistemic.ts`.
+    acceptedByKind: record.acceptedBy.kind,
+    humanTouchedAt: record.humanTouchedAt === null ? null : new Date(record.humanTouchedAt),
     createdAt: new Date(object.createdAt),
     updatedAt: new Date(record.updatedAt),
   });
@@ -385,6 +393,21 @@ async function projectObjectCorrected(
       revision: record.revision,
       retractedAt: record.retractedAt === null ? null : new Date(record.retractedAt),
       supersededById: record.supersededById,
+      // Both halves of the predicate are written from `after`, not just one.
+      // `acceptedByKind` is the accepter's kind and a correction does not change
+      // it — but writing it (like `type`, `payload`, every field above) keeps
+      // this projection convergent with the fold rather than trusting the value
+      // the insert left behind; omitting it was the divergence-repair gap a
+      // blind critic named (#98 r2, finding 6).
+      acceptedByKind: record.acceptedBy.kind,
+      // A correction by a person promotes `~`→`✓`: the reducer moves
+      // `humanTouchedAt` off `null` (reduce.ts `commitPlan`), and this is the
+      // one field in this event's own vocabulary that carries that promotion
+      // into the read model. Omitting it — as this projection omitted every
+      // field it did not think changed until #22 r10 — left a corrected object
+      // still rendering `~`, the covenant's second clause invisible. Written
+      // from `after`, like everything else here.
+      humanTouchedAt: record.humanTouchedAt === null ? null : new Date(record.humanTouchedAt),
       updatedAt: new Date(record.updatedAt),
     })
     .where(and(eq(acceptedObjects.id, event.objectId), eq(acceptedObjects.roomId, roomId)));

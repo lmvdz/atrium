@@ -1215,6 +1215,34 @@ export const acceptedObjects = pgTable(
     /** Denormalised from the `supersedes` edge for cheap "is this still true?". */
     supersededById: uuid('superseded_by_id'),
     acceptedBy: uuid('accepted_by').references(() => users.id, { onDelete: 'set null' }),
+    /**
+     * The KIND of the actor that accepted this, projected from the fold's
+     * `acceptedBy` (`ObjectRecord.acceptedBy.kind`). This is the read model's
+     * half of @atrium/core's one certification predicate: `epistemicStateOf` is
+     * `isHuman(acceptedBy) || humanTouchedAt !== null`, and `accepted_by` alone
+     * cannot answer `isHuman` because an `agent` also carries a `users` id
+     * (0017). Deliberately NOT NULL: every accepted row has an accepter kind,
+     * and a nullable column would let a forgotten projection render a machine's
+     * reading as a fact. `_ActorKindParity` pins this enum to `Actor['kind']`.
+     *
+     * `DEFAULT 'model'` is the fail-CLOSED value, not a convenience: the
+     * projection always sets this explicitly from the fold, so the default is
+     * reached only by a writer that forgot who accepted — and the safe answer to
+     * "we do not know who certified this" is "a machine did", which renders `~`
+     * and asks a person, never `✓`. Same judgement 0018 recorded for keeping a
+     * safe default over a no-default error that fires at an unaudited call site.
+     */
+    acceptedByKind: actorKind('accepted_by_kind').notNull().default('model'),
+    /**
+     * When a human first touched this object — accepted it, or corrected it
+     * afterwards — or `null` while it is still only a machine's reading. The
+     * second half of the predicate, projected from `ObjectRecord.humanTouchedAt`
+     * on both `object_accepted` AND `object_corrected` (a correction by a person
+     * promotes `~`→`✓`, so the correction projection must move it too). Until
+     * this column existed the covenant was unobservable: a `✓` on screen was not
+     * evidence a person made it.
+     */
+    humanTouchedAt: timestamp('human_touched_at', { withTimezone: true }),
     createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
     updatedAt: timestamp('updated_at', { withTimezone: true }).notNull().defaultNow(),
   },

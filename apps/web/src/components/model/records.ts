@@ -12,7 +12,7 @@
  * ------------------------------------------------------------------------- */
 
 import type { EpistemicState, Glyph, ObjectKind } from './glyph';
-import { GLYPH_HARDNESS, glyphFor, needsViewer } from './glyph';
+import { GLYPH_HARDNESS, glyphFor, needsViewer, truthUnchecked } from './glyph';
 import type {
   Citation,
   MessageId,
@@ -1549,9 +1549,12 @@ export function trailerFor(input: {
   const commitments = rest.filter((o) => o.kind === 'commitment').length;
   const overdue = rest.filter((o) => late.has(o.id)).length;
   const failures = rest.filter((o) => o.state.verification === 'failed').length;
-  const unverified = rest.filter((o) =>
-    ['proposed', 'unverified', 'self_reported'].includes(o.state.verification),
-  ).length;
+  // The TRUTH axis, via the one `truthUnchecked` predicate — the SAME set the
+  // row underlines and the lens counts. Open-coding `isClaim` here let the final
+  // "everything outside your list is verified" lead fire while a certified-but-
+  // unverified claim sat dotted in the rows below it; green means checked by
+  // something other than the claimant, and a taken-but-unchecked claim is not.
+  const unverified = rest.filter((o) => truthUnchecked(o.state)).length;
   const openQuestions = rest.filter((o) => o.state.verification === 'open').length;
 
   const summary = (

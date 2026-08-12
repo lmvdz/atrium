@@ -123,6 +123,33 @@ describe('the glyph cannot be handed in', () => {
     expect(container.querySelector('[data-glyph]')?.getAttribute('data-glyph')).toBe('✓');
     expect(container.querySelector('[data-claim="true"]')).toBeNull();
   });
+
+  /* CATCHES: reading a certified self-reported claim as fact-checked (#98 r2,
+     finding 4). After the axes split a person accepting a claim certifies it
+     (`✓`) without anything checking its truth, so the glyph is the tick AND the
+     underline stays — the truth axis must remain honestly visible. A certified
+     DECISION carries no truth axis and is never dotted. */
+  const CERTIFIED_UNVERIFIED_CLAIM: EpistemicState = {
+    kind: 'claim',
+    verification: 'accepted',
+    owedToViewer: false,
+    irreversible: false,
+  };
+  const CERTIFIED_DECISION: EpistemicState = {
+    kind: 'decision',
+    verification: 'accepted',
+    owedToViewer: false,
+    irreversible: false,
+  };
+  it('keeps a certified but unverified claim dotted, and a certified decision clean', () => {
+    const claim = render(<TimelineRow entry={messageEntry(CERTIFIED_UNVERIFIED_CLAIM)} />);
+    expect(claim.container.querySelector('[data-glyph]')?.getAttribute('data-glyph')).toBe('✓');
+    expect(claim.container.querySelector('[data-claim="true"]')).not.toBeNull();
+    cleanup();
+    const decision = render(<TimelineRow entry={messageEntry(CERTIFIED_DECISION)} />);
+    expect(decision.container.querySelector('[data-glyph]')?.getAttribute('data-glyph')).toBe('✓');
+    expect(decision.container.querySelector('[data-claim="true"]')).toBeNull();
+  });
 });
 
 /* ---------------------------------------------------------------------------
