@@ -786,45 +786,104 @@ function acceptanceOf(object: ReplayData['objects'][number]): ObjectAcceptance {
   };
 }
 
+/**
+ * `~` vs `✓` — CERTIFICATION — is core's one predicate for EVERY type, read off
+ * the projected columns via `epistemicStateFromAcceptance`, which delegates to
+ * `epistemicStateOf`, the SAME function the reducer's supersession gate enforces.
+ * A machine's acceptance is `~` (unconfirmed) and stays `~` until a person
+ * touches it; a thing with no acceptance (`null`, a staged proposal) is a
+ * machine's reading, `~`. `confirmed` is derived here FIRST, before any type
+ * branches, so it governs the glyph uniformly.
+ */
+function certified(acceptance: ObjectAcceptance | null): boolean {
+  return (
+    acceptance !== null &&
+    epistemicStateFromAcceptance(acceptance.acceptedByKind, acceptance.humanTouchedAt) ===
+      'confirmed'
+  );
+}
+
+/**
+ * The three axes of a semantic object, kept apart on purpose (init.md §5,
+ * `@atrium/core`'s `epistemic.ts`):
+ *
+ *   1. CERTIFICATION (`~`/`✓`) — did a PERSON take this? The predicate, and the
+ *      ONLY source of the tick. Governs every type here.
+ *   2. CLAIM-TRUTH (`verified`/`self_reported`) — has anything OUTSIDE the
+ *      claimant checked the claim? Orthogonal to (1). A machine cannot mint a
+ *      `verified` claim (the reducer's `claim_verification` gate), so `verified`
+ *      only ever refines an already-certified `✓` — it rides SUBORDINATE to the
+ *      glyph (a green "verified" flavour of the tick), never a second `✓` source.
+ *   3. QUESTION-STATUS (`open`/`answered`) — the `?` glyph is for a question with
+ *      no answer yet. Answeredness never mints the tick either: an ANSWERED
+ *      question is `✓` only when a person certified it, and `~` otherwise.
+ *
+ * Before this, a `claim` read its own `verification` and an `open_question` its
+ * own `status` in branches that RETURNED before the predicate — so exactly the
+ * two types a machine can accept (`modelMintingGate`) rendered the tick from
+ * payload, never from who accepted. That was the covenant breach, both ways:
+ * an answered-but-uncertified question showed `✓`, a human-confirmed claim `~`.
+ */
 function stateForObject(
   type: ReplayData['objects'][number]['type'],
   payload: ReplayData['objects'][number]['payload'],
   owedToViewer: boolean,
   acceptance: ObjectAcceptance | null,
 ): EpistemicState {
+  const confirmed = certified(acceptance);
   if (type === 'open_question') {
     const question = OpenQuestionPayload.parse(payload);
+    // A question with no answer is `?` — that is question-STATUS, not the tick.
+    // Once answered, CERTIFICATION alone decides `✓` vs `~`: an answer a person
+    // did not take stays a machine's reading.
+    if (question.status !== 'answered') {
+      return { kind: 'question', verification: 'open', owedToViewer, irreversible: false };
+    }
     return {
       kind: 'question',
-      verification: question.status === 'answered' ? 'accepted' : 'open',
+      verification: confirmed ? 'accepted' : 'proposed',
       owedToViewer,
       irreversible: false,
     };
   }
   if (type === 'claim') {
     const claim = ClaimPayload.parse(payload);
+    // CERTIFICATION gates the tick FIRST. `verified` only distinguishes the
+    // FLAVOUR of an already-certified `✓` (checked-by-another vs merely taken);
+    // it is never reached for an uncertified claim, so it cannot be the tick.
     return {
       kind: 'claim',
-      verification: claim.verification === 'verified' ? 'verified' : 'self_reported',
+      verification: confirmed
+        ? claim.verification === 'verified'
+          ? 'verified'
+          : 'accepted'
+        : 'self_reported',
       owedToViewer,
       irreversible: false,
     };
   }
-  // `~` vs `✓` is core's one predicate, read off the projected columns via
-  // `epistemicStateFromAcceptance` — which delegates to `epistemicStateOf`, the
-  // SAME function the reducer's supersession gate enforces. A machine's
-  // acceptance is `~` (unconfirmed) and stays `~` until a person touches it;
-  // there is no second answer derived from row existence anymore. A thing with
-  // no acceptance (`null`, a staged proposal) is a machine's reading, `~`.
-  const confirmed =
-    acceptance !== null &&
-    epistemicStateFromAcceptance(acceptance.acceptedByKind, acceptance.humanTouchedAt) ===
-      'confirmed';
   return {
     kind: objectKind(type),
     verification: confirmed ? 'accepted' : 'proposed',
     owedToViewer,
     irreversible: false,
+  };
+}
+
+/**
+ * A human's local, optimistic acceptance in the replay UI, run through the ONE
+ * predicate so the rendered `✓` has a single source. `ReplaySession` used to
+ * hand-set `verification: 'accepted'` on accept — a second tick source that
+ * agreed with the covenant only by luck. Routing an explicit `human` acceptance
+ * through `epistemicStateFromAcceptance` means a mutation of `epistemicStateOf`
+ * moves this glyph the same way it moves every other.
+ */
+export function locallyAcceptedState(state: EpistemicState, at: string): EpistemicState {
+  const confirmed = epistemicStateFromAcceptance('human', at) === 'confirmed';
+  return {
+    ...state,
+    verification: confirmed ? 'accepted' : state.verification,
+    owedToViewer: false,
   };
 }
 

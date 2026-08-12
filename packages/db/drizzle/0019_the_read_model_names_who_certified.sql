@@ -44,28 +44,41 @@
 -- reading — that IS the `~` state — so its column is nullable, exactly as
 -- `ObjectRecord.humanTouchedAt` is `Timestamp | null`.
 --
--- ## The backfill, and why it is the honest one for the rows that exist
+-- ## The backfill reads the IMMUTABLE LEDGER, not the nullable attribution FKs
 --
--- New columns need a value for rows already on disk. The fold that produced
--- those rows is gone, so the backfill reconstructs the two facts from what the
--- old projection *did* keep:
+-- New columns need a value for rows already on disk. The fold that produced them
+-- is gone, so the backfill reconstructs the two facts — but from `core_events`,
+-- the append-only spine, NOT from `accepted_objects.accepted_by` or
+-- `corrections.by_user_id`.
 --
---   * `accepted_by_kind` — a row with a non-null `accepted_by` was written by
---     `humanId(actor)`, which returned an id ONLY for a `human` (an `agent`
---     could not accept before 0017 landed, and no accepted row predates it), so
---     that row was human-accepted. A null `accepted_by` on an accepted object is
---     a `model` acceptance — the only other accepter of an object. `system`
---     never accepts an object, so it is not a case here.
---   * `human_touched_at` — a human acceptance set it to the acceptance instant,
---     which is `created_at`; and a human CORRECTION set it to the correction
---     instant, which is the earliest human correction this object carries. Both
---     are recovered below; a model-accepted object never touched by a person
---     stays NULL, which is `~`.
+-- Those two columns are the wrong source, and a blind critic (#98 r2, finding 4)
+-- named exactly why: BOTH are `ON DELETE SET NULL`. A human accepted an object,
+-- their user row was later deleted, and `accepted_by` is now NULL — so a backfill
+-- keyed on `accepted_by IS NOT NULL` reads that historical `✓` as a `model`
+-- acceptance and renders it `~`. The covenant would be quietly downgraded by an
+-- unrelated account deletion. `corrections.by_user_id` fails the same way for the
+-- promotion-by-correction half.
 --
--- This is a one-time reconstruction of historical rows and says nothing about
--- new writes: those come from the projection, which reads the fold directly. A
--- fresh database (every integration run) has no rows here and the backfill is
--- inert.
+-- `core_events.actor_kind` cannot be nulled: it is a NOT NULL column on the
+-- append-only log (0003's trigger forbids UPDATE/DELETE), written from the
+-- trusted actor at append and never a foreign key to a row that can vanish. It
+-- is the SAME `actor_kind` every acceptance gate read to decide the write in the
+-- first place. So the backfill matches each `accepted_objects` row to the
+-- `object_accepted` event that minted it and takes THAT event's `actor_kind`:
+--
+--   * `accepted_by_kind` — the accepting event's `actor_kind` verbatim (`human`,
+--     `agent`, `model`, or `system`), so an agent acceptance (0017) is recorded
+--     as `agent` rather than mis-read as `human` from a surviving `accepted_by`
+--     uuid. `epistemicStateFromAcceptance` then treats only `human` as `✓` via
+--     `isHuman`, exactly as the live projection does off `ObjectRecord.acceptedBy.kind`.
+--   * `human_touched_at` — the acceptance instant (`created_at`) when the
+--     accepting event was a HUMAN's; plus the earliest `object_corrected` event
+--     whose `actor_kind = 'human'`, its immutable `occurred_at`. A model-accepted
+--     object no person ever touched stays NULL, which is `~`.
+--
+-- This is a one-time reconstruction of historical rows and says nothing about new
+-- writes: those come from the projection, which reads the fold directly. A fresh
+-- database (every integration run) has no rows here and the backfill is inert.
 -- ═════════════════════════════════════════════════════════════════════════════
 
 -- ─────────────────────────────────────────────────────────────────────────────
@@ -73,19 +86,25 @@
 -- ─────────────────────────────────────────────────────────────────────────────
 --
 -- Added NOT NULL DEFAULT 'model' in one step: existing rows take 'model' (`~`),
--- the fail-closed value, and the human-accepted ones are corrected to 'human'
--- immediately below. The default is not a convenience — see the column COMMENT:
--- the projection always writes this, so the default is reached only by a writer
--- that forgot who accepted, and the safe answer there is "a machine did".
+-- the fail-closed value, and every row whose minting event survives on the
+-- ledger is corrected to that event's real `actor_kind` immediately below. The
+-- default is reached only by a row with no `object_accepted` event to match
+-- (there are none — every accepted row came from one) or by a future writer that
+-- forgot who accepted, and the safe answer there is "a machine did".
 ALTER TABLE "accepted_objects"
   ADD COLUMN "accepted_by_kind" "actor_kind" NOT NULL DEFAULT 'model';--> statement-breakpoint
 
--- A row with a non-null `accepted_by` was written by `humanId(actor)`, which
--- returned an id ONLY for a `human` (an `agent` could not accept before 0017,
--- and no accepted row predates it). So it was human-accepted.
-UPDATE "accepted_objects"
-SET "accepted_by_kind" = 'human'::"actor_kind"
-WHERE "accepted_by" IS NOT NULL;--> statement-breakpoint
+-- The accepter's kind is the `actor_kind` of the `object_accepted` event that
+-- minted the row — immutable, NOT NULL, and never a deletable FK. Matched by the
+-- object id the event carries in its payload (`payload->'object'->>'id'`),
+-- room-scoped. Takes the kind verbatim, so `agent` (0017) is `agent`, not a
+-- `human` mis-read from a surviving `accepted_by` uuid.
+UPDATE "accepted_objects" a
+SET "accepted_by_kind" = e."actor_kind"
+FROM "core_events" e
+WHERE e."type" = 'object_accepted'
+  AND e."room_id" = a."room_id"
+  AND (e."payload" -> 'object' ->> 'id') = a."id"::text;--> statement-breakpoint
 
 COMMENT ON COLUMN "accepted_objects"."accepted_by_kind" IS
   'The kind of the actor that accepted this object, projected from the fold''s ObjectRecord.acceptedBy.kind. The read model''s half of @atrium/core''s one certification predicate epistemicStateOf = isHuman(acceptedBy) || humanTouchedAt !== null: accepted_by alone cannot answer isHuman because an agent (0017) also carries a users id, so the KIND is projected. NOT NULL — every accepted row has an accepter kind, and a null would let a forgotten projection render a machine''s reading as a fact. Pinned to Actor[''kind''] by _ActorKindParity. Read by replay-view.ts via epistemicStateFromAcceptance so the rendered ✓ and the reducer''s gate are one function (#98/H5/H6).';--> statement-breakpoint
@@ -95,24 +114,34 @@ COMMENT ON COLUMN "accepted_objects"."accepted_by_kind" IS
 -- ─────────────────────────────────────────────────────────────────────────────
 ALTER TABLE "accepted_objects" ADD COLUMN "human_touched_at" timestamptz;--> statement-breakpoint
 
--- A human acceptance set humanTouchedAt to the acceptance instant (created_at).
-UPDATE "accepted_objects"
-SET "human_touched_at" = "created_at"
-WHERE "accepted_by" IS NOT NULL
-  AND "human_touched_at" IS NULL;--> statement-breakpoint
+-- A HUMAN acceptance set humanTouchedAt to the acceptance instant (created_at).
+-- Whether it was a human is the accepting event's `actor_kind`, off the ledger —
+-- not `accepted_by IS NOT NULL`, which a deleted user row silently falsifies.
+UPDATE "accepted_objects" a
+SET "human_touched_at" = a."created_at"
+FROM "core_events" e
+WHERE e."type" = 'object_accepted'
+  AND e."room_id" = a."room_id"
+  AND (e."payload" -> 'object' ->> 'id') = a."id"::text
+  AND e."actor_kind" = 'human'
+  AND a."human_touched_at" IS NULL;--> statement-breakpoint
 
 -- A human correction of a machine-accepted object promoted it: the touch is the
--- earliest human correction this object carries. `by_user_id` is written by
--- `humanId(actor)`, so a non-null value is a human's correction.
+-- earliest such correction. The correcting actor's kind is the `object_corrected`
+-- event's immutable `actor_kind` (the object id is `payload->>'objectId'`), and
+-- the instant is that event's `occurred_at` — again the ledger, so a later
+-- deletion of `corrections.by_user_id` cannot un-promote a historical `✓`.
 UPDATE "accepted_objects" a
 SET "human_touched_at" = c."first_touch"
 FROM (
-  SELECT "object_id", min("created_at") AS "first_touch"
-  FROM "corrections"
-  WHERE "by_user_id" IS NOT NULL
-  GROUP BY "object_id"
+  SELECT "room_id", ("payload" ->> 'objectId') AS "object_id",
+         min("occurred_at") AS "first_touch"
+  FROM "core_events"
+  WHERE "type" = 'object_corrected' AND "actor_kind" = 'human'
+  GROUP BY "room_id", ("payload" ->> 'objectId')
 ) c
-WHERE a."id" = c."object_id"
+WHERE a."room_id" = c."room_id"
+  AND a."id"::text = c."object_id"
   AND a."human_touched_at" IS NULL;--> statement-breakpoint
 
 COMMENT ON COLUMN "accepted_objects"."human_touched_at" IS

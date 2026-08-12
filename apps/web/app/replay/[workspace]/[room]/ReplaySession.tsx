@@ -10,6 +10,7 @@ import {
   retypeAsClaim,
 } from '../../../../lib/replay-transitions';
 import {
+  locallyAcceptedState,
   replayAt,
   replayReceipt,
   replayReceiptSubject,
@@ -91,11 +92,10 @@ export function ReplaySession({ data, viewerId }: { data: ReplayData; viewerId?:
       acceptedSubjects.includes(object.id) && object.kind !== 'claim'
         ? {
             ...object,
-            state: {
-              ...object.state,
-              verification: 'accepted' as const,
-              owedToViewer: false,
-            },
+            // A person clicked accept here — represent it as a `human`
+            // acceptance and let the ONE predicate derive the tick, rather than
+            // hand-setting `verification: 'accepted'` (a second `✓` source).
+            state: locallyAcceptedState(object.state, new Date().toISOString()),
             objectives:
               object.objectives.length === 0
                 ? view.objectives.map((objective) => objective.id)

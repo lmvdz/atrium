@@ -393,6 +393,13 @@ async function projectObjectCorrected(
       revision: record.revision,
       retractedAt: record.retractedAt === null ? null : new Date(record.retractedAt),
       supersededById: record.supersededById,
+      // Both halves of the predicate are written from `after`, not just one.
+      // `acceptedByKind` is the accepter's kind and a correction does not change
+      // it — but writing it (like `type`, `payload`, every field above) keeps
+      // this projection convergent with the fold rather than trusting the value
+      // the insert left behind; omitting it was the divergence-repair gap a
+      // blind critic named (#98 r2, finding 6).
+      acceptedByKind: record.acceptedBy.kind,
       // A correction by a person promotes `~`→`✓`: the reducer moves
       // `humanTouchedAt` off `null` (reduce.ts `commitPlan`), and this is the
       // one field in this event's own vocabulary that carries that promotion

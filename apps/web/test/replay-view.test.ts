@@ -259,28 +259,37 @@ describe('persisted replay view', () => {
     expect(view.entries.find((entry) => entry.id === 'm1')).toMatchObject({ tag: null });
   });
   /**
-   * H5/H6, M5/M7 — the rendered ✓ IS core's one certification predicate.
+   * H5/H6, M5/M7 — the rendered ✓ IS core's one certification predicate, for the
+   * TWO types a machine can actually accept.
    *
-   * Two decisions with identical words differ in exactly one thing: who accepted
-   * them. The human-accepted one renders ✓; the machine-accepted one renders ~,
-   * and it does so because `epistemicStateOf` — the SAME function the reducer's
-   * gate reads — says `unconfirmed`, derived from the projected
-   * `accepted_by_kind`/`human_touched_at` columns and nothing else.
+   * `modelMintingGate` lets a machine accept exactly a `claim` and an
+   * `open_question` — and those were the two types whose glyph `stateForObject`
+   * read from their own payload (`claim.verification`, `question.status`) in a
+   * branch that returned before the predicate. So the round-1 M5 test was a
+   * false-green: it used a machine-accepted DECISION, a state the reducer
+   * refuses, which fell through to the predicate and could never have exposed
+   * the bug. This exercises the reachable ones.
    *
    * MUTATION (M5): flip `epistemic.ts`'s `epistemicStateOf` to `return
-   * 'confirmed'` and the machine-accepted decision below renders ✓ — this
-   * assertion fails. Before this ticket, only `packages/core`'s own
-   * `corrections.test.ts` noticed that flip; the glyph a user sees was derived
-   * from row existence and did not move. It moves now.
+   * 'confirmed'` and BOTH machine acceptances below render ✓ — every `~`
+   * assertion here fails. The character a user sees moves with the predicate,
+   * for a claim and for an answered question, off the projected
+   * `accepted_by_kind`/`human_touched_at` columns and nothing else.
    */
-  it('renders a machine-accepted object ~ and the same sentence human-accepted ✓', () => {
+  it('renders a machine-accepted claim and answered question ~, and the predicate moves the glyph', () => {
     const snapshot = data();
-    const decision = (id: string, accepter: 'human' | 'model') =>
+    const claim = (id: string, accepter: 'human' | 'model') =>
       ({
         id,
         roomId: 'room',
-        type: 'decision' as const,
-        payload: { statement: 'Regenerate in the background.', decidedBy: null, status: 'active' },
+        type: 'claim' as const,
+        // A machine may only mint an UNVERIFIED claim — the reducer's
+        // `claim_verification` gate is human-only — so this is the reachable state.
+        payload: {
+          statement: 'Background regeneration keeps the old page live.',
+          claimant: 'alice',
+          verification: 'unverified' as const,
+        },
         objectiveId: null,
         proposalId: null,
         revision: 0,
@@ -292,19 +301,53 @@ describe('persisted replay view', () => {
         createdAt: at,
         updatedAt: at,
       }) as ReplayData['objects'][number];
-    snapshot.objects.push(decision('by-person', 'human'), decision('by-machine', 'model'));
+    const answeredQuestion = (id: string, accepter: 'human' | 'model') =>
+      ({
+        id,
+        roomId: 'room',
+        type: 'open_question' as const,
+        payload: { question: 'Should regeneration happen in the background?', status: 'answered' },
+        objectiveId: null,
+        proposalId: null,
+        revision: 0,
+        retractedAt: null,
+        supersededById: null,
+        acceptedBy: accepter === 'human' ? 'alice' : null,
+        acceptedByKind: accepter,
+        humanTouchedAt: accepter === 'human' ? at : null,
+        createdAt: at,
+        updatedAt: at,
+      }) as ReplayData['objects'][number];
+    snapshot.objects.push(
+      claim('claim-by-person', 'human'),
+      claim('claim-by-machine', 'model'),
+      answeredQuestion('answer-by-person', 'human'),
+      answeredQuestion('answer-by-machine', 'model'),
+    );
 
     const view = replayView(snapshot, 'alice');
-    const byPerson = view.objects.find((object) => object.id === 'by-person');
-    const byMachine = view.objects.find((object) => object.id === 'by-machine');
-    if (!byPerson || !byMachine) throw new Error('both accepted decisions must render');
+    const glyph = (id: string) => {
+      const object = view.objects.find((candidate) => candidate.id === id);
+      if (!object) throw new Error(`object ${id} must render`);
+      return glyphFor(object.state);
+    };
 
-    // The rendered glyph — the character on screen — moves with the accepter.
-    expect(glyphFor(byPerson.state)).toBe('✓');
-    expect(glyphFor(byMachine.state)).toBe('~');
-    // And it is the covenant's verification vocabulary underneath, not a coincidence.
-    expect(byPerson.state.verification).toBe('accepted');
-    expect(byMachine.state.verification).toBe('proposed');
+    // ── Covenant, DIRECTION ONE: a human-confirmed claim renders ✓ (was ~,
+    //    finding 3: the fold said `confirmed`, replay emitted `self_reported`).
+    expect(glyph('claim-by-person')).toBe('✓');
+    // ── Covenant, DIRECTION TWO: an unconfirmed ANSWERED question renders ~ (was
+    //    ✓, finding 2: `status='answered'` minted the tick with no human touch).
+    expect(glyph('answer-by-machine')).toBe('~');
+    // A human-certified answered question is ✓; a machine-accepted claim is ~.
+    expect(glyph('answer-by-person')).toBe('✓');
+    expect(glyph('claim-by-machine')).toBe('~');
+
+    // MUTATION anchor: these two `~` come SOLELY from `epistemicStateOf`
+    // returning `unconfirmed`. Flip it to `confirmed` and both become `✓`.
+    const machineClaim = view.objects.find((object) => object.id === 'claim-by-machine');
+    const machineAnswer = view.objects.find((object) => object.id === 'answer-by-machine');
+    expect(machineClaim?.state.verification).toBe('self_reported');
+    expect(machineAnswer?.state.verification).toBe('proposed');
   });
 
   /**
