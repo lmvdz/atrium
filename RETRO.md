@@ -1076,3 +1076,24 @@ upgrade visibility lives in the journal timestamp, not the filename.**
 **Findings refuted (with evidence)**: the page critic's two verdict-3 caveats (260 CSS still present; `overflow:46` still a constant) — both stale-comment reads; opened the citations, the `.pinList` rule is `var(--pin-belt)` and the `overflow` field is gone. Also its "two registers" (custom property + inline px) is the documented server-expression/client-measured split, not a defect.
 
 **The one process lesson**: **a self-measuring layout loop (measure → set budget → relayout → measure) is a convergence problem, and a gauntlet will find a new boundary every round until the fix is by-construction, not by-case.** Three rounds each fixed the specific oscillation instance codex constructed and each left an adjacent one; only removing every budget-dependent term from the episode key ended it. When a reviewer keeps finding narrower instances of the same class, stop patching instances and fix the invariant — and when the fix is a structural claim ("no term can swing"), the orchestrator can verify it by reading the key rather than spending another critic round. Corollary already known, re-confirmed: a rendered-artifact critic must drive the page (it caught the row-drop bug source review under-weighted) AND its static caveats need the same citation-opening as any other prose (it mis-read two comments as live code).
+
+---
+
+## #96 — a principal kind on the identity, threaded into the Actor (closed 2026-08-11, 3 rounds + 2 verify)
+
+**Rounds**: build + 3 fix rounds, each gauntleted by BOTH foreign lineages (codex + grok) as the certify/trust boundary demands. The trunk — blocks #99/#100/#101/#102/#104.
+
+**What each round caught**:
+- Build: gave a non-human an identity end to end (principal_kind column, widened Actor, actorOf branch, DB agreement invariant) with the ✓ gates intact. Its OWN new authority matrix pinned an agent-retires-confirmed breach as correct.
+- R1 gauntlet (codex + grok): the glyph path was sound (no agent→human laundering, no ✓ mint) but four covenant-SPIRIT holes — agent retires human-confirmed objects (both lineages, ship-blocker), agent resolves anyone's attention (owner scope dropped via null humanId), certification refused only as `applied_with_issue` not a hard nack, and a fail-open `IN('human','agent')` enum + delete-reinsert immutability gap.
+- R2 gauntlet (codex + grok DISAGREED): grok cleared all four fixes; **codex alone caught a HIGH regression** — the confirmed-supersession gate keyed on confirmed-state but not the actor's relation to an UNCONFIRMED object, so an agent could retire another machine's `~` (always foreign, since an agent owns no proposal). The fix round's own matrix pinned it again.
+- R3 + codex verify: gate broadened to #95's actual rule (a non-human never retires, only drafts); `epistemicStateOf` demoted to choosing the refusal reason; oracle corrected; verified closed.
+
+**Findings refuted / re-scoped (with evidence)**: the R1 "applied_with_issue" concern was real but the fix round found the ship-blocker mutant ESCAPED at integration level (the socket's double-refusal masked a missing reducer gate) — re-scoped to per-layer unit mutants, because the reducer gate is what binds replay and the worker. The zero-height-container `Infinity` reading (page critic on the sibling #94, same class) was deliberate, not a bug.
+
+**The process lessons worth keeping**:
+1. **Both foreign lineages, on the certify boundary, are not redundant — they are complementary.** R2 is the proof on this campaign: grok cleared the tree, codex caught a ship-blocker in it. The CLAUDE.md routing rule ("run BOTH on trust/security/git-write paths") earned itself here. A single-reviewer gauntlet ships the covenant hole.
+2. **A build's own new authority/oracle test can pin the defect as correct** — happened twice on #96 (r1 and r2 matrices). Every gauntlet on a build that adds an authority oracle must check the oracle didn't codify the hole. This is the "tests are claims, not coverage" rule with teeth.
+3. **A layered guard hides a missing layer.** The ship-blocker mutant passed integration because two layers both refused; only per-layer unit mutants prove each gate stands alone. Mutation-test each enforcement layer independently, especially the one (the reducer) that binds paths the socket doesn't cover (replay, the worker).
+
+**Harness lesson (promoted to auto-memory, not repo-specific)**: the codex-relay wrapper subagent cannot block on reviews exceeding Bash's 600s foreground cap (it auto-backgrounds); ~5 round-trips were lost before the orchestrator ran codex directly as a background task. grok's faster CLI never hit it.
