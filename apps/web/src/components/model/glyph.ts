@@ -179,7 +179,14 @@ export const GLYPHS: readonly Glyph[] = (Object.keys(GLYPH_HARDNESS) as Glyph[])
  * already knows that, and until r9 the type did not say it.
  */
 const GLYPH_MEANING = {
-  '✓': 'verified — checked by something other than the claimant',
+  // CERTIFICATION, not fact-check. After the axes split (#98) a single `✓` is
+  // minted by the one predicate — a person accepted or corrected the reading —
+  // for every type, so the tooltip describes that and nothing else. "Verified —
+  // checked by something other than the claimant" was false for the common case:
+  // a person accepting their own self-reported claim certifies it (`✓`) while
+  // nothing has fact-checked it. Whether the claim's TRUTH was independently
+  // checked is the separate axis the dotted underline still shows.
+  '✓': 'certified — a person has accepted this reading',
   '~': "a claim — the claimant's own account, nothing has checked it",
   '?': 'an open question — explicitly unverified',
   '·': 'routine — no attention owed',

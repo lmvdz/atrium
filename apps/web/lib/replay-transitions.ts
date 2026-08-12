@@ -42,8 +42,18 @@ export function retypeAsClaim(
       kind: 'claim',
       state: {
         kind: 'claim',
-        /* Human correction confirms the reading, not the truth of the claim. */
-        verification: 'unverified',
+        /*
+         * A retype is a HUMAN correction: a person has now read this and taken
+         * responsibility for it, so it is CERTIFIED (`✓`) — the same split the
+         * persisted `stateForObject` makes. Certification and claim-truth are
+         * separate axes: `accepted` is "a person took this reading" (the tick),
+         * NOT "something fact-checked the claim". The truth stays unverified, and
+         * it stays honestly visible — in the fact below, and in the dotted
+         * underline `ClaimText` keeps on a certified-but-unverified claim.
+         * Setting `unverified` here re-conflated the two and de-certified a human
+         * touch, rendering `~` where the covenant says `✓`.
+         */
+        verification: 'accepted',
         owedToViewer: false,
         irreversible: false,
       },

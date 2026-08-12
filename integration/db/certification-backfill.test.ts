@@ -2,7 +2,7 @@ import { randomUUID } from 'node:crypto';
 import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { type DatabaseHandle, migrationsFolder } from '@atrium/db';
-import { acceptedObjects } from '@atrium/db/schema';
+import { acceptedObjects, corrections } from '@atrium/db/schema';
 import { and, eq, sql } from 'drizzle-orm';
 import { afterAll, beforeEach, describe, expect, it } from 'vitest';
 import { openDatabase, resetDatabase, seedRoom } from '../support/harness.js';
@@ -20,6 +20,14 @@ import { openDatabase, resetDatabase, seedRoom } from '../support/harness.js';
  * This runs the migration's OWN `UPDATE` statements against rows whose FK
  * attribution has been nulled — the deletion scenario — and proves the ledger,
  * not the FK, decides the glyph.
+ *
+ * The correction-promotion half carries a second obligation (#98 r2, finding 1):
+ * the reducer appends an `object_corrected` event even when it REFUSES or NO-OPS
+ * a correction (an empty `patch:{}` changes nothing), so promoting `~`→`✓` off
+ * the raw ledger event would mint a certification a person only *attempted*. The
+ * runtime projection writes a `corrections` row only when the fold moved the
+ * object, so the backfill joins that table — a refused correction (no row) must
+ * not promote, an applied one (a row) must.
  */
 
 let handle: DatabaseHandle;
@@ -117,7 +125,7 @@ async function appendCorrected(
   objectId: string,
   actorKind: 'human' | 'model',
   actorId: string | null,
-): Promise<string> {
+): Promise<{ id: string; at: string }> {
   const id = randomUUID();
   const at = nextAt();
   await append({
@@ -139,7 +147,26 @@ async function appendCorrected(
       note: null,
     },
   });
-  return at;
+  return { id, at };
+}
+
+/**
+ * The `corrections` row the runtime projection writes ONLY when a correction
+ * actually applied — the apply signal the backfill joins. `by_user_id` is left
+ * NULL on purpose: the deletion the finding is about already happened, so the
+ * ledger event, not this nullable FK, must decide who touched the object.
+ */
+async function seedCorrectionRow(roomId: string, objectId: string, eventId: string): Promise<void> {
+  await handle.db.insert(corrections).values({
+    roomId,
+    objectId,
+    action: 'amend',
+    before: null,
+    after: null,
+    byUserId: null,
+    note: null,
+    eventId,
+  });
 }
 
 /** Insert an accepted-objects row in its PRE-backfill state: default kind, no touch. */
@@ -170,22 +197,36 @@ describe('migration 0019 backfill reconstructs certification from the immutable 
     const { roomId, people } = await seedRoom(handle, ['alice'], { slug: 'certify' });
     const alice = people.alice as string;
 
-    // Three historical rows, each with `accepted_by` NULL (its user deleted):
-    //  H  — accepted by a HUMAN; the ledger says so even though the FK is gone.
-    //  M  — accepted by a MODEL; a machine's reading, stays `~`.
-    //  MC — accepted by a MODEL, later CORRECTED by a human; promoted to `✓`.
+    // Four historical rows, each with `accepted_by` NULL (its user deleted):
+    //  H   — accepted by a HUMAN; the ledger says so even though the FK is gone.
+    //  M   — accepted by a MODEL; a machine's reading, stays `~`.
+    //  MCA — accepted by a MODEL, later CORRECTED by a human whose correction
+    //        APPLIED (a `corrections` row exists); promoted to `✓`.
+    //  MCR — accepted by a MODEL, with a human `object_corrected` event on the
+    //        ledger that the reducer REFUSED/NO-OP'd (no `corrections` row);
+    //        must NOT promote — it stays `~`.
     const objectH = randomUUID();
     const objectM = randomUUID();
-    const objectMC = randomUUID();
+    const objectMCA = randomUUID();
+    const objectMCR = randomUUID();
 
     const acceptedH = await appendAccepted(roomId, objectH, 'human', alice);
     await appendAccepted(roomId, objectM, 'model', 'test-model');
-    await appendAccepted(roomId, objectMC, 'model', 'test-model');
-    const correctedMC = await appendCorrected(roomId, objectMC, 'human', alice);
+    await appendAccepted(roomId, objectMCA, 'model', 'test-model');
+    await appendAccepted(roomId, objectMCR, 'model', 'test-model');
+    const correctedMCA = await appendCorrected(roomId, objectMCA, 'human', alice);
+    // The refused correction is a real ledger event by a human — the exact shape
+    // that would over-promote if the backfill trusted the raw event.
+    await appendCorrected(roomId, objectMCR, 'human', alice);
 
     await seedPreMigrationObject(roomId, objectH, acceptedH);
     await seedPreMigrationObject(roomId, objectM, nextAt());
-    await seedPreMigrationObject(roomId, objectMC, nextAt());
+    await seedPreMigrationObject(roomId, objectMCA, nextAt());
+    await seedPreMigrationObject(roomId, objectMCR, nextAt());
+
+    // Only the APPLIED correction leaves a `corrections` row (the projection's
+    // apply signal). The refused one does not — its ledger event stands alone.
+    await seedCorrectionRow(roomId, objectMCA, correctedMCA.id);
 
     // Precondition: the FK the OLD backfill trusted is NULL on every row, so an
     // `accepted_by IS NOT NULL` reconstruction would call all three machines.
@@ -214,7 +255,8 @@ describe('migration 0019 backfill reconstructs certification from the immutable 
 
     const h = await read(objectH);
     const m = await read(objectM);
-    const mc = await read(objectMC);
+    const mca = await read(objectMCA);
+    const mcr = await read(objectMCR);
 
     // H: the immutable ledger recovers the HUMAN acceptance the nulled FK lost —
     // a `✓` the old backfill would have silently downgraded to `~`.
@@ -226,9 +268,16 @@ describe('migration 0019 backfill reconstructs certification from the immutable 
     expect(m?.acceptedByKind).toBe('model');
     expect(m?.humanTouchedAt).toBeNull();
 
-    // MC: model-accepted, then a human correction promotes it — the touch is the
-    // correction's immutable `occurred_at`, recovered though `by_user_id` is gone.
-    expect(mc?.acceptedByKind).toBe('model');
-    expect(mc?.humanTouchedAt?.toISOString()).toBe(new Date(correctedMC).toISOString());
+    // MCA: model-accepted, then a human correction that APPLIED promotes it — the
+    // touch is the correction's immutable `occurred_at`, recovered though
+    // `by_user_id` is gone. The `corrections` row is what qualified it.
+    expect(mca?.acceptedByKind).toBe('model');
+    expect(mca?.humanTouchedAt?.toISOString()).toBe(new Date(correctedMCA.at).toISOString());
+
+    // MCR: model-accepted, with a human `object_corrected` event the reducer
+    // refused/no-op'd — NO `corrections` row. The backfill must not promote it
+    // from a touch that never landed: it stays a machine's reading, `~`.
+    expect(mcr?.acceptedByKind).toBe('model');
+    expect(mcr?.humanTouchedAt).toBeNull();
   });
 });

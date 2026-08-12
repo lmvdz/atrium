@@ -462,7 +462,10 @@ test.describe('persisted three-surface replay', () => {
     const accepted = page
       .locator('[data-region="current-state"] [data-object-id]')
       .filter({ hasText: decision });
-    await expect(accepted).toContainText('~');
+    // A human retype is a human touch: the reading is CERTIFIED (`✓`), and its
+    // truth stays the separate unverified axis. Was `~` — the pre-split framing
+    // that de-certified the correction (#98 r2, finding 2).
+    await expect(accepted).toContainText('✓');
     await expect(accepted).toContainText('claim truth remains unverified');
 
     const slider = page.getByRole('slider', { name: 'Replay position' });

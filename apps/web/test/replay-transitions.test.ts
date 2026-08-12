@@ -42,8 +42,12 @@ describe('replay correction transitions', () => {
       action: 'retype',
       objectId: decision.id,
       before: { id: decision.id, kind: 'decision' },
-      after: { id: decision.id, kind: 'claim', state: { verification: 'unverified' } },
+      // A human retype CERTIFIES (`✓`): `accepted` is the tick, with claim-truth
+      // the separate unverified axis (kept in the facts and the dotted underline).
+      // Was `unverified` — the pre-split framing that de-certified a human touch.
+      after: { id: decision.id, kind: 'claim', state: { verification: 'accepted' } },
     });
+    expect(transition.after.facts).toContain('claim truth remains unverified');
     expect(applyReplayTransitions([decision], [transition])[0]).toBe(transition.after);
   });
 

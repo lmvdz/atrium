@@ -72,9 +72,18 @@
 --     uuid. `epistemicStateFromAcceptance` then treats only `human` as `✓` via
 --     `isHuman`, exactly as the live projection does off `ObjectRecord.acceptedBy.kind`.
 --   * `human_touched_at` — the acceptance instant (`created_at`) when the
---     accepting event was a HUMAN's; plus the earliest `object_corrected` event
---     whose `actor_kind = 'human'`, its immutable `occurred_at`. A model-accepted
---     object no person ever touched stays NULL, which is `~`.
+--     accepting event was a HUMAN's; plus the earliest human correction that
+--     ACTUALLY APPLIED, at its immutable `occurred_at`. "Applied" is the load-
+--     bearing word: the reducer appends an `object_corrected` event even when it
+--     REFUSES or NO-OPS the correction (an empty `patch:{}` changes nothing), and
+--     a refused touch must not promote a machine's `~` to `✓`. The runtime
+--     projection filters exactly these — it writes only when the fold moved the
+--     object — and the `corrections` table is where that write lands, so a
+--     `corrections` row is the apply signal the raw ledger event is not. The
+--     backfill joins it, and still reads the actor's kind and the touch instant
+--     from the immutable ledger, never from `corrections.by_user_id`. A model-
+--     accepted object no person ever *effectively* touched stays NULL, which is
+--     `~`.
 --
 -- This is a one-time reconstruction of historical rows and says nothing about new
 -- writes: those come from the projection, which reads the fold directly. A fresh
@@ -126,23 +135,30 @@ WHERE e."type" = 'object_accepted'
   AND e."actor_kind" = 'human'
   AND a."human_touched_at" IS NULL;--> statement-breakpoint
 
--- A human correction of a machine-accepted object promoted it: the touch is the
--- earliest such correction. The correcting actor's kind is the `object_corrected`
--- event's immutable `actor_kind` (the object id is `payload->>'objectId'`), and
--- the instant is that event's `occurred_at` — again the ledger, so a later
--- deletion of `corrections.by_user_id` cannot un-promote a historical `✓`.
+-- A human correction of a machine-accepted object promoted it — but ONLY a
+-- correction that ACTUALLY APPLIED. The reducer appends an `object_corrected`
+-- event even when it refuses or no-ops the correction (an empty `patch:{}`
+-- changes nothing), so keying the promotion on the raw event would mint a `✓`
+-- from a touch a person only *attempted*. The runtime projection writes a
+-- `corrections` row only when the fold moved the object, so that table — not the
+-- ledger event — is the apply signal, and this backfill JOINs it to count applied
+-- corrections only. Actor kind and the touch instant still come from the immutable
+-- ledger (`core_events.actor_kind`, `occurred_at`), never `corrections.by_user_id`,
+-- which a later account deletion nulls. The touch is the earliest applied human
+-- correction.
 UPDATE "accepted_objects" a
 SET "human_touched_at" = c."first_touch"
 FROM (
-  SELECT "room_id", ("payload" ->> 'objectId') AS "object_id",
-         min("occurred_at") AS "first_touch"
-  FROM "core_events"
-  WHERE "type" = 'object_corrected' AND "actor_kind" = 'human'
-  GROUP BY "room_id", ("payload" ->> 'objectId')
+  SELECT cor."room_id", cor."object_id",
+         min(e."occurred_at") AS "first_touch"
+  FROM "corrections" cor
+  JOIN "core_events" e ON e."id" = cor."event_id"
+  WHERE e."type" = 'object_corrected' AND e."actor_kind" = 'human'
+  GROUP BY cor."room_id", cor."object_id"
 ) c
 WHERE a."room_id" = c."room_id"
-  AND a."id"::text = c."object_id"
+  AND a."id" = c."object_id"
   AND a."human_touched_at" IS NULL;--> statement-breakpoint
 
 COMMENT ON COLUMN "accepted_objects"."human_touched_at" IS
-  'When a human first touched this object — accepted it, or corrected it afterwards — or NULL while it is still only a machine''s reading (that IS the ~ state, so the column is nullable, as ObjectRecord.humanTouchedAt is Timestamp | null). The second half of epistemicStateOf, projected from the fold on object_accepted AND object_corrected: a person''s correction promotes ~→✓, so the correction projection moves this too. Backfilled from acceptance instants and the earliest human correction per object (#98/H5).';
+  'When a human first touched this object — accepted it, or corrected it afterwards — or NULL while it is still only a machine''s reading (that IS the ~ state, so the column is nullable, as ObjectRecord.humanTouchedAt is Timestamp | null). The second half of epistemicStateOf, projected from the fold on object_accepted AND object_corrected: a person''s correction promotes ~→✓, so the correction projection moves this too. Backfilled from acceptance instants and the earliest human correction that ACTUALLY APPLIED per object — joined through the corrections table (written only on apply), because the reducer appends an object_corrected event even for a refused or no-op (patch:{}) correction, and a refused touch must not promote a ~ (#98/H5, #98 r2/H1).';
