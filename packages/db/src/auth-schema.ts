@@ -9,8 +9,10 @@ import { users, workspaces } from './schema.js';
  * deliberate ways:
  *
  *  1. `user` is our existing `users` table, not a second identity store. There
- *     is exactly one row per human and application data foreign-keys straight
- *     at it — the whole reason Better Auth won over the hosted candidates.
+ *     is exactly one row per participant and application data foreign-keys
+ *     straight at it — the whole reason Better Auth won over the hosted
+ *     candidates. (It read "one row per human" until drizzle/0017; a row is now
+ *     an identity of a stated kind, see `users.principalKind`.)
  *  2. `organization` is our `workspaces` table, for the same reason.
  *  3. Primary keys are real `uuid` columns rather than Better Auth's default
  *     32-char random strings, so they match every other id in the schema.
@@ -181,6 +183,39 @@ export const authModelOptions = {
   user: {
     modelName: 'users',
     fields: { name: 'displayName', image: 'avatarUrl' },
+    /**
+     * `principal_kind`, carried on the user object Better Auth resolves — which
+     * is what makes the kind ride on the *session* rather than needing a second
+     * database read at every seam that has one (`packages/auth/session.ts`).
+     *
+     * **`input: false` is the whole security property of this block.** It tells
+     * Better Auth the field is never taken from a request body, on signup or on
+     * update, so there is no HTTP surface anywhere — mounted or not — through
+     * which a caller can claim to be an agent, or stop being one. Provisioning an
+     * agent principal is a programmatic write (`provisionAgentPrincipal` in
+     * `@atrium/auth`), and it is programmatic because there is deliberately no
+     * interactive route to it. `mounted.ts` already publishes only three paths;
+     * this makes the answer independent of that list.
+     *
+     * `defaultValue` matches the column default so the two cannot disagree about
+     * what an ordinary signup produces, and `required: false` because the caller
+     * supplies nothing: the value comes from the default at both layers.
+     *
+     * The property key is `principalKind` and not `principal_kind` — the Drizzle
+     * adapter resolves a field as `table[fieldName ?? field]`, and the Drizzle
+     * property on `users` is the camel-cased one. `test/auth-schema.test.ts`
+     * asks the installed library what it expects and fails if that stops being
+     * true.
+     */
+    additionalFields: {
+      principalKind: {
+        type: 'string' as const,
+        required: false,
+        input: false,
+        returned: true,
+        defaultValue: 'human',
+      },
+    },
   },
   session: { modelName: 'authSessions' },
   account: { modelName: 'authAccounts' },

@@ -1,5 +1,11 @@
 import type { IncomingMessage } from 'node:http';
-import { loadRoomMembershipRow, roomMembershipKey, roomMembershipsHeld } from '@atrium/auth';
+import {
+  loadRoomMembershipRow,
+  type PrincipalKind,
+  parsePrincipalKind,
+  roomMembershipKey,
+  roomMembershipsHeld,
+} from '@atrium/auth';
 import type { Database } from '@atrium/db';
 
 /**
@@ -25,6 +31,23 @@ import type { Database } from '@atrium/db';
 
 export interface Session {
   userId: string;
+  /**
+   * What sort of participant this is — the one thing besides `userId` that the
+   * command layer reads off a session, because it is what `actorOf` branches on.
+   *
+   * **Required.** `AtriumSession` satisfies this interface structurally, so an
+   * optional field here would be satisfied by every authenticator that simply
+   * never thought about it, and the `?? 'human'` that would inevitably follow at
+   * the read site is the fail-open default #90 names: `human` is the privileged
+   * answer, so "nobody said" must not resolve to it. Required, a new
+   * authenticator does not compile until it has decided.
+   *
+   * It is not the last line of defence, and it is not asked to be. The database
+   * refuses an append whose `actor_kind` disagrees with the identity's own
+   * `users.principal_kind` (drizzle/0017), so a session that gets this wrong
+   * writes nothing at all rather than writing history under the wrong kind.
+   */
+  principalKind: PrincipalKind;
   /**
    * Free-form label for logs — the stub's provenance, a real one's method.
    *
@@ -130,16 +153,42 @@ export const membershipKey = roomMembershipKey;
  * the membership check below vacuous the day someone forgets to pass a user,
  * and a test suite that connects without a user should fail loudly rather than
  * quietly exercise a path production will never take.
+ *
+ * ## The principal kind, and what this stub can and cannot prove about it
+ *
+ * `x-atrium-principal` / `?principal=` says which kind the caller claims to be,
+ * defaulting to `human` — and *that default is not a fail-open hole here*, for
+ * the same reason the user id is not: this authenticator already lets anyone
+ * claim to be anyone, so there is nothing left for a principal claim to escalate.
+ * An unrecognised value is refused rather than coerced, because a typo silently
+ * meaning "human" is how a test that thinks it is exercising the agent path
+ * quietly exercises the person path and passes.
+ *
+ * What follows is worth stating plainly, because it bounds what any test built
+ * on this stub proves: a claim made here is **not** checked against
+ * `users.principal_kind` by this function. It is checked by the database, on the
+ * append (drizzle/0017), which refuses a row whose `actor_kind` disagrees with
+ * the identity it names. So a stub session claiming `human` over an agent's user
+ * id does not produce falsified history — it produces a failed append. The
+ * session → kind half of the chain is proven against the real Better Auth
+ * resolver instead; see `integration/server/agent-principal.test.ts`.
  */
 export function createStubSessionAuthenticator(): SessionAuthenticator {
   return {
     authenticateUpgrade: async (request) => {
+      const url = new URL(request.url ?? '/', 'http://placeholder');
       const header = request.headers['x-atrium-user'];
       const fromHeader = Array.isArray(header) ? header[0] : header;
-      const fromQuery = new URL(request.url ?? '/', 'http://placeholder').searchParams.get('user');
-      const userId = (fromHeader ?? fromQuery ?? '').trim();
+      const userId = (fromHeader ?? url.searchParams.get('user') ?? '').trim();
       if (!userId) return null;
-      return { userId, method: 'stub' };
+
+      const kindHeader = request.headers['x-atrium-principal'];
+      const fromKindHeader = Array.isArray(kindHeader) ? kindHeader[0] : kindHeader;
+      const claimed = (fromKindHeader ?? url.searchParams.get('principal') ?? '').trim();
+      const principalKind = claimed === '' ? 'human' : parsePrincipalKind(claimed);
+      if (principalKind === null) return null;
+
+      return { userId, principalKind, method: 'stub' };
     },
   };
 }

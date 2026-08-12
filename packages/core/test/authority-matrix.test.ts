@@ -60,14 +60,39 @@ const ROOM = 'room_1';
 const MODEL_A = 'model-a';
 const MODEL_B = 'model-b';
 
-/** The four kinds of actor the matrix ranges over. */
-type ActorKind = 'human' | 'model_proposer' | 'model_other' | 'system';
-const ACTOR_KINDS: ActorKind[] = ['human', 'model_proposer', 'model_other', 'system'];
+/**
+ * The five kinds of actor the matrix ranges over.
+ *
+ * `agent` is the identified non-human: it carries a user id exactly as `human`
+ * does, and it is a machine exactly as `model` is. Adding it to this list rather
+ * than writing agent cases by hand is the point — the whole case space is
+ * re-enumerated against it, every event type, every object type, every receipt
+ * shape, every correction verb, every relation kind. The oracle below says what
+ * each cell should do, restated from #4 rather than imported from `authority.ts`,
+ * so an implementation that let an agent through anywhere is a failing cell
+ * rather than a missing test.
+ *
+ * The mutation this closes: `isHuman` written as `kind !== 'model' && kind !==
+ * 'system'`. That spelling passes every cell of this matrix as it stood before
+ * `agent` existed, and opens every gate in it for the one kind that was added.
+ */
+type ActorKind = 'human' | 'agent' | 'model_proposer' | 'model_other' | 'system';
+const ACTOR_KINDS: ActorKind[] = ['human', 'agent', 'model_proposer', 'model_other', 'system'];
+
+/**
+ * A `users` row that is not a person. Distinct from ALICE and BOB because the
+ * attribution gates compare ids: an agent sharing ALICE's id would make "the
+ * accepter is the person this names" true by accident and hide whichever gate
+ * that made unreachable.
+ */
+const SCRIBE = 'user_scribe';
 
 function actorOf(kind: ActorKind): Actor {
   switch (kind) {
     case 'human':
       return { kind: 'human', userId: ALICE };
+    case 'agent':
+      return { kind: 'agent', userId: SCRIBE };
     case 'model_proposer':
       return { kind: 'model', model: MODEL_A };
     case 'model_other':
@@ -95,6 +120,18 @@ const GATES = {
   claim_verification: 'would become a verified claim',
   direct_acceptance: 'only a human may accept an object directly',
   supersession: 'retires an accepted',
+  // #95, #96 r2. A second supersession gate, on the other axis: the one above
+  // asks what TYPE is being retired, this one asks whether a person has already
+  // put their name to THIS ONE. The markers have no overlap, so a cell that
+  // reaches the wrong one is a failing cell rather than a silently satisfied
+  // assertion.
+  confirmed_supersession: 'retires an object a person has already confirmed',
+  // #96 r3. The other axis of the same relation rule: retiring a machine's own
+  // unconfirmed `~`. #95 reserves that to a person too — an agent owns no
+  // proposal, so every unconfirmed accepted object it reaches belongs to
+  // another machine, and unmaking it is not the machine's to do. The marker is
+  // the clause that names the `~` case and appears in no other refusal.
+  unconfirmed_supersession: 'even an unconfirmed reading',
   answer_relation: 'declares an open question answered',
   correction: 'corrections (amend, retract, restore)',
   // #4's sentence has two halves and so does the correction gate: a name
@@ -150,7 +187,22 @@ const FLOOR: Record<AcceptedObjectType, number> = {
   objective: Number.POSITIVE_INFINITY,
 };
 
-/** Supersession authority, restated from #4's split by what is retired. */
+/**
+ * Supersession authority, restated from #4's split by what is retired.
+ *
+ * **This table is only half of the rule, and until #96 r2 the matrix behaved as
+ * though it were all of it.** `claim: false` and `open_question: false` are #4's
+ * words and they are right about the *type*: retiring a reading is cheap to
+ * correct. What the two `false`s said, cell for cell, was that an authenticated
+ * agent may retire a claim a **person accepted** — and a passing test asserting
+ * that is exactly the class this repository's own rules warn about. Both of
+ * #96's blind critics found it, from opposite lineages, in the source rather
+ * than here.
+ *
+ * The other half is `RETIRING_AN_ACCEPTED_OBJECT_NEEDS_HUMAN` below. Both are
+ * restated from #4 and #95 rather than imported, like everything else in this
+ * oracle.
+ */
 const SUPERSESSION_NEEDS_HUMAN: Record<AcceptedObjectType, boolean> = {
   decision: true,
   commitment: true,
@@ -159,9 +211,58 @@ const SUPERSESSION_NEEDS_HUMAN: Record<AcceptedObjectType, boolean> = {
   open_question: false,
 };
 
+/**
+ * #95's rule, restated: **a non-human may never retire a standing accepted
+ * object by superseding it**, whatever the type table above says about its
+ * type, and *whether or not a person has confirmed it*.
+ *
+ * Not a `Record` because it is not keyed by type — that is the whole point of
+ * it. Kind answers *may this species certify at all*; this answers *may this
+ * actor unmake this standing object*. Both must pass. #96 r2 read this as the
+ * confirmed subset (`… && retires.confirmed`); r2's blind critic found the
+ * unconfirmed cells still `allowed`, because an agent owns no proposal so every
+ * unconfirmed accepted object it reaches was accepted by a *model* — a foreign
+ * reading, and #95 reserves unmaking one to a person exactly as it reserves a
+ * `✓`. The rule is on the relation, so the flag is unconditional; only the
+ * *reason* still splits on confirmed state.
+ *
+ * "Confirmed" is restated here too, rather than read from `epistemicStateOf` —
+ * an object is confirmed once a person has accepted or corrected it. The cells
+ * below build the two states the only two ways the reducer allows: a human
+ * acceptance (confirmed) and a model acceptance of a cited proposal at θ
+ * (unconfirmed), the latter accepted by `model_a` so a differing actor is a
+ * genuinely foreign retirement.
+ */
+const RETIRING_AN_ACCEPTED_OBJECT_NEEDS_HUMAN = true;
+
+/**
+ * The types a machine can put on the board at all, so the only ones that have an
+ * unconfirmed state to be retired from.
+ *
+ * Everything else is human-only to accept (`FLOOR` is unreachable for three of
+ * them), so a machine-accepted decision, commitment or objective is not a thing
+ * this matrix can build — which is itself one of the rules above, and is why the
+ * enumeration below is not a plain cross-product.
+ */
+const MACHINE_MINTABLE: AcceptedObjectType[] = ['claim', 'open_question'];
+
+/**
+ * Restated, not imported. One kind is a person; everything else is a machine,
+ * including the one that holds an account — an agent's identity buys it
+ * membership and attribution, and buys it nothing at any gate below.
+ */
 const isHumanKind = (kind: ActorKind) => kind === 'human';
 
-/** "A model may act only on its own proposals; a human on any; the system on none." */
+/**
+ * "A model may act only on its own proposals; a human on any; the system on
+ * none — and an agent on none, because no proposal is staged by one."
+ *
+ * `Proposer` is `human | model`. There is no agent proposer to match, so an
+ * agent owns nothing and every binding gate refuses it. This is a fact about the
+ * proposal vocabulary rather than a policy about agents, and it is why the
+ * command layer refuses to stage an agent's proposal at all instead of writing
+ * one down as somebody else's.
+ */
 function ownsProposal(kind: ActorKind, proposer: 'model_a' | 'human'): boolean {
   if (kind === 'human') return true;
   if (kind === 'model_proposer') return proposer === 'model_a';
@@ -298,16 +399,23 @@ function expectedForCorrection(actor: ActorKind): Gate | 'allowed' {
 function expectedForRelation(
   actor: ActorKind,
   kind: RelationKind,
-  retires: AcceptedObjectType | null,
+  retires: { type: AcceptedObjectType; confirmed: boolean } | null,
 ): Gate | 'allowed' {
   if (kind === 'answers' && !isHumanKind(actor)) return 'answer_relation';
-  if (
-    kind === 'supersedes' &&
-    retires !== null &&
-    SUPERSESSION_NEEDS_HUMAN[retires] &&
-    !isHumanKind(actor)
-  ) {
-    return 'supersession';
+  if (kind === 'supersedes' && retires !== null && !isHumanKind(actor)) {
+    // The type row first: it is the more specific answer, and a machine retiring
+    // a decision should hear "a decision needs the hand that accepted one"
+    // rather than the general rule.
+    if (SUPERSESSION_NEEDS_HUMAN[retires.type]) return 'supersession';
+    // Then #95's relation row, which is what the two `false`s above leave to it:
+    // a non-human never retires a standing accepted object by superseding it,
+    // confirmed or not. #96 r2 closed only the confirmed cells; r3 closes the
+    // unconfirmed ones its critic found still `allowed`. The two report
+    // different reasons — a `✓` unmade vs a `~` unmade — but neither is a
+    // machine's to do, so the flag is unconditional and only the reason splits.
+    if (RETIRING_AN_ACCEPTED_OBJECT_NEEDS_HUMAN) {
+      return retires.confirmed ? 'confirmed_supersession' : 'unconfirmed_supersession';
+    }
   }
   return 'allowed';
 }
@@ -1290,18 +1398,80 @@ describe('authority matrix — relation_added, every actor × kind × retired ty
       // at, so it is the only one enumerated over the target's type — and since
       // round 2 that enumeration has to cover the whole policy table, not just
       // the decision row of it.
-      const targets: AcceptedObjectType[] =
+      //
+      // **#96 r2 added the second axis: the epistemic state of the thing being
+      // retired.** Every cell here used to build its target with a *human*
+      // acceptance, so every one of them retired a `✓` — and the ones the type
+      // table calls `auto_accept` asserted that a machine may unmake a person's
+      // judgement. r2 moved those from "allowed" to a refusal, but only for the
+      // confirmed cells.
+      //
+      // **#96 r3 finishes it: the unconfirmed half refuses too.** r2 left it
+      // open on the theory that a machine replacing its own `~` is the
+      // covenant's left-hand side — but that path is `proposal_superseded` on a
+      // *pending* proposal (the `superseded a proposal` block above, still
+      // `allowed`), not a `supersedes` relation retiring a *standing accepted*
+      // object. This block only builds the latter, and #95 reserves every such
+      // retirement to a person: the unconfirmed target here is accepted by
+      // `model_a`, so any non-`model_a` actor retiring it is a machine unmaking
+      // another machine's reading — foreign, and refused. The cell proves the
+      // relation rule fires without a `✓` in sight; drafting a fresh `~` stays
+      // open and is the acceptance suites' business, not this relation's.
+      const targets: { type: AcceptedObjectType; confirmed: boolean }[] =
         kind === 'supersedes'
-          ? ['decision', 'commitment', 'objective', 'claim', 'open_question']
-          : ['decision'];
+          ? (['decision', 'commitment', 'objective', 'claim', 'open_question'] as const).flatMap(
+              (type) => [
+                { type, confirmed: true },
+                // Only where a machine can mint one at all — see MACHINE_MINTABLE.
+                ...(MACHINE_MINTABLE.includes(type) ? [{ type, confirmed: false }] : []),
+              ],
+            )
+          : [{ type: 'decision' as AcceptedObjectType, confirmed: true }];
 
       for (const target of targets) {
-        it(`${actor} adds "${kind}"${kind === 'supersedes' ? ` retiring a ${target}` : ''}`, () => {
-          const suffix = `${actor}_${kind}_${target}`;
-          const fromType: AcceptedObjectType = kind === 'answers' ? 'open_question' : target;
-          const toType: AcceptedObjectType = kind === 'answers' ? 'decision' : target;
+        const label = `${actor} adds "${kind}"${kind === 'supersedes' ? ` retiring ${target.confirmed ? 'a confirmed' : 'an unconfirmed'} ${target.type}` : ''}`;
+        it(label, () => {
+          const suffix = `${actor}_${kind}_${target.type}_${target.confirmed ? 'c' : 'u'}`;
+          const fromType: AcceptedObjectType = kind === 'answers' ? 'open_question' : target.type;
+          const toType: AcceptedObjectType = kind === 'answers' ? 'decision' : target.type;
           const fromId = `obj_from_${suffix}`;
           const toId = `obj_to_${suffix}`;
+
+          // The object being retired, in the state the cell names.
+          //
+          //  - confirmed: a person accepted it outright, which is the one act
+          //    that makes an object the room's word rather than a reading.
+          //  - unconfirmed: a model staged a reading and accepted its own at θ,
+          //    which is the only route to an object no person has touched. It
+          //    needs the receipt window and a proposal, so it is two events.
+          const retiredProposalId = `prop_t_${suffix}`;
+          const retiredSetup: AuthoredEvent[] = target.confirmed
+            ? [
+                acceptEvent({
+                  id: `t_${suffix}`,
+                  objectId: toId,
+                  type: toType,
+                  actor: 'human',
+                  proposalId: null,
+                  setup: true,
+                }),
+              ]
+            : [
+                proposalEvent({
+                  id: retiredProposalId,
+                  type: toType,
+                  proposer: 'model_a',
+                  confidence: 0.95,
+                  recordedBy: 'model_proposer',
+                }),
+                acceptEvent({
+                  id: `t_${suffix}`,
+                  objectId: toId,
+                  type: toType,
+                  actor: 'model_proposer',
+                  proposalId: retiredProposalId,
+                }),
+              ];
 
           const events: AuthoredEvent[] = [
             acceptEvent({
@@ -1312,14 +1482,7 @@ describe('authority matrix — relation_added, every actor × kind × retired ty
               proposalId: null,
               setup: true,
             }),
-            acceptEvent({
-              id: `t_${suffix}`,
-              objectId: toId,
-              type: toType,
-              actor: 'human',
-              proposalId: null,
-              setup: true,
-            }),
+            ...retiredSetup,
             row(
               {
                 id: `ev_rel_${suffix}`,
@@ -1342,10 +1505,23 @@ describe('authority matrix — relation_added, every actor × kind × retired ty
           ];
 
           const state = reduce(events);
+          // The setup has to have produced both objects, or a refusal below
+          // would be the setup failing rather than the rule firing — which is
+          // how a matrix cell quietly stops testing anything.
+          expect(Object.keys(state.objects).sort()).toEqual([fromId, toId].sort());
+
           const expected = expectedForRelation(actor, kind, kind === 'supersedes' ? target : null);
           expect(verdictOf(state, `ev_rel_${suffix}`)).toBe(expected);
           expect(state.relations.map((relation) => relation.id)).toEqual(
             expected === 'allowed' ? [`rel_${suffix}`] : [],
+          );
+          // And the fold, not the verdict: a refused supersession leaves the
+          // object standing. `issues: []` with the row already retired is the
+          // shape this round is closing.
+          const retiredRecord = state.objects[toId];
+          if (!retiredRecord) throw new Error('setup did not produce the retired object');
+          expect(retiredRecord.supersededById).toBe(
+            expected === 'allowed' && kind === 'supersedes' ? fromId : null,
           );
         });
       }
@@ -1354,7 +1530,7 @@ describe('authority matrix — relation_added, every actor × kind × retired ty
 });
 
 describe('the matrix as a whole', () => {
-  it('enumerates every cell it claims to — 4 actors × 5 types × 9 citation/staging/confidence shapes', () => {
+  it('enumerates every cell it claims to — 5 actors × 5 types × 9 citation/staging/confidence shapes', () => {
     // Per actor, per type: two cited proposals × two confidence bands × two
     // stagers, plus the one direct shape (with nothing cited there is no band and
     // no staging) = 9. Five types, of which `claim` is doubled for
@@ -1364,7 +1540,14 @@ describe('the matrix as a whole', () => {
     // here used to be recorded by `model_proposer`, so the whole *human*-staged
     // half of the space — where D1 lives — was outside the enumeration while the
     // file's own header claimed the case space was enumerated.
-    expect(acceptanceCases).toHaveLength(4 * (4 * 9 + 9 * 2));
+    //
+    // Five actors since `agent`, and the leading factor is written out rather
+    // than read from `ACTOR_KINDS.length` on purpose: derived from the same list
+    // the loops range over, this assertion would agree with itself no matter what
+    // that list held, which is precisely the vacuity it exists to rule out. The
+    // number is the claim in the title, and both move by hand when a kind is
+    // added.
+    expect(acceptanceCases).toHaveLength(5 * (4 * 9 + 9 * 2));
     const distinct = new Set(
       acceptanceCases.map(
         (entry) =>

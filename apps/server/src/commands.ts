@@ -9,7 +9,9 @@ import {
   CorrectionAction,
   DecisionPayload,
   emptyProvenance,
+  epistemicStateOf,
   Id,
+  isHuman,
   ObjectivePayload,
   OpenQuestionPayload,
   type Proposal,
@@ -67,6 +69,11 @@ import type { Authorizer, MembershipPair, Session } from './session.js';
  * sentence as a machine's reading (see `draftBase`). A proposal staged here is a
  * human proposal by the session's own user, full stop; #21 will need a seam of
  * its own, and whatever it is, `stagedBy` will record which one was used.
+ *
+ * "Full stop" is now enforced rather than merely intended: a session belonging
+ * to an agent principal is refused here instead of having its reading recorded
+ * as a person's, because `Proposer` has no agent variant to record it as. See
+ * `draftToProposal`.
  */
 
 const AttachmentList = z
@@ -308,6 +315,119 @@ export const Command = z.discriminatedUnion('name', [
   z.object({ name: z.literal('advance_seen'), roomId: Id, roomSeq: z.number().int().min(0) }),
 ]);
 export type Command = z.infer<typeof Command>;
+
+/**
+ * What a command does to the room's certified record, per command name.
+ *
+ * ## The hole this closes
+ *
+ * `@atrium/core`'s gates are folds: a non-human `accept_proposal` reaches the
+ * reducer, the reducer refuses it, and `appendAndProject` reports
+ * `applied_with_issue`. That is a correct verdict and an **incorrect shape** —
+ * the `core_events` row is still inserted, the ack still comes back `ack` with a
+ * populated `issues` array, and a client that renders acks and ignores `issues`
+ * shows the room a certification that did not happen. #96's gauntlet:
+ * *"'writes nothing' is overstated"*. It is not the ✓ (no object lands) and it
+ * is durable history saying a machine tried to mint one, dressed as a success.
+ *
+ * `draftToProposal` already had the right shape — a non-human staging a proposal
+ * throws before anything is appended — and this generalises it to the rest of
+ * the certification class.
+ *
+ * ## Why a total classification rather than a list of the bad ones
+ *
+ * A denylist of certifying commands fails **open** for the fourteenth command,
+ * which is the exact defect shape #96 finding 4 is about one layer down. This
+ * switch is exhaustive over `CommandName`, so a new verb does not compile until
+ * somebody has said which of the three it is, and "I forgot" is a build error
+ * rather than an open gate.
+ *
+ * ## The three classes, and the line between them
+ *
+ * The line is **the covenant** (init.md, AGENTS.md): a machine may draft (`~`),
+ * never certify (`✓`). So the question for each verb is *does performing this
+ * put the room's word on something, or move something that already carries it?*
+ *
+ *  - `accept_proposal` mints an accepted object. That is the ✓ itself.
+ *  - `answer_message` mints a `decision` carrying `decidedBy: <the actor>` and
+ *    binds it as the answer to an open question — a certification and a
+ *    settlement in one batch. (It also posts a message, which an agent may do;
+ *    the message is not separable from the decision here, and the command as a
+ *    whole is the certifying one. An agent with something to say posts it.)
+ *  - `answer_bind` declares a question settled. #4 gives a decision exactly two
+ *    doors and this is one of them.
+ *  - `correct` rewrites what the room already accepted — human-only for every
+ *    verb, and the act that promotes a `~` to `✓` by touching it.
+ *  - `reject_proposal` retires **somebody else's** staged reading, always: a
+ *    non-human owns no proposal to withdraw, because `Proposer` has no agent
+ *    variant and `draftToProposal` refuses to mint one. So every non-human
+ *    rejection reachable from this socket is a judgement on another's reading,
+ *    which is authority. If `Proposer` ever gains an agent variant, this row
+ *    moves to `conditional` and the condition is `actorMatchesProposer`.
+ *
+ * `supersede_object` is classified `conditional` because it retires an object,
+ * and retirement is human-only — but a non-human is refused it outright: #95
+ * says a machine may never retire an accepted object at all (confirmed or not),
+ * only draft a superseding reading. The `prepare` guard therefore refuses every
+ * non-human; `epistemicStateOf` is read there only to name *which* rule refused
+ * (`confirmed_supersession` vs `unconfirmed_supersession`) so the room hears the
+ * reason, not to decide *whether* to refuse. (The earlier interim keyed the
+ * refusal on `confirmed` alone; #96 round 3 broadened it after a blind critic
+ * found a non-human could retire another machine's unconfirmed `~`.) A human
+ * still supersedes freely, subject to #4's type rules.
+ *
+ * Everything else is participation, and an agent is a participant: posting,
+ * resolving **its own** attention (scoped in `projections.ts`, #96 finding 2),
+ * presence, typing, its own seen cursor. `record_proposal` and
+ * `stage_semantic_command` are `open` here **on purpose** — staging is the
+ * covenant's left-hand side and open to every member — and today they are
+ * refused for a non-human one layer in, by `draftToProposal`, for a narrower
+ * reason that is about the proposer vocabulary rather than about authority. Two
+ * different rules; classifying them as certifying here would hide the day the
+ * vocabulary grows and staging legitimately opens.
+ */
+export type CertificationClass =
+  /** Puts the room's word on something. Human-only, refused before the append. */
+  | 'certifies'
+  /** May or may not, depending on the object. Refused at the command's own site. */
+  | 'conditional'
+  /** Participation. Open to any member, of any kind. */
+  | 'open';
+
+export function certificationClassOf(name: CommandName): CertificationClass {
+  switch (name) {
+    case 'accept_proposal':
+    case 'answer_message':
+    case 'answer_bind':
+    case 'correct':
+    case 'reject_proposal':
+      return 'certifies';
+    case 'supersede_object':
+      return 'conditional';
+    case 'send_message':
+    case 'record_proposal':
+    case 'stage_semantic_command':
+    case 'resolve_attention':
+    case 'set_presence':
+    case 'set_typing':
+    case 'advance_seen':
+      return 'open';
+    default: {
+      // A verb nobody has classified is not a verb a machine may perform.
+      const exhaustive: never = name;
+      return JSON.stringify(exhaustive) === '' ? 'open' : 'certifies';
+    }
+  }
+}
+
+/**
+ * What a room is told when a machine tries to certify. Names the act, the kind,
+ * and the route that stays open — a refusal that does not say what to do instead
+ * is a dead end (`RETRO.md`).
+ */
+export function nonHumanCertificationRefusal(name: CommandName, kind: string): string {
+  return `"${name}" is a certification and this session is a ${kind} principal — a machine may draft a reading (~) and may never certify one (✓); nothing was appended. Stage the reading and let a person in the room accept it`;
+}
 /**
  * A command as a *caller* writes it — defaults not yet applied.
  *
@@ -456,8 +576,40 @@ export function createCommandService({
     return membership;
   }
 
+  /**
+   * The session, as the actor core will fold under. The one derivation.
+   *
+   * It returned the literal `{ kind: 'human', userId }` until agents existed,
+   * which was correct for exactly as long as holding an account implied being a
+   * person. It does not any more, and the substitution is not cosmetic: `kind`
+   * is what every certification gate in `@atrium/core` reads, so a seam that
+   * keeps answering `'human'` for an agent's session does not fail a test — it
+   * quietly certifies on a machine's behalf while every gate reports green.
+   *
+   * `session.principalKind` is required (`session.ts`), so there is no absent
+   * case to default and no `?? 'human'` anywhere on this path. The switch is
+   * exhaustive over `PrincipalKind`, so a third kind of principal does not
+   * compile until somebody has said what actor it makes.
+   *
+   * Both branches carry `userId`, and that is the shape the rest of the system
+   * needs: an agent that is a room member, an attention target and an author has
+   * to be nameable by the same id `memberships` and `attention_items` use. What
+   * separates the two branches downstream is `isHuman`, and nothing else.
+   */
   function actorOf(session: Session): Actor {
-    return { kind: 'human', userId: session.userId };
+    switch (session.principalKind) {
+      case 'human':
+        return { kind: 'human', userId: session.userId };
+      case 'agent':
+        return { kind: 'agent', userId: session.userId };
+      default: {
+        const exhaustive: never = session.principalKind;
+        throw new CommandError(
+          'invalid',
+          `session carries an unknown principal kind ${JSON.stringify(exhaustive)}`,
+        );
+      }
+    }
   }
 
   /**
@@ -506,6 +658,25 @@ export function createCommandService({
     // allowed to become durable is inside the append transaction — see
     // `appendAndProject`.
     await requireMembership(session, command.roomId);
+
+    // ── The covenant, before the append rather than during the fold ──────────
+    //
+    // #96 r2, finding 3. The reducer already refuses every one of these, and it
+    // refuses them *as a fold*: the row lands, the outcome is
+    // `applied_with_issue`, and the caller gets an `ack` carrying `issues`. A
+    // hard refusal here is the honest shape — nothing durable, a `nack`, and no
+    // client left to work out that an ack it was given did not happen.
+    //
+    // Note this does not replace the reducer's gates and must not: this binds
+    // one door and the reducer binds the fold itself, which is what a replay, a
+    // second writer or the interpretation worker goes through. Two layers, the
+    // same rule, and `certificationClassOf` is the only place the *list* lives.
+    if (!isHuman(actorOf(session)) && certificationClassOf(command.name) === 'certifies') {
+      throw new CommandError(
+        'invalid',
+        nonHumanCertificationRefusal(command.name, session.principalKind),
+      );
+    }
 
     switch (command.name) {
       case 'send_message': {
@@ -879,6 +1050,37 @@ export function createCommandService({
             if (retired.retractedAt !== null || retired.supersededById !== null) {
               throw new CommandError('invalid', 'the object being retired is not active');
             }
+            // ── The `conditional` half of `certificationClassOf` ─────────────
+            //
+            // #95: a non-human may never retire an accepted object by
+            // superseding it — confirmed or not — it may only draft a
+            // superseding reading (~). It is a fact about *this object* and the
+            // actor's relation to it, not about the verb, which is why it is
+            // answered here where the object is in hand and not in the table up
+            // top.
+            //
+            // #96 r3 broadened it from the confirmed subset: keying on
+            // `epistemicStateOf(retired) === 'confirmed'` left a machine free to
+            // retire another machine's unconfirmed `~`, which #95 also reserves
+            // to a person. `epistemicStateOf` now decides only which reason the
+            // room hears — the predicate the ✓ is rendered from, and the
+            // reducer's gate asks the same function, so a gate and a glyph never
+            // disagree in front of a user.
+            //
+            // The reducer refuses this too, and its refusal is the one that
+            // binds a replay. This one is what makes the refusal *hard* — with
+            // `requireClean: true` above, the reducer's issue already aborts the
+            // batch, so what this adds is the reason: a room hears which rule
+            // refused it instead of an atomic-command summary.
+            if (!isHuman(actorOf(session))) {
+              const confirmed = epistemicStateOf(retired) === 'confirmed';
+              throw new CommandError(
+                'invalid',
+                confirmed
+                  ? `object "${command.retiredObjectId}" has been confirmed by a person and this session is a ${session.principalKind} principal — a machine may never retire what the room has confirmed (#95); draft a superseding reading (~) and let a person retire the old one`
+                  : `object "${command.retiredObjectId}" is an accepted reading and this session is a ${session.principalKind} principal — a machine may never retire an accepted object by superseding it (#95), even an unconfirmed one; draft a superseding reading (~) and let a person retire the old one`,
+              );
+            }
           },
           idempotency: {
             commandName: 'supersede_object',
@@ -1073,6 +1275,30 @@ function describeCause(error: unknown): string {
  * needs a human other than its stager to accept it, and `ProposalRecord.stagedBy`
  * is what makes that answerable. Neither half is sufficient alone; see the note
  * on that function.
+ *
+ * ## And why an agent session is refused here rather than attributed
+ *
+ * `Proposer` is `human | model`. It has no agent variant, and widening it is not
+ * a rename: `acceptance.ts` reads the proposer to decide whether the reading
+ * needs a receipt window checked against the messages it cites (`:663`), whether
+ * θ applies at all (`:828`), and whether a commitment naming somebody else waits
+ * for that person. Those are acceptance-semantics questions about how much a
+ * given sort of reading is trusted, and nothing about "an agent holds an
+ * account" answers any of them.
+ *
+ * So the two available moves were to record an agent's proposal as a human's, or
+ * to refuse it. Recording it as a human's is precisely the r9 defect with a new
+ * author: a reading that is not a person's, stored as a person's, skipping the
+ * receipt gate a human acceptance skips. It is refused instead, by name, and the
+ * refusal says what is missing rather than pretending the command was malformed.
+ * When `Proposer` gains an agent variant with the two questions above answered,
+ * this refusal is what a reviewer deletes, and `actorMatchesProposer` in
+ * `@atrium/core` is the other end that has to move with it.
+ *
+ * Note what is NOT restricted: an agent may post messages, answer, resolve
+ * attention, set presence and advance its seen cursor. Staging a `~` reading is
+ * the one participant act whose meaning depends on a vocabulary that has not
+ * been extended yet.
  */
 function draftToProposal(
   draft: ProposalDraft,
@@ -1080,6 +1306,12 @@ function draftToProposal(
   at: string,
   session: Session,
 ): Proposal {
+  if (session.principalKind !== 'human') {
+    throw new CommandError(
+      'invalid',
+      `a ${session.principalKind} principal may not stage a proposal over this socket — a proposal's proposer decides whether the reading is checked against the messages it cites and whether θ applies, and there is no proposer vocabulary for this kind yet; recording it as a person's would be an attribution nobody made`,
+    );
+  }
   return {
     id: randomUUID(),
     roomId,

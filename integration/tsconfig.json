@@ -12,14 +12,15 @@
     "types": ["node", "vitest/globals"],
     "module": "ESNext",
     "moduleResolution": "Bundler",
-    // The same three aliases `vitest.integration.config.ts` resolves, so what
+    // The same four aliases `vitest.integration.config.ts` resolves, so what
     // the compiler checks is what the runner runs. Pointing at source rather
     // than `dist` also means the suite never depends on build order.
     "baseUrl": "..",
     "paths": {
       "@atrium/core": ["./packages/core/src/index.ts"],
       "@atrium/db": ["./packages/db/src/index.ts"],
-      "@atrium/db/schema": ["./packages/db/src/schema.ts"]
+      "@atrium/db/schema": ["./packages/db/src/schema.ts"],
+      "@atrium/auth": ["./packages/auth/src/index.ts"]
     }
   },
   "include": ["**/*.ts", "../apps/web/lib/replay-data.ts", "../vitest.integration.config.ts"]

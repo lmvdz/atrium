@@ -33,6 +33,7 @@ import { canonicalJson } from './state.js';
  * | **Decisions never auto-accept**                          | human   | **here**  |
  * | A claim becomes `verified`                               | human   | **here**  |
  * | Supersession, split by the type being retired            | per policy | **here** |
+ * | **Retiring anything a person has confirmed** (#95, r2)   | human   | **here**  |
  * | **Corrections (amend / retract / restore / …)**          | human   | **here**  |
  * | **Acceptance citing no proposal at all**                 | human   | **here**  |
  * | **Declaring a question answered**                        | human   | **here**  |
@@ -151,6 +152,62 @@ export type HumanOnlyGate =
   | 'claim_verification'
   /** `supersedes` pointed at a type the supersession policy reserves to people. */
   | 'supersession'
+  /**
+   * `supersedes` pointed at an object a **person has already touched**,
+   * whatever its type. **#95, #96 r2.**
+   *
+   * The gate above keys on the *type* being retired, which is #4's split and is
+   * the whole of what the reducer asked until now. #90's audit found what that
+   * leaves standing once a machine can hold an account: `decideSupersession`
+   * says a claim and an open question `auto_accept`, so an authenticated agent
+   * could retire a claim **a person had accepted** — a `✓` deleted on a
+   * machine's word, which is the covenant read backwards. Both foreign-lineage
+   * critics found it independently and this build's own authority matrix pinned
+   * it as correct.
+   *
+   * #95 decided the rule this enforces: **a non-human may never retire an
+   * accepted object via supersession at all** — confirmed or not — it may only
+   * draft a superseding reading. Kind answers *may this species certify at all*;
+   * the answer for retirement is simply no. `epistemicStateOf(target)` is read
+   * only to choose *which* reason the refusal carries (`confirmed_supersession`
+   * vs `unconfirmed_supersession`), never to decide whether to refuse.
+   *
+   * (The first cut of this gate keyed the refusal on `confirmed` alone — the
+   * narrow interim of #95's table. #96 round 3 broadened it after a blind critic
+   * found that left a non-human free to retire another machine's unconfirmed
+   * `~`, which — since an agent owns no proposal — is always foreign. #102 still
+   * owns the full HUMAN relation matrix: who verified, who stated, who owns.)
+   *
+   * Ordered *after* `supersession` on purpose: a machine retiring a confirmed
+   * decision is refused by the type rule and hears the type rule's more specific
+   * reason. This general gate then catches every remaining non-human
+   * retirement — the `auto_accept` types (claim, open question) at any epistemic
+   * state — which are exactly the cells the type table left open.
+   *
+   * What stays open, and must: a machine may always **draft** a superseding
+   * reading and let a person retire the old one. That is the covenant's
+   * left-hand side and nothing here narrows it — `proposal_superseded` on a
+   * *pending* proposal, a different event, stays open too. What is closed is
+   * retiring a *standing accepted* object by a `supersedes` relation.
+   */
+  | 'confirmed_supersession'
+  /**
+   * `supersedes` pointed at an accepted object no person has confirmed —
+   * a model's own unconfirmed `~`. **#96 r3.**
+   *
+   * The gate above closed the `✓` half of #95; its blind critic found the `~`
+   * half still open, because `!isHuman(actor) && epistemicStateOf === 'confirmed'`
+   * refused only a person's judgement and let a machine unmake another machine's
+   * reading. #95's decided rule is on the *relation*, not the epistemic state: a
+   * non-human **never** retires a standing accepted object by superseding it, it
+   * only drafts a fresh `~`. Since an agent owns no proposal of its own, every
+   * unconfirmed accepted object it can reach was accepted by a model, so this
+   * cell is always a foreign retirement — which is why closing it is the whole
+   * of #95's non-human-supersede rule, not a further narrowing. The distinct
+   * gate value keeps the *reason* honest: this retirement destroyed no person's
+   * `✓`, and the refusal says so.
+   */
+  | 'unconfirmed_supersession'
   /** An `answers` edge — declaring a question settled. */
   | 'answer_relation'
   /** `object_corrected`, every verb. */
@@ -222,7 +279,18 @@ export function modelMintingGate(type: AcceptedObjectType): HumanOnlyGate | null
   }
 }
 
-/** The one predicate every gate is built from. */
+/**
+ * The one predicate every gate is built from.
+ *
+ * Written as an allowlist of the single kind that passes, and that spelling is
+ * now load-bearing rather than stylistic. An `agent` actor holds a `users` row,
+ * a session and a room membership — everything that used to be sufficient to be
+ * treated as a person by anything downstream of a session. Written as
+ * `kind !== 'model' && kind !== 'system'` this function would have silently
+ * started returning true for it, and every gate below would have opened at once.
+ * One kind passes; anything the union gains is a machine until this line says
+ * otherwise.
+ */
 export function isHuman(actor: Actor): boolean {
   return actor.kind === 'human';
 }
@@ -240,23 +308,37 @@ export function humanOnlyRefusal(
   retiredType?: AcceptedObjectType,
 ): string {
   const kind = actor.kind;
+  /**
+   * "a model actor", "a human actor", "a system actor" — and "an agent actor".
+   *
+   * A refusal is prose the room reads. Interpolating the discriminant straight
+   * into `a ${kind}` was correct for every kind the union had when it was
+   * written and is wrong for the first one that starts with a vowel, so the
+   * article is derived from the word rather than assumed. Every existing message
+   * is byte-identical; only the new kind reads differently, which is the point.
+   */
+  const a = /^[aeiou]/.test(kind) ? 'an' : 'a';
   switch (gate) {
     case 'direct_acceptance':
-      return `${subject} was accepted with no proposal by a ${kind} actor — only a human may accept an object directly; a ${kind} actor must record a proposal and have it accepted`;
+      return `${subject} was accepted with no proposal by ${a} ${kind} actor — only a human may accept an object directly; ${a} ${kind} actor must record a proposal and have it accepted`;
     case 'decision_acceptance':
-      return `${subject} is a decision accepted by a ${kind} actor — a decision never auto-accepts (issue #4): a ${kind} actor may propose one, but only a human may accept it`;
+      return `${subject} is a decision accepted by ${a} ${kind} actor — a decision never auto-accepts (issue #4): ${a} ${kind} actor may propose one, but only a human may accept it`;
     case 'commitment_acceptance':
-      return `${subject} is a commitment accepted by a ${kind} actor — accepting it writes an obligation onto a named person who never agreed to it, and #4's rule is that nobody gets committed by someone else's sentence; a ${kind} actor may propose the commitment and let the person named, or a person in the room, accept it`;
+      return `${subject} is a commitment accepted by ${a} ${kind} actor — accepting it writes an obligation onto a named person who never agreed to it, and #4's rule is that nobody gets committed by someone else's sentence; ${a} ${kind} actor may propose the commitment and let the person named, or a person in the room, accept it`;
     case 'objective_acceptance':
-      return `${subject} is an objective accepted by a ${kind} actor — an objective is what everything else in the room is filed under, and retiring one already needs a person (#4's supersession split), so minting one does too; a ${kind} actor may propose it and let a person accept`;
+      return `${subject} is an objective accepted by ${a} ${kind} actor — an objective is what everything else in the room is filed under, and retiring one already needs a person (#4's supersession split), so minting one does too; ${a} ${kind} actor may propose it and let a person accept`;
     case 'claim_verification':
-      return `${subject} would become a verified claim on a ${kind} actor's word — only a human may move a claim to "verified"; a ${kind} actor may accept it as unverified or disputed`;
+      return `${subject} would become a verified claim on ${a} ${kind} actor's word — only a human may move a claim to "verified"; ${a} ${kind} actor may accept it as unverified or disputed`;
     case 'supersession':
-      return `${subject} retires an accepted ${retiredType ?? 'object'} on a ${kind} actor's word — ${retiredType ? decideSupersession(retiredType).reason : 'this type needs a human'}; a ${kind} actor may propose the replacement and let a person retire it`;
+      return `${subject} retires an accepted ${retiredType ?? 'object'} on ${a} ${kind} actor's word — ${retiredType ? decideSupersession(retiredType).reason : 'this type needs a human'}; ${a} ${kind} actor may propose the replacement and let a person retire it`;
+    case 'confirmed_supersession':
+      return `${subject} retires an object a person has already confirmed, on a ${kind} actor's word — a non-human may never retire anything the room has confirmed (#95), whatever its type: the ✓ is a person's judgement and unmaking it is the same act as making it; a ${kind} actor may draft a superseding reading (~) and let a person retire the old one`;
+    case 'unconfirmed_supersession':
+      return `${subject} supersedes an accepted ${retiredType ?? 'object'} on a ${kind} actor's word — a non-human may never retire a standing accepted object by superseding it (#95), even an unconfirmed reading another machine accepted; a ${kind} actor may draft a superseding reading (~) and let a person retire the old one`;
     case 'answer_relation':
-      return `${subject} declares an open question answered on a ${kind} actor's word — only a human may bind an answer (#4: a decision reaches the room through answer-binding or an explicit accept, never through inference); a ${kind} actor may propose the answer and let a person bind it`;
+      return `${subject} declares an open question answered on ${a} ${kind} actor's word — only a human may bind an answer (#4: a decision reaches the room through answer-binding or an explicit accept, never through inference); ${a} ${kind} actor may propose the answer and let a person bind it`;
     case 'correction':
-      return `${subject} was corrected by a ${kind} actor — corrections (amend, retract, restore) are human-only in v1: a correction rewrites what the room already accepted`;
+      return `${subject} was corrected by ${a} ${kind} actor — corrections (amend, retract, restore) are human-only in v1: a correction rewrites what the room already accepted`;
     default: {
       const exhaustive: never = gate;
       return `unknown authority gate ${JSON.stringify(exhaustive)}`;
@@ -293,6 +375,15 @@ export type ProposalBindingGate =
  * nothing the system emits was ever staged by the system, so there is no
  * proposal it can own. It may still do everything a system actor could do
  * before — this closes a door that was never open.
+ *
+ * An **agent** actor never matches, for the same structural reason and with the
+ * same consequence: `Proposer` has no agent variant either, so no proposal in
+ * any room was ever staged by an agent and there is none for it to own. This is
+ * not a policy choice about agents made here — it follows from `Proposer`, and
+ * it stops following the day `Proposer` gains an agent variant, which is exactly
+ * when somebody has to come back to this function and decide on purpose. Until
+ * then `apps/server` refuses to stage an agent's proposal at all rather than
+ * writing it down as a human's, so the two ends agree.
  */
 export function actorMatchesProposer(actor: Actor, proposer: Proposer): boolean {
   if (actor.kind === 'human') return true;
@@ -621,6 +712,12 @@ export function actorName(actor: Actor): string {
   switch (actor.kind) {
     case 'human':
       return `user "${actor.userId}"`;
+    // Named by its identity, like a person, and labelled as a machine, like a
+    // model. Both halves matter in a refusal: the room needs to know which
+    // participant was refused, and it needs to know the refusal was about what
+    // that participant *is* rather than about which account it holds.
+    case 'agent':
+      return `agent "${actor.userId}"`;
     case 'model':
       return `model "${actor.model}"`;
     case 'system':
@@ -687,7 +784,9 @@ export function uncertifiedTypeRefusal(
   type: AcceptedObjectType,
   subject: string,
 ): string {
-  return `${subject} was accepted as a ${type} by a ${actor.kind} actor, and the quoted words read as something somebody is undertaking to do as easily as something they are asserting — a receipt proves who wrote a sentence, not what kind of act it was, so which of the two this is is the proposal's own word; a ${actor.kind} actor may propose it and let a person accept it as a ${type} or as a commitment`;
+  // Same article rule as `humanOnlyRefusal`; see the note there.
+  const a = /^[aeiou]/.test(actor.kind) ? 'an' : 'a';
+  return `${subject} was accepted as a ${type} by ${a} ${actor.kind} actor, and the quoted words read as something somebody is undertaking to do as easily as something they are asserting — a receipt proves who wrote a sentence, not what kind of act it was, so which of the two this is is the proposal's own word; ${a} ${actor.kind} actor may propose it and let a person accept it as a ${type} or as a commitment`;
 }
 
 /* ─────────────────────────────────────────────────────────────────────────

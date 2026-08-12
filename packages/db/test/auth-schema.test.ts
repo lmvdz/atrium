@@ -162,16 +162,59 @@ describe('generated migration', () => {
   });
 
   /**
-   * The columns Better Auth needs on `users` are now part of creating the
-   * table, not bolted on by a second migration. Nothing has ever shipped, so
-   * the squash into one initial migration is free — and it removes the
-   * `rooms.workspace_id NOT NULL` step that could not have run against any
-   * database that already had rooms.
+   * The columns Better Auth's **core** user model needs are part of creating the
+   * table, not bolted on by a second migration. Nothing had ever shipped when
+   * 0000 was written, so the squash into one initial migration was free — and it
+   * removed the `rooms.workspace_id NOT NULL` step that could not have run
+   * against any database that already had rooms.
+   *
+   * ## Why this stopped being `not.toContain('ALTER TABLE "users" ADD COLUMN')`
+   *
+   * It said "no migration ever adds a column to `users`", which was a proxy for
+   * the thing it cared about — that the initial table is complete — and the
+   * proxy became false in 0017 without the thing becoming false. `principal_kind`
+   * is Atrium's own column that Better Auth is *told about* (an
+   * `additionalFields` declaration), added by ALTER because by then the table had
+   * shipped and the squash argument no longer applies.
+   *
+   * So the assertion is rewritten as the property rather than the proxy, and it
+   * gets stronger in the process: **every field the installed library asks of
+   * `user` must have a column somewhere in this migration chain**, derived from
+   * the library rather than from a list here. Catches the mutation that the old
+   * spelling never could — declaring an additional field and forgetting the
+   * migration, which is invisible to the compiler and shows up as a 500 on
+   * somebody's first signup.
    */
-  it('declares better auth’s user columns in the initial CREATE TABLE', () => {
-    expect(sql).not.toContain('ALTER TABLE "users" ADD COLUMN');
+  it('declares better auth’s user fields in the migration chain, core ones in the initial CREATE TABLE', () => {
     const create = /CREATE TABLE "users" \(([\s\S]*?)\n\);/.exec(sql)?.[1] ?? '';
     expect(create).toContain('"email_verified"');
     expect(create).toContain('"updated_at"');
+
+    // Drizzle property name → SQL column name, read off the table rather than
+    // guessed from a camel-case rule: the mapping is the adapter's, and a
+    // hand-rolled snake_case would disagree with it at the first irregular name.
+    const columnFor = new Map(
+      getTableConfig(users).columns.map((column) => [column.name, column.name]),
+    );
+    const propertyToColumn = new Map(
+      Object.entries(users as unknown as Record<string, unknown>)
+        .filter(([, value]) => typeof value === 'object' && value !== null && 'name' in value)
+        .map(([property, value]) => [property, (value as { name: string }).name]),
+    );
+
+    const missing: string[] = [];
+    for (const [field, attribute] of Object.entries(expected.users?.fields ?? {})) {
+      const property = attribute.fieldName ?? field;
+      const column = propertyToColumn.get(property);
+      if (column === undefined || !columnFor.has(column)) {
+        missing.push(`${field} → no column`);
+        continue;
+      }
+      const declared =
+        create.includes(`"${column}"`) ||
+        sql.includes(`ALTER TABLE "users" ADD COLUMN "${column}"`);
+      if (!declared) missing.push(`${field} → "${column}" is in no migration`);
+    }
+    expect(missing).toEqual([]);
   });
 });

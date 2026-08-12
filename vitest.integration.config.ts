@@ -25,6 +25,11 @@ export default defineConfig({
       { find: /^@atrium\/db\/schema$/, replacement: src('./packages/db/src/schema.ts') },
       { find: /^@atrium\/db$/, replacement: src('./packages/db/src/index.ts') },
       { find: /^@atrium\/core$/, replacement: src('./packages/core/src/index.ts') },
+      // The identity package, for the suite that wires the real Better Auth
+      // upgrade authenticator instead of the stub. Source rather than `dist` for
+      // the same reason as the other three: the suite must never depend on build
+      // order, and what the compiler checks has to be what the runner runs.
+      { find: /^@atrium\/auth$/, replacement: src('./packages/auth/src/index.ts') },
     ],
   },
   test: {

@@ -15,6 +15,7 @@ import type { ClientFrameInput, ServerFrame } from '../../apps/server/src/protoc
 import {
   createMembershipAuthorizer,
   createStubSessionAuthenticator,
+  type SessionAuthenticator,
 } from '../../apps/server/src/session.js';
 import { createRealtimeServer, type RealtimeServer } from '../../apps/server/src/ws-server.js';
 import type { SocketLike } from '../../apps/web/src/lib/realtime.js';
@@ -101,21 +102,42 @@ export interface SeededRoom {
   people: Record<string, string>;
 }
 
-/** A room with members. Ids are uuids because the schema's columns are. */
+/**
+ * A room with members. Ids are uuids because the schema's columns are.
+ *
+ * `options.agents` names the members that are provisioned as **agent**
+ * principals rather than people. They are otherwise seeded identically —
+ * same `users` row, same `workspace_members` row, same `memberships` row — which
+ * is the claim drizzle/0017 makes and the reason the parameter is a list of
+ * names rather than a separate function: an agent that needed its own seeding
+ * path would be evidence that it is not the same sort of member after all.
+ *
+ * Every name in `agents` must also be in `people`, so the roster stays one list
+ * and a typo cannot silently seed a person the caller meant to be a machine.
+ */
 export async function seedRoom(
   handle: DatabaseHandle,
   people: readonly string[],
-  options: { slug?: string } = {},
+  options: { slug?: string; agents?: readonly string[] } = {},
 ): Promise<SeededRoom> {
   const roomId = randomUUID();
   const ids: Record<string, string> = {};
+  const agents = new Set(options.agents ?? []);
+  for (const name of agents) {
+    if (!people.includes(name)) {
+      throw new Error(`seedRoom: "${name}" is named as an agent but is not in the roster`);
+    }
+  }
 
   for (const name of people) {
     const id = randomUUID();
     ids[name] = id;
-    await handle.db
-      .insert(users)
-      .values({ id, email: `${name}-${id}@example.test`, displayName: name });
+    await handle.db.insert(users).values({
+      id,
+      email: `${name}-${id}@example.test`,
+      displayName: name,
+      principalKind: agents.has(name) ? 'agent' : 'human',
+    });
   }
   /* A ROOM NOW LIVES IN A WORKSPACE, AND A MEMBERSHIP IS NOW DERIVED FROM ONE.
      Two changes the auth lane (#26) made that this fixture has to reflect:
@@ -191,6 +213,21 @@ export interface TestServerOptions {
    */
   membershipRevalidateIntervalMs?: number;
   attachmentCapabilities?: Pick<AttachmentSigner, 'verify'>;
+  /**
+   * The identity seam, when a suite needs the real one.
+   *
+   * Defaults to `createStubSessionAuthenticator()`, which is what every suite
+   * about the ledger, the protocol or the fan-out wants: those questions are not
+   * about who is connected, and making each of them mint a Better Auth session
+   * would be a slower test of the same thing.
+   *
+   * `integration/server/agent-principal.test.ts` passes the real
+   * `createUpgradeAuthenticator`, because its question IS who is connected —
+   * specifically whether the principal kind on the identity survives the trip
+   * through Better Auth into the actor the ledger writes. A stub that was told
+   * the answer could not ask that.
+   */
+  session?: SessionAuthenticator;
 }
 
 /** A realtime server on an ephemeral port, wired exactly as `index.ts` wires it. */
@@ -223,7 +260,7 @@ export async function startTestServer(
     bus,
     reconcileIntervalMs: options.reconcileIntervalMs ?? 200,
     membershipRevalidateIntervalMs: options.membershipRevalidateIntervalMs ?? 60_000,
-    session: createStubSessionAuthenticator(),
+    session: options.session ?? createStubSessionAuthenticator(),
     // ORIGIN POLICY, STATED. The merged server requires it (the auth lane's
     // rule: originless must be opt-in, because an attacker who simply omits the
     // header would otherwise face no check). These are node `ws` clients with no
@@ -373,8 +410,33 @@ export class TestClient {
     });
   }
 
-  static async connect(url: string, userId: string): Promise<TestClient> {
-    const socket = new WebSocket(url, { headers: { 'x-atrium-user': userId } });
+  /**
+   * Open a socket as `userId`.
+   *
+   * `options.headers` is how a caller presents a credential this harness does not
+   * mint — a real Better Auth session cookie, for the suites that wire the real
+   * upgrade authenticator instead of the stub. It is merged UNDER the stub's own
+   * header rather than over it, so a caller cannot half-replace the identity and
+   * end up with a socket whose two credentials name different people.
+   *
+   * `options.principalKind` is the stub's principal claim. Absent means the stub
+   * defaults to `human`, which is what almost every suite here wants; a suite
+   * that means "agent" has to say so, because a silent default in this position
+   * is how a test that thinks it is exercising the agent path exercises the
+   * person path instead.
+   */
+  static async connect(
+    url: string,
+    userId: string,
+    options: { headers?: Record<string, string>; principalKind?: 'human' | 'agent' } = {},
+  ): Promise<TestClient> {
+    const socket = new WebSocket(url, {
+      headers: {
+        ...options.headers,
+        'x-atrium-user': userId,
+        ...(options.principalKind ? { 'x-atrium-principal': options.principalKind } : {}),
+      },
+    });
     const client = new TestClient(socket);
     client.userId = userId;
     await new Promise<void>((resolve, reject) => {

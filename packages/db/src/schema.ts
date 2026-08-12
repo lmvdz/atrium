@@ -183,8 +183,45 @@ export const eventType = pgEnum('event_type', [
  * It is a **column**, not a payload field, and that is #21's contract rather
  * than a storage preference: the actor decides every human-only gate in the
  * reducer, and a payload is whatever the writer says it is. See `core_events`.
+ *
+ * `agent` (drizzle/0017) is the identified non-human: it carries a user id in
+ * `actor_id` exactly as `human` does, and it is refused by every certification
+ * gate exactly as `model` is. Which of `human` and `agent` a row may claim is
+ * not the writer's choice either — `atrium_core_events_invariants` reads
+ * `users.principal_kind` for the id in `actor_id` and refuses a row whose
+ * `actor_kind` disagrees with it, so an agent's session cannot append history
+ * that reads as a person's, nor the reverse.
+ *
+ * **Which of these labels is an *identity* is not written down anywhere as a
+ * list** (drizzle/0018). The append boundary derives the identified set from the
+ * `principal_kind` enum below — a label that names a `users` row is checked for
+ * membership and kind agreement, `model` and `system` are the two enumerated
+ * exemptions, and a label that is neither is refused outright. So adding a value
+ * here does not silently exempt it from the boundary the way it did while 0017
+ * spelled the set as `IN ('human','agent')`; it fails closed at the first
+ * append, which is the only direction this gate may fail in.
  */
-export const actorKind = pgEnum('actor_kind', ['human', 'model', 'system']);
+export const actorKind = pgEnum('actor_kind', ['human', 'agent', 'model', 'system']);
+
+/**
+ * What an identity *is* — the kind of principal a `users` row stands for.
+ *
+ * A **column on `users`** rather than a sibling table, and the reason is the
+ * failure direction rather than tidiness. Every membership, attention and
+ * attribution foreign key in this schema already lands on `users.id`; a sibling
+ * `principals(user_id, kind)` would answer this question with a join whose
+ * *missing row* is a third state, and the only sane reading of a missing row is
+ * "human" — which is a default that fails open in the one place that has to fail
+ * closed (#90's interlock: `human` has always meant "authenticated account", so
+ * the day accounts stop implying people, an absent answer must not read as one).
+ * `NOT NULL DEFAULT 'human'` on the row itself has no missing state to read.
+ *
+ * Deliberately a **second** enum rather than a reuse of `actor_kind`. They are
+ * different questions asked of different things — `actor_kind` describes an
+ * event, `principal_kind` describes an identity — and `model`/`system` are not
+ * identities and must not be spellable here.
+ */
+export const principalKind = pgEnum('principal_kind', ['human', 'agent']);
 
 /** Typed payload union stored in `accepted_objects.payload` / `proposals.payload`. */
 export type ObjectPayload =
@@ -197,16 +234,44 @@ export type ObjectPayload =
 /* ── identity ───────────────────────────────────────────────────────────── */
 
 /**
- * The application's people table AND Better Auth's `user` model — one row per
- * human, not two. Better Auth field names that differ from ours are remapped in
- * `auth-schema.ts` (`name` → `displayName`, `image` → `avatarUrl`); every other
- * property name below is a Better Auth field name and must not be renamed.
+ * The application's participant table AND Better Auth's `user` model — one row
+ * per participant, not two. Better Auth field names that differ from ours are
+ * remapped in `auth-schema.ts` (`name` → `displayName`, `image` → `avatarUrl`);
+ * every other property name below is a Better Auth field name and must not be
+ * renamed.
+ *
+ * **It said "one row per human" until drizzle/0017, and that is no longer
+ * true.** A row here is an identity — something that can hold a session, a
+ * workspace membership, a room membership, and its own name on what it wrote.
+ * `principal_kind` says which sort of identity, and it is the only thing in the
+ * schema that does; nothing else about a row distinguishes a person from an
+ * agent, by design, because every relation that lands on `users.id` should treat
+ * them alike right up to the point where certification is asked for.
  */
 export const users = pgTable(
   'users',
   {
     id: uuid('id').primaryKey().defaultRandom(),
     email: text('email').notNull(),
+    /**
+     * Person or agent. Set at provisioning and never afterwards — a BEFORE
+     * UPDATE trigger (drizzle/0017) refuses any change, because changing it
+     * would silently re-read every `core_events` row this identity ever
+     * appended as having been written by the other sort of participant.
+     *
+     * "Never afterwards" is a property of the **row**, and until drizzle/0018 it
+     * was only a property of the UPDATE statement: delete the row and insert the
+     * same uuid under the other kind and the trigger never fired, while the
+     * re-attribution it exists to prevent happened in full. A BEFORE INSERT
+     * companion (`users_principal_kind_matches_history`) now refuses a row whose
+     * kind disagrees with what that uuid has already appended, so the two
+     * triggers together bind every route that leaves history behind.
+     *
+     * Exposed to Better Auth as a user `additionalField` with `input: false`
+     * (`auth-schema.ts`), so it rides on the session the library already
+     * resolves and there is no request body anywhere that can set it.
+     */
+    principalKind: principalKind('principal_kind').notNull().default('human'),
     /** Better Auth `user.name`. */
     displayName: text('display_name').notNull(),
     /** Better Auth `user.image`. */
@@ -441,10 +506,14 @@ export const coreEvents = pgTable(
     /**
      * The trusted actor, as **two columns** (#21 r3).
      *
-     * `actor_id` is the user id for a human, the model id for a model, and NULL
-     * for the system actor — the shape #21's contract names, checked by
-     * `core_events_actor_id_matches_kind` so the third case cannot be spelled as
-     * an empty string.
+     * `actor_id` is the user id for a human **or an agent**, the model id for a
+     * model, and NULL for the system actor — the shape #21's contract names,
+     * checked by `core_events_actor_id_matches_kind` so the last case cannot be
+     * spelled as an empty string.
+     *
+     * Two kinds now share the "user id" spelling, so the column alone no longer
+     * answers "was this a person?" — `actor_kind` does, and it is the column
+     * every gate reads. See `actorKind`.
      */
     actorKind: actorKind('actor_kind').notNull(),
     actorId: text('actor_id'),
@@ -796,10 +865,10 @@ export const coreEvents = pgTable(
      */
     check('core_events_payload_has_no_actor', sql`NOT jsonb_exists(${t.payload}, 'actor')`),
     /**
-     * `actor_id` is the user id for a human and the model id for a model, and is
-     * NULL for the system actor and only for it. Without this, `{kind:'system',
-     * actor_id:'alice'}` is a row that reads as a person having done something
-     * the process did.
+     * `actor_id` is the user id for a human or an agent and the model id for a
+     * model, and is NULL for the system actor and only for it. Without this,
+     * `{kind:'system', actor_id:'alice'}` is a row that reads as a person having
+     * done something the process did.
      */
     check(
       'core_events_actor_id_matches_kind',
@@ -807,6 +876,17 @@ export const coreEvents = pgTable(
     ),
     check('core_events_actor_id_not_blank', sql`${t.actorId} IS NULL OR length(${t.actorId}) > 0`),
     index('core_events_actor_idx').on(t.actorKind, t.actorId),
+    /**
+     * "Anything at all under this uuid, of any kind" — which the composite index
+     * above cannot answer without a scan, because `actor_kind` leads it.
+     *
+     * Its one caller is `atrium_users_principal_kind_matches_history`
+     * (drizzle/0018), which runs on every `users` INSERT and asks exactly that
+     * question: has this uuid already appended history as the other sort of
+     * participant? Without this index that guard turns each signup into a
+     * sequential scan of the ledger.
+     */
+    index('core_events_actor_id_idx').on(t.actorId),
   ],
 );
 
@@ -823,8 +903,8 @@ export const coreEvents = pgTable(
  * claimed count without trusting a caller-supplied list of event ids.
  *
  * `actor_id` is deliberately non-null. Idempotent participant commands may be
- * issued by humans and named models; the system actor has no stable id and may
- * not claim a retry key. This keeps the same `(actor_kind, actor_id)` spelling
+ * issued by humans, by agents and by named models; the system actor has no
+ * stable id and may not claim a retry key. This keeps the same `(actor_kind, actor_id)` spelling
  * as `core_events` while making the unique key an ordinary PostgreSQL key with
  * no NULL corner case.
  */
@@ -1028,8 +1108,8 @@ export const proposals = pgTable(
      * Deliberately shaped like `core_events.actor_kind`/`actor_id` rather than
      * like `proposer_*`: the stager is an `Actor`, so it has a `system` variant
      * that `proposer_kind` has no spelling for, and `actor_id` carries the user id
-     * for a human and the model id for a model under the same check constraint
-     * that table uses. It is not an FK for the same reason `core_events.actor_id`
+     * for a human or an agent and the model id for a model under the same check
+     * constraint that table uses. It is not an FK for the same reason `core_events.actor_id`
      * is not one — the column is polymorphic. A deleted user leaves the id behind
      * here on purpose: "who staged this attribution" is a fact about an append,
      * not a live pointer.

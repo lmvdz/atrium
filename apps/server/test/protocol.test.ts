@@ -297,8 +297,31 @@ describe('the #26 session stub', () => {
   it('reads the user from a header', async () => {
     await expect(auth.authenticateUpgrade(request({ 'x-atrium-user': 'u1' }))).resolves.toEqual({
       userId: 'u1',
+      principalKind: 'human',
       method: 'stub',
     });
+  });
+
+  it('reads the principal kind, and refuses a value it does not recognise', async () => {
+    // Catches: `parsePrincipalKind` replaced by `claimed === 'agent' ? 'agent' :
+    // 'human'`. That spelling answers "human" for a typo, and a suite that
+    // thinks it is driving the agent path would drive the person path and pass —
+    // which is the same fail-open direction #90 names one layer up, reproduced
+    // in the test fixture rather than in the product.
+    await expect(
+      auth.authenticateUpgrade(request({ 'x-atrium-user': 'u1', 'x-atrium-principal': 'agent' })),
+    ).resolves.toEqual({ userId: 'u1', principalKind: 'agent', method: 'stub' });
+    await expect(
+      auth.authenticateUpgrade(request({}, '/ws?user=u2&principal=agent')),
+    ).resolves.toEqual({ userId: 'u2', principalKind: 'agent', method: 'stub' });
+    // `model` and `system` are `actor_kind` values, not `principal_kind` values:
+    // they name anonymous server-side writers, which is exactly what a session
+    // cannot be. Refusing them here is what keeps the two enums from bleeding.
+    for (const claimed of ['Agent', 'HUMAN', 'model', 'system', 'robot']) {
+      await expect(
+        auth.authenticateUpgrade(request({ 'x-atrium-user': 'u1', 'x-atrium-principal': claimed })),
+      ).resolves.toBeNull();
+    }
   });
 
   it('reads it from the query string, which is all a browser socket can send', async () => {

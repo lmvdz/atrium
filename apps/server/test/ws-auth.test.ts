@@ -23,7 +23,23 @@ function fakeAuth(getSession: () => unknown): AtriumAuth {
 
 const verifiedUser = {
   session: { id: 'sess-1', userId: 'user-1', activeOrganizationId: 'ws-1' },
-  user: { email: 'ada@example.com', name: 'ada', emailVerified: true },
+  user: {
+    email: 'ada@example.com',
+    name: 'ada',
+    emailVerified: true,
+    principalKind: 'human',
+  },
+};
+
+/** The same shape, for an identity Better Auth reports as a non-human principal. */
+const verifiedAgent = {
+  session: { id: 'sess-2', userId: 'user-2', activeOrganizationId: 'ws-1' },
+  user: {
+    email: 'scribe@agents.invalid',
+    name: 'scribe',
+    emailVerified: true,
+    principalKind: 'agent',
+  },
 };
 
 describe('authenticateUpgrade', () => {
@@ -36,8 +52,47 @@ describe('authenticateUpgrade', () => {
       email: 'ada@example.com',
       displayName: 'ada',
       emailVerified: true,
+      principalKind: 'human',
       activeWorkspaceId: 'ws-1',
     });
+  });
+
+  it('carries the principal kind through, so an agent session is not a person\u2019s', async () => {
+    // The load-bearing half of #90's interlock, at the seam it enters the
+    // system: `kind: 'human'` has always meant "authenticated account", and the
+    // moment an agent holds one, every gate downstream is decided by whether
+    // this field survived the trip. Catches: hardcoding `principalKind: 'human'`
+    // in `getAtriumSession`, which no other assertion in this file would notice.
+    const authenticate = createUpgradeAuthenticator({
+      auth: fakeAuth(() => verifiedAgent),
+      logger,
+    });
+    const session = await authenticate(request({ cookie: 'atrium.session_token=abc' }));
+    expect(session).toMatchObject({ userId: 'user-2', principalKind: 'agent' });
+  });
+
+  it('returns no session at all when the principal kind is unreadable', async () => {
+    // The two available responses to "the identity does not say what it is" are
+    // "assume human" and "refuse", and assuming human re-opens every gate this
+    // field exists to keep closed, silently, across a whole deployment. So it
+    // refuses — a deployment that has not applied drizzle/0017, or whose field
+    // declaration was dropped, signs nobody in rather than certifying on
+    // machines' behalf.
+    //
+    // Catches: `principalKind ?? 'human'` anywhere on this path.
+    for (const principalKind of [undefined, null, '', 'HUMAN', 'model', 'system', 42]) {
+      const authenticate = createUpgradeAuthenticator({
+        auth: fakeAuth(() => ({
+          session: { id: 's', userId: 'u' },
+          user: { email: 'e@x.test', name: 'e', emailVerified: true, principalKind },
+        })),
+        logger,
+      });
+      expect(
+        await authenticate(request({ cookie: 'atrium.session_token=abc' })),
+        `principal kind ${JSON.stringify(principalKind)} must not resolve to a session`,
+      ).toBeNull();
+    }
   });
 
   it('returns null when there is no session', async () => {
@@ -57,7 +112,11 @@ describe('authenticateUpgrade', () => {
     const authenticate = createUpgradeAuthenticator({
       auth: fakeAuth(() => ({
         session: { id: 's', userId: 'u' },
-        user: { email: 'e@x.test', name: 'e', emailVerified: false },
+        // `principalKind` is present and valid on purpose: without it this
+        // refusal would be attributable to the unreadable-kind rule instead,
+        // and the verification check could be deleted with this test still
+        // green. One refusal per test, caused by the thing the test names.
+        user: { email: 'e@x.test', name: 'e', emailVerified: false, principalKind: 'human' },
       })),
       logger,
     });
@@ -87,7 +146,11 @@ describe('createSessionResolver', () => {
   it('returns the session for a still-valid cookie', async () => {
     const resolve = createSessionResolver({ auth: fakeAuth(() => verifiedUser), logger });
     const session = await resolve(new Headers({ cookie: 'atrium.session_token=abc' }));
-    expect(session).toMatchObject({ sessionId: 'sess-1', userId: 'user-1' });
+    expect(session).toMatchObject({
+      sessionId: 'sess-1',
+      userId: 'user-1',
+      principalKind: 'human',
+    });
   });
 
   it('returns null once the session is gone', async () => {
@@ -99,7 +162,11 @@ describe('createSessionResolver', () => {
     const resolve = createSessionResolver({
       auth: fakeAuth(() => ({
         session: { id: 's', userId: 'u' },
-        user: { email: 'e@x.test', name: 'e', emailVerified: false },
+        // `principalKind` is present and valid on purpose: without it this
+        // refusal would be attributable to the unreadable-kind rule instead,
+        // and the verification check could be deleted with this test still
+        // green. One refusal per test, caused by the thing the test names.
+        user: { email: 'e@x.test', name: 'e', emailVerified: false, principalKind: 'human' },
       })),
       logger,
     });

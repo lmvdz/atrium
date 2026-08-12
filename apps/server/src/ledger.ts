@@ -72,7 +72,9 @@ import { declaredRoomId, isCoreEvent, RoomEvent } from './room-events.js';
  *
  * `drizzle/0004_trusted_actor_and_append_boundary.sql` is the answer and is the
  * authority on it: `EXECUTE` is revoked from `PUBLIC` and granted to the app
- * role; a human actor's membership is read `FOR SHARE`; the reducer's two
+ * role; an identified actor's membership is read `FOR SHARE` (a human's since
+ * 0004, an agent's too since 0017, which also refuses a row whose `actor_kind`
+ * disagrees with that identity's own `principal_kind`); the reducer's two
  * rejection reasons — both properties of position — are enforced in canonical
  * `(at, id)` order under `COLLATE "C"`; and the notification is emitted, so no
  * path can insert without ringing the bell. This file still does all of it too,
@@ -458,6 +460,13 @@ export function actorFromColumns(kind: string, id: string | null): Actor {
   switch (kind) {
     case 'human':
       return { kind: 'human', userId: id ?? '' };
+    // Same column shape as `human`, deliberately: `actor_id` holds the user id
+    // for both, so replay reconstructs an agent by the same id the live append
+    // wrote. What separates them on the way back out is the discriminant, which
+    // is exactly what `isHuman` reads — a replay that flattened the two would
+    // re-fold an agent's history as a person's and quietly reopen every gate.
+    case 'agent':
+      return { kind: 'agent', userId: id ?? '' };
     case 'model':
       return { kind: 'model', model: id ?? '' };
     case 'system':
@@ -474,6 +483,8 @@ export function actorToColumns(actor: Actor): { kind: Actor['kind']; id: string 
   switch (actor.kind) {
     case 'human':
       return { kind: 'human', id: actor.userId };
+    case 'agent':
+      return { kind: 'agent', id: actor.userId };
     case 'model':
       return { kind: 'model', id: actor.model };
     case 'system':

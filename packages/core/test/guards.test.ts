@@ -39,8 +39,18 @@ const OTHER_ROOM = 'room_2';
 
 type TestActor =
   | { kind: 'human'; userId: string }
+  /**
+   * The identified non-human (drizzle/0017). It holds a `users` row, so unlike
+   * `model` and `system` it is a kind that can actually *send* a frame over an
+   * authenticated socket — which is why #96's findings are about this kind even
+   * though the gates they exercise are older than it.
+   */
+  | { kind: 'agent'; userId: string }
   | { kind: 'model'; model: string }
   | { kind: 'system' };
+
+/** A `users` row that is not a person. Distinct from ALICE and BOB on purpose. */
+const SCRIBE = '11111111-2222-4333-8444-555555555555';
 
 /** The claim these fixtures quote, and the person who wrote it. */
 const CLAIM_TEXT = 'the build is green on main';
@@ -923,8 +933,75 @@ describe('the actor floor — gate 4: superseding a decision is human-only', () 
     expect(state.relations.map((r) => r.id)).toEqual(['rel_1', 'rel_2']);
   });
 
-  it('allows a model to supersede an open question — #4 auto-accepts that one', () => {
+  /**
+   * A model-accepted open question: `~`, nobody has touched it.
+   *
+   * Two events rather than the one-line `question` fixture above, and the
+   * difference is the entire point of the pair of cases below. `question` is
+   * minted by `human()`, so it is **confirmed** — and this test used to retire
+   * that one and call the result "#4 auto-accepts that one". #4 does say a
+   * machine may retire an open question; it does not say a machine may unmake a
+   * person's acceptance of one, and until #96 r2 the reducer read the first
+   * sentence as though it were the second.
+   */
+  const stagedQuestion = proposalEvent({
+    id: 'ev_z1prop',
+    proposalId: 'prop_q_unconfirmed',
+    type: 'open_question',
+    at: at(9),
+  });
+  const modelAcceptedQuestion = acceptEvent({
+    id: 'ev_z2acc',
+    objectId: 'obj_question_3',
+    type: 'open_question',
+    proposalId: 'prop_q_unconfirmed',
+    actor: model(),
+    at: at(9),
+  });
+
+  it('refuses a model retiring an UNCONFIRMED open question — #96 r3, and this test used to assert the opposite', () => {
+    // **The `~` half of #95, which #96 r2 left open and its blind critic found.**
+    // `obj_question_3` is a model's own unconfirmed reading — but retiring it is
+    // still a `supersedes` relation on a *standing accepted* object, not the
+    // `proposal_superseded` dedup of a pending proposal (the route that stays
+    // open, exercised where proposals are staged, not here). #95 reserves every
+    // such retirement to a person: an agent owns no proposal, so every
+    // unconfirmed accepted object a machine reaches was accepted by another
+    // machine, and unmaking one is not a machine's to do. The open route is to
+    // draft a fresh `~`, never to retire the standing one.
+    const state = reduce([
+      ...sampleLog(),
+      stagedQuestion,
+      modelAcceptedQuestion,
+      supersede(model(), 'obj_question_3', 'ev_ms'),
+    ]);
+    expect(state.issues).toHaveLength(1);
+    expect(state.issues[0]?.reason).toContain('may never retire a standing accepted object');
+    expect(state.issues[0]?.reason).toContain('even an unconfirmed reading');
+    expect(state.issues[0]?.reason).toContain('model actor');
+    // The fold, not the verdict: the reading is still standing.
+    expect(state.objects.obj_question_3?.supersededById).toBeNull();
+  });
+
+  it('refuses a model retiring a CONFIRMED open question — #95, and this test used to assert the opposite', () => {
+    // **The exact cell #96's two blind critics found, and the exact test that
+    // pinned it as correct.** `question` is human-accepted, so it is a `✓` — and
+    // #4's auto-accept row is about how cheap a *reading* is to replace, not
+    // about whether a machine may delete a person's judgement. #95: a non-human
+    // may never retire anything confirmed, whatever the type table says.
     const state = reduce([...sampleLog(), question, supersede(model(), 'obj_question_2', 'ev_ms')]);
+    expect(state.issues).toHaveLength(1);
+    expect(state.issues[0]?.reason).toContain('retires an object a person has already confirmed');
+    expect(state.issues[0]?.reason).toContain('model actor');
+    // The fold, not the verdict: the question is still standing.
+    expect(state.objects.obj_question_2?.supersededById).toBeNull();
+  });
+
+  it('lets a human retire the confirmed one — the route that stays open', () => {
+    // The refusal above is not "this cannot be retired", it is "not on a
+    // machine's word". A cell proving the door is still there, so a later round
+    // cannot satisfy the rule by closing supersession altogether.
+    const state = reduce([...sampleLog(), question, supersede(human(), 'obj_question_2', 'ev_hs')]);
     expect(state.issues).toEqual([]);
     expect(state.objects.obj_question_2?.supersededById).toBe('obj_decision_2');
   });
@@ -1710,7 +1787,47 @@ describe('the actor floor — gate 11: supersession follows the policy, all of i
     expect(state.objects.obj_objective_x?.supersededById).toBeNull();
   });
 
-  it('still lets a model retire a claim — #4 puts that one in the auto-accept row', () => {
+  it('refuses a model retiring an UNCONFIRMED claim — #96 r3, and this test used to assert the opposite', () => {
+    // Staged by a model and accepted by one: a `~` claim, which #4 calls cheap
+    // to correct — but "correct" is drafting a *newer* reading, not retiring the
+    // standing one on a machine's word. This is a `supersedes` relation on an
+    // accepted object, and #95 reserves it to a person, confirmed or not: an
+    // agent owns no proposal, so the accepter (`model()`) is another machine and
+    // the retirement is foreign. The pending-proposal dedup a worker actually
+    // runs is `proposal_superseded`, a different event, and stays open.
+    const state = reduce([
+      ...sampleLog(),
+      proposalEvent({
+        id: 'ev_p1prop',
+        proposalId: 'prop_c_unconfirmed',
+        type: 'claim',
+        at: at(10),
+      }),
+      acceptEvent({
+        id: 'ev_p2acc',
+        objectId: 'obj_claim_old',
+        type: 'claim',
+        proposalId: 'prop_c_unconfirmed',
+        actor: model(),
+        at: at(10),
+      }),
+      newer('claim'),
+      retire('obj_claim_old', model(), 'ev_r'),
+    ]);
+    expect(state.issues).toHaveLength(1);
+    expect(state.issues[0]?.reason).toContain('may never retire a standing accepted object');
+    expect(state.issues[0]?.reason).toContain('even an unconfirmed reading');
+    expect(state.issues[0]?.reason).toContain('model actor');
+    // The fold, not the verdict: the reading is still standing.
+    expect(state.objects.obj_claim_old?.supersededById).toBeNull();
+  });
+
+  it('refuses a model retiring a claim a PERSON accepted — #95, and this test used to assert the opposite', () => {
+    // **The breach, in the file that pinned it.** Same log as the case above
+    // except for who accepted the claim being retired: BOB did, so it carries
+    // BOB's judgement, and #4's auto-accept row does not license a machine to
+    // unmake one. `epistemicStateOf` is the predicate — the same one the `✓` on
+    // screen is rendered from, so the gate and the glyph cannot disagree.
     const state = reduce([
       ...sampleLog(),
       event({
@@ -1731,8 +1848,39 @@ describe('the actor floor — gate 11: supersession follows the policy, all of i
       newer('claim'),
       retire('obj_claim_old', model(), 'ev_r'),
     ]);
-    expect(state.issues).toEqual([]);
-    expect(state.objects.obj_claim_old?.supersededById).toBe('obj_newer');
+    expect(state.issues).toHaveLength(1);
+    expect(state.issues[0]?.reason).toContain('retires an object a person has already confirmed');
+    expect(state.objects.obj_claim_old?.supersededById).toBeNull();
+  });
+
+  it('refuses an AGENT retiring a human-accepted claim — the session #96 actually hands out', () => {
+    // The same cell as the one above, driven by the kind that made it reachable
+    // from a socket. An agent holds an account, a room membership and a session,
+    // so unlike `model()` it is a thing that can send this frame; that is the
+    // whole reason #95's rule had to land in this ticket rather than in #102.
+    const state = reduce([
+      ...sampleLog(),
+      event({
+        id: 'ev_claim_old',
+        at: at(10),
+        actor: human(BOB),
+        type: 'object_accepted',
+        object: {
+          id: 'obj_claim_old',
+          roomId: ROOM,
+          type: 'claim',
+          payload: { statement: 'an older claim', claimant: BOB },
+          createdAt: at(10),
+          updatedAt: at(10),
+        },
+      }),
+      newer('claim'),
+      retire('obj_claim_old', { kind: 'agent', userId: SCRIBE }, 'ev_r'),
+    ]);
+    expect(state.issues).toHaveLength(1);
+    expect(state.issues[0]?.reason).toContain('retires an object a person has already confirmed');
+    expect(state.issues[0]?.reason).toContain('agent actor');
+    expect(state.objects.obj_claim_old?.supersededById).toBeNull();
   });
 
   it('lets a human retire any of them', () => {

@@ -1,4 +1,10 @@
-import type { AcceptedObject, Actor, CoreState, Relation } from '@atrium/core';
+import {
+  type AcceptedObject,
+  type Actor,
+  actorUserId,
+  type CoreState,
+  type Relation,
+} from '@atrium/core';
 import {
   acceptedObjects,
   attentionItems,
@@ -95,7 +101,8 @@ export async function projectRoomEvent(
 type EventOf<T extends RoomEvent['type']> = Extract<RoomEvent, { type: T }>;
 
 /**
- * The user id when a human acted, `null` for a model or the system.
+ * The user id when a **person** acted, `null` for an agent, a model or the
+ * system.
  *
  * The actor comes off the `ProjectionContext` now, not off the event: #21 took
  * it out of the payload, so `event.actor` no longer exists and these columns are
@@ -103,6 +110,37 @@ type EventOf<T extends RoomEvent['type']> = Extract<RoomEvent, { type: T }>;
  * `accepted_by`, `by_user_id` and `author_id` in this file is therefore an
  * authenticated identity or NULL — which is what those columns were always
  * supposed to mean.
+ *
+ * ## An agent has a user id and still gets NULL here, on purpose
+ *
+ * The name is the specification: this is the *human's* id, and the columns it
+ * feeds all mean "the person whose judgement this was" — `decided_by`,
+ * `accepted_by`, `by_user_id`. An agent never reaches those columns at all,
+ * because the reducer refuses every event that would write one before a
+ * projection runs.
+ *
+ * `author_id` on `messages` is the one column where an agent legitimately could
+ * be written and is not, and that is a deferral rather than an oversight. Making
+ * an agent's message carry its author is the *front half* of a change whose back
+ * half is a voice register — AGENTS.md's "no synthesized speech" rule says
+ * nothing rendered as a person's words may be words they did not write, and the
+ * feed's attribution cell is unkinded today (`MessageRecord.actor` is a display
+ * name string). Filling in `author_id` alone would render an agent's sentences
+ * as a participant's typed words with nothing to distinguish them, which is a
+ * worse falsehood than an unattributed row. The two land together, in the ticket
+ * that gives the renderer a kind to read; this function is where that ticket
+ * starts, and it does not start here.
+ *
+ * ## What this function is NOT for, learned the expensive way
+ *
+ * It answers "which person", so every caller must be asking that question.
+ * `projectAttentionResolved` was calling it to answer "**whose** item is this",
+ * which is a question about *ownership*, and ownership is not a thing only
+ * people have. Getting `null` back, it dropped the owner predicate from its
+ * UPDATE and resolved anybody's item — a wildcard, from a gate. It asks
+ * `actorUserId` now; see the note there. If a call site here means "which
+ * identity", it is the wrong function, and the two only look interchangeable
+ * because for every actor kind that existed before `agent` they agreed.
  */
 function humanId(actor: Actor): string | null {
   return actor.kind === 'human' ? actor.userId : null;
@@ -161,13 +199,20 @@ async function projectMessagePosted(
 }
 
 /**
- * The polymorphic actor id: the user id for a human, the model id for a model,
- * NULL for the system actor — the shape `core_events.actor_id` already uses, and
- * what `proposals_staged_by_id_matches_kind` requires.
+ * The polymorphic actor id: the user id for a human or an agent, the model id
+ * for a model, NULL for the system actor — the shape `core_events.actor_id`
+ * already uses, and what `proposals_staged_by_id_matches_kind` requires.
+ *
+ * Distinct from `humanId` above and not a variant of it: this one answers "which
+ * identity, of whatever sort" and that one answers "which person". They agreed
+ * for every kind that existed before agents did, which is why the difference is
+ * worth spelling out now that they do not.
  */
 function actorId(actor: Actor): string | null {
   switch (actor.kind) {
     case 'human':
+      return actor.userId;
+    case 'agent':
       return actor.userId;
     case 'model':
       return actor.model;
@@ -461,7 +506,42 @@ async function projectAttentionResolved(
   { tx, roomId, actor }: ProjectionContext<RoomEvent>,
   event: EventOf<'attention_resolved'>,
 ): Promise<void> {
-  const owner = humanId(actor);
+  // ── Whose item, and the wildcard that used to be here ─────────────────────
+  //
+  // **#96 r2, finding 2 — both blind critics, independently.** This read
+  // `humanId(actor)`, and a null owner *dropped the `userId` predicate from the
+  // UPDATE altogether*. While every non-human was anonymous that branch was
+  // unreachable in practice; the moment an agent holds a session and a room
+  // membership — which is what #96 is — it became a live wildcard: one
+  // `resolve_attention` frame from an agent member dismissed **anybody's**
+  // Needs-you item, and the ack came back clean.
+  //
+  // The rule is now the one the command always meant: **an actor may resolve
+  // only attention it owns.** It is scoped by identity rather than by humanity,
+  // because owning an attention item is not a thing only people do — an agent is
+  // an attention target (`attention_items.user_id` is a `users` id, and an agent
+  // has one) and resolving its own routed work is ordinary participation, which
+  // is why the command layer leaves `resolve_attention` open to it.
+  //
+  // `actorUserId` is @atrium/core's "does this actor have an identity" predicate,
+  // deliberately not `humanId`: this is the one place in this file where the two
+  // questions differ and the identity one is the right one. Every other call
+  // site here writes a `decided_by` / `accepted_by` / `by_user_id` column, which
+  // means "the person whose judgement this was" and stays `humanId`.
+  //
+  // An **anonymous** actor is refused outright rather than falling through to a
+  // wildcard. A `model` or `system` actor owns nothing here — there is no
+  // `attention_items` row that could point at it — so the honest answer is that
+  // it has no item to resolve, not that it may resolve every one. That is the
+  // fail-closed direction, and it is what the null branch should always have
+  // said.
+  const owner = actorUserId(actor);
+  if (owner === null) {
+    throw new CommandError(
+      'invalid',
+      `a ${actor.kind} actor carries no identity and so owns no attention item; "${event.attentionId}" in room "${roomId}" belongs to somebody, and only its owner may resolve it`,
+    );
+  }
   const touched = await tx
     .update(attentionItems)
     .set({ status: event.status, resolvedAt: new Date(event.at) })
@@ -469,14 +549,14 @@ async function projectAttentionResolved(
       and(
         eq(attentionItems.id, event.attentionId),
         eq(attentionItems.roomId, roomId),
-        ...(owner === null ? [] : [eq(attentionItems.userId, owner)]),
+        eq(attentionItems.userId, owner),
       ),
     )
     .returning({ id: attentionItems.id });
   if (touched.length === 0) {
     throw new CommandError(
       'invalid',
-      `no pending attention item "${event.attentionId}" for this person in room "${roomId}"`,
+      `no pending attention item "${event.attentionId}" for this actor in room "${roomId}"`,
     );
   }
 }

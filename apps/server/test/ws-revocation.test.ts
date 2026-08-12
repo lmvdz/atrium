@@ -74,7 +74,9 @@ async function start(
     commands: stubCommands(members),
     ledger: stubLedger,
     membershipRevalidateIntervalMs: intervalMs,
-    session: { authenticateUpgrade: async () => ({ userId: USER, method: 'stub' }) },
+    session: {
+      authenticateUpgrade: async () => ({ userId: USER, principalKind: 'human', method: 'stub' }),
+    },
     // ORIGIN POLICY, STATED. The merged server requires it (the auth lane's
     // rule: originless must be opt-in, because an attacker who simply omits the
     // header would otherwise face no check). These are node `ws` clients with no
