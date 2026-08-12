@@ -17,6 +17,7 @@
     "test:watch": "vitest",
     "test:integration": "bash scripts/integration-test.sh",
     "test:e2e": "pnpm --filter \"./packages/*\" build && pnpm --filter @atrium/web test:e2e",
+    "test:e2e:destination": "pnpm --filter \"./packages/*\" build && pnpm --filter @atrium/web test:e2e:destination",
     "lint": "biome check .",
     "lint:fix": "biome check --write .",
     "format": "biome format --write .",

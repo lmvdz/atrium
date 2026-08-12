@@ -12,6 +12,7 @@
     "test": "vitest run",
     "test:mutations": "node test/mutations.mjs",
     "test:e2e": "node e2e/support/ensure-database.mjs && playwright test",
+    "test:e2e:destination": "node e2e/support/ensure-database.mjs && playwright test --config playwright.destination.config.ts",
     "clean": "rm -rf .next"
   },
   "dependencies": {
