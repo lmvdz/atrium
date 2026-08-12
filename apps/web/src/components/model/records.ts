@@ -1176,33 +1176,95 @@ export const PIN_COMPACT_BUDGET = 4;
  *
  * Making the belt relative (`min(340px, 34vh)`) keeps the composer on screen and
  * on its own turns the pin back into what round 2 shipped: a box holding more
- * than it can show. So the COUNT bound moves with the pixel bound. The numbers
- * below are the rendered geometry, measured in Chromium at 1124px, and the
- * arithmetic is the same arithmetic the stylesheet does:
+ * than it can show. So the COUNT bound moves with the pixel bound.
  *
- *   available = min(340, 0.34 × viewport)      ← attention.module.css, .pinList
- *   needed(b) = card + gap + overflow + b × (row + gap)
+ * ROUND 9: THE BELT WAS TWO NUMBERS THAT DID NOT AGREE, AND A THIRD WRONG ONE
+ * HID IT.
  *
- * They are two numbers that must agree, and what makes them agree is not this
- * comment: e2e/pin-bound.spec.ts asserts `scrollHeight <= clientHeight` at five
- * viewport heights, so a card that grows a line fails the suite rather than
- * silently clipping a row off the bottom of the pin.
+ * This block said the belt was `min(340px, 34vh)` and `.pinList` said
+ * `max-height: min(260px, 30vh)`. Three comments — here, in the stylesheet, and
+ * in `Pin.tsx` — asserted the two were the same number. They were never read
+ * against each other because the pixel cap that actually ships is the INLINE one
+ * `Pin` writes after measuring, and an inline `max-height` outranks the class
+ * rule outright: at a 900px viewport the stylesheet said 260 and the element
+ * rendered 306. The stylesheet's copy was dead except before hydration, so it
+ * could drift 80px and nothing would fail.
+ *
+ * The sums balanced anyway because `overflow: 46` charged the belt for the
+ * "N more owed" control, which has been a SIBLING of the clipped list since
+ * round 5 — a charge for something outside the box being measured, cancelling a
+ * belt that was too small. Two wrongs, and removing either one alone moves the
+ * row ladder.
+ *
+ * SO THE BELT IS ONE VALUE NOW, and it lives here. `beltCss` renders these same
+ * two numbers as the CSS expression `.pinList` wears (`--pin-belt`, set by
+ * `Pin` on the pin root, so the server can serve it with no viewport to measure)
+ * and `pinBeltFor` renders them as the pixel number the measured cap and the row
+ * ladder both take. There is no belt literal in the stylesheet to disagree with.
+ *
+ *   available = min(beltMax, beltShare × viewport)   ← and the container's room
+ *   needed(b) = card + cardGrowth + b × (row + gap)
+ *
+ * Every term of `needed` is a box INSIDE `.pinList`. What makes the two agree is
+ * not this comment: `test/pin-bound.test.tsx` asserts the rendered custom
+ * property is built from these fields, and e2e/pin-bound.spec.ts asserts
+ * `scrollHeight <= clientHeight` at five viewport heights, so a card that grows
+ * a line fails the suite rather than silently clipping a row off the bottom.
  * ------------------------------------------------------------------------- */
 export const PIN_GEOMETRY = {
-  /** the open card */
+  /** the open card with a single-line title. Measured in Chromium at 1280,
+      1340 and 1440: 72.27px at all three, rounded up. */
   card: 74,
-  /** one compressed row */
+  /** one compressed row. Measured: 37.22px, rounded up. */
   row: 39,
-  /** flex gap between them */
-  gap: 4,
-  /** the gap the belt leaves so a card that grew a line is visibly clipped rather
-      than exactly filling the box — the "N more owed" control is a SIBLING of the
-      clipped list now (attention.module.css, .pinMore), so it is not in this sum */
-  overflow: 46,
-  /** `.pinList`'s max-height, both halves of it */
+  /** the flex gap between the list's children — `.pinList`'s own `gap`,
+      measured as `rowGap: 2px`. It read 4 here while the stylesheet said 2. */
+  gap: 2,
+  /** one line of the open card's title: `font-size: 11px × line-height: 1.3`,
+      measured as 14.3px. */
+  titleLine: 14.3,
+  /**
+   * How many extra title lines the belt carries before a grown card costs a row.
+   *
+   * Round 6 REMOVED the two-line clamp on `.acardTitle` on purpose (see the
+   * `.why` block in attention.module.css: a clip at the end of the route a
+   * compressed row sends the reader to is a route to nothing), so the open card
+   * is unbounded and `card` above is a measurement of the common case rather
+   * than a ceiling. Measured, the card grows exactly one `titleLine` per wrapped
+   * line: 72.27 → 86.56 → 100.86 → 115.16.
+   *
+   * This is the headroom that used to be spelled `overflow: 46` and described as
+   * the "N more owed" control — a control that has been a SIBLING of the clipped
+   * list since round 5 and was never in this box at all. The allowance is real;
+   * only the thing it was attributed to was wrong. Three lines is what the
+   * measured belt actually carries at every rung of the ladder: at a 900px
+   * viewport the four-row list comes to 229.15px inside a 306px belt.
+   */
+  cardGrowthLines: 3,
+  /** `.pinList`'s max-height, both halves of it — the ONLY place either half is
+      written. `beltCss()` renders them for the stylesheet. */
   beltMax: 340,
   beltShare: 0.34,
 } as const;
+
+/**
+ * The belt as the CSS expression `.pinList` wears, built from the same two
+ * fields `pinBeltFor` divides by.
+ *
+ * It is a string rather than a number because the server has no viewport to
+ * measure and guessing one would be a number nothing measured — `vh` lets the
+ * browser answer before any script runs. `Pin` sets it as `--pin-belt` on the
+ * pin root; `.pinList` carries no belt literal of its own, so this cannot drift
+ * out of agreement with the ladder the way `min(260px, 30vh)` did.
+ */
+export function beltCss(): string {
+  const g = PIN_GEOMETRY;
+  /* 0.34 × 100 is 34.000000000000004 in binary floating point, and
+     `min(340px, 34.000000000000004vh)` is a stylesheet that says the quiet part
+     out loud. Six places is past any resolution a viewport has. */
+  const share = Number((g.beltShare * 100).toFixed(6));
+  return `min(${g.beltMax}px, ${share}vh)`;
+}
 
 /** The belt a viewport this tall allows, before the pin's own container is
     consulted. `Pin` takes the smaller of this and the room its pane leaves. */
@@ -1214,7 +1276,10 @@ export function pinBeltFor(viewportHeight: number): number {
 /** How many compressed rows fit beside the open card in a belt this tall. */
 export function pinBudgetForBelt(available: number): number {
   const g = PIN_GEOMETRY;
-  const fixed = g.card + g.gap + g.overflow;
+  /* Both terms are boxes inside `.pinList`: the open card, and the headroom for
+     the card growing past its measured height. The "N more owed" control is not
+     here because it is not in there. */
+  const fixed = g.card + g.titleLine * g.cardGrowthLines;
   const rows = Math.floor((available - fixed) / (g.row + g.gap));
   return Math.max(0, Math.min(PIN_COMPACT_BUDGET, rows));
 }

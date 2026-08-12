@@ -35,10 +35,17 @@
  * NOT owed to this person never do — they compress to a derived glyph count.
  * ------------------------------------------------------------------------- */
 
+import type { CSSProperties } from 'react';
 import { useEffect, useRef, useState } from 'react';
 import { needsViewer } from '../model/glyph';
 import type { AttentionItem, GlyphCount, PinFold, TrailerSummary } from '../model/records';
-import { foldPin, PIN_COMPACT_BUDGET, pinBeltFor, pinBudgetForBelt } from '../model/records';
+import {
+  beltCss,
+  foldPin,
+  PIN_COMPACT_BUDGET,
+  pinBeltFor,
+  pinBudgetForBelt,
+} from '../model/records';
 import { plural } from '../model/text';
 import { AggregateGlyph } from '../primitives/Glyph';
 import type { Arming } from '../primitives/HoldToAct';
@@ -116,11 +123,17 @@ export function Pin({
      is exactly how round 2's affordance became inert after one click. */
   const [page, setPage] = useState(0);
   /* HOW MANY ROWS THERE IS ROOM FOR, MEASURED — not a prop, not a constant.
-     `.pinList`'s belt is `min(340px, 34vh)`, so at a short viewport the box
-     shrinks; without this the pin would hold more than it can show, which is
-     exactly the hidden-scroll-container state round 2 shipped. The ladder is
-     `pinBudgetFor` (model/records.ts) and the agreement between it and the
-     stylesheet is asserted in e2e/pin-bound.spec.ts at five heights.
+     `.pinList`'s belt is `beltCss()`, so at a short viewport the box shrinks;
+     without this the pin would hold more than it can show, which is exactly the
+     hidden-scroll-container state round 2 shipped. The ladder is `pinBudgetFor`
+     (model/records.ts) and it divides the same two fields `beltCss` renders, so
+     "the agreement between the ladder and the stylesheet" is no longer an
+     agreement between two numbers — it is one number reaching two places. The
+     e2e still drives it at five heights.
+
+     This comment used to say the belt was `min(340px, 34vh)` while the
+     stylesheet said `min(260px, 30vh)`. Both were quoted as fact for four
+     rounds. Neither is quoted now: there is one place to read it.
 
      The server renders the full budget and the effect corrects it, because
      there is no viewport on the server and guessing one would be a number
@@ -192,7 +205,23 @@ export function Pin({
   const owedItems = items.filter((item) => needsViewer(item.state));
 
   return (
-    <section aria-label="Needs you" className={styles.pin} data-region="needs-you" ref={rootRef}>
+    <section
+      aria-label="Needs you"
+      className={styles.pin}
+      data-region="needs-you"
+      /* THE BELT, ONCE, FROM THE PLACE THE ROW LADDER READS IT.
+         `.pinList` carries no belt literal — it is `max-height: var(--pin-belt)`
+         — so this is where the stylesheet's copy of the bound comes from, and it
+         is `PIN_GEOMETRY.beltMax` and `beltShare` rendered as CSS. It is set
+         here rather than on the list because it is a fact about the pin, it
+         costs nothing on the server, and it needs no viewport to be true: `vh`
+         is answered by the browser before any script runs, which is what makes
+         the pre-hydration frame bounded at all.
+         Round 9 replaced a hard-coded `min(260px, 30vh)` in the stylesheet that
+         had drifted 80px from the ladder without anything failing. */
+      style={{ '--pin-belt': beltCss() } as CSSProperties}
+      ref={rootRef}
+    >
       <div className={styles.pinHead}>
         {/* THE HEAD GLYPH IS THE HARDEST THING IN THE PIN, and it is a component
             over a SET rather than a character over a count — see AggregateGlyph.
@@ -229,9 +258,20 @@ export function Pin({
           <div
             className={styles.pinList}
             ref={listRef}
-            /* The measured belt, when there is one. The stylesheet's
-               `min(260px, 30vh)` is the server's answer and stays the ceiling —
-               this only ever takes space away, never adds it. */
+            /* The measured belt, when there is one.
+               This said "the stylesheet's `min(260px, 30vh)` is the server's
+               answer and stays the ceiling — this only ever takes space away,
+               never adds it". Both halves were false. An inline `max-height`
+               outranks a class rule outright, so this REPLACED the stylesheet's
+               cap rather than tightening it, and at 900px it replaced 260 with
+               306 — it added 46px, the same 46 the ladder was over-charging.
+               It is true now, and structurally rather than by assertion:
+               `available` is `Math.min(fromViewport, fromContainer)` where
+               `fromViewport` is `pinBeltFor`, the pixel rendering of the very
+               expression `--pin-belt` carries. The min() is taken in JS because
+               the row budget must be derived from the SAME number the box is
+               capped at (below); handing CSS a second expression to evaluate is
+               how the two registers happened. */
             style={belt === null ? undefined : { maxHeight: `${belt}px` }}
             data-pin-belt={belt === null ? undefined : String(Math.round(belt))}
             data-pin-budget={String(budget)}

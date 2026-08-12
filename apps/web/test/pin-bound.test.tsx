@@ -8,20 +8,39 @@
  * has to be right for the pixels to have a chance.
  * ------------------------------------------------------------------------- */
 
+import { existsSync, readFileSync } from 'node:fs';
+import { dirname, resolve } from 'node:path';
 import { cleanup, fireEvent, render, screen } from '@testing-library/react';
 import { afterEach, describe, expect, it } from 'vitest';
 import * as f from '../app/gallery/fixtures';
 import { nextPageLabel, Pin } from '../src/components';
 import type { AttentionItem, TrailerSummary } from '../src/components/model';
 import {
+  beltCss,
   foldPin,
   PIN_COMPACT_BUDGET,
+  PIN_GEOMETRY,
+  pinBeltFor,
   pinBudgetFor,
+  pinBudgetForBelt,
   rationale,
   trailerFor,
 } from '../src/components/model';
 
 afterEach(cleanup);
+
+/** Walk up from the working directory until the file turns up, so paths resolve
+    whether vitest ran from the repo root or from apps/web (token-contrast.test.ts
+    carries the same helper for the same reason). */
+function find(relative: string): string {
+  let dir = process.cwd();
+  for (let i = 0; i < 6; i += 1) {
+    const candidate = resolve(dir, relative);
+    if (existsSync(candidate)) return candidate;
+    dir = dirname(dir);
+  }
+  throw new Error(`${relative} not found above ${process.cwd()}`);
+}
 
 const TRAILER: TrailerSummary = trailerFor({ objects: [], objectives: [], overdue: [] });
 
@@ -335,6 +354,197 @@ describe('the pin’s row budget shrinks with the viewport', () => {
     );
     unmount();
     Object.defineProperty(window, 'innerHeight', { configurable: true, value: original });
+  });
+});
+
+/* ---------------------------------------------------------------------------
+ * ROUND 9 — THE BELT IS ONE NUMBER, AND FLIPPING IT MOVES EVERY SURFACE.
+ *
+ * `PIN_GEOMETRY` said the belt was `min(340px, 34vh)`. `.pinList` said
+ * `max-height: min(260px, 30vh)`. Three comments — records.ts, the stylesheet
+ * and Pin.tsx — asserted the two agreed. They had disagreed by 80px for four
+ * rounds and no test failed, because the cap that ships is the INLINE one `Pin`
+ * writes after measuring and an inline `max-height` outranks a class rule: at
+ * 900px the stylesheet said 260 and the element rendered 306. The stylesheet's
+ * copy was live only before hydration, so it was free to drift.
+ *
+ * The arithmetic balanced anyway because `PIN_GEOMETRY.overflow` charged 46px
+ * for the "N more owed" control, which has been a SIBLING of the clipped list
+ * since round 5 — a charge for a box outside the box being measured, cancelling
+ * a belt that was too small. Removing either alone moves the row ladder.
+ *
+ * There is one belt now and the stylesheet takes it from `--pin-belt`. These
+ * tests are the mutation the two-register version could not survive: change the
+ * single value and the CSS expression, the pixel belt, the row ladder and the
+ * rendered custom property all move together. Under the old shape the
+ * stylesheet's 260 would not have moved at all.
+ * ------------------------------------------------------------------------- */
+describe('the belt is one value', () => {
+  /** the fields under test are `as const` for callers; the runtime object is a
+      plain object, and flipping it is the whole point of these tests */
+  const mutable = PIN_GEOMETRY as unknown as { beltMax: number; beltShare: number };
+
+  function withBelt<T>(beltMax: number, beltShare: number, body: () => T): T {
+    const max = mutable.beltMax;
+    const share = mutable.beltShare;
+    mutable.beltMax = beltMax;
+    mutable.beltShare = beltShare;
+    try {
+      return body();
+    } finally {
+      mutable.beltMax = max;
+      mutable.beltShare = share;
+    }
+  }
+
+  function renderedBelt(): string | null {
+    const { container } = render(
+      <Pin items={f.manyOwed(34)} lastCheck="12:29" trailer={TRAILER} viewer="lars" />,
+    );
+    const pin = container.querySelector('[data-region="needs-you"]') as HTMLElement | null;
+    return pin === null ? null : pin.style.getPropertyValue('--pin-belt').trim();
+  }
+
+  /* CATCHES: the stylesheet keeping a belt literal of its own — the exact
+     two-register shape this round removed. Asserted against the file rather than
+     against a copy of the number, so there is no list of forbidden values to
+     fall out of date: any `max-height` on `.pinList` that is not the custom
+     property fails. */
+  it('the stylesheet writes no belt of its own', () => {
+    const css = readFileSync(
+      find('apps/web/src/components/attention/attention.module.css'),
+      'utf8',
+    );
+    const rule = /\.pinList\s*\{([^}]*)\}/.exec(css);
+    expect(rule, '.pinList is not in attention.module.css any more').not.toBeNull();
+    const declarations = (rule?.[1] ?? '')
+      .split('\n')
+      .map((line) => line.replace(/\/\*[\s\S]*?\*\//g, '').trim())
+      .filter((line) => line.startsWith('max-height'));
+    expect(declarations, '.pinList declares no max-height at all').toHaveLength(1);
+    expect(declarations[0], 'the stylesheet is carrying a second belt register again').toBe(
+      'max-height: var(--pin-belt);',
+    );
+  });
+
+  /* CATCHES: the rendered pin not passing the belt to the stylesheet — which
+     would leave `var(--pin-belt)` unresolved and `.pinList` with no max-height
+     at all, i.e. round 1's unbounded pin, before hydration. */
+  it('the pin hands the stylesheet the belt, and it is the derived one', () => {
+    expect(renderedBelt()).toBe(beltCss());
+    expect(beltCss()).toBe('min(340px, 34vh)');
+  });
+
+  /* THE FLIP. One value changes and every surface claiming to derive from it
+     moves: the CSS expression, the pixel belt, the ladder, and the property the
+     pin actually renders. CATCHES: any of the four going back to a literal. */
+  it('flipping the belt moves the stylesheet, the pixel belt and the ladder together', () => {
+    const before = {
+      css: beltCss(),
+      belt: pinBeltFor(900),
+      budget: pinBudgetFor(900),
+      rendered: renderedBelt(),
+    };
+    expect(before).toEqual({
+      css: 'min(340px, 34vh)',
+      belt: 306,
+      budget: 4,
+      rendered: 'min(340px, 34vh)',
+    });
+
+    cleanup();
+    const after = withBelt(200, 0.2, () => ({
+      css: beltCss(),
+      belt: pinBeltFor(900),
+      budget: pinBudgetFor(900),
+      rendered: renderedBelt(),
+    }));
+
+    /* halving the belt halves what the pin may hold, in every register at once */
+    expect(after).toEqual({
+      css: 'min(200px, 20vh)',
+      belt: 180,
+      budget: 1,
+      rendered: 'min(200px, 20vh)',
+    });
+
+    // and the flip is not sticky: the constant is restored
+    expect(beltCss()).toBe(before.css);
+    expect(pinBudgetFor(900)).toBe(before.budget);
+  });
+
+  /* CATCHES: `beltCss` shipping binary floating point into a stylesheet.
+     `0.34 * 100` is 34.000000000000004, and `min(340px, 34.000000000000004vh)`
+     is a valid but embarrassing declaration. */
+  it('the share reaches the stylesheet as a number a person would write', () => {
+    expect(beltCss()).not.toMatch(/\d{6,}vh/);
+    expect(withBelt(340, 0.305, () => beltCss())).toBe('min(340px, 30.5vh)');
+  });
+
+  /* CATCHES: the belt charge going back to a box that is not inside the belt.
+     `overflow: 46` charged for the "N more owed" control, which has been a
+     sibling of the clipped list since round 5. Every term of the fixed cost is
+     now a box the belt actually contains, and this is the arithmetic that says
+     so: the ladder's rungs are exactly the counts whose measured content fits.
+
+     The measurements are Chromium at 1280, 1340 and 1440 — the card 72.27px,
+     a compressed row 37.22px, the list's own gap 2px (`PIN_GEOMETRY.gap` read 4
+     against that 2 until this round). */
+  it.each([
+    [900, 4],
+    [768, 3],
+    [640, 2],
+    [500, 1],
+    [420, 0],
+  ])('at %ipx the %i rows the ladder allows are rows that measurably fit', (height, rows) => {
+    const MEASURED = { card: 72.27, row: 37.22, gap: 2 } as const;
+    const belt = pinBeltFor(height);
+    expect(pinBudgetFor(height)).toBe(rows);
+    const needed = MEASURED.card + rows * (MEASURED.row + MEASURED.gap);
+    expect(needed, `a ${rows}-row list is ${needed}px in a ${belt}px belt`).toBeLessThanOrEqual(
+      belt,
+    );
+  });
+
+  /* CATCHES: the fixed cost being padded back out with a charge for something
+     outside the box. The headroom the belt carries is the open card growing —
+     round 6 removed `.acardTitle`'s clamp on purpose — and it is three measured
+     title lines, not an unattributed 46. */
+  it('the fixed cost is the open card and its measured growth, and nothing else', () => {
+    expect(PIN_GEOMETRY).not.toHaveProperty('overflow');
+    expect(PIN_GEOMETRY.titleLine * PIN_GEOMETRY.cardGrowthLines).toBeCloseTo(42.9, 5);
+
+    /* AND THE LADDER ACTUALLY DIVIDES THOSE FIELDS, rather than merely having
+       them nearby. Naming the constants is not evidence: the first version of
+       this test asserted the fields and their product, and a mutant restoring
+       `card + gap + 46` — 122px against the honest 116.9 — ESCAPED it, because
+       both land inside the window that leaves the five rungs where they are.
+
+       So the cost is read back OUT of `pinBudgetForBelt` instead. The function is
+       `floor((a - fixed) / perRow)`, so the belt at which it first allows one row
+       is exactly `fixed + perRow`; bisecting for that threshold recovers `fixed`
+       from behaviour. The 122px mutant moves the threshold to 163 and fails
+       here. */
+    const perRow = PIN_GEOMETRY.row + PIN_GEOMETRY.gap;
+    let low = 0;
+    let high = 1000;
+    for (let i = 0; i < 60; i += 1) {
+      const mid = (low + high) / 2;
+      if (pinBudgetForBelt(mid) >= 1) high = mid;
+      else low = mid;
+    }
+    const fixed = high - perRow;
+    expect(fixed, 'the belt is charging for something that is not the open card').toBeCloseTo(
+      PIN_GEOMETRY.card + PIN_GEOMETRY.titleLine * PIN_GEOMETRY.cardGrowthLines,
+      6,
+    );
+
+    /* and the headroom is really load-bearing: without it a 768px viewport would
+       allow a fourth row, which is the rung the phantom 46 was holding up */
+    const belt = pinBeltFor(768);
+    const bare = Math.floor((belt - PIN_GEOMETRY.card) / perRow);
+    expect(bare).toBe(4);
+    expect(pinBudgetFor(768)).toBe(3);
   });
 });
 

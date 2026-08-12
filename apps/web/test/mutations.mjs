@@ -598,6 +598,36 @@ const LEDGER = [
     replace: '  beltShare: 1,',
     test: 'test/pin-bound.test.tsx',
   },
+  /* Round 9: the belt was two registers, and a charge for a box outside the
+     belt hid the gap between them. */
+  {
+    name: 'the stylesheet takes its belt back from the constant that ships it',
+    file: 'src/components/attention/attention.module.css',
+    find: '  max-height: var(--pin-belt);',
+    replace: '  max-height: min(260px, 30vh);',
+    test: 'test/pin-bound.test.tsx',
+  },
+  {
+    name: 'the pin stops handing the stylesheet a belt at all',
+    file: 'src/components/attention/Pin.tsx',
+    find: "      style={{ '--pin-belt': beltCss() } as CSSProperties}",
+    replace: '      style={undefined}',
+    test: 'test/pin-bound.test.tsx',
+  },
+  {
+    name: 'the belt charges again for the control that is not inside it',
+    file: 'src/components/model/records.ts',
+    find: '  const fixed = g.card + g.titleLine * g.cardGrowthLines;',
+    replace: '  const fixed = g.card + g.gap + 46;',
+    test: 'test/pin-bound.test.tsx',
+  },
+  {
+    name: 'the belt loses the headroom the unclamped card needs',
+    file: 'src/components/model/records.ts',
+    find: '  cardGrowthLines: 3,',
+    replace: '  cardGrowthLines: 0,',
+    test: 'test/pin-bound.test.tsx',
+  },
   {
     name: 'the fold ignores the room there is and renders the full budget',
     file: 'src/components/model/records.ts',
