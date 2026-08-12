@@ -205,6 +205,17 @@ const LEDGER = [
     test: 'test/token-contrast.test.ts',
   },
   {
+    /* THE ONE ENTRY IN THIS LEDGER THAT ESCAPES, AND WHY — measured round 10 so
+       the next round does not re-derive it. The mutant is faithful: `indexOf`
+       finds `:root` and `html.atr-dark` in tokens.css's own provenance comment
+       (line 7 names both), walks forward to the same `{`, and reads the light
+       block twice. It escapes because during the WIRE transition the two blocks
+       are DELIBERATELY the same contract — `design/tokens.css` says so — so
+       "light measured twice" and "light and dark measured once each" are the
+       same numbers. The guarantee is currently unfalsifiable rather than
+       unguarded, and it becomes falsifiable again the moment the two themes
+       differ. Left standing rather than repointed: the entry names the right
+       defect. */
     name: 'the token audit measures the light theme twice and calls one of them dark',
     file: 'test/token-contrast.test.ts',
     find: "  const start = TOKENS.search(new RegExp(`^${selector.replace('.', '\\\\.')}\\\\s*\\\\{`, 'm'));",
@@ -255,10 +266,16 @@ const LEDGER = [
     test: 'test/pin-bound.test.tsx',
   },
   {
+    /* Round 10 repointed this anchor. It matched exactly once and was therefore
+       invisible to the static guard — but the one place it matched was the
+       DOCBLOCK sentence recording what the head glyph used to be, so the
+       mutation edited a comment and the entry reported ESCAPED for a round
+       while the guarantee it names was never touched. An anchor that matches is
+       not an anchor that mutates. */
     name: 'the pin head glyph is hard-coded to ◆ again',
     file: 'src/components/attention/Pin.tsx',
-    find: "{headGlyph ?? '·'}",
-    replace: "{'◆'}",
+    find: '          <AggregateGlyph over={owedItems} />',
+    replace: "          {'◆'}",
     test: 'test/pin-bound.test.tsx',
   },
   {
@@ -598,6 +615,149 @@ const LEDGER = [
     replace: '  beltShare: 1,',
     test: 'test/pin-bound.test.tsx',
   },
+  /* Round 9: the belt was two registers, and a charge for a box outside the
+     belt hid the gap between them. */
+  {
+    name: 'the stylesheet takes its belt back from the constant that ships it',
+    file: 'src/components/attention/attention.module.css',
+    find: '  max-height: var(--pin-belt);',
+    replace: '  max-height: min(260px, 30vh);',
+    test: 'test/pin-bound.test.tsx',
+  },
+  {
+    name: 'the pin stops handing the stylesheet a belt at all',
+    file: 'src/components/attention/Pin.tsx',
+    find: "      style={{ '--pin-belt': beltCss() } as CSSProperties}",
+    replace: '      style={undefined}',
+    test: 'test/pin-bound.test.tsx',
+  },
+  {
+    /* Round 10 repointed this anchor: the sum moved into `pinFixedCost`, where
+       it is now the PRE-MEASURE arm. The defect it names is unchanged — the belt
+       charging for a box that is not inside it. */
+    name: 'the belt charges again for the control that is not inside it',
+    file: 'src/components/model/records.ts',
+    find: '    return g.card + g.titleLine * g.cardGrowthLines;',
+    replace: '    return g.card + g.gap + 46;',
+    test: 'test/pin-bound.test.tsx',
+  },
+  {
+    name: 'the belt loses the headroom the unclamped card needs',
+    file: 'src/components/model/records.ts',
+    find: '  cardGrowthLines: 3,',
+    replace: '  cardGrowthLines: 0,',
+    test: 'test/pin-bound.test.tsx',
+  },
+  /* Round 10: the belt's fixed cost was an ALLOWANCE where a measurement
+     existed, `chrome` was a cache the pin's own content never invalidated, and
+     the belt flip never let the pixel arm bind. */
+  {
+    name: 'the ladder goes back to an allowance where the card is in the DOM',
+    file: 'src/components/attention/Pin.tsx',
+    find: '    const computed = pinBudgetForBelt(available, boxes);',
+    replace: '    const computed = pinBudgetForBelt(available);',
+    test: 'test/pin-bound.test.tsx',
+  },
+  {
+    name: 'the belt stops charging for the clean summary that is inside it',
+    file: 'src/components/model/records.ts',
+    find: '  return boxes.open + (boxes.clean > 0 ? g.gap + boxes.clean : 0);',
+    replace: '  return boxes.open;',
+    test: 'test/pin-bound.test.tsx',
+  },
+  {
+    name: 'a card the browser has not laid out yet is charged as a card that is free',
+    file: 'src/components/model/records.ts',
+    find: '  if (boxes === undefined || boxes === null || boxes.open <= 0) {',
+    replace: '  if (boxes === undefined || boxes === null) {',
+    test: 'test/pin-bound.test.tsx',
+  },
+  {
+    name: 'the pin goes back to watching only the pane it sits in',
+    file: 'src/components/attention/Pin.tsx',
+    find: `    for (const target of [
+      rootRef.current?.parentElement,
+      rootRef.current,
+      list,
+      list?.firstElementChild,
+      list?.querySelector('[data-pin-clean]'),
+    ]) {`,
+    replace: '    for (const target of [rootRef.current?.parentElement]) {',
+    test: 'test/pin-bound.test.tsx',
+  },
+  {
+    /* Round 11, finding 2: the card was watched but the clean summary — a child
+       of the same clipped list — was not, so a late font wrap of the clean line
+       went unmeasured. This drops ONLY the clean box from the observe set. */
+    name: 'the clean summary drops out of the observe set and its late wrap clips',
+    file: 'src/components/attention/Pin.tsx',
+    find: `      list?.firstElementChild,
+      list?.querySelector('[data-pin-clean]'),`,
+    replace: '      list?.firstElementChild,',
+    test: 'test/pin-bound.test.tsx',
+  },
+  {
+    /* Round 11, finding 1(a): the open card the budget is priced against must be
+       the reference (shown whenever a row shows), not the paged-to card at budget
+       0 — pricing against `firstElementChild` reintroduces the two-cycle the
+       gauntlet saw the pin oscillate through at a boundary belt. */
+    name: 'the budget is priced against the paged-to card and chases itself',
+    file: 'src/components/attention/Pin.tsx',
+    find: `    const cached = openHeightRef.current;
+    const openHeight =
+      cached.id === referenceId && cached.height > 0
+        ? cached.height
+        : openIsReferenceRef.current
+          ? firstChildHeight
+          : 0;`,
+    replace: '    const openHeight = firstChildHeight;',
+    test: 'test/pin-bound.test.tsx',
+  },
+  {
+    /* Round 12, finding (the last): the convergence episode key must carry
+       nothing the budget moves. `fold.open.id` is the paged-to card at budget 0
+       and `fold.page` is normalised against a budget-dependent page count, so
+       putting them back in the content signature swings the key between the two
+       budget states at a boundary belt — the `Math.min` ratchet resets every pass
+       and the settling loop cycles forever (React aborts with a max-update-depth
+       error). CAUGHT by the constructed-boundary test. */
+    name: 'the episode key carries the budget-dependent fold terms again',
+    file: 'src/components/attention/Pin.tsx',
+    find: `      folded ? 'folded' : 'open',
+      referenceId,`,
+    replace: `      folded ? 'folded' : 'open',
+      fold.open?.id ?? '',
+      fold.page,
+      referenceId,`,
+    test: 'test/pin-bound.test.tsx',
+  },
+  {
+    /* Round 12: the reference card's box enters the key quantised to 0.1px, not
+       rounded to the pixel, so a sub-pixel shrink across a row threshold
+       (72.49→72.01) changes the key, ends the episode and lets the budget
+       recover. `Math.round` collapses both to 72 and pins the stale lower budget.
+       CAUGHT by the sub-pixel recovery test. */
+    name: 'the episode key rounds the card box to the pixel and sticks a stale budget',
+    file: 'src/components/attention/Pin.tsx',
+    find: '      decipx(boxes?.open ?? 0),',
+    replace: '      Math.round(boxes?.open ?? 0),',
+    test: 'test/pin-bound.test.tsx',
+  },
+  {
+    name: 'the pin measures once and lets every later commit go unmeasured',
+    file: 'src/components/attention/Pin.tsx',
+    find: `    openIsReferenceRef.current = budget >= 1 || fold.page === 0;
+    measure();`,
+    replace: `    openIsReferenceRef.current = budget >= 1 || fold.page === 0;`,
+    test: 'test/pin-bound.test.tsx',
+  },
+  {
+    name: 'the pixel belt goes back to a literal the CSS expression hides',
+    file: 'src/components/model/records.ts',
+    find: '  return Math.min(g.beltMax, viewportHeight * g.beltShare);',
+    replace: '  return Math.min(340, viewportHeight * g.beltShare);',
+    test: 'test/pin-bound.test.tsx',
+  },
   {
     name: 'the fold ignores the room there is and renders the full budget',
     file: 'src/components/model/records.ts',
@@ -855,9 +1015,13 @@ const LEDGER = [
      Round 5 put it on `AuthoredMessageEntry`, which is one of them. Each entry
      below breaks the check and asserts a DIFFERENT boundary notices. */
   {
+    /* Round 10 repointed this anchor: the parts are one per line now, so the
+       inline `, record.room ?? '∅'` the entry was cutting had not existed for a
+       round and the mutation never happened. Found by the anchor guard once it
+       stopped skipping the fifty-two entries it could not parse. */
     name: 'the checksum leaves `room` out, and two rooms hash the same',
     file: 'src/components/model/quotation.ts',
-    find: ", record.room ?? '∅'",
+    find: "    record.room ?? '∅',\n",
     replace: '',
     test: 'test/attribution.test.tsx',
   },
@@ -1344,10 +1508,15 @@ const LEDGER = [
 
   /* D7 — the trailer says the worst count twice. */
   {
+    /* Round 10 repointed this anchor: the tail clause the entry was switching
+       back on is gone from `Trailer.tsx` entirely, so the mutation edited
+       nothing. The defect is reintroduced the way round 7 shipped it instead —
+       a fixed tail printing the count the derived lead is already about. */
     name: 'the trailer repeats the count its lead is already about',
     file: 'src/components/attention/Trailer.tsx',
-    find: "        {summary.leadsWith === 'failures' ? null : (",
-    replace: '        {false ? null : (',
+    find: '        <span data-trailer-scope="check">',
+    replace:
+      "        <span data-trailer-scope=\"outside\">\n          {summary.failures} failure{summary.failures === 1 ? '' : 's'} ·{' '}\n        </span>\n        <span data-trailer-scope=\"check\">",
     test: 'test/attention.test.tsx',
   },
 
@@ -1447,8 +1616,11 @@ const LEDGER = [
     test: 'test/printed-strings.test.tsx',
   },
   {
+    /* Round 10 repointed this anchor: the list moved to `test/app-sources.ts`
+       as COMPILED_EXTENSIONS, and the entry kept cutting a line out of the file
+       that no longer holds it. */
     name: 'the sweep’s extension list goes back to TypeScript only',
-    file: 'test/printed-strings.test.tsx',
+    file: 'test/app-sources.ts',
     find: "  '.jsx',\n",
     replace: '',
     test: 'test/printed-strings.test.tsx',

@@ -403,38 +403,72 @@ describe('the round’s own enumerators', () => {
    * CATCHES: any refactor that moves a line the ledger anchors on. It cannot see
    * an anchor that still matches but no longer means what the entry's name says —
    * only running the harness can, and that is what the harness is for.
+   *
+   * ROUND 10: AND THE DENOMINATOR WAS 140 OF 192.
+   *
+   * The regex above demanded `name`, `file` and `find` on three consecutive
+   * lines and allowed a `find` written as a single-quoted or template literal.
+   * Fifty-two entries are none of those — an entry whose anchor CONTAINS a
+   * single quote is written with double quotes, and an entry with a comment
+   * between its name and its file has three lines that are not consecutive — and
+   * every one of them fell out of `matchAll` silently. `found > 100` passed on
+   * 140 exactly as it would on 192, so the guard over the ledger had the shape of
+   * the defect the ledger exists to find: a sweep whose exclusions are invisible
+   * because nothing states its own denominator. One of the fifty-two was round
+   * 9's own belt entry ("the pin stops handing the stylesheet a belt at all"),
+   * whose `find` carries `'--pin-belt'`.
+   *
+   * The entries are split on their object boundary and each field is read from
+   * its own block, so an entry can only escape the check by not being an object
+   * in the array — and the count is asserted against the entries the file
+   * declares rather than against a number somebody hoped was big enough.
    * ------------------------------------------------------------------------- */
   it('every mutation anchor still matches its file, exactly once', () => {
     const ledger = read('apps/web/test/mutations.mjs');
-    /* The entries are object literals in one array; each is `name`, `file`,
-       `find` in that order. Parsed from the source rather than imported, because
-       importing `mutations.mjs` RUNS the harness. */
-    const entry =
-      /name: '((?:[^'\\]|\\.)*)',\s*\n\s*file: '([^']+)',\s*\n\s*find:\s*((?:'(?:[^'\\]|\\.)*'|`(?:[^`\\]|\\.)*`)(?:\s*\+\s*\n?\s*(?:'(?:[^'\\]|\\.)*'|`(?:[^`\\]|\\.)*`))*)/g;
+    /* Parsed from the source rather than imported, because importing
+       `mutations.mjs` RUNS the harness. */
+    const blocks = ledger.split(/\n {2}\{\n/).slice(1);
+    const literal = String.raw`(?:'(?:[^'\\]|\\.)*'|"(?:[^"\\]|\\.)*"|\`(?:[^\`\\]|\\.)*\`)`;
+    const findPattern = new RegExp(String.raw`find:\s*(${literal}(?:\s*\+\s*\n?\s*${literal})*)`);
     const stale: string[] = [];
     let found = 0;
-    for (const match of ledger.matchAll(entry)) {
+    for (const block of blocks) {
+      const name = /name:\s*(?:'((?:[^'\\]|\\.)*)'|"((?:[^"\\]|\\.)*)")/.exec(block);
+      const file = /file:\s*'([^']+)'/.exec(block);
+      const anchor = findPattern.exec(block);
+      /* An entry that cannot be read is not an entry that passes. The old
+         version's exclusions were a silent `continue`; these are failures. */
+      if (name === null || file === null || anchor === null) {
+        stale.push(`an entry could not be parsed: ${block.slice(0, 80).replace(/\n/g, ' ')}`);
+        continue;
+      }
       found += 1;
-      const [, name, file, literal] = match;
-      if (name === undefined || file === undefined || literal === undefined) continue;
+      const literalSource = anchor[1];
       /* The `find` is a JavaScript string literal, possibly concatenated. `JSON`
          cannot read a single-quoted one, so the escapes are resolved the way the
          harness itself resolves them — by evaluating the literal, with nothing
          but the literal in scope. */
-      const needle = new Function(`return ${literal};`)() as string;
+      const needle = new Function(`return ${literalSource};`)() as string;
+      const named = name[1] ?? name[2];
+      const path = file[1];
       let body: string;
       try {
-        body = read(`apps/web/${file}`);
+        body = read(`apps/web/${path}`);
       } catch {
-        stale.push(`${name} — ${file} does not exist`);
+        stale.push(`${named} — ${path} does not exist`);
         continue;
       }
       const hits = body.split(needle).length - 1;
-      if (hits !== 1) stale.push(`${name} — ${file} matches ${hits} times`);
+      if (hits !== 1) stale.push(`${named} — ${path} matches ${hits} times`);
     }
-    /* THE DENOMINATOR FIRST. A regex that stops matching the ledger's shape
-       reports exactly like a ledger with no stale anchors. */
-    expect(found, 'the ledger parse found almost no entries').toBeGreaterThan(100);
+    /* THE DENOMINATOR, AGAINST THE LEDGER RATHER THAN AGAINST A HOPE. Every
+       `name:` in the file is an entry, so every one of them has to have been
+       read; `> 100` is what let fifty-two go unchecked for a round. */
+    const declared = (ledger.match(/^ {4}name:/gm) ?? []).length;
+    expect(declared, 'the ledger parse found almost no entries').toBeGreaterThan(100);
+    expect(found, 'the anchor check is reading fewer entries than the ledger declares').toBe(
+      declared,
+    );
     expect(
       stale,
       'a mutation anchor matches nothing (or more than one thing), so that guard is not being run',
