@@ -50,6 +50,13 @@ const WS_PORT = 4201;
 const TLS_PORT = 3200;
 const baseURL = `https://localhost:${TLS_PORT}`;
 
+// The destination run must PROVE itself. `requireBrowser` (e2e/support/flows.ts)
+// reads this from the TEST-RUNNER process — which is this config's own process —
+// so a browserless run FAILS in `beforeAll` instead of skipping to a green it
+// never earned. Set here (not in the webServer env, which only reaches the child
+// servers) and before the spec's `describe` body runs its guard.
+process.env.ATRIUM_E2E_BROWSER_REQUIRED = '1';
+
 /** Production posture: real NODE_ENV=production, TLS-declared origins, a configured relay. */
 const environment = {
   ...serverEnvironment(),

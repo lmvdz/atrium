@@ -56,7 +56,7 @@ const DESTINATION_APP_URL = 'https://localhost:3200';
  *   DETERMINISTIC PROTOCOL FRAMES on its own socket — no model in the loop, fixed
  *   text, fixed order. The `~` drafts ride the EXISTING deterministic interpret
  *   worker (`INTERPRET_PROVIDER=acceptance-deterministic`): the agent posts
- *   `Decision:` / `Objective:` and the worker stages them, minted by a genuine
+ *   `Claim:` / `Open question:` and the worker stages them, minted by a genuine
  *   `{kind:'model'}` actor, with zero new machinery and zero model calls.
  * - **The certify-refusal clause** attempts an agent certification over the AGENT's
  *   own authenticated socket and asserts the SERVER refuses it (a `nack`, the command
@@ -290,6 +290,24 @@ async function eventually<T>(
 }
 
 /**
+ * The persisted message id for a client-supplied id authored by a given user, or
+ * `null` until the row lands. Keyed on `author_id` too so the assertion proves the
+ * agent's OWN message, not merely a row with the right idempotency key.
+ */
+async function messageIdFor(
+  roomId: string,
+  clientMessageId: string,
+  authorId: string,
+): Promise<string | null> {
+  const rows = await sql<{ id: string }[]>`
+    SELECT id::text FROM messages
+    WHERE room_id=${roomId}::uuid AND client_message_id=${clientMessageId}
+      AND author_id=${authorId}::uuid
+  `;
+  return rows[0]?.id ?? null;
+}
+
+/**
  * Open a `~` reading's receipt from the current-state surface. The auto-accepted
  * claim/open_question renders as a row (`data-object-id`) with no pin to answer —
  * the person clicks the reading itself, and the receipt carries #110's certify /
@@ -474,6 +492,31 @@ test.describe
           body: `Run ${runId}: acknowledged, standing by.`,
           clientMessageId: `dest-${runId}-echo-answer`,
         });
+        // ── CLAUSE: "the agent answers" is proven in the READ MODEL, not the ack ──
+        // The command ack only says the server accepted the frame; the covenant is
+        // that participants SEE the answer. So: the Scribe answer is a real message
+        // row authored by the AGENT (a fold fact), and it renders in Ada's live
+        // conversation feed by that exact id.
+        let scribeAnswerId: string | null = null;
+        await expect
+          .poll(
+            async () =>
+              (scribeAnswerId = await messageIdFor(
+                roomId,
+                `dest-${runId}-scribe-answer`,
+                scribe.userId,
+              )),
+            {
+              message: "the agent's answer to persist as a message row it authored",
+              timeout: 30_000,
+            },
+          )
+          .not.toBeNull();
+        await expect(
+          ada.locator(`[data-region="conversation"] [data-message-id="${scribeAnswerId}"]`),
+          "the agent's answer must render in a human's live feed, not just ack",
+        ).toBeVisible({ timeout: 20_000 });
+
         // The agent DRAFTS the two LITERAL scenario types. A `claim` and an
         // `open_question` AUTO-ACCEPT (#4/#8): the deterministic provider reads a
         // whole-line `Claim: …` / `Open question: …` body, stages the reading, and
@@ -547,15 +590,49 @@ test.describe
         // The claim is a `~` reading: no human has certified it, nothing verified.
         const claimState = async () =>
           (
-            await sql<{ verification: string | null; touched: string | null }[]>`
+            await sql<
+              {
+                verification: string | null;
+                touched: string | null;
+                acceptedByKind: string | null;
+                claimant: string | null;
+              }[]
+            >`
               SELECT payload->>'verification' AS verification,
-                     human_touched_at::text AS touched
+                     human_touched_at::text AS touched,
+                     accepted_by_kind::text AS "acceptedByKind",
+                     payload->>'claimant' AS claimant
               FROM accepted_objects WHERE id=${claimReading.id}::uuid
+            `
+          )[0];
+        const questionState = async () =>
+          (
+            await sql<{ touched: string | null; acceptedByKind: string | null }[]>`
+              SELECT human_touched_at::text AS touched,
+                     accepted_by_kind::text AS "acceptedByKind"
+              FROM accepted_objects WHERE id=${questionReading.id}::uuid
             `
           )[0];
         const before = await claimState();
         expect(before?.verification).toBe('unverified');
         expect(before?.touched).toBeNull();
+        // clause 2: BOTH drafts are genuine MACHINE `~` BEFORE any human acts — accepted
+        // by a `model`/`agent` actor and untouched by a human. `unverified` alone would
+        // hold on an already-human-touched object; the accepter-kind is what proves the
+        // certify and the remove below act on a real machine reading.
+        expect(['model', 'agent']).toContain(before?.acceptedByKind);
+        const questionBefore = await questionState();
+        expect(['model', 'agent']).toContain(questionBefore?.acceptedByKind);
+        expect(questionBefore?.touched).toBeNull();
+        // clause 3: the certifier (Ada) is DISINTERESTED — she is neither the claim's
+        // `claimant` nor the author of its source message (both are the agent). Pinned
+        // from the fold, not assumed from the fixture: verification is a second pair of
+        // eyes (#102), and this proves the eyes are genuinely a second pair.
+        expect(before?.claimant, 'the claimant must not be the certifier').not.toBe(adaId);
+        expect(before?.claimant).toBe(scribe.userId);
+        expect(claimReading.authorId, 'the source author must not be the certifier').not.toBe(
+          adaId,
+        );
 
         // ── CLAUSE: an agent must never certify — the API refuses it ────────────
         // Over its OWN authenticated socket, the agent attempts the very act #110
@@ -626,6 +703,21 @@ test.describe
         );
         const afterCertify = await claimState();
         expect(afterCertify?.touched).not.toBeNull();
+        // clause 3: the certifying event itself was AUTHORED by the disinterested human.
+        // The `~`→`✓` came from a `object_corrected {verification: verified}` whose actor
+        // is Ada — a human, and specifically her — not the agent, not the claimant.
+        const certifier = (
+          await sql<{ actorKind: string; actorId: string | null }[]>`
+            SELECT actor_kind::text AS "actorKind", actor_id AS "actorId"
+            FROM core_events
+            WHERE room_id=${roomId}::uuid AND type='object_corrected'
+              AND payload->>'objectId'=${claimReading.id}
+              AND payload->'patch'->>'verification'='verified'
+            ORDER BY room_seq DESC LIMIT 1
+          `
+        )[0];
+        expect(certifier?.actorKind, 'the certifying act must be by a human').toBe('human');
+        expect(certifier?.actorId, 'the certifier of record must be Ada').toBe(adaId);
 
         // ── CLAUSE: a human rejects (removes) the `~` open_question ─────────────
         // An open_question is not "certified"; the scenario rejects it, and removal
@@ -671,6 +763,26 @@ test.describe
         `
         )[0];
         expect(benMention).toEqual({ subjectKind: 'message', reasonKind: 'mention' });
+        // clause 5: the attention comes FROM the reference, not a coincidence of two
+        // independent rows. Its `subject_id` IS the message that carries the human
+        // reference to Ben — join them and require exactly one. A body-parse mention, or
+        // an attention keyed to some other message, drops this to zero.
+        const mentionFromReference = Number(
+          (
+            await sql`
+              SELECT count(*)::int AS n
+              FROM attention_items a
+              JOIN message_references r ON r.message_id = a.subject_id AND r.room_id = a.room_id
+              WHERE a.room_id=${roomId}::uuid AND a.user_id=${benId}::uuid
+                AND a.subject_kind='message' AND a.reason->>'kind'='mention'
+                AND r.kind='human' AND r.target_id=${benId}::uuid
+            `
+          )[0]?.n ?? 0,
+        );
+        expect(
+          mentionFromReference,
+          "Ben's mention attention must be keyed to the reference's own message",
+        ).toBe(1);
         // NOWHERE reads from a register the client doesn't write: the second register
         // is GONE. `messages.mention_user_ids` was dropped (drizzle/0020), so no code
         // path can read a mention from a column the client never fills.
@@ -685,20 +797,84 @@ test.describe
         ).toBe(0);
 
         // ── CLAUSE: the returning human opens at since-you-left, replays to live, follows ──
+        // The KNOWN head after Ben's absence: the last room event before he returns. The
+        // whole window he missed sits between his `boundaryHead` seen-cursor and this.
+        // Replay-to-live has to carry BOTH cursors to THIS head — not merely past zero.
+        const knownHead = Number(
+          (
+            await sql<{ h: number }[]>`
+              SELECT COALESCE(max(room_seq), 0)::int AS h FROM core_events WHERE room_id=${roomId}::uuid
+            `
+          )[0]?.h ?? 0,
+        );
+        expect(
+          knownHead,
+          'the absence must have advanced the head past where Ben last saw',
+        ).toBeGreaterThan(boundaryHead);
+        // The exact ids on the two sides of the boundary: the last message Ben SAW before
+        // leaving (Ada's opener, at/under `boundaryHead`) and the first he MISSED (the
+        // Scribe answer, the first event after it).
+        const openMsgId = await messageIdFor(roomId, `dest-${runId}-open`, adaId);
+        if (!openMsgId || !scribeAnswerId)
+          throw new Error('the boundary message ids did not resolve');
+
         await ben.goto(`/app/${workspace.slug}/general`);
         await expect(ben.locator('[data-frame="live"]')).toBeVisible();
         await expect(benDivider).toBeVisible();
         await expect(benDivider).toContainText('messages');
+        // clause 1a: the divider sits at the GENUINE since-you-left boundary — the last
+        // message Ben saw is ABOVE it and the first he missed is BELOW it. `toBeVisible`
+        // alone passes on a divider stranded anywhere in the feed; this fails unless it
+        // divides exactly the seen window from the unseen one.
+        const lastSeenRow = ben.locator(
+          `[data-region="conversation"] [data-message-id="${openMsgId}"]`,
+        );
+        const firstMissedRow = ben.locator(
+          `[data-region="conversation"] [data-message-id="${scribeAnswerId}"]`,
+        );
+        await expect(lastSeenRow).toBeVisible({ timeout: 30_000 });
+        await expect(firstMissedRow).toBeVisible({ timeout: 30_000 });
+        const boundaryOrder = await ben.locator('[data-region="conversation"]').evaluate(
+          (region, ids) => {
+            const divider = region.querySelector('[data-row="since-you-left"]');
+            const lastSeen = region.querySelector(`[data-message-id="${ids.lastSeen}"]`);
+            const firstMissed = region.querySelector(`[data-message-id="${ids.firstMissed}"]`);
+            if (!divider || !lastSeen || !firstMissed) return null;
+            const precedes = (a: Element, b: Element) =>
+              (a.compareDocumentPosition(b) & Node.DOCUMENT_POSITION_FOLLOWING) !== 0;
+            return {
+              lastSeenAbove: precedes(lastSeen, divider),
+              missedBelow: precedes(divider, firstMissed),
+            };
+          },
+          { lastSeen: openMsgId, firstMissed: scribeAnswerId },
+        );
+        expect(
+          boundaryOrder,
+          'the since-you-left divider must sit between the last-seen and first-missed message',
+        ).toEqual({ lastSeenAbove: true, missedBelow: true });
+
         const seenControl = benDivider.getByRole('button', { name: 'mark this group seen' });
         if ((await seenControl.count()) > 0) await seenControl.click();
 
+        // clause 1b: replay-to-live is proven by BOTH cursors reaching the KNOWN head, not
+        // by `data-persisted-through > 0` — which is true from the initial SSR head even if
+        // WS catch-up never runs. The persisted cursor (server-component projection) AND the
+        // live cursor (the durable WS client's `lastSeq`) must both catch the post-absence
+        // head; a broken catch-up strands `data-live-through` below it.
         const benSurface = ben.locator('main[data-room-id]');
         await expect
           .poll(async () => Number(await benSurface.getAttribute('data-persisted-through')), {
-            message: 'the returning route to catch up to the live edge',
+            message: 'the persisted projection to catch up to the known post-absence head',
             timeout: 30_000,
           })
-          .toBeGreaterThan(0);
+          .toBeGreaterThanOrEqual(knownHead);
+        await expect
+          .poll(async () => Number(await benSurface.getAttribute('data-live-through')), {
+            message: 'the live WS cursor to catch up to the known post-absence head',
+            timeout: 30_000,
+          })
+          .toBeGreaterThanOrEqual(knownHead);
 
         // follow: a new message from another participant scrolls into view at the live
         // edge, and the follow survives the composer reshaping under a long multi-line draft.
@@ -714,6 +890,19 @@ test.describe
             ...Array.from({ length: 14 }, (_, i) => `line ${i + 1}`),
           ].join('\n'),
         );
+        // Where the feed sits BEFORE the new message exists — and proof it is genuinely
+        // scrollable. A feed that cannot scroll (`maxScroll <= 0`) satisfies any
+        // scroll-distance tolerance without ever moving, which is the exact hollowness a
+        // bare distance check hides.
+        const beforeFollow = await benFeed.evaluate((element) => ({
+          scrollTop: element.scrollTop,
+          maxScroll: element.scrollHeight - element.clientHeight,
+        }));
+        expect(
+          beforeFollow.maxScroll,
+          'the returning feed must be scrollable for "follow the live edge" to mean anything',
+        ).toBeGreaterThan(0);
+
         const followMarker = `Run ${runId}: live edge follow ${Date.now()}`;
         await scenarioCommand(echoSeat.page, {
           name: 'send_message',
@@ -723,26 +912,56 @@ test.describe
         });
         const appended = benFeed.locator('[data-message-id]').filter({ hasText: followMarker });
         await expect(appended).toBeVisible({ timeout: 20_000 });
+        // clause 1c: the feed ACTUALLY MOVED to the live edge on the new message. Poll
+        // returns both the pin distance AND the feed's new geometry; a scroll-distance
+        // identity that holds on an unmoved feed cannot satisfy all three assertions.
+        let followState = {
+          distance: Number.POSITIVE_INFINITY,
+          scrollTop: beforeFollow.scrollTop,
+          target: 0,
+        };
         await expect
           .poll(
-            () =>
-              benFeed.evaluate((element, text) => {
+            async () => {
+              followState = await benFeed.evaluate((element, text) => {
                 const row = [...element.querySelectorAll('[data-message-id]')].find((child) =>
                   child.textContent?.includes(text),
                 );
-                if (!(row instanceof HTMLElement)) return Number.POSITIVE_INFINITY;
+                if (!(row instanceof HTMLElement))
+                  return {
+                    distance: Number.POSITIVE_INFINITY,
+                    scrollTop: element.scrollTop,
+                    target: 0,
+                  };
                 const target = Math.min(
                   element.scrollHeight - element.clientHeight,
                   Math.max(0, row.offsetTop),
                 );
-                return Math.abs(element.scrollTop - target);
-              }, followMarker),
+                return {
+                  distance: Math.abs(element.scrollTop - target),
+                  scrollTop: element.scrollTop,
+                  target,
+                };
+              }, followMarker);
+              return followState.distance;
+            },
             {
               message: 'the feed to follow the live edge through the composer reshape',
               timeout: 20_000,
             },
           )
           .toBeLessThanOrEqual(4);
+        // The new message's live edge is genuinely BELOW where the feed sat before it
+        // arrived, and the feed travelled there — so this cannot pass on a feed that never
+        // moved (target === old scrollTop) or a degenerate zero-scroll feed.
+        expect(
+          followState.target,
+          'the new message must define a live edge past where the feed already was',
+        ).toBeGreaterThan(beforeFollow.scrollTop);
+        expect(
+          followState.scrollTop,
+          'the feed must have scrolled down to reach the new live edge',
+        ).toBeGreaterThan(beforeFollow.scrollTop);
       } finally {
         await Promise.all(contexts.map((c) => c.close().catch(() => {})));
         // Teardown: the workspace cascade takes the room, memberships, messages and

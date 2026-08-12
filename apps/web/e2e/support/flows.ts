@@ -111,17 +111,25 @@ export async function openRail(page: Page): Promise<void> {
 }
 
 export function requireBrowser(): void {
+  // A skip reports a green run that proved nothing. That courtesy is only ever
+  // safe when a missing browser genuinely means "can't run here", never when the
+  // run's whole purpose is to prove itself: CI, and the destination scenario. The
+  // destination command sets `ATRIUM_E2E_BROWSER_REQUIRED=1` (see
+  // `playwright.destination.config.ts`), so a browserless destination run FAILS in
+  // `beforeAll` below instead of skipping — `pnpm test:e2e:destination` green
+  // ALWAYS means the scenario actually ran.
+  const mustRun = isCI || !!process.env.ATRIUM_E2E_BROWSER_REQUIRED;
   test.skip(
-    !isCI && !browserAvailable(),
+    !mustRun && !browserAvailable(),
     'Playwright browsers are not installed — run `pnpm exec playwright install chromium`',
   );
 
   test.beforeAll(() => {
     if (!browserAvailable()) {
       throw new Error(
-        'Playwright browsers are not installed. In CI this is a failure, not a skip: ' +
-          'a browser suite that silently declines to run reports success it never earned. ' +
-          'Run `pnpm exec playwright install chromium`.',
+        'Playwright browsers are not installed. In CI and the destination run this is a ' +
+          'failure, not a skip: a browser suite that silently declines to run reports ' +
+          'success it never earned. Run `pnpm exec playwright install chromium`.',
       );
     }
   });
