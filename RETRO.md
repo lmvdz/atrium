@@ -1097,3 +1097,134 @@ upgrade visibility lives in the journal timestamp, not the filename.**
 3. **A layered guard hides a missing layer.** The ship-blocker mutant passed integration because two layers both refused; only per-layer unit mutants prove each gate stands alone. Mutation-test each enforcement layer independently, especially the one (the reducer) that binds paths the socket doesn't cover (replay, the worker).
 
 **Harness lesson (promoted to auto-memory, not repo-specific)**: the codex-relay wrapper subagent cannot block on reviews exceeding Bash's 600s foreground cap (it auto-backgrounds); ~5 round-trips were lost before the orchestrator ran codex directly as a background task. grok's faster CLI never hit it.
+
+---
+
+## #99 — a kinded ParticipantSummary, read by every renderer (closed 2026-08-12, 2 rounds)
+
+**Rounds**: build + 1 fix round + page-critic verify. A rendered artifact — codex (source) then a page-driving critic (pixels).
+
+**What each round caught**:
+- Build: kinded the record end to end; agent renders by shape+word not hue (good taste call, respecting the reserved-colour grammar). Deliberately failed OPEN to human on an unreadable kind, documented as "cosmetic".
+- R1 (codex, source): four holes — the fail-open kind (HIGH: leaked past the monogram into mention filtering and counts, so a machine could be a mention candidate / counted person), the viewer's own monogram ignoring its kind, a second RoomHead kind register, and a "People" heading. Adjudicated the fail-open as OVERRIDDEN despite the builder's cosmetic rationale — the mention-filter leak made it functional, and AGENTS.md forbids presenting a machine as a person.
+- R2 fix: the fix-closed design added `unknown` as a third closed-union member (dashed hollow, counted separately, mention-excluded by construction) — a future enum value now renders visibly-unknown rather than silently-human. Also caught a latent guard-test failure (the new spec wasn't in the e2e allowlist, red since round 1).
+- R2 page critic: all five surfaces pass in pixels; agent and unknown both honest and first-class.
+
+**Findings refuted / re-scoped**: the builder's "fail open to human is cosmetic" — refuted by tracing the default into mention filtering and counts (functional, not cosmetic). The page critic's read of "both themes" — the tokens are deliberately identical light/dark, a design fact not a bug.
+
+**The process lesson worth keeping**: **"fail open to the privileged reading" hides inside a rationale that is locally true.** The builder was right that a monogram guessing a person is cosmetic — but the SAME default fed the mention filter and the counts, where it is not cosmetic at all. When a fail-open is defended as harmless, trace every consumer of the defaulted value, not just the one the defender named; the allowlist-the-compliant-form rule wants a neutral fail-closed value (`unknown`), never the privileged one (`human`). Corollary re-confirmed: a machine must never be *presented* as a person, and that is a covenant-adjacent honesty rule, not only a certify-gate rule.
+
+---
+
+## #98 — one predicate for the rendered ✓ (closed 2026-08-12, 4 rounds)
+
+**Rounds**: build + 4 fix rounds, gauntleted by codex (source) + a page-driving critic (pixels). The covenant-visible surface — the most defect-dense ticket of the campaign.
+
+**What each round caught**:
+- Build: made `epistemicStateOf` the projected source and derived replay's `verification` from it. But `stateForObject` branched on each type's OWN payload field (claim→verification, question→status) BEFORE the predicate — and those are the only two types a machine can accept, so the covenant broke both ways. M5 passed on an impossible case (a model-accepted decision the reducer refuses).
+- R1 (codex): the bypass, the covenant breaking both directions (unconfirmed-answered→✓, human-confirmed-claim→~). The design correction: certification is a SEPARATE axis from claim-truth/question-status.
+- R2 (codex + page critic): persisted path fixed and pixel-confirmed (all six covenant states). But the migration minted ✓ from refused CORRECTIONS (a false-green test asserting it), the optimistic retype de-certified, the M5 fixture was reducer-unreachable, the tooltip said "verified" for a merely-accepted claim.
+- R3 (codex verify): correction backfill + M5 fixed; found the SAME class on the ACCEPTANCE backfill (refused duplicate), the aggregates (StateLens/trailer) still calling a certified-but-unverified claim "verified", and the retype hand-setting.
+- R4 (root sweep): centralized `truthUnchecked` and routed every consumer through it + the two predicates; a mutation-proven sweep-test that flips each axis. By-construction, not by-case.
+
+**Findings refuted / re-scoped**: the page critic's "ship the collapsed ✓" taste call was ADOPTED (re-splitting the glyph would recreate the second tick this ticket kills) — but its reading of `replay.spec.ts:437` "retype→~" as correct was the stale-test trap codex caught. The served fixture routes were scoped OUT (#109) as illustrative demo, not covenant claims.
+
+**The process lesson worth keeping**: **"one predicate everywhere" is a SWEEP, and a gauntlet finds a new consumer every round until the fix is by-construction.** Four rounds each fixed the instances then-known (persisted, then correction-backfill, then acceptance-backfill + aggregates); the loop only ended when round 4 centralized the predicate AND added a mutation-proven test that flips the axis and asserts EVERY consumer moves — so a future second source is caught, not just the ones a reviewer happened to enumerate. Identical shape to #94's convergence: when a reviewer keeps finding adjacent members of a class, stop patching members and enforce the invariant with a test that would catch any of them. Corollary: a false-green (a test asserting the defect) appeared in THREE of this ticket's rounds — the matrix, M5-on-a-decision, and the backfill-asserts-refused-promotes — the single most recurrent failure of the campaign's builders.
+
+---
+
+## #100 — one register for a mention; an agent may be named (closed 2026-08-12, 2 rounds)
+
+**Rounds**: build + 1 fix round, gauntleted by BOTH foreign lineages (the fail-closed kind-anchoring is a trust check).
+
+**What each round caught**:
+- Build: collapsed `mention_user_ids` into `message_references`, made an agent mentionable, kind-anchored references fail-closed. Adjudicated a load-bearing contradiction itself: naively repointing the dead `mentionSignals` worker helper at references DOUBLE-COUNTS mentions — retired it, made the projection the sole producer (caught by its own first e2e).
+- R1 gauntlet (codex + grok CONVERGED on core soundness): one register, fail-closed anchoring, kind-agnostic attention all confirmed. codex alone found a HIGH the coverage-focused review missed — the migration DROPS the column on a false "client never filled it" assertion (the SERVER write path existed; git history contradicts it), losing legacy data. Both flagged an inverted/tautological composer-allowlist test (a false-green).
+- R2 fix: a fail-if-populated GUARD (backfill proven impossible — a reference needs a body-span anchor a bare uuid list can't synthesise), and all four coverage gaps closed with mutation-caught tests.
+
+**Findings refuted / re-scoped**: the migration's own comment asserted "the client never filled it (four confirmations)" — TRUE of the client, FALSE as a claim about the column (the server wrote it). The lesson the campaign keeps re-teaching: open the citation; a confirmation about one actor is not a fact about the field.
+
+**The process lesson worth keeping**: **a "collapse two registers" migration must preserve data in the retired register, or refuse — never silently drop on an authored assertion that it's empty.** And when the safe collapse is impossible (the target format can't represent the source), the correct migration RAISES for an operator rather than guessing. Corollary re-confirmed for the Nth time: a test that recreates the logic it means to check (a local re-implementation of the filter) is tautological and green regardless — extract the real code to one definition and make the test call IT.
+
+---
+
+## #101 — a non-human author is attributable, in its own voice (closed 2026-08-12, 2 rounds)
+
+**Rounds**: build + 1 fix round; gauntleted by codex (source) + a page-driving critic (pixels), the critic driving the load-bearing "does a quote launder a machine into a person" check.
+
+**What each round caught**:
+- Build: attributed an agent via `actorUserId` (was NULL), a structural machine register (square + word), the #96 pin inverted. No `author_id` leak into judgement columns.
+- R1 (codex + page critic CONVERGED on the serious one): the deleted-author / absent-kind path fails OPEN to human (`replay-view.ts:152` mapped absent→human, contradicting its sibling comment) — page-critic-DRIVEN, a machine's words rendered as a person's. Plus three citation surfaces (reply/composer-preview/receipt) ignoring `authorKind`; a monospace "voice" that was a no-op (the app is already monospace); and a #96 pin that stayed green if the register was removed (false-green).
+- R2 fix + page verify: absent kind fails CLOSED to `unknown` everywhere; the three citations carry the register; the dead monospace claim dropped; the coupling test asserts the COMPUTED square. All four pixel-verified.
+
+**Findings refuted / re-scoped**: the builder's monospace register was a genuine no-op (CONVENTIONS itself forbids a font-swap-alone distinction) — dropped, not fixed. The "both themes" caveat is a design fact (single near-black surface), not a bug.
+
+**The process lesson worth keeping**: **the fail-open-to-the-privileged-reading bug recurs across every layer, and only a page-driving critic that DELETES the identity found it here** — a unit test on the happy path never exercises the NULL. Third campaign appearance of "a machine defaults to person on missing/unreadable data" (the reducer's isHuman denylist, #99's participantKindOf, now #101's absent authorKind); each time the fix is the same — fail CLOSED to a neutral value, never the person reading. And the rendered-artifact rule holds again: the covenant-adjacent "never LOOK like a person" is only provable by driving pixels, not by reading the diff.
+
+---
+
+## #102 — the certify boundary's human relation rules (closed 2026-08-12, 3 rounds)
+
+**Rounds**: build + 3 fix rounds, gauntleted by BOTH foreign lineages (certify boundary). The last build on the destination critical path.
+
+**What each round caught**:
+- Build: enforced #95's three human relation rules in the reducer, mutation-tested, and corrected THREE false-green oracles (a self-verification asserted allowed, any-human-commitment cells, a receipt payload cell).
+- R1 gauntlet — **the lineages DISAGREED**: codex found 3 HIGH bypasses, grok found none. Adjudicated against the code: all 3 codex findings CONFIRMED, grok had reviewed the acceptance path (where the rules hold) and missed the adjacent CORRECTION paths. The three: `selfVerificationRefusal` trusts a spoofable `payload.claimant` (the build's docblock ASSERTED claimant==author "by construction" — codex opened the citation and found the human path skips the receipt gate); retype mints a foreign commitment (owner-confirm ran only on acceptance); reattribute-then-amend a verified claim bypasses (gate keyed on the becomesVerified transition only).
+- R2 fix + codex verify: finding 1 correctly moved to the COMMAND layer (the reducer structurally cannot resolve the source author — CoreState holds no messages), the other two to the reducer. codex confirmed the 3 bypasses CLOSED — but found the lapse implementation wrote a self-contradicting record (fold unverified, receipt says verified) and over-lapsed on whitespace, with a false-green non-material test.
+- R3 fix: the lapse made honest (plan.after agrees, materiality under normalizeForReceipt), the command guard reshaped — the builder OVERTURNED the orchestrator's suggested remedy because it had a fail-open.
+
+**Findings refuted (with evidence)**: grok's "no bypass" clean pass — refuted by tracing the correction paths codex found and confirming against the fold. The build's "claimant==author by construction" docblock — refuted by opening the cited receipt gate (it binds only a commitment's owner; the human claim path runs no receipt gate). The orchestrator's own finding-3 remedy — refuted by the builder (fail-open on rewording an unverified claim).
+
+**The process lessons worth keeping**:
+1. **On a trust boundary, run BOTH foreign lineages AND adjudicate against the code — the vote count is not the verdict.** codex found 3 ship-relevant bypasses grok cleared; a majority-vote or single-lineage gauntlet ships them. This is the third campaign proof of the both-lineages rule (with #96 the reverse-direction proof).
+2. **"By construction" in a docblock is a claim to verify, not a fact.** The build rested a covenant gate on an invariant (claimant==author) its own comment asserted; opening the cited mechanism showed the invariant holds on one path and not the other. Same shape as #98's stale comments and #100's "client never filled it."
+3. **The orchestrator's remedy is a hypothesis too.** Round 3's builder caught a fail-open in the orchestrator's suggested command-guard shape. State the defect precisely and the remedy tentatively — the person with the code in hand can see what the reviewer cannot.
+4. **A fix that is fail-SAFE can still be wrong** (the lapse wrote a self-contradicting record) — the certify boundary "holds" is not the same as "the records it writes are internally consistent." Verify the artifact, not just the gate.
+
+---
+
+## #110 — certify a ~ claim / remove a ~ reading on the live route (closed 2026-08-12, 2 rounds)
+
+**Rounds**: build + 1 fix round; gauntleted by codex (source) + a page-driving critic (pixels). Built AFTER the destination scenario #103 surfaced that the product could not do the literal covenant act ("a human certifies an agent's drafted claim") — Lars chose to build the affordance rather than let #103 substitute decision/objective.
+
+**What each round caught**:
+- Build: the certify affordance in the receipt footer (two-stage vouch, covenant prose, green only on the settled ✓), routing through #102's gate, agent-gated. The page critic found the CERTIFY flow excellent and covenant-solid — nothing to change there.
+- R1 (codex found what the page critic didn't drive — it removed a ~, never a ✓): Remove was over-broad (`removable` omitted the ~-only check → offered on a ✓ verified claim, including another's; server `retract` ungated), with a false-green test pinning it; the viewer-kind gate failed OPEN to a substituted human; certify was offered on an already-✓ claim.
+- R2 fix: removable/certifiable ~-only; a SCOPED server retract gate for the ✓-verified-claim door (a blanket confirmed-retract gate would have regressed 13 correction-model cases); the viewer gate fails CLOSED to unknown.
+
+**The process lessons worth keeping**:
+1. **Fail-open-to-person on missing identity data is THIS CAMPAIGN'S most consistent defect — four appearances** (the reducer's isHuman denylist; #99's participantKindOf; #101's absent author kind; #110's viewer fallback). Every one defaulted a missing/unreadable identity to the PRIVILEGED reading (human/person) and every fix failed CLOSED to a neutral value. Any new identity-consuming code must be assumed guilty until its missing-data path is checked. Promote to a standing gauntlet lens.
+2. **A page-driving critic and a source critic are not redundant even on the same ticket** — the page critic proved the certify UX and removed a ~; codex removed a ✓ (in its head) and found the hole. Drive the happy path AND read the code for the paths the drive didn't reach.
+3. **A safety gate must be scoped by RELATION, not by a blanket predicate** — a blanket "refuse retract of any confirmed object" was fail-safe but wrong (regressed the correction model's 13 legitimate cases). The right gate targeted the exact new act. Fail-safe is not the same as correct; the narrowest gate that closes the hole preserves everything else.
+
+---
+
+## #103 — the destination scenario (closed 2026-08-12, 2 rounds) — DESTINATION REACHED
+
+**Rounds**: build + 1 fix round, gauntleted by BOTH foreign lineages + (its component surfaces already page-verified in their own tickets). The campaign's capstone.
+
+**What each round caught**:
+- Build v1: the scenario green twice at 4 workers on a real production build — but it SUBSTITUTED decision/objective for the goal's literal claim/open_question, because the live route had no affordance to certify a ~ claim or remove a ~ reading. Surfaced the gap; Lars chose to build the affordance (#110) rather than substitute.
+- Build v2 (after #110): the literal claim/open_question scenario, green twice.
+- R1 gauntlet (codex + grok CONVERGED): the covenant SPINE is genuinely proven (agent certify refused at the API over its own authenticated socket, real production build, TLS satisfied not bypassed) — but SEVERAL clauses were HOLLOW: the returning-human half (since-you-left/replay/follow) passed on a feed that never moved; the ~ claim wasn't proven machine-accepted; the certifier's disinterest wasn't pinned by relation; the mention wasn't tied to its reference; the command could pass SKIPPED. **The destination scenario, green twice, was passing without proving itself.**
+- R2 fix: every clause hardened to compare rendered/DB state against independently-derived known values; two broken-state-proven (certifier actor, agent answer). Green twice again, now genuine.
+
+**The process lesson worth keeping — the campaign's thesis, proven on its own capstone**: **a green suite is not proof; only a fresh-context adversarial pass is.** The DESTINATION scenario itself — green twice at 4 workers, on a production build, the thing the whole campaign aimed at — was still passing without proving its own clauses. Both foreign lineages, reading the spec cold, converged on exactly which assertions were hollow. Every ticket in this campaign taught the same thing (false-greens on #96/#98/#100/#102, fail-open-to-person 4×, adjacent-path bypasses), and the finish line taught it hardest: the last and most important test was the one most in danger of certifying itself. Harden an assertion until a broken product fails it; a test that cannot fail proves nothing.
+
+
+---
+
+# Carried from main's Phase-1/2 history (union at the 2026-08-12 land)
+
+Paragraphs that lived on `main` (a separately-evolved history) and were absent from the
+campaign RETRO — preserved verbatim so no lesson is lost.
+
+**Process note — a decision's rule can be right and its calibration dead, and only the corpus tells you which** (#23 interpretation worker, 2026-08-02). #8 decided a two-tier model routing with deterministic pre-call text triggers, and amended itself once already after a spike found the escalation tier was **dead code**. The worker built to that decision measured the trigger rule against the actual corpus and found the mirror image: the rule fires on 35% of individual messages, 91% of five-message windows, and **100% of ten- and twenty-message windows** — and the rule is evaluated **per window**, at a window size of 10–20. So **the default pass never runs and every burst pays the escalation tier's price**, where the decision's entire premise was a blend. A prior note in the same decision — that the triggers *"fire on the ~10–15% of messages that carry load, which is the cost profile #7 assumed"* — was true per-message and irrelevant, because per-message is not the unit the rule is evaluated in. Lesson kept: **when a rule is calibrated on one unit and applied on another, the calibration number is not evidence about the rule — measure in the unit the code evaluates.** And the builder did the right thing twice: it refused to repair the rule (every repair is a different product and belongs to the deciding ticket), and it **pinned the rate as a test carrying the numbers**, so the next change to the rule moves a number somebody has to look at.
+
+**Process note — disbelieve a green result whose mechanism you have not traced** (#23 interpretation worker, 2026-08-02). The worker reported one object accepted while `accepted_objects` held **zero rows**. The cause is a two-shaped API: `ledger.append` **throws** for structural refusals and **returns normally** for business ones, writing an `applied_with_issue` row that fans out marked and changes nothing. The builder read the accepted object off the returned event and counted it — and `core_events` genuinely had the row, so every direct check looked right. It was found only because the builder went to probe an unrelated blocker and **disbelieved its own passing result**, and the same fiction was being counted by two more metrics. Lesson kept: **a function that signals failure two different ways will be read as signalling it one way, and the caller will pick the wrong one — so when an API both throws and returns-with-issues, the predicate over the issues is the only correct read, and it belongs in one place.** The campaign's own standing rule is *a verdict is a claim and the fold is the fact*; this is that rule applied to instrumentation, where it is easier to skip because the number looks plausible and nothing is red. Practical trigger: any count reported by code that also has an error path deserves one query against the table it claims to be counting.
+
+**Process note — a document describing a system is evidence about when it was written** (foundation re-derivation, 2026-08-02). Throughout a day of orchestration I cited the README's *"no running process is wired to the core at all"* as a current fact about the tree — in briefs, in receipts, and in a published debrief where it carried the argument. It was true of `main` when written and false of the merged tree, where `apps/server` wires core through five modules and had been driven end to end against real Postgres. Nobody broke anything: **the README is derived prose, the code is the source of truth, and derived prose lags.** The error was entirely in the reading. Lesson kept: **before citing any document as evidence about the state of the system, read the system.** This repo's own standing rule already said it — *"prose that names its authority is not thereby correct — open the citation"* — and I applied it diligently to code comments, docblocks, test matrices and migration headers while exempting the README, because a document *about* build state reads like a report rather than like a claim. It is a claim. Corollary worth having: when a merge lands, every hand-maintained description of what runs is stale by default, and the cheap move is to re-derive the one paragraph a reader is told to trust first rather than to assume it survived.
+
+**Process note — two correct lanes can compose into a dead product path, and git has nothing to flag** (merge train → `merge/foundation`, 2026-08-02). `fix/realtime-r11` defined the receipt window as **exactly the cited messages**; `fix/core-engine-r12` **refused any window that ends at the citations**. Each lane was internally consistent, each passed a terminal blind review with its own probes, and neither rule existed on `main`. Merged, the SQL cannot produce a window the TypeScript will certify — **every non-human acceptance is refused and the model path is dead** — and **git produced not one conflict marker**, because the two rules live in different files and different languages. Lesson kept: **a merge conflict is a syntactic collision, and the dangerous class is semantic — two lanes editing *different* files can contradict each other, and nothing in the tooling looks for it.** This is the "property measurable on neither branch" lesson at its hardest edge: the earlier instance was two lanes disagreeing about a *number*; this one is two lanes agreeing to break the product. Practical form: when two lanes both touch one invariant from opposite sides — a producer and its checker, a schema and its validator, a writer and its reader — **the integration suite is the only instrument that will see it, so run it on the merged tree before believing a green typecheck.** It was one red integration test that surfaced this, out of 135.
+
+**Process note — a fail-closed merge defect is the lucky one; ask what the fail-open version would have looked like** (merge train, 2026-08-02). Assembling the tree moved a fan-out membership check into a shared package and **took the query while leaving the key** — `userId:roomId` on one side against a NUL separator on the other. Every lookup missed, so the revalidation pass revoked *every* subscriber, and three integration tests went red immediately. The builder's own framing is the keeper: **it failed in the lucky direction.** Two sides agreeing on a *wrong* key would have found everybody "still a member", silently stopped revoking anyone, and left the suite green. Lesson kept: **when a merge defect is caught loudly, spend a minute on the symmetric version that would have been caught by nothing — that is the one to write a test against.** Two details worth carrying: a **third** spelling was then found in a fixture helper with **reversed argument order**, so the fix was one function rather than two agreeing ones; and the raw NUL byte made the file report as `data` to `file(1)`, so **`grep` skipped it entirely** and a search for the identifier came back empty while the function sat inside it — a search returning nothing is not evidence that nothing is there.

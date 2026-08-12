@@ -14,39 +14,39 @@ A room's conversation, plus a second surface holding what the group actually dec
 
 ## State of play
 
-Work is **not on `main`.** `main` carries only `RETRO.md` and this file.
+**Phase 1 and Phase 2 are built, and `main` carries them** as of 2026-08-05. Before that date `main` held only `RETRO.md`, this file and `docs/skills/`, and the whole product existed as local branches on one machine with no remote copy. Everything below is now on `origin`.
 
-| branch | what it holds | gate |
+| branch | what it holds | browser gate |
 |---|---|---|
-| `merge/foundation` | six lanes assembled: core, realtime, auth, UI, prototype, README | 2,909 unit · 134/135 integration |
-| `fix/receipt-window` | the merge blocker closed, based on foundation | 2,927 unit · **139/139** integration · ledgers 172/172 and 96/96 |
-| `build/interpret-worker` | the interpretation worker, based on foundation | 2,944 unit · 148/149 integration |
+| `main` | Phase 1 replay + Phase 2 live multiplayer, assembled | 160/169 |
+| `fix/live-v8-fidelity` | WIRE v8 frame, rich composer, typed references, attachments, conversation follow | **101/177 — red** |
 
-**`fix/receipt-window` and `build/interpret-worker` have never met.** That merge is the next action, and it is one merge and one command:
+`build/live-multiplayer` (what `main` merged), `build/replay-app`, `join/worker-on-fixed-window` and `phase3/dogfood-protocol` are all strictly contained in `fix/live-v8-fidelity`. They are history on `origin`, not pending work. The pre-UI lanes named in earlier revisions of this file — `merge/foundation`, `fix/receipt-window`, `build/interpret-worker` — are ancestors of all of it.
 
-```
-git checkout -b join/worker-on-fixed-window fix/receipt-window
-git merge build/interpret-worker
-pnpm install && pnpm -r build && pnpm test:integration
-```
+Measured on `main`, 2026-08-05, on a 16-core machine:
 
-`fix/receipt-window` is the base and `build/interpret-worker` merges **into** it — that direction because the receipt-window fix is what makes the worker's acceptances land at all. Both branch from `merge/foundation`, so the shared history is identical and only their own files should conflict. A single assertion flips — `objectsAccepted` becomes 1 and `rejected` empties — and that flip is the cheapest available proof the engine works end to end.
+- `pnpm -r build`, `pnpm typecheck` — pass
+- `pnpm lint` — **exits 1**, and always has. The errors are `design/*.mjs` and `scripts/mutation-ledger.mjs`, the harness files this file's own "Traps" section records as never having passed; no `apps/` or `packages/` source is among them. The Phase 2 receipt records this gate as "exit 0"; that reading came from a pipeline whose last stage was `tail`, so it measured `tail`. Run it as `pnpm lint >/dev/null; echo $?` if you want the real number. **This is not a green gate. It is a known-red one with a known boundary**, and the honest form is to say so rather than to keep quoting a zero nothing produced.
+- `pnpm test --maxWorkers=2` — 3,107/3,107
+- `pnpm test:integration` — 189/189 against the compose-managed database
+- `pnpm test:e2e` at 8 workers — 160/169; the nine failures are timeouts and auth-flow content in the flaky auth/mail set, with zero product-shaped assertion failures
 
 ### What is built and adversarially verified
 
-`packages/core` (the semantic engine), `packages/db` (11 migrations, append-only ledger with SQL-level guards), `packages/auth`, `apps/server` (wired to core through `ledger`, `commands`, `projections`, `room-events`, `protocol` — and driven end to end on the production build against real Postgres), `apps/web/src/components` (the component library), `apps/web/src/lib/realtime.ts` (durable client, survives socket kill, reload and flood with nothing lost or misattributed), `packages/ingest`.
+`packages/core` (the semantic engine), `packages/db` (append-only ledger with SQL-level guards), `packages/auth`, `apps/server` (wired to core through `ledger`, `commands`, `projections`, `room-events`, `protocol` — and driven end to end on the production build against real Postgres), `apps/web/src/components` (the component library), `apps/web/src/lib/realtime.ts` (durable client, survives socket kill, reload and flood with nothing lost or misattributed), `packages/ingest`.
+
+**The two surfaces have met.** `/replay/[workspace]/[room]` renders the component library against the persisted corpus and worker output for a verified room member; `/app/[workspace]/[room]` renders the same surfaces against live shared state. `docs/PHASE2-RECEIPT.md` is the delivery receipt, including the blind reorientation comparison and both independent full-diff reviews.
 
 ### What is not built
 
-**Two working surfaces that have never met.** `/` renders the three-surface product from the component library **against fixtures** — no data layer. `/app/[workspace]/[room]` is a real authenticated route with live presence that renders **its own markup** and references the component library zero times.
-
-Joining them is the remaining work: the replay app and live multiplayer. Those are the open build tickets on the tracker.
+- **A browser gate over the WIRE v8 frame.** `fix/live-v8-fidelity` raised the frame's minimum width from 1024 to 1340 and hid the room rail pending a fold affordance that does not exist yet, without updating the runner viewport or the specs that pin the old information architecture. 76 of 177 browser tests fail there. That branch's `HANDOFF.md` has the triage.
+- **Phase 3.** The dogfood protocol is preregistered and its validator self-tests in `plans/phase3-dogfood/`, with zero observations recorded. Its stop rule is a fourteen-day window that does not start until the first receipt exists.
 
 ## Where the decisions live
 
 `github.com/lmvdz/atrium/issues/1` is the map — destination, methodology, model routing, every resolved decision indexed. **Read it before starting.**
 
-The repo is private and **`gh` cannot reach GitHub from a sandboxed shell** — it returns `error connecting to api.github.com`. If that happens to you, read **`docs/TRACKER.md`**, a point-in-time snapshot of the open tickets, the map, and the four load-bearing build tickets. It is a copy and it will drift; the live tracker wins whenever you can reach it.
+The repo is private and **`gh` may or may not reach GitHub from your shell** — sandboxed shells have returned `error connecting to api.github.com`, while an ordinary authenticated shell on this machine reached it fine on 2026-08-05. Try it. If it fails, read **`docs/TRACKER.md`**, a point-in-time snapshot of the open tickets, the map, and the four load-bearing build tickets. It is a copy and it will drift; the live tracker wins whenever you can reach it. Note that #25 and #27 are delivered on this tree and still open on the tracker — nothing has been written back to GitHub.
 
 Each build ticket carries `## Question`, `## Context`, `## Touches`, `## Acceptance test`, `## Verification gate`, `## Scope boundary` and `## Gauntlet`. A ticket you cannot pick up cold is a defect — say so rather than guessing.
 
@@ -96,7 +96,12 @@ Six subsystems have already been through repeated blind adversarial review — c
 
 The deployment lane is **deliberately stopped**, not abandoned — its remaining findings all required editing the gate's own source, and hardening a gate against its own author has no terminal state.
 
-The work is the join: connecting the verified component library to the verified server, plus replay. Everything else is a distraction with a good excuse.
+**The join is done.** The component library and the server meet on both the replay and the live routes, and Phase 2's own acceptance drove it. The work now is, in order:
+
+1. **Make the browser gate honest again** on `fix/live-v8-fidelity`, so the shipped frame is covered by something. A UI change that moves the product's minimum width and removes its navigation column, verified by unit tests alone, is how 76 browser tests went red without anyone noticing.
+2. **Start the Phase 3 dogfood clock.** It is preregistered, its validator self-tests, and it has zero observations. Nothing about it gets more true by waiting.
+
+Everything else is a distraction with a good excuse. That includes another round on the six verified subsystems, and it includes inferring a sixth scrolling algorithm from a defect nobody has yet instrumented.
 
 ## How work is verified here
 
