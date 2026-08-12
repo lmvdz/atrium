@@ -195,7 +195,7 @@ async function main(): Promise<void> {
     attachments,
     // #26, arrived. The stub is gone; this is Better Auth reading the same
     // cookie the web app mints, over the same tables.
-    session: { authenticateUpgrade: createUpgradeAuthenticator({ auth, logger }) },
+    session: { authenticateUpgrade: createUpgradeAuthenticator({ auth, db: database.db, logger }) },
     // A WebSocket handshake is not same-origin-protected and carries cookies,
     // so the browser's `Origin` is checked against the same origin Better Auth
     // trusts on the HTTP side.
@@ -204,7 +204,7 @@ async function main(): Promise<void> {
     // And a socket does not get to outlive the session that opened it. This
     // rides the membership revalidation pass rather than a sweep of its own —
     // see `revalidateSessions` in ws-server.ts.
-    revalidateSession: createSessionResolver({ auth, logger }),
+    revalidateSession: createSessionResolver({ auth, db: database.db, logger }),
     revalidateTtlMs: env.WS_REVALIDATE_TTL_MS,
   });
   signalProjectionChanged = (roomId) => realtime.projectionChanged(roomId);

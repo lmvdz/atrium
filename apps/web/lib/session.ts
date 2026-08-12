@@ -3,6 +3,7 @@ import { type AtriumSession, getAtriumSession } from '@atrium/auth';
 import { headers } from 'next/headers';
 import { redirect } from 'next/navigation';
 import { auth } from './auth';
+import { db } from './db';
 
 /**
  * Reading the session in a Server Component.
@@ -14,7 +15,7 @@ import { auth } from './auth';
  */
 
 export async function currentSession(): Promise<AtriumSession | null> {
-  return getAtriumSession(auth(), await headers());
+  return getAtriumSession(auth(), await headers(), db());
 }
 
 /**

@@ -1,5 +1,6 @@
 import type { IncomingMessage } from 'node:http';
 import type { AtriumAuth } from '@atrium/auth';
+import type { Database } from '@atrium/db';
 import { describe, expect, it, vi } from 'vitest';
 import { createLogger } from '../src/logger.js';
 import { createSessionResolver, createUpgradeAuthenticator, toHeaders } from '../src/ws-auth.js';
@@ -20,6 +21,30 @@ function request(headers: Record<string, string | string[]>): IncomingMessage {
 function fakeAuth(getSession: () => unknown): AtriumAuth {
   return { api: { getSession: async () => getSession() } } as unknown as AtriumAuth;
 }
+
+/**
+ * A stand-in for the database `getAtriumSession` re-checks the agent owner
+ * sidecar against (#116 fix r3, F-C). `hasSidecar` decides whether the single
+ * `select … from agents … limit 1` this path issues comes back with a row. A
+ * human principal never reaches this read, so the default is harmless for the
+ * human cases; the agent cases pick the answer they mean to test. The real
+ * query against a real Postgres is covered in
+ * `integration/server/agent-principal.test.ts`; this fake keeps the unit test
+ * unit-sized without hiding the branch.
+ */
+function fakeDb(hasSidecar: boolean): Database {
+  return {
+    select: () => ({
+      from: () => ({
+        where: () => ({
+          limit: async () => (hasSidecar ? [{ userId: 'user-2' }] : []),
+        }),
+      }),
+    }),
+  } as unknown as Database;
+}
+
+const db = fakeDb(true);
 
 const verifiedUser = {
   session: { id: 'sess-1', userId: 'user-1', activeOrganizationId: 'ws-1' },
@@ -44,7 +69,11 @@ const verifiedAgent = {
 
 describe('authenticateUpgrade', () => {
   it('returns the session for a valid cookie', async () => {
-    const authenticate = createUpgradeAuthenticator({ auth: fakeAuth(() => verifiedUser), logger });
+    const authenticate = createUpgradeAuthenticator({
+      auth: fakeAuth(() => verifiedUser),
+      db,
+      logger,
+    });
     const session = await authenticate(request({ cookie: 'atrium.session_token=abc' }));
     expect(session).toEqual({
       sessionId: 'sess-1',
@@ -57,18 +86,37 @@ describe('authenticateUpgrade', () => {
     });
   });
 
-  it('carries the principal kind through, so an agent session is not a person\u2019s', async () => {
+  it('carries the principal kind through, so an agent session is not a person’s', async () => {
     // The load-bearing half of #90's interlock, at the seam it enters the
     // system: `kind: 'human'` has always meant "authenticated account", and the
     // moment an agent holds one, every gate downstream is decided by whether
     // this field survived the trip. Catches: hardcoding `principalKind: 'human'`
     // in `getAtriumSession`, which no other assertion in this file would notice.
+    // The agent has its owner sidecar (`fakeDb(true)`), so it resolves.
     const authenticate = createUpgradeAuthenticator({
       auth: fakeAuth(() => verifiedAgent),
+      db: fakeDb(true),
       logger,
     });
     const session = await authenticate(request({ cookie: 'atrium.session_token=abc' }));
     expect(session).toMatchObject({ userId: 'user-2', principalKind: 'agent' });
+  });
+
+  it('refuses an agent whose owner sidecar is gone (#116 fix r3, F-C)', async () => {
+    // The de-sidecar'd agent: Better Auth still resolves the cookie, and the
+    // kind is a clean `agent`, but no `agents` row means no owner — the
+    // ownership chain no longer terminates at a human. `getAtriumSession` reads
+    // the sidecar on every resolution and refuses when it is gone, so this must
+    // be `null` rather than a usable agent session.
+    //
+    // Catches: dropping the sidecar recheck back to a kind-only test — which is
+    // exactly what round 2 shipped.
+    const authenticate = createUpgradeAuthenticator({
+      auth: fakeAuth(() => verifiedAgent),
+      db: fakeDb(false),
+      logger,
+    });
+    expect(await authenticate(request({ cookie: 'atrium.session_token=abc' }))).toBeNull();
   });
 
   it('returns no session at all when the principal kind is unreadable', async () => {
@@ -86,6 +134,7 @@ describe('authenticateUpgrade', () => {
           session: { id: 's', userId: 'u' },
           user: { email: 'e@x.test', name: 'e', emailVerified: true, principalKind },
         })),
+        db,
         logger,
       });
       expect(
@@ -96,13 +145,14 @@ describe('authenticateUpgrade', () => {
   });
 
   it('returns null when there is no session', async () => {
-    const authenticate = createUpgradeAuthenticator({ auth: fakeAuth(() => null), logger });
+    const authenticate = createUpgradeAuthenticator({ auth: fakeAuth(() => null), db, logger });
     expect(await authenticate(request({}))).toBeNull();
   });
 
   it('returns null when the session has no user', async () => {
     const authenticate = createUpgradeAuthenticator({
       auth: fakeAuth(() => ({ session: { id: 's' }, user: null })),
+      db,
       logger,
     });
     expect(await authenticate(request({ cookie: 'atrium.session_token=abc' }))).toBeNull();
@@ -118,6 +168,7 @@ describe('authenticateUpgrade', () => {
         // green. One refusal per test, caused by the thing the test names.
         user: { email: 'e@x.test', name: 'e', emailVerified: false, principalKind: 'human' },
       })),
+      db,
       logger,
     });
     expect(await authenticate(request({ cookie: 'atrium.session_token=abc' }))).toBeNull();
@@ -128,6 +179,7 @@ describe('authenticateUpgrade', () => {
       auth: fakeAuth(() => {
         throw new Error('database is on fire');
       }),
+      db,
       logger,
     });
     const error = vi.spyOn(console, 'error').mockImplementation(() => {});
@@ -144,7 +196,7 @@ describe('authenticateUpgrade', () => {
  */
 describe('createSessionResolver', () => {
   it('returns the session for a still-valid cookie', async () => {
-    const resolve = createSessionResolver({ auth: fakeAuth(() => verifiedUser), logger });
+    const resolve = createSessionResolver({ auth: fakeAuth(() => verifiedUser), db, logger });
     const session = await resolve(new Headers({ cookie: 'atrium.session_token=abc' }));
     expect(session).toMatchObject({
       sessionId: 'sess-1',
@@ -153,8 +205,21 @@ describe('createSessionResolver', () => {
     });
   });
 
+  it('closes a live agent socket once its owner sidecar is gone (#116 fix r3, F-C)', async () => {
+    // Re-validation runs for the whole life of a socket, so a de-sidecar'd
+    // agent's ALREADY-OPEN connection must fail the same recheck the handshake
+    // does — otherwise an ownerless agent keeps operating until it happens to
+    // reconnect. Same function, both seams.
+    const resolve = createSessionResolver({
+      auth: fakeAuth(() => verifiedAgent),
+      db: fakeDb(false),
+      logger,
+    });
+    expect(await resolve(new Headers({ cookie: 'atrium.session_token=abc' }))).toBeNull();
+  });
+
   it('returns null once the session is gone', async () => {
-    const resolve = createSessionResolver({ auth: fakeAuth(() => null), logger });
+    const resolve = createSessionResolver({ auth: fakeAuth(() => null), db, logger });
     expect(await resolve(new Headers({ cookie: 'atrium.session_token=abc' }))).toBeNull();
   });
 
@@ -168,6 +233,7 @@ describe('createSessionResolver', () => {
         // green. One refusal per test, caused by the thing the test names.
         user: { email: 'e@x.test', name: 'e', emailVerified: false, principalKind: 'human' },
       })),
+      db,
       logger,
     });
     expect(await resolve(new Headers({ cookie: 'atrium.session_token=abc' }))).toBeNull();
@@ -178,6 +244,7 @@ describe('createSessionResolver', () => {
       auth: fakeAuth(() => {
         throw new Error('database is on fire');
       }),
+      db,
       logger,
     });
     const error = vi.spyOn(console, 'error').mockImplementation(() => {});
@@ -213,6 +280,7 @@ describe('createSessionResolver', () => {
           },
         };
       }),
+      db,
       logger,
     });
     const error = vi.spyOn(console, 'error').mockImplementation(() => {});

@@ -392,3 +392,117 @@ describe('provisionAgentConfig writes the sidecar and inherits the DB triggers',
     );
   });
 });
+
+/**
+ * A SETTLED/FAILED ROW IS DONE, AS A TABLE FACT (#116 fix r3, F-B, drizzle/0025).
+ *
+ * The command path already enforces one-exit-per-plan/session (projectPlanSettled
+ * / projectSessionExit scope their UPDATE with `status = 'open'`). But that is a
+ * property of one writer, not of the table: raw SQL — or a future projection that
+ * forgets the predicate — could `UPDATE plans SET status='open'` a settled plan
+ * and re-settle it, or rewrite a session's exit receipt. The two BEFORE UPDATE
+ * triggers 0025 adds make "done is one-way" a fact of the `plans` and `sessions`
+ * tables, and this drives them through raw SQL so a refusal surfaces the *named*
+ * trigger. It also backstops F-A: even if the session-open status check
+ * regressed, the plan it targets cannot be reopened here.
+ */
+describe('terminal plan/session states are frozen at the table (F-B)', () => {
+  /** A plan raw-settled through the legal open → settled transition. */
+  async function settledPlan(): Promise<{ roomId: string; planId: string }> {
+    const ch = await seedAgentChannel('fleet');
+    const planId = await insertPlan(ch.roomId, ch.agentId);
+    // OLD is `open` here, so the terminal guard does not fire — the legitimate
+    // settle passes exactly as the projection's does.
+    await handle.db.execute(sql`UPDATE plans SET status = 'settled' WHERE id = ${planId}`);
+    return { roomId: ch.roomId, planId };
+  }
+
+  /** A session raw-inserted, then raw-exited to a terminal `status`. */
+  async function exitedSession(
+    status: 'settled' | 'failed',
+  ): Promise<{ roomId: string; sessionId: string }> {
+    const ch = await seedAgentChannel('fleet');
+    const planId = await insertPlan(ch.roomId, ch.agentId);
+    const sessionId = randomUUID();
+    await handle.db.execute(sql`
+      INSERT INTO sessions (id, room_id, plan_id, harness, model)
+      VALUES (${sessionId}, ${ch.roomId}, ${planId}, 'claude', 'opus')
+    `);
+    await handle.db.execute(
+      sql`UPDATE sessions SET status = ${status}, exit_summary = 'done' WHERE id = ${sessionId}`,
+    );
+    return { roomId: ch.roomId, sessionId };
+  }
+
+  it('REFUSES reopening a settled plan by UPDATE', async () => {
+    const { planId } = await settledPlan();
+    await violatesConstraint('plans_terminal_immutable', () =>
+      handle.db.execute(sql`UPDATE plans SET status = 'open' WHERE id = ${planId}`),
+    );
+    // Still settled: the reopen was refused, not silently applied.
+    const [row] = await handle.db.execute<{ status: string }>(
+      sql`SELECT status FROM plans WHERE id = ${planId}`,
+    );
+    expect(row?.status).toBe('settled');
+  });
+
+  it("REFUSES rewriting a settled plan's receipt pointer by UPDATE", async () => {
+    const { planId } = await settledPlan();
+    await violatesConstraint('plans_terminal_immutable', () =>
+      handle.db.execute(
+        sql`UPDATE plans SET settled_by_event_id = 'forged-event' WHERE id = ${planId}`,
+      ),
+    );
+  });
+
+  it('ALLOWS an unrelated touch on a settled plan — the freeze is on the receipt, not the row', async () => {
+    // The control that keeps the trigger honest: it must refuse a status/receipt
+    // rewrite, not every write. A spend rollup or an updated_at touch is fine.
+    const { planId } = await settledPlan();
+    await handle.db.execute(sql`UPDATE plans SET spent_micros = 42 WHERE id = ${planId}`);
+    const [row] = await handle.db.execute<{ spent_micros: string; status: string }>(
+      sql`SELECT spent_micros, status FROM plans WHERE id = ${planId}`,
+    );
+    expect(row?.status).toBe('settled');
+    expect(Number(row?.spent_micros)).toBe(42);
+  });
+
+  for (const status of ['settled', 'failed'] as const) {
+    it(`REFUSES reopening a ${status} session by UPDATE`, async () => {
+      const { sessionId } = await exitedSession(status);
+      await violatesConstraint('sessions_terminal_immutable', () =>
+        handle.db.execute(sql`UPDATE sessions SET status = 'open' WHERE id = ${sessionId}`),
+      );
+      const [row] = await handle.db.execute<{ status: string }>(
+        sql`SELECT status FROM sessions WHERE id = ${sessionId}`,
+      );
+      expect(row?.status).toBe(status);
+    });
+  }
+
+  it('REFUSES flipping a settled session to failed — two contradictory receipts for one process', async () => {
+    const { sessionId } = await exitedSession('settled');
+    await violatesConstraint('sessions_terminal_immutable', () =>
+      handle.db.execute(sql`UPDATE sessions SET status = 'failed' WHERE id = ${sessionId}`),
+    );
+  });
+
+  it("REFUSES rewriting a terminal session's exit receipt by UPDATE", async () => {
+    const { sessionId } = await exitedSession('failed');
+    await violatesConstraint('sessions_terminal_immutable', () =>
+      handle.db.execute(
+        sql`UPDATE sessions SET exit_summary = 'rewritten', spend_micros = 999 WHERE id = ${sessionId}`,
+      ),
+    );
+  });
+
+  it('ALLOWS an unrelated touch on a terminal session — the freeze is on the receipt, not the row', async () => {
+    const { sessionId } = await exitedSession('settled');
+    await handle.db.execute(sql`UPDATE sessions SET updated_at = now() WHERE id = ${sessionId}`);
+    const [row] = await handle.db.execute<{ status: string; exit_summary: string }>(
+      sql`SELECT status, exit_summary FROM sessions WHERE id = ${sessionId}`,
+    );
+    expect(row?.status).toBe('settled');
+    expect(row?.exit_summary).toBe('done');
+  });
+});

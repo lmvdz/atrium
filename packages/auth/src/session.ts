@@ -1,3 +1,5 @@
+import { agents, type Database } from '@atrium/db';
+import { eq } from 'drizzle-orm';
 import type { AtriumAuth } from './auth.js';
 import { type PrincipalKind, parsePrincipalKind } from './principal.js';
 
@@ -41,10 +43,16 @@ export interface AtriumSession {
  * a `Headers` built from `IncomingMessage.headers` at a WebSocket upgrade. Both
  * end up in the same library call, which is the point — there is one definition
  * of "signed in" and neither caller reimplements it.
+ *
+ * `db` is here for the same reason (#116 fix r3, F-C): the sidecar recheck below
+ * is a database read, and keeping it inside this one function is what stops the
+ * two callers each rolling their own — the query that decides whether an agent
+ * still has an owner is written once, exactly like the `principal_kind` read.
  */
 export async function getAtriumSession(
   auth: AtriumAuth,
   headers: Headers,
+  db: Database,
 ): Promise<AtriumSession | null> {
   const result = await auth.api.getSession({ headers });
   if (!result?.session || !result.user) return null;
@@ -65,6 +73,33 @@ export async function getAtriumSession(
    */
   const principalKind = parsePrincipalKind((user as { principalKind?: unknown }).principalKind);
   if (principalKind === null) return null;
+
+  /**
+   * An agent with no owner sidecar is not a usable session (#116 fix r3, F-C).
+   *
+   * `mintAgentSession` refuses to MINT a session for an agent with no `agents`
+   * row — that is the only route an agent session is created by. But a cookie
+   * outlives its mint: an agent configured, minted, and then de-sidecar'd
+   * (`DELETE FROM agents WHERE user_id = …`) still presents a valid Better Auth
+   * session, and round 2 would have let it keep operating — ownerless, the
+   * "ownership chain terminates at a human" invariant (#114) silently bypassed
+   * for the whole life of the cookie.
+   *
+   * So the check that ran at mint runs again HERE, on every resolution, the same
+   * discipline `principal_kind === null` gets: refuse rather than operate. An
+   * `agents` row cannot exist without a human `owner_user_id`
+   * (`agents_owner_is_human`, 0021), so its mere existence is the owner — no
+   * ownerless agent resolves to a session. A HUMAN principal needs no sidecar
+   * and is not touched by this read; only an `agent` pays the round-trip.
+   */
+  if (principalKind === 'agent') {
+    const [sidecar] = await db
+      .select({ userId: agents.userId })
+      .from(agents)
+      .where(eq(agents.userId, session.userId))
+      .limit(1);
+    if (!sidecar) return null;
+  }
 
   return {
     sessionId: session.id,

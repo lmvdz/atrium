@@ -10,6 +10,7 @@ import {
 import type { DatabaseHandle } from '@atrium/db';
 import {
   acceptedObjects,
+  agents,
   attentionItems,
   coreEvents,
   memberships,
@@ -165,7 +166,9 @@ beforeEach(async () => {
   server = await startTestServer(handle, {
     // The real seam. Every other integration suite uses the stub, because their
     // questions are not about who is connected; this one's is.
-    session: { authenticateUpgrade: createUpgradeAuthenticator({ auth, logger }) },
+    session: {
+      authenticateUpgrade: createUpgradeAuthenticator({ auth, db: handle.db, logger }),
+    },
   });
 });
 
@@ -264,12 +267,53 @@ describe('an agent principal, from provisioning to the ledger', () => {
     // Read back through the library, from the cookie, by the same function the
     // WebSocket upgrade and every web page call. Catches: minting a row that no
     // real code path would accept, which is what a hand-built session would be.
-    const resolved = await getAtriumSession(auth, new Headers({ cookie: agent.session.cookie }));
+    const resolved = await getAtriumSession(
+      auth,
+      new Headers({ cookie: agent.session.cookie }),
+      handle.db,
+    );
     expect(resolved).toMatchObject({
       userId: agent.userId,
       principalKind: 'agent',
       emailVerified: true,
     });
+  });
+
+  it('stops resolving an agent session once its owner sidecar is deleted (#116 fix r3, F-C)', async () => {
+    /**
+     * The round-2 leak, from the post-mint side. `mintAgentSession` refuses an
+     * agent with NO sidecar — but a cookie outlives its mint. An agent that WAS
+     * configured, minted a session, and then had its `agents` row deleted
+     * (`DELETE FROM agents WHERE user_id = …`) still presents a valid Better
+     * Auth session, and round 2 kept letting it operate: ownerless, the "chain
+     * terminates at a human" invariant (#114) bypassed for the life of the
+     * cookie.
+     *
+     * `getAtriumSession` re-reads the sidecar on every resolution now, so the
+     * live cookie fails closed the moment the owner is gone — the same recheck
+     * the mint did, run again where the session is actually used.
+     *
+     * RED without the fix: a kind-only `getAtriumSession` returns a usable agent
+     * session here regardless of whether any `agents` row exists.
+     */
+    const agent = await agentInTheRoom();
+    const headers = new Headers({ cookie: agent.session.cookie });
+
+    // Live and usable while the sidecar exists.
+    expect(await getAtriumSession(auth, headers, handle.db)).toMatchObject({
+      userId: agent.userId,
+      principalKind: 'agent',
+    });
+
+    // De-sidecar it. `agents.channel_room_id` is referenced by nothing that
+    // blocks the delete; the row is the agent's config, and removing it removes
+    // the owner.
+    await handle.db.delete(agents).where(eq(agents.userId, agent.userId));
+
+    // The same cookie, the same function — now no session at all. Not a human,
+    // not a downgraded agent: null, the fail-closed verdict `principalKind ===
+    // null` gets.
+    expect(await getAtriumSession(auth, headers, handle.db)).toBeNull();
   });
 
   it('refuses to mint a session for a person — this is not a sign-in bypass', async () => {

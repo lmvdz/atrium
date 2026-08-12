@@ -176,6 +176,13 @@
       "when": 1786358400009,
       "tag": "0024_agent_channel_reciprocity",
       "breakpoints": true
+    },
+    {
+      "idx": 25,
+      "version": "7",
+      "when": 1786444800000,
+      "tag": "0025_terminal_states_are_a_table_fact",
+      "breakpoints": true
     }
   ]
 }

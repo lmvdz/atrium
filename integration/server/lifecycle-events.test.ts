@@ -205,6 +205,33 @@ describe('the agent/plan/session lifecycle appends, projects, and touches no cov
   it('runs ALL SIX lifecycle events without moving a ~ to a ✓ (the covenant is untouched)', async () => {
     const claimId = await seedMachineReading();
 
+    /**
+     * The whole-table census, not just the one seeded row (#116 fix r3, F-D).
+     *
+     * Asserting the seeded `~` is byte-unchanged catches a projection that
+     * REWRITES it — but not one that CERTIFIES a *different* or *new* object: a
+     * lifecycle arm that inserted its own `accepted_objects` row, or flipped some
+     * other object's `human_touched_at`, would leave this row alone and pass. So
+     * the covenant claim is measured across the table: how many objects exist,
+     * and how many are certified (`✓` — a human touch). If no lifecycle
+     * projection may reach a judgement column, BOTH numbers are invariant across
+     * the six events, and "byte-unchanged seeded row" becomes one corollary of
+     * the stronger "the certified census does not move".
+     */
+    const census = async () => {
+      const [row] = await handle.db
+        .select({
+          total: sql<number>`count(*)::int`,
+          certified: sql<number>`count(*) FILTER (WHERE ${acceptedObjects.humanTouchedAt} IS NOT NULL)::int`,
+        })
+        .from(acceptedObjects)
+        .where(eq(acceptedObjects.roomId, room.roomId));
+      return row ?? { total: 0, certified: 0 };
+    };
+    const censusBefore = await census();
+    // The seeded reading is a `~`: it counts as an object, and as zero certified.
+    expect(censusBefore).toEqual({ total: 1, certified: 0 });
+
     const before = await handle.db
       .select()
       .from(acceptedObjects)
@@ -325,6 +352,12 @@ describe('the agent/plan/session lifecycle appends, projects, and touches no cov
         'plan_settled',
       ]),
     );
+
+    // The census has not moved: no lifecycle arm inserted a certified row, and
+    // none flipped an existing one to `✓`. This is the assertion the
+    // single-row check could not make — a projection certifying some OTHER
+    // object would pass byte-equality on `claimId` and fail here.
+    expect(await census()).toEqual(censusBefore);
 
     const after = await handle.db
       .select()
@@ -507,6 +540,63 @@ describe('the agent/plan/session lifecycle appends, projects, and touches no cov
     });
     expect(refused.type).toBe('nack');
 
+    const [{ n } = { n: 0 }] = await handle.db
+      .select({ n: sql<number>`count(*)::int` })
+      .from(coreEvents)
+      .where(and(eq(coreEvents.roomId, room.roomId), eq(coreEvents.type, 'session_opened')));
+    expect(n).toBe(0);
+  });
+
+  /**
+   * A SESSION MAY OPEN ONLY UNDER AN OPEN PLAN (#116 fix r3, F-A). The composite
+   * FK checks the parent EXISTS, not that it is still open, so round 2 let
+   * `open_plan → settle_plan → open_session{planId}` all ack — grafting a fresh
+   * open session onto a settled plan whose receipt had already closed.
+   * `projectSessionOpened` now reads `plans.status` under the append lock; a
+   * settled parent aborts the projection, so the `session_opened` nacks and
+   * leaves no ledger row and no session.
+   *
+   * RED without the fix: revert the status check in `projectSessionOpened` and
+   * the open-session below acks, a session rows up under the settled plan, and
+   * the `session_opened` count is 1.
+   */
+  it('refuses opening a session under a SETTLED plan, and writes nothing', async () => {
+    const hexi = await connect(agentId, 'agent');
+    await hexi.command({
+      name: 'open_plan',
+      roomId: room.roomId,
+      agentUserId: agentId,
+      title: 'a plan that will close',
+      budgetLimitMicros: null,
+    });
+    const [{ id: planId } = { id: '' }] = await handle.db
+      .select({ id: plans.id })
+      .from(plans)
+      .where(eq(plans.roomId, room.roomId));
+
+    // Close the board.
+    expect((await hexi.command({ name: 'settle_plan', roomId: room.roomId, planId })).type).toBe(
+      'ack',
+    );
+
+    // Now try to graft a new session onto the settled plan.
+    const refused = await hexi.command({
+      name: 'open_session',
+      roomId: room.roomId,
+      planId,
+      harness: 'omp',
+      model: 'haiku',
+    });
+    expect(refused.type).toBe('nack');
+
+    // No session rowed up…
+    const sessionRows = await handle.db
+      .select({ id: sessions.id })
+      .from(sessions)
+      .where(eq(sessions.roomId, room.roomId));
+    expect(sessionRows).toHaveLength(0);
+    // …and no `session_opened` landed on the spine: the projection aborted the
+    // append, so there is nothing durable to replay.
     const [{ n } = { n: 0 }] = await handle.db
       .select({ n: sql<number>`count(*)::int` })
       .from(coreEvents)

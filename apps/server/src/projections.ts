@@ -677,6 +677,32 @@ async function projectSessionOpened(
 ): Promise<void> {
   // `planId` lands on the `sessions_plan_same_room_fk` composite FK: a parent
   // in another room, or no such plan, aborts here. One parent, one room, by DDL.
+  //
+  // But a composite FK checks EXISTENCE, not STATUS — it accepts a parent that
+  // has already settled (#116 fix r3, F-A). A settled plan's receipt has closed;
+  // grafting a fresh `open` session onto it re-opens work under a board that
+  // reported done. So this reads `plans.status` under the append lock, the same
+  // guarded-write shape `projectPlanSettled` / `projectSessionExit` use: a
+  // zero-row match throws and aborts the append, so a `session_opened` naming a
+  // settled/failed or absent plan leaves NO ledger row and the caller gets a
+  // `nack`. A session may open only under a plan that is still `open`.
+  const [parent] = await tx
+    .select({ status: plans.status })
+    .from(plans)
+    .where(and(eq(plans.id, event.planId), eq(plans.roomId, roomId)))
+    .for('share');
+  if (!parent) {
+    throw new CommandError(
+      'invalid',
+      `no plan "${event.planId}" to open a session under in room "${roomId}" — it does not exist here`,
+    );
+  }
+  if (parent.status !== 'open') {
+    throw new CommandError(
+      'invalid',
+      `plan "${event.planId}" is ${parent.status}, not open — a session may open only under an open plan, and this plan's receipt has already closed`,
+    );
+  }
   await tx.insert(sessions).values({
     id: event.sessionId,
     roomId,
