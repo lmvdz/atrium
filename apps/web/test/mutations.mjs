@@ -703,8 +703,44 @@ const LEDGER = [
        gauntlet saw the pin oscillate through at a boundary belt. */
     name: 'the budget is priced against the paged-to card and chases itself',
     file: 'src/components/attention/Pin.tsx',
-    find: '    const openHeight = openHeightRef.current > 0 ? openHeightRef.current : firstChildHeight;',
+    find: `    const cached = openHeightRef.current;
+    const openHeight =
+      cached.id === referenceId && cached.height > 0
+        ? cached.height
+        : openIsReferenceRef.current
+          ? firstChildHeight
+          : 0;`,
     replace: '    const openHeight = firstChildHeight;',
+    test: 'test/pin-bound.test.tsx',
+  },
+  {
+    /* Round 12, finding (the last): the convergence episode key must carry
+       nothing the budget moves. `fold.open.id` is the paged-to card at budget 0
+       and `fold.page` is normalised against a budget-dependent page count, so
+       putting them back in the content signature swings the key between the two
+       budget states at a boundary belt — the `Math.min` ratchet resets every pass
+       and the settling loop cycles forever (React aborts with a max-update-depth
+       error). CAUGHT by the constructed-boundary test. */
+    name: 'the episode key carries the budget-dependent fold terms again',
+    file: 'src/components/attention/Pin.tsx',
+    find: `      folded ? 'folded' : 'open',
+      referenceId,`,
+    replace: `      folded ? 'folded' : 'open',
+      fold.open?.id ?? '',
+      fold.page,
+      referenceId,`,
+    test: 'test/pin-bound.test.tsx',
+  },
+  {
+    /* Round 12: the reference card's box enters the key quantised to 0.1px, not
+       rounded to the pixel, so a sub-pixel shrink across a row threshold
+       (72.49→72.01) changes the key, ends the episode and lets the budget
+       recover. `Math.round` collapses both to 72 and pins the stale lower budget.
+       CAUGHT by the sub-pixel recovery test. */
+    name: 'the episode key rounds the card box to the pixel and sticks a stale budget',
+    file: 'src/components/attention/Pin.tsx',
+    find: '      decipx(boxes?.open ?? 0),',
+    replace: '      Math.round(boxes?.open ?? 0),',
     test: 'test/pin-bound.test.tsx',
   },
   {

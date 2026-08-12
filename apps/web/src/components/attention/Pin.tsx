@@ -42,6 +42,7 @@ import type { AttentionItem, GlyphCount, PinFold, TrailerSummary } from '../mode
 import {
   beltCss,
   foldPin,
+  hardestFirst,
   PIN_COMPACT_BUDGET,
   pinBeltFor,
   pinBudgetForBelt,
@@ -174,26 +175,38 @@ export function Pin({
   /* WHAT THE LAST MEASUREMENT SAW, so a measurement that has learned nothing
      new can stop rather than commit. See the convergence note on `measure`. */
   const settledRef = useRef<{ key: string; belt: number; budget: number } | null>(null);
-  /* Everything about the pin's content that the BUDGET does not decide — the
-     items, which one is open, which page, whether the pin is folded. A change
-     here is news from outside, and it ends the settling episode below. */
+  /* THE ITEM SET, and nothing the budget moves. The convergence episode is keyed
+     on this: the owed and clean items (id + state + count), which card is the
+     reference, and whether the pin is folded — every input the budget does NOT
+     decide. It deliberately does NOT carry `fold.open.id` or `fold.page`: at
+     budget 0 the fold PAGES a different card and normalises the page against a
+     different page count, so those two moved with the budget, and keying on them
+     made the episode key swing between the budget states at a boundary belt — the
+     `Math.min` ratchet reset every pass and the settling loop cycled (round 3's
+     residual). A change here is news from outside, and it ends the episode. */
   const contentRef = useRef('');
-  /* THE REFERENCE OPEN CARD'S HEIGHT, AND WHETHER IT IS WHAT IS DRAWN.
+  /* THE REFERENCE ID the budget prices the open card against, stashed for the
+     stable `measure` callback. The reference is the hardest owed item (or `openId`
+     when it is owed) — a pure function of the items, NOT of the budget. */
+  const referenceIdRef = useRef('');
+  /* THE REFERENCE OPEN CARD'S HEIGHT, KEYED BY THE REFERENCE IT MEASURED, and
+     whether that reference is what is currently drawn.
      The budget is "how many compressed rows fit BESIDE THE OPEN CARD", and the
-     open card that shows whenever a row shows is the hardest owed item (or
-     `openId`) — a pure function of the items, NOT of the budget. At budget 0 the
-     pin has no room for a row, so it PAGES the single card it can show for
-     reachability (records.ts `foldPin`); that paged-to card is a paging artifact
-     and must not be what the budget is priced against, or the budget depends on
-     the card, which depends on the budget: at a boundary belt with the reference
-     card tall and a paged card short, `measure` reads tall→0 rows, renders the
-     short paged card, reads short→1 row, renders the reference, reads tall→0 …
-     forever, and the episode key changes every pass so the ratchet never bites.
-     So `measure` reads the first child's height only while the reference is what
-     is drawn — page 0, or any budget ≥ 1 — and reuses the last reference height
-     it saw otherwise. Page 0 always draws the reference, so the cache is seeded
-     before the user can ever page away from it. */
-  const openHeightRef = useRef(0);
+     open card that shows whenever a row shows is the reference — NOT the budget.
+     At budget 0 the pin has no room for a row, so it PAGES the single card it can
+     show for reachability (records.ts `foldPin`); that paged-to card is a paging
+     artifact and must not be what the budget is priced against, or the budget
+     depends on the card, which depends on the budget, and the two chase each
+     other. So `measure` caches the first child's height only while the reference
+     is what is drawn — page 0, or any budget ≥ 1 — and reuses it otherwise, but
+     ONLY when the cache still holds THIS reference: a height measured for a
+     previous reference (or a reference laid out at zero, then paged, then made
+     visible) must not be priced for a different card. When there is no height for
+     the current reference and the reference is not what is drawn, the fixed cost
+     falls back to the allowance rather than pricing whichever card the budget
+     happened to page to. Page 0 always draws the reference, so the cache is
+     seeded before the user can page away from it. */
+  const openHeightRef = useRef<{ id: string; height: number }>({ id: '', height: 0 });
   const openIsReferenceRef = useRef(true);
 
   const measure = useCallback(() => {
@@ -227,14 +240,23 @@ export function Pin({
        three-title-line allowance that answers before there is a page to read.
        `pinFixedCost` falls back to that allowance when the card has no box. */
     const firstChildHeight = px(list?.firstElementChild);
-    /* Price the open card against the REFERENCE, not the paged-to one. Cache the
-       first child's height only while the reference is what is drawn; otherwise
-       (budget 0, paged off page 0) reuse the last reference height, so the card
-       the budget decides cannot feed back into the budget. See `openHeightRef`. */
+    /* Price the open card against the REFERENCE, not the paged-to one, and only
+       reuse a cached height that still belongs to THIS reference. Cache the first
+       child's height while the reference is what is drawn; otherwise (budget 0,
+       paged off page 0) reuse the reference's cached height when we have it, and
+       fall back to the allowance (openHeight 0 → `pinFixedCost`) rather than
+       pricing whatever card the budget paged to. See `openHeightRef`. */
+    const referenceId = referenceIdRef.current;
     if (openIsReferenceRef.current && firstChildHeight > 0) {
-      openHeightRef.current = firstChildHeight;
+      openHeightRef.current = { id: referenceId, height: firstChildHeight };
     }
-    const openHeight = openHeightRef.current > 0 ? openHeightRef.current : firstChildHeight;
+    const cached = openHeightRef.current;
+    const openHeight =
+      cached.id === referenceId && cached.height > 0
+        ? cached.height
+        : openIsReferenceRef.current
+          ? firstChildHeight
+          : 0;
     const boxes =
       list === null
         ? null
@@ -260,12 +282,27 @@ export function Pin({
        that SHRANK raises the budget again rather than being pinned to the worst
        thing ever measured. `test/pin-bound.test.tsx` drives the loop with cards
        of DIFFERENT heights and asserts it commits nothing once settled; assuming
-       convergence is how a render loop ships. */
+       convergence is how a render loop ships.
+
+       EVERY TERM IN THIS KEY IS BUDGET-INDEPENDENT — an allowlist, not a
+       subtraction. The room (viewport, container), the reference card's box (not
+       the paged-to card's — `openHeight` above is the reference), the clean box,
+       and the content signature (`contentRef`, the item set + reference id +
+       folded, NOT `fold.open.id`/`fold.page`). So the key holds constant across
+       the two budget states at a boundary belt where the overflow control's glyph
+       tally wraps and `chrome` swings non-monotonically — and a key that holds is
+       exactly what lets `Math.min` ratchet the applied budget down to its fixed
+       point instead of resetting every pass. The box heights are quantised to
+       0.1px, not rounded to the pixel, so a sub-pixel shrink of the reference
+       across a row threshold (72.49→72.01 at available ~154) DOES change the key
+       and end the episode, letting the budget recover; `Math.round` stuck both at
+       72 and pinned the stale lower budget. */
+    const decipx = (n: number) => Math.round(n * 10) / 10;
     const key = [
       Math.round(viewport),
       Math.round(containerHeight),
-      Math.round(boxes?.open ?? 0),
-      Math.round(boxes?.clean ?? 0),
+      decipx(boxes?.open ?? 0),
+      decipx(boxes?.clean ?? 0),
       contentRef.current,
     ].join('|');
     const settled = settledRef.current;
@@ -303,12 +340,36 @@ export function Pin({
      It is a LAYOUT effect so the first measurement lands before paint — see
      `useIsomorphicLayoutEffect`. */
   useIsomorphicLayoutEffect(() => {
+    /* THE REFERENCE, AND THE EPISODE KEY'S CONTENT HALF — both budget-independent.
+       The reference is the card the budget is priced against: the hardest owed
+       item, or `openId` when it is owed (the same rule `foldPin` uses at budget ≥
+       1). The content signature is the owed and clean item sets (id + state), the
+       reference id, and whether the pin is folded — the whole of what the pin
+       shows that the BUDGET does not decide. It carries neither `fold.open.id`
+       (which is the paged-to card at budget 0) nor `fold.page` (normalised against
+       a budget-dependent page count): those are what made the key swing between
+       budget states at a boundary and defeated the ratchet. */
+    const owedItems = hardestFirst(items.filter((item) => needsViewer(item.state)));
+    const cleanItems = hardestFirst(items.filter((item) => !needsViewer(item.state)));
+    const referenceId =
+      (openId !== undefined && owedItems.some((item) => item.id === openId)
+        ? openId
+        : owedItems[0]?.id) ?? '';
+    referenceIdRef.current = referenceId;
+    const sig = (list: readonly AttentionItem[]) =>
+      list
+        .map(
+          (item) =>
+            `${item.id}:${item.state.kind}:${item.state.verification}:${item.state.owedToViewer ? 1 : 0}:${item.state.irreversible ? 1 : 0}`,
+        )
+        .join(',');
     contentRef.current = [
-      items.length,
-      fold.open?.id ?? '',
-      fold.page,
-      fold.clean.length,
       folded ? 'folded' : 'open',
+      referenceId,
+      owedItems.length,
+      sig(owedItems),
+      cleanItems.length,
+      sig(cleanItems),
     ].join('/');
     /* Whether the card currently drawn is the reference the budget is priced
        against: the reference is drawn at any budget ≥ 1 and at page 0. When it

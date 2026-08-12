@@ -1027,6 +1027,246 @@ describe('the pin re-measures when its own boxes change', () => {
 });
 
 /* ---------------------------------------------------------------------------
+ * THE CONVERGENCE EPISODE KEY CARRIES NOTHING THE BUDGET MOVES.
+ *
+ * Round 3 fixed the measured HEIGHT (the budget is priced against the reference
+ * card, not the paged-to one) but left the settling episode's KEY carrying
+ * budget-DEPENDENT terms — `fold.open.id` (the paged card at budget 0) and the
+ * normalised `fold.page`. At a boundary belt where the overflow control's glyph
+ * tally wraps differently across the one-row budget boundary, `chrome` swings
+ * non-monotonically between the two budget states, and because the key differed
+ * between those states the `Math.min` ratchet reset every pass and the loop
+ * cycled: pass→1, pass→0, pass→1, … The key is now an ALLOWLIST of
+ * budget-independent inputs, so it holds constant across the two states and the
+ * ratchet drives the applied budget to its fixed point by construction.
+ *
+ * This drives codex's EXACT constructed boundary (viewport 1100 → 340px belt,
+ * container 318, reference 180 / paged 168, row cost 41, page 2, a control whose
+ * chrome swings 90↔104 with the tally wrap) and asserts a fixed point — plus the
+ * sub-pixel recovery the pixel-rounded key stuck (72.49→72.01 at available
+ * ~154.25 raises the budget 1→2, which `Math.round` pinned by collapsing both to
+ * 72). The layout here CARRIES THE FEEDBACK the loop runs on: the control's
+ * height depends on how many compressed rows were cut (the tally it renders), and
+ * the list clips to its own inline belt, so the loop genuinely runs in jsdom.
+ * ------------------------------------------------------------------------- */
+describe('the convergence episode key carries nothing the budget moves', () => {
+  interface FakeObserver {
+    readonly targets: Element[];
+    live: boolean;
+    fire: () => void;
+  }
+  const observers: FakeObserver[] = [];
+  const PER_ROW = PIN_GEOMETRY.row + PIN_GEOMETRY.gap; // 41
+  /* the constructed boundary's dimensions — every one of codex's numbers */
+  let viewport = 1100;
+  let pane = 318;
+  let baseChrome = 50; // the head and the trailer: chrome there whatever the budget is
+  let cardHeight = 168; // the paged-to card
+  let cardHeights: Record<string, number> = {};
+  /* THE CONTROL'S HEIGHT IS THE FEEDBACK. Its glyph tally wraps differently once a
+     compressed row is cut, so its box — and therefore the pin's whole chrome —
+     depends on the budget. At budget 0 (no compressed row) the tally is short
+     (chrome 90); at budget ≥ 1 it wraps (chrome 104). That non-monotone swing
+     across the budget boundary is exactly what made the old key oscillate. */
+  let controlFor = (compactRows: number): number => (compactRows >= 1 ? 54 : 40);
+  let realRect: () => DOMRect;
+  let realObserver: typeof ResizeObserver | undefined;
+  let realHeight: number;
+
+  function laidOut(element: Element): number {
+    if (element.tagName === 'ARTICLE') {
+      const id = element.getAttribute('data-attention-id');
+      return id !== null && cardHeights[id] !== undefined ? cardHeights[id] : cardHeight;
+    }
+    if (element.hasAttribute('data-pin-list')) {
+      const items = element.querySelectorAll('[data-attention-id]').length;
+      const article = element.querySelector('article');
+      const card = article === null ? 0 : laidOut(article);
+      const content = card + Math.max(0, items - 1) * PER_ROW;
+      const cap = /max-height:\s*([\d.]+)px/.exec(element.getAttribute('style') ?? '');
+      return cap === null ? content : Math.min(Number(cap[1]), content);
+    }
+    if (element.getAttribute('data-region') === 'needs-you') {
+      const list = element.querySelector('[data-pin-list]');
+      const control = element.querySelector('[data-pin-overflow]');
+      const compactRows =
+        list === null ? 0 : list.querySelectorAll('[data-attention-id]').length - 1;
+      return (
+        baseChrome +
+        (list === null ? 0 : laidOut(list)) +
+        (control === null ? 0 : controlFor(Math.max(0, compactRows)))
+      );
+    }
+    return 0;
+  }
+
+  beforeEach(() => {
+    observers.length = 0;
+    viewport = 1100;
+    pane = 318;
+    baseChrome = 50;
+    cardHeight = 168;
+    cardHeights = {};
+    controlFor = (compactRows: number) => (compactRows >= 1 ? 54 : 40);
+    realHeight = window.innerHeight;
+    Object.defineProperty(window, 'innerHeight', {
+      configurable: true,
+      get: () => viewport,
+    });
+    Object.defineProperty(HTMLElement.prototype, 'clientHeight', {
+      configurable: true,
+      get(this: HTMLElement) {
+        return this.firstElementChild?.getAttribute('data-region') === 'needs-you' ? pane : 0;
+      },
+    });
+    realRect = Element.prototype.getBoundingClientRect;
+    Element.prototype.getBoundingClientRect = function rect(this: Element): DOMRect {
+      const height = laidOut(this);
+      return {
+        height,
+        width: 0,
+        top: 0,
+        left: 0,
+        right: 0,
+        bottom: height,
+        x: 0,
+        y: 0,
+        toJSON: () => ({}),
+      } as DOMRect;
+    };
+    realObserver = globalThis.ResizeObserver;
+    globalThis.ResizeObserver = class {
+      private readonly record: FakeObserver;
+      constructor(callback: () => void) {
+        this.record = { targets: [], live: true, fire: callback };
+        observers.push(this.record);
+      }
+      observe(target: Element) {
+        this.record.targets.push(target);
+      }
+      unobserve() {}
+      disconnect() {
+        this.record.live = false;
+      }
+    } as unknown as typeof ResizeObserver;
+  });
+
+  afterEach(() => {
+    Element.prototype.getBoundingClientRect = realRect;
+    delete (HTMLElement.prototype as { clientHeight?: number }).clientHeight;
+    if (realObserver === undefined) {
+      (globalThis as { ResizeObserver?: typeof ResizeObserver }).ResizeObserver = undefined;
+    } else {
+      globalThis.ResizeObserver = realObserver;
+    }
+    Object.defineProperty(window, 'innerHeight', { configurable: true, value: realHeight });
+  });
+
+  function reshape() {
+    act(() => {
+      for (const observer of [...observers].filter((o) => o.live)) observer.fire();
+    });
+  }
+
+  function budgetOf(container: HTMLElement): string | null {
+    return container.querySelector('[data-pin-list]')?.getAttribute('data-pin-budget') ?? null;
+  }
+
+  function openCardId(container: HTMLElement): string | null {
+    return (
+      container.querySelector('[data-pin-list] article')?.getAttribute('data-attention-id') ?? null
+    );
+  }
+
+  /* CATCHES: any budget-dependent term returning to the episode key
+     (`fold.open.id`, `fold.page`) — under which this boundary oscillates forever
+     and React aborts the commit with a max-update-depth error rather than
+     settling. Also catches pricing the paged-to card instead of the cached
+     reference (the round-3 win). */
+  it('codex’s constructed boundary settles at its floor and stops committing', () => {
+    const items = f.manyOwed(34);
+    const refId = foldPin(items).open?.id as string;
+    /* the reference is TALLER than the paged-to card: 180 vs 168. Priced against
+       the reference there is no room for a compressed row beside it at the tight
+       chrome, one at the loose chrome — the 1↔0 two-cycle. */
+    cardHeights[refId] = 180;
+
+    /* the two budget states the boundary swings between, stated as the ladder
+       sees them: 90px chrome (budget 0, short tally) admits one row beside the
+       180px reference; 104px chrome (budget ≥ 1, wrapped tally) admits none. The
+       old key differed between these two states, so the ratchet never engaged. */
+    expect(pinBudgetForBelt(pane - 90, { open: 180, clean: 0 })).toBe(1);
+    expect(pinBudgetForBelt(pane - 104, { open: 180, clean: 0 })).toBe(0);
+
+    const { container } = render(
+      <Pin items={items} lastCheck="12:29" trailer={TRAILER} viewer="lars" />,
+    );
+    /* the ratchet takes the floor of the episode: 0, the only non-clipping state
+       (a row shown at budget 1 wraps the control past the belt). */
+    expect(budgetOf(container), 'the pin did not settle at the ratcheted floor').toBe('0');
+    expect(openCardId(container), 'page 0 opens the reference').toBe(refId);
+
+    /* page to codex's page 2 — the budget-0 branch pages the CARD, so a DIFFERENT
+       card is now drawn. Under the old key `fold.open.id` and `fold.page` moved
+       with this, swinging the key between budget states. */
+    const control = () => container.querySelector('[data-pin-overflow]') as HTMLElement;
+    fireEvent.click(control());
+    fireEvent.click(control());
+    expect(container.querySelector('[data-pin-page]')?.getAttribute('data-pin-page')).toBe('3/34');
+    const paged = openCardId(container);
+    expect(paged, 'paging drew the same card').not.toBe(refId);
+    expect(budgetOf(container), 'the paged-to card moved the budget').toBe('0');
+
+    /* and it is a FIXED POINT: reshapes commit nothing. One observer per commit,
+       so a stable observer count is a stable loop. Under a budget-dependent key
+       this count climbs without bound (or React throws first). */
+    const settled = observers.length;
+    for (let i = 0; i < 12; i += 1) reshape();
+    expect(
+      observers.length,
+      'the settling loop never reached a fixed point — the key still swings with the budget',
+    ).toBe(settled);
+    expect(budgetOf(container)).toBe('0');
+    expect(openCardId(container), 'the reshapes moved the paged card').toBe(paged);
+  });
+
+  /* CATCHES: `Math.round` (or any per-pixel rounding) returning to the key, which
+     collapses 72.49 and 72.01 to the same 72 and pins the stale lower budget so
+     the pin cannot recover when its reference card shrinks across a row
+     threshold. The key quantises to 0.1px, so the threshold crossing changes it. */
+  it('a sub-pixel shrink of the reference across a row threshold raises the budget', () => {
+    /* available ≈ 154.25: viewport 900 gives a 306px belt, but the pane binds —
+       244.25px of pane less 90px of chrome (control present, no tally swing here).
+       Beside a 72.49px card that leaves room for exactly one compressed row; a
+       72.01px card leaves room for two. The crossing is a quarter-pixel wide. */
+    viewport = 900;
+    pane = 244.25;
+    controlFor = () => 40; // constant chrome: this case is about the height term, not the swing
+    const items = f.manyOwed(8);
+    const refId = foldPin(items).open?.id as string;
+    cardHeights[refId] = 72.49;
+
+    expect(pinBudgetForBelt(154.25, { open: 72.49, clean: 0 }), 'boundary setup').toBe(1);
+    expect(pinBudgetForBelt(154.25, { open: 72.01, clean: 0 }), 'boundary setup').toBe(2);
+
+    const { container } = render(
+      <Pin items={items} lastCheck="12:29" trailer={TRAILER} viewer="lars" />,
+    );
+    expect(budgetOf(container), 'the pin did not settle at one row').toBe('1');
+
+    /* the reference shrinks a quarter of a pixel back under the threshold. Nothing
+       else moves. A pixel-rounded key cannot tell 72.49 from 72.01 and stays
+       pinned at one row; the 0.1px key ends the episode and re-derives two. */
+    cardHeights[refId] = 72.01;
+    reshape();
+    expect(
+      budgetOf(container),
+      'the sub-pixel shrink did not recover the row — the key rounded it away',
+    ).toBe('2');
+  });
+});
+
+/* ---------------------------------------------------------------------------
  * THE WAY OUT OF THE FOLD IS NOT INSIDE THE THING THAT CLIPS.
  *
  * Found by the blind cross-lineage review of round 5: the row budget is computed
