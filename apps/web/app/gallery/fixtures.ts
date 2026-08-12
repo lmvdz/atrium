@@ -70,7 +70,7 @@ import {
  */
 const HERE = 'users-migration';
 
-export const MESSAGES: Readonly<Record<string, MessageRecord>> = {
+const RAW_MESSAGES: Readonly<Record<string, MessageRecord>> = {
   m2: {
     id: 'm2',
     at: '09:04',
@@ -219,6 +219,19 @@ export const MESSAGES: Readonly<Record<string, MessageRecord>> = {
     room: HERE,
   },
 };
+
+/**
+ * Every message in this gallery conversation is authored by a PERSON, so each
+ * record declares `authorKind: 'human'`. #101 made an absent kind fail CLOSED to
+ * `'unknown'` (a deleted author must never render as a person), so this demo's
+ * human speech says it is human rather than leaning on a default — and the spread
+ * lets any individual record override it (an agent message would set `'agent'`).
+ * `MESSAGES` and `RECORDS` reference the SAME normalized objects, so a citation
+ * minted from one resolves against the other (the fingerprint is identical).
+ */
+export const MESSAGES: Readonly<Record<string, MessageRecord>> = Object.fromEntries(
+  Object.entries(RAW_MESSAGES).map(([id, message]) => [id, { authorKind: 'human', ...message }]),
+);
 
 /**
  * The register as a list, for `<AttributionLedger>`. Every citation any frame

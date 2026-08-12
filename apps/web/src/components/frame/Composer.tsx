@@ -685,12 +685,35 @@ export function Composer({
  */
 function ReplyBanner({ to, onCancel }: { readonly to: Quotation; readonly onCancel?: () => void }) {
   const reply = useAttribution(to, 'Composer reply banner');
+  /* A CITED MACHINE STAYS A MACHINE (#101, round-2 finding 2). The banner names
+     whoever the record says wrote the replied-to message; if that is an agent (or
+     an unreadable `unknown`), it wears the machine register — the squared marker,
+     the kind in a word, `data-author-kind` — and its words are not dressed in the
+     human curly-quote register. Read off the resolved record, never a flag. */
+  const nonHuman = reply.authorKind === 'agent' || reply.authorKind === 'unknown';
+  const kindWord =
+    reply.authorKind === 'agent' ? 'agent' : reply.authorKind === 'unknown' ? 'unknown' : null;
   return (
-    <div className={`${styles.ctxbar} ${styles.ctxbarReply}`} data-binding="replying">
+    <div
+      className={`${styles.ctxbar} ${styles.ctxbarReply}`}
+      data-binding="replying"
+      data-author-kind={nonHuman ? reply.authorKind : undefined}
+    >
       <span aria-hidden="true">↩</span>
       <b>REPLYING TO</b>
       <span data-attribution={reply.messageId}>
-        {reply.actor} {reply.at}
+        <span
+          className={nonHuman ? styles.ctxMachineWho : undefined}
+          data-participant-kind={reply.authorKind}
+        >
+          {reply.actor}
+        </span>
+        {kindWord === null ? null : (
+          <span className={styles.ctxKindWord} data-author-kind-word={reply.authorKind}>
+            {kindWord}
+          </span>
+        )}{' '}
+        {reply.at}
       </span>
       {/* TRUNCATED QUOTED WORDS, WITH A ROUTE. Nothing in CONVENTIONS governed
           this until round 6, and a quotation is the one string on the page where
@@ -701,10 +724,13 @@ function ReplyBanner({ to, onCancel }: { readonly to: Quotation; readonly onCanc
       <span
         className={styles.ctxbarIn}
         data-quoted={quotationRef(reply)}
+        data-author-kind={nonHuman ? reply.authorKind : undefined}
         data-truncates={`element:[data-message-id="${reply.messageId}"]`}
         title={reply.text}
       >
-        “{reply.text}”
+        {/* A machine's words are not the human quoted register — no curly quotes;
+            the squared marker and the word above say a machine wrote them. */}
+        {nonHuman ? reply.text : `“${reply.text}”`}
       </span>
       <button
         aria-label="Cancel reply"

@@ -16,12 +16,16 @@ import { renderRefusing, renderWith } from './harness';
 
 afterEach(cleanup);
 
+/* Human fixtures declare `authorKind: 'human'`: round 2 made an absent kind fail
+   CLOSED to `'unknown'` (a deleted author must not render as a person), so a human
+   fixture says it is one rather than leaning on a default. */
 const typed: MessageRecord = {
   id: 'm21',
   at: '13:07',
   actor: 'lars',
   text: 'Hold the cutover until 418 is explained.',
   origin: 'typed',
+  authorKind: 'human',
 };
 
 const seeded: MessageRecord = {
@@ -30,6 +34,7 @@ const seeded: MessageRecord = {
   actor: 'priya',
   text: 'Cut over Friday 1 Aug.',
   origin: 'seeded',
+  authorKind: 'human',
   room: 'identity-service',
 };
 
@@ -39,6 +44,7 @@ const chosen: MessageRecord = {
   actor: 'lars',
   text: 'Keep dual-write on until parity holds for 7 consecutive days',
   origin: 'chosen',
+  authorKind: 'human',
 };
 
 describe('the quotation invariant', () => {

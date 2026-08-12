@@ -588,14 +588,22 @@ describe('persisted replay view', () => {
    * Mutation: turn a nullable author join into a named human. The adapter then
    * invents an identity that is absent from the persisted message record.
    */
-  it('labels a missing attribution as unavailable instead of inventing a participant', () => {
+  it('a deleted author reads as unavailable AND fails closed to the not-a-person register', () => {
+    /* THE DELETED-AUTHOR PATH, FAIL CLOSED (#101, round-2 finding 1). When an
+       author's `users` row is gone (`messages.author_id` is ON DELETE SET NULL),
+       the join yields no display name and no `principal_kind`. Round 1 mapped the
+       absent kind to `'human'`, so an agent's genuine message rendered
+       "author unavailable" in the HUMAN register — the exact masquerade AGENTS.md
+       forbids. It now fails CLOSED to `'unknown'`: visibly not a person. */
     const snapshot = data();
     const first = snapshot.messages[0];
     if (!first) throw new Error('fixture message missing');
-    snapshot.messages[0] = { ...first, author: null };
+    snapshot.messages[0] = { ...first, author: null, authorKind: null };
 
     const view = replayView(snapshot, 'alice');
     expect(view.records[0]?.actor).toBe('author unavailable');
+    // the kind is 'unknown', NOT 'human' — the record is painted not-a-person
+    expect(view.records[0]?.authorKind).toBe('unknown');
     // The room head's members derive from this participant source; assert it.
     expect(view.participants.map((p) => ({ name: p.name, kind: p.kind }))).toEqual([
       { name: 'alice', kind: 'human' },

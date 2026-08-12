@@ -188,19 +188,17 @@
   min-width: 0;
 }
 
-/* THE AGENT VOICE REGISTER (#101). An agent's words are its OWN — real,
-   attributed, quotable — so they are NOT the receded system voice (--tx2, the
-   page's framing). They stay full-strength reading text (--tx1) but in the
-   machine's monospace: the same machine/human typographic split CONVENTIONS.md
-   states and `globals.css` names, applied at the author end. A person's sentence
-   is the proportional reading font; a machine's is mono, and the two are never
-   the same shape. No new hue — blue/green/amber/red keep their meanings — because
-   the register is carried by the FONT and by the word `agent` beside the name,
-   not by colour. `'unknown'` — an author whose kind failed closed — takes the
-   same not-a-person treatment, which is the whole point of failing closed. */
-.machineVoice {
-  font-family: 'JetBrains Mono Variable', ui-monospace, monospace;
-}
+/* THE AGENT VOICE REGISTER (#101) IS STRUCTURAL, NOT A FONT SWAP. An agent's
+   words are its OWN — real, attributed, quotable — and the register that marks
+   them a machine's is the neutral squared marker before the name (`.actorMachine`
+   below) and the word `agent`/`unknown` at the head of the body (`.authorKindWord`),
+   carried on the DOM as `data-author-kind`. It is NOT a typeface: WIRE is one
+   font everywhere (CONVENTIONS.md, "Typography", which states the distinction
+   "may never depend on a font swap alone"), and the round-2 gauntlet found the
+   former `.machineVoice` font swap was doubly dead — it lost specificity to
+   `globals.css`'s `[data-frame] *` rule and swapped one mono for another. No new
+   hue either — blue/green/amber/red keep their meanings. `'unknown'` — an author
+   whose kind failed closed — takes the same not-a-person marker. */
 
 /* The kind, worded, at the head of the body column. `atr-lbl` supplies the
    letter-spacing idiom; this supplies the muted tone and the gap to the words,
@@ -235,6 +233,28 @@
    (absent) nor the agent's filled square — matching the roster's `.presUnknown`
    fail-closed marker. Wins over the filled rule above by following it. */
 .actorMachine[data-participant-kind='unknown']::before {
+  background: transparent;
+  border: 1px dashed var(--tx2);
+}
+
+/* THE SAME SQUARED MARKER, for a cited machine in the reply line (#101, round-2
+   finding 2). A distinct name from `.actorMachine` on purpose: the reply-line
+   marker sits on its own inline span, and `.actor` is a truncating class whose
+   name is a prefix of `.actorMachine` — so the truncation audit would demand a
+   route from an element that does not clip. `.machineMark` shares no prefix with
+   a truncating class and carries the identical square. */
+.machineMark::before {
+  content: '';
+  display: inline-block;
+  width: 6px;
+  height: 6px;
+  margin-right: 4px;
+  vertical-align: baseline;
+  border-radius: 1px;
+  background: var(--tx2);
+}
+
+.machineMark[data-participant-kind='unknown']::before {
   background: transparent;
   border: 1px dashed var(--tx2);
 }

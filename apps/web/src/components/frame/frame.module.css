@@ -412,6 +412,36 @@
   border: 1.5px dashed var(--tx2);
 }
 
+/* A CITED MACHINE IN THE REPLY BANNER keeps the machine register (#101, round-2
+   finding 2): the neutral squared marker before the replied-to name, the kind in
+   a word, and `data-author-kind` on the banner — so an agent one is replying to
+   is not laundered into the human quote register. Structural (a square and a
+   word), never a hue and never a font swap; WIRE is one typeface (CONVENTIONS.md).
+   The dashed hollow variant is the fail-closed `unknown`, matching `.presUnknown`. */
+.ctxMachineWho::before {
+  content: '';
+  display: inline-block;
+  width: 6px;
+  height: 6px;
+  margin-right: 4px;
+  vertical-align: baseline;
+  border-radius: 1px;
+  background: var(--tx2);
+}
+
+.ctxMachineWho[data-participant-kind='unknown']::before {
+  background: transparent;
+  border: 1px dashed var(--tx2);
+}
+
+.ctxKindWord {
+  margin: 0 4px 0 2px;
+  color: var(--tx2);
+  text-transform: uppercase;
+  font-size: 9.5px;
+  letter-spacing: 0.12em;
+}
+
 /* A PERSON'S NAME IS NOT CLIPPED HERE ANY MORE. Round 7: its declared route was
    "the row's title" — and `title=` is precisely what CONVENTIONS refuses as a
    route ("invisible to touch, invisible to a keyboard, announced inconsistently

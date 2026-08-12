@@ -257,12 +257,14 @@ function AuthoredRow({
   /* THE VOICE REGISTER (#101). An agent's words are its own — attributed, real,
      quotable — but AGENTS.md's "no synthesized speech" rule reaches the author
      end too: an agent's sentence may never render as a person's. So a non-human
-     author's row is painted in the machine's monospace (the same machine/human
-     typographic split CONVENTIONS states, `globals.css`) and names its kind in a
-     word, and the row carries `data-author-kind` so a reader, an audit and
-     replay can all tell a machine spoke. `'unknown'` — an author whose kind we
-     could not read — takes the same not-a-person register, failing closed. A
-     person's row is unchanged: the default treatment is the human one. */
+     author's row wears the machine register — a neutral squared marker before
+     the name (`.actorMachine`) and its kind stated in a word — and carries
+     `data-author-kind` so a reader, an audit and replay can all tell a machine
+     spoke. It is STRUCTURAL, not a font: WIRE is one typeface everywhere
+     (CONVENTIONS.md), so the square and the word carry the distinction, never a
+     typeface swap. `'unknown'` — an author whose kind we could not read — takes
+     the same not-a-person register, failing closed. A person's row is unchanged:
+     the default treatment is the human one. */
   const authorKind = attribution.authorKind;
   const nonHuman = authorKind === 'agent' || authorKind === 'unknown';
   const kindWord = authorKind === 'agent' ? 'agent' : authorKind === 'unknown' ? 'unknown' : null;
@@ -277,7 +279,6 @@ function AuthoredRow({
       !entry.body.some((segment) => segment.kind === 'code'));
   const authoredBody = (
     <div
-      className={nonHuman ? styles.machineVoice : undefined}
       data-row-body={attribution.messageId}
       data-author-voice={nonHuman ? authorKind : undefined}
     >
@@ -519,12 +520,34 @@ function formatBytes(size: number): string {
  */
 function ReplyLine({ to }: { readonly to: Quotation }) {
   const reply = useAttribution(to, 'TimelineRow reply');
+  /* A CITED MACHINE STAYS A MACHINE (#101, round-2 finding 2). The reply line
+     re-derives the replied-to author from the record; if that author is an agent
+     (or an unreadable `unknown`), its words may not be laundered into the human
+     register through the reply. It wears the same register the feed row does —
+     the neutral squared marker before the name and the kind stated in a word,
+     `data-author-kind` on the line — read off the resolved record, never a flag. */
+  const nonHuman = reply.authorKind === 'agent' || reply.authorKind === 'unknown';
+  const kindWord =
+    reply.authorKind === 'agent' ? 'agent' : reply.authorKind === 'unknown' ? 'unknown' : null;
   return (
     <span
       className={styles.reply}
+      data-author-kind={nonHuman ? reply.authorKind : undefined}
       data-truncates={`element:[data-message-id="${reply.messageId}"]`}
     >
-      ↩ {reply.actor} {reply.at} · <span data-quoted={quotationRef(reply)}>{reply.text}</span>
+      ↩{' '}
+      <span
+        className={nonHuman ? styles.machineMark : undefined}
+        data-participant-kind={reply.authorKind}
+      >
+        {reply.actor}
+      </span>
+      {kindWord === null ? null : (
+        <span className={styles.authorKindWord} data-author-kind-word={reply.authorKind}>
+          {kindWord}
+        </span>
+      )}{' '}
+      {reply.at} · <span data-quoted={quotationRef(reply)}>{reply.text}</span>
     </span>
   );
 }

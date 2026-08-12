@@ -43,11 +43,12 @@ export interface QuotedProps {
 export function Quoted({ quote, attributed = true, className }: QuotedProps) {
   const attribution = useAttribution(quote, 'Quoted');
   /* WHO WROTE THESE WORDS IS PART OF THE QUOTATION. An agent's words are real
-     and quotable, but rendering them in the human register — italic, the reading
-     font — would read as a person's. So a cited machine takes the machine
-     register (upright mono) and its source line names the kind, the same
-     no-synthesized-speech rule the feed row applies, reached through a citation.
-     Read off the resolved record, never a carried flag. */
+     and quotable, but rendering them in the human register — italic — would read
+     as a person's. So a cited machine takes the machine register (UPRIGHT, not
+     italic — a structural distinction, not a font swap; WIRE is one typeface) and
+     its source line names the kind, the same no-synthesized-speech rule the feed
+     row applies, reached through a citation. Read off the resolved record, never
+     a carried flag. */
   const nonHuman = attribution.authorKind === 'agent' || attribution.authorKind === 'unknown';
   const kindWord =
     attribution.authorKind === 'agent'

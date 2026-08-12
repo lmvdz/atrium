@@ -54,12 +54,16 @@ import { renderBare, renderWith } from './harness';
 
 afterEach(cleanup);
 
+/* These fixtures declare `authorKind: 'human'` explicitly. Round 2 made an absent
+   kind FAIL CLOSED to `'unknown'` (a deleted author must not render as a person),
+   so a human fixture now says it is one rather than leaning on a default. */
 const priya: MessageRecord = {
   id: 'm10',
   at: '11:02',
   actor: 'priya',
   text: 'Cut over Friday 1 Aug.',
   origin: 'seeded',
+  authorKind: 'human',
   room: 'identity-service',
 };
 
@@ -69,6 +73,7 @@ const lars: MessageRecord = {
   actor: 'lars',
   text: 'Hold the cutover until 418 is explained.',
   origin: 'typed',
+  authorKind: 'human',
 };
 
 const chosen: MessageRecord = {
@@ -77,6 +82,7 @@ const chosen: MessageRecord = {
   actor: 'lars',
   text: 'Keep dual-write on until parity holds for 7 consecutive days',
   origin: 'chosen',
+  authorKind: 'human',
 };
 
 const RECORDS = [priya, lars, chosen];
@@ -1086,8 +1092,8 @@ describe('the row and the register it renders against are the same register', ()
     // The author's kind is a field a reader can see — it decides the voice
     // register — so a register that disagrees about it (a human's words rendered
     // as an agent's, or the reverse) is refused exactly like a disagreement about
-    // the name. `lars` carries no `authorKind`, which reads as `'human'`; the
-    // disagreement is an agent claiming the same words.
+    // the name. `lars` is `authorKind: 'human'`; the disagreement is an agent
+    // claiming the same words.
     authorKind: { authorKind: 'agent' },
     room: { room: 'identity-service' },
     attachments: {
@@ -1274,6 +1280,90 @@ describe('an agent’s authored words render in the agent voice register, never 
     // the source line names the kind, so the attribution is not a bare name that
     // reads as a person's
     expect(container.querySelector('[data-attribution]')?.textContent).toContain('· agent');
+  });
+
+  /* THE THREE CITATION SURFACES THAT RE-DERIVE actor+text (round-2 finding 2).
+     `<Quoted>` was already kind-aware, but the feed reply line, the composer's
+     reply banner and the receipt's provenance row each looked the record up
+     themselves and printed the words in the human register regardless of kind.
+     A machine's words must stay a machine's wherever they are cited. */
+
+  it('the feed reply line quotes an agent in the machine register, not a person’s', () => {
+    /* A PERSON replies to the agent, so the ROW is human (no register) and the
+       only machine markers on screen belong to the reply line — proving the reply
+       line carries the kind on its own, not by inheriting the row's. */
+    const humanReplier: MessageRecord = {
+      id: 'm-reply',
+      at: '13:12',
+      actor: 'lars',
+      text: 'Noted — I will pick it up.',
+      origin: 'typed',
+      authorKind: 'human',
+    };
+    const quotation = quotationFrom(scribe);
+    expect(quotation).not.toBeNull();
+    if (quotation === null) return;
+    const entry = messageEntry(humanReplier, { state: lars_state(), replyTo: quotation });
+    const { container } = renderWith([humanReplier, scribe], <TimelineRow entry={entry} />);
+
+    // the row itself is a person's — no register on it
+    expect(
+      container.querySelector('[data-row="message"]')?.getAttribute('data-author-kind'),
+    ).toBeNull();
+    // the reply line names the replied-to agent and carries the kind
+    const reply = container.querySelector('[data-truncates*="m-agent"]');
+    expect(reply?.getAttribute('data-author-kind')).toBe('agent');
+    expect(reply?.querySelector('[data-participant-kind="agent"]')?.textContent).toContain(
+      'atrium',
+    );
+    expect(reply?.querySelector('[data-author-kind-word="agent"]')?.textContent).toBe('agent');
+    // and the agent's replied-to words are not dressed in the human quote register
+    expect(reply?.textContent).not.toContain('“');
+  });
+
+  it('the composer reply banner quotes an agent in the machine register', () => {
+    const quotation = quotationFrom(scribe);
+    expect(quotation).not.toBeNull();
+    if (quotation === null) return;
+    const { container } = renderWith(
+      [scribe],
+      <Composer
+        binding={{ mode: 'replying', to: quotation }}
+        footNote=""
+        roomName="users-migration"
+      />,
+    );
+    const banner = container.querySelector('[data-binding="replying"]');
+    expect(banner?.getAttribute('data-author-kind')).toBe('agent');
+    expect(banner?.querySelector('[data-participant-kind="agent"]')?.textContent).toContain(
+      'atrium',
+    );
+    expect(banner?.querySelector('[data-author-kind-word="agent"]')?.textContent).toBe('agent');
+    // the excerpt carries the kind and is not the human curly-quote register
+    const excerpt = banner?.querySelector('[data-quoted]');
+    expect(excerpt?.getAttribute('data-author-kind')).toBe('agent');
+    expect(excerpt?.textContent).not.toContain('“');
+    expect(excerpt?.textContent).toContain('nothing was settled');
+  });
+
+  it('a receipt citing an agent renders the excerpt in the machine register', () => {
+    const quotation = quotationFrom(scribe);
+    expect(quotation).not.toBeNull();
+    if (quotation === null) return;
+    const receipt = {
+      ...f.RECEIPT,
+      provenance: [{ id: 'prov-agent', excerpt: quotation, note: null }],
+      corrections: [],
+    };
+    const { container } = renderWith([scribe, ...f.RECORDS], <ReceiptView receipt={receipt} />);
+    const row = container.querySelector('[data-jumps-to="m-agent"]');
+    expect(row?.getAttribute('data-author-kind')).toBe('agent');
+    expect(row?.querySelector('[data-participant-kind="agent"]')?.textContent).toContain('atrium');
+    expect(row?.querySelector('[data-author-kind-word="agent"]')?.textContent).toBe('agent');
+    const excerpt = row?.querySelector('[data-quoted]');
+    expect(excerpt?.getAttribute('data-author-kind')).toBe('agent');
+    expect(excerpt?.textContent).not.toContain('“');
+    expect(excerpt?.textContent).toContain('nothing was settled');
   });
 });
 

@@ -302,13 +302,42 @@ test.describe('a provisioned agent member renders as an agent, and its kind is t
       // the words are painted in the machine voice register
       await expect(agentRow.locator('[data-author-voice="agent"]')).toHaveCount(1);
       // the actor cell names the identity by the roster's own attribute
-      await expect(agentRow.locator('[data-participant-kind="agent"]')).toHaveCount(1);
+      const agentActor = agentRow.locator('[data-participant-kind="agent"]');
+      await expect(agentActor).toHaveCount(1);
+
+      // ---- COUPLING: attribution and the COMPUTED register ship together -------
+      // Round-2 finding 4: a `data-` marker can be present while the visual is
+      // gone, so this asserts the RENDERED register — the `::before` square the
+      // machine treatment computes — on the SAME row that is attributed to the
+      // agent above. If the register is dropped (the `.actorMachine` class, its
+      // `::before` rule, or the kind that keys it) while the agent stays
+      // attributed, `content`/`background` collapse and this fails. The two cannot
+      // pass independently: attribution without the machine visual is the exact
+      // masquerade #101 forbids.
+      const agentSquare = await agentActor.evaluate((el) => {
+        const s = getComputedStyle(el, '::before');
+        return { content: s.content, width: s.width, background: s.backgroundColor };
+      });
+      // a real square is drawn: content is present (not `none`) and it has size
+      expect(agentSquare.content).not.toBe('none');
+      expect(agentSquare.width).toBe('6px');
+      // the AGENT square is FILLED (a session-holding machine) — a painted fill,
+      // not the transparent no-op a removed rule would leave
+      expect(agentSquare.background).not.toBe('rgba(0, 0, 0, 0)');
+      expect(agentSquare.background).not.toBe('transparent');
 
       // ---- the human's message carries NONE of it: the two are never identical -
       await expect(humanRow).toHaveCount(1);
       await expect(humanRow).not.toHaveAttribute('data-author-kind', 'agent');
       await expect(humanRow.locator('[data-author-voice]')).toHaveCount(0);
       await expect(humanRow.locator('[data-author-kind-word]')).toHaveCount(0);
+      // and the human actor cell computes NO square — the register is the agent's
+      // alone, not a constant every row wears
+      const humanSquare = await humanRow
+        .locator('[data-attribution]')
+        .first()
+        .evaluate((el) => getComputedStyle(el, '::before').content);
+      expect(humanSquare === 'none' || humanSquare === '""' || humanSquare === '').toBe(true);
 
       // ---- flip the input: the same message, authored by a person now ---------
       await db.update(messages).set({ authorId: at.viewerId }).where(eq(messages.id, agentMsgId));

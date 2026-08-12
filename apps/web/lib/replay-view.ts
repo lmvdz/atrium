@@ -144,12 +144,15 @@ export function replayView(data: ReplayData, viewerId?: string) {
     actor: message.author ?? 'author unavailable',
     text: message.body,
     origin: 'seeded',
-    // The author's kind decides the voice register (#101). A present value is
-    // read through `participantKindOf` so a kind that cannot be read fails
-    // CLOSED to `'unknown'`, never softened to a person; an absent one (a
-    // pre-kind fixture, or an author row that is gone) is left off, which the
-    // record model reads as the historical `'human'` default.
-    ...(message.authorKind == null ? {} : { authorKind: participantKindOf(message.authorKind) }),
+    // The author's kind decides the voice register (#101), read through
+    // `participantKindOf` so it FAILS CLOSED: a value that cannot be read — and
+    // a NULL from a deleted author row (`messages.author_id` is ON DELETE SET
+    // NULL, so the join yields no `principal_kind`) — becomes `'unknown'`, a
+    // visibly-not-a-person register, NEVER softened to a person. Always set,
+    // never omitted: a deleted agent's genuine message must not fall through to
+    // a human default. `users.principal_kind` is NOT NULL, so a live author is
+    // always `'human'`/`'agent'` and only a gone author reads as `'unknown'`.
+    authorKind: participantKindOf(message.authorKind),
     room: data.room.name,
     attachments: message.attachments,
   }));

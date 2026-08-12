@@ -324,17 +324,35 @@ function ProvenanceRow({
      cites. */
   const excerpt = useAttribution(entry.excerpt, 'ReceiptView provenance');
   const location = sourceLocation(excerpt, useHere('ReceiptView provenance'));
+  /* A CITED MACHINE STAYS A MACHINE (#101, round-2 finding 2). The provenance row
+     re-derives its author from the cited record; if that author is an agent (or
+     an unreadable `unknown`), the receipt wears the machine register — the squared
+     marker, the kind in a word, `data-author-kind` — and the excerpt is not
+     dressed in the human curly-quote register. Read off the record, never a flag. */
+  const nonHuman = excerpt.authorKind === 'agent' || excerpt.authorKind === 'unknown';
+  const kindWord =
+    excerpt.authorKind === 'agent' ? 'agent' : excerpt.authorKind === 'unknown' ? 'unknown' : null;
   return (
     <button
       className={styles.prov}
       data-jumps-to={excerpt.messageId}
+      data-author-kind={nonHuman ? excerpt.authorKind : undefined}
       onClick={onJump === undefined ? undefined : () => onJump(excerpt.messageId)}
       type="button"
     >
       <span className={styles.provHead}>
-        <span className={styles.provWho} data-attribution={excerpt.messageId}>
+        <span
+          className={`${styles.provWho}${nonHuman ? ` ${styles.provMachineWho}` : ''}`}
+          data-attribution={excerpt.messageId}
+          data-participant-kind={excerpt.authorKind}
+        >
           {excerpt.actor}
         </span>
+        {kindWord === null ? null : (
+          <span className={styles.provKindWord} data-author-kind-word={excerpt.authorKind}>
+            {kindWord}
+          </span>
+        )}
         <span>{excerpt.at}</span>
         {/* THE SAME COMPARISON AS THE CARD'S SOURCE LINK, FROM THE SAME DOOR.
             Round 8, D3, in the opposite direction: `excerpt.room === null` read
@@ -362,8 +380,14 @@ function ProvenanceRow({
           record, and a quotation is the one string on the page where a
           hover-only remainder is least defensible (CONVENTIONS). So the excerpt
           renders in full and the pane scrolls, which is what a record does. */}
-      <span className={styles.provExcerpt} data-quoted={quotationRef(excerpt)}>
-        “{excerpt.text}”
+      <span
+        className={styles.provExcerpt}
+        data-quoted={quotationRef(excerpt)}
+        data-author-kind={nonHuman ? excerpt.authorKind : undefined}
+      >
+        {/* A machine's words are not the human quoted register — no curly quotes;
+            the squared marker and the word above say a machine wrote them. */}
+        {nonHuman ? excerpt.text : `“${excerpt.text}”`}
       </span>
       {/* THE PAGE'S NOTE, IN THE PAGE'S VOICE — and structurally so.
           Round 7: this was `Maybe<string>` printed raw, inside this same
