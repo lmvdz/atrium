@@ -106,6 +106,10 @@ export interface RoomFrameHandlers {
   readonly onRetypeToClaim?: (receiptId: string) => void;
   readonly onAcceptReceipt?: (receiptId: string, objectiveId: string | null) => void;
   readonly onAnswerReceipt?: (receiptId: string) => void;
+  /** Certify a `~` claim → `✓ verified` (#102). Human-only; gated on the viewer's kind. */
+  readonly onCertifyReceipt?: (receiptId: string) => void;
+  /** Retract an accepted `~` reading (claim or open_question) from current state. */
+  readonly onRemoveReceipt?: (receiptId: string) => void;
   readonly onSupersedeReceipt?: (retiredObjectId: string, replacementObjectId: string) => void;
   readonly onJumpToMessage?: (messageId: string) => void;
   /* The trace bar's other two seams, found by the counting test above rather
@@ -531,13 +535,20 @@ function Frame(props: RoomFrameProps) {
                             onAccept={on.onAcceptReceipt}
                             onAnswer={on.onAnswerReceipt}
                             onBack={on.onCloseReceipt}
+                            onCertify={on.onCertifyReceipt}
                             onJump={on.onJumpToMessage}
+                            onRemove={on.onRemoveReceipt}
                             onReopen={on.onReopen}
                             onRetypeToClaim={on.onRetypeToClaim}
                             onSupersede={on.onSupersedeReceipt}
                             pendingReplacementId={props.pendingReplacementId}
                             receipt={props.receipt}
                             supersessionCandidates={props.supersessionCandidates}
+                            /* The viewer's kind gates the certify/remove affordance:
+                               a machine may never certify (#102), and the gate is an
+                               allowlist so `unknown` is refused too. Flipping
+                               `viewer.kind` moves it, like every other kinded surface. */
+                            viewerKind={props.viewer.kind}
                           />,
                         )
                   }

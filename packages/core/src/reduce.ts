@@ -11,6 +11,7 @@ import {
   modelMintingGate,
   ownerConfirmRefusal,
   proposalBindingRefusal,
+  retractVerifiedClaimRefusal,
   selfStagedReadingRefusal,
   selfVerificationRefusal,
   uncertifiedTypeRefusal,
@@ -1266,6 +1267,29 @@ function applyObjectCorrected(
       claimant: after.payload.claimant,
       stagedBy,
     });
+    if (refusal) {
+      fail(state, event.id, refusal);
+      return false;
+    }
+  }
+
+  // ── A `✓ verified` vouch is not unmade by a silent retract (#68/#95, #110) ──
+  //
+  // The correction model already lets a member retract a confirmed object — a
+  // colleague's accepted commitment or decision is a legitimate room correction
+  // (`authority-matrix.test.ts`), and `planCorrection` refuses only re-retracting
+  // a withdrawn one. What that model never contained is the act the certify flow
+  // introduced: a claim a second, disinterested pair of eyes verified true. The
+  // round-1 build let ANY member silently withdraw that `✓ verified` — including
+  // another person's — with no precondition, the covenant breach #110 found.
+  // Unmaking a verification is a judgement act (#95), the mirror of #96's
+  // confirmed-supersession gate, and `retract` is not its door: the scenario's
+  // removal is on a `~`, and a verification is unmade in the open through a
+  // re-verification (`amend`, already gated). The web button is the courtesy;
+  // this is the authority — the affordance is not the only thing between a person
+  // and another's verified `✓`.
+  if (event.action === 'retract') {
+    const refusal = retractVerifiedClaimRefusal({ actor, object: record.object });
     if (refusal) {
       fail(state, event.id, refusal);
       return false;

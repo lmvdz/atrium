@@ -19,6 +19,7 @@ import {
   replayReceipt,
   replayView,
 } from '../lib/replay-view';
+import type { StateObject } from '../src/components';
 import { needsViewer, withFilter } from '../src/components';
 import { glyphFor } from '../src/components/model';
 import type { RoomView } from '../src/lib/realtime';
@@ -1441,5 +1442,217 @@ describe('live room view', () => {
     });
     expect(view.entries.some((entry) => entry.type === 'since-you-left')).toBe(false);
     expect(view.rooms[0]?.unseen).toBe(0);
+  });
+});
+
+/* ───────────────────────────────────────────────────────────────────────────
+ * CERTIFY + REMOVE FLAGS on a `~` reading (#110), derived in the projection.
+ *
+ * The receipt for an auto-accepted `~` claim now carries the two acts the live
+ * route was missing — certify (`~`→`✓ verified`, #102) and remove (retract). The
+ * flags are pure properties of the SUBJECT; the self-verification refusal is the
+ * one relation that reads the VIEWER, and it mirrors #102 (claimant / stager /
+ * source-author) only to disable the affordance — the server stays the authority.
+ * ─────────────────────────────────────────────────────────────────────────── */
+describe('the receipt exposes certify + remove for a `~` reading', () => {
+  /* An agent/model-drafted claim, folded through @atrium/core so it is exactly the
+     `~` state the engine produces: staged by a model, auto-accepted, no human
+     touch. Its source message `mc` is alice's, and its claimant is alice. */
+  function machineClaimSnapshot(): { snapshot: ReplayData; claim: StateObject } {
+    const snapshot = data();
+    snapshot.objects.push(foldMachineClaim('claim-1'));
+    snapshot.messages.push({
+      id: 'mc',
+      seq: 3,
+      authorId: 'alice',
+      author: 'alice',
+      body: CLAIM_TEXT,
+      replyToId: null,
+      attachments: [],
+      createdAt: at,
+    });
+    (
+      snapshot.objectSources as unknown as Array<{
+        roomId: string;
+        objectId: string;
+        messageId: string;
+      }>
+    ).push({ roomId: 'room', objectId: 'claim-1', messageId: 'mc' });
+    const view = replayView(snapshot, 'alice');
+    const claim = view.objects.find((object) => object.id === 'claim-1');
+    if (!claim) throw new Error('the machine claim did not reach the view');
+    // it is a `~` claim: nothing outside the claimant has touched it
+    expect(glyphFor(claim.state)).toBe('~');
+    return { snapshot, claim };
+  }
+
+  /* CATCHES: offering certify to nobody, or refusing a disinterested reader. A
+     model drafted it; a member who is not its claimant, did not stage it, and
+     wrote none of its source is exactly #68's second pair of eyes. */
+  it('a disinterested human may certify it; the claimant/author is refused', () => {
+    const { snapshot, claim } = machineClaimSnapshot();
+    const view = replayView(snapshot, 'alice');
+
+    const disinterested = replayReceipt(snapshot, view.records, claim, {
+      viewer: { id: 'bob', kind: 'human' },
+    });
+    expect(disinterested.certifiable).toBe(true);
+    expect(disinterested.removable).toBe(true);
+    expect(disinterested.certifyRefusal).toBeNull();
+
+    // alice is both the payload claimant and the author of the source message —
+    // #102 refuses her, and the refusal is surfaced (not a silent disable).
+    const selfVerify = replayReceipt(snapshot, view.records, claim, {
+      viewer: { id: 'alice', kind: 'human' },
+    });
+    expect(selfVerify.certifiable).toBe(true);
+    expect(selfVerify.certifyRefusal).toContain('second pair of eyes');
+  });
+
+  /* CATCHES: the flags leaking the viewer relation into the pure subject
+     property. Without a viewer (the replay route), the subject is still
+     certifiable/removable, but no refusal is computed. */
+  it('is certifiable/removable with no viewer, and computes no refusal then', () => {
+    const { snapshot, claim } = machineClaimSnapshot();
+    const view = replayView(snapshot, 'alice');
+    const receipt = replayReceipt(snapshot, view.records, claim);
+    expect(receipt.certifiable).toBe(true);
+    expect(receipt.removable).toBe(true);
+    expect(receipt.certifyRefusal).toBeNull();
+  });
+
+  /* CATCHES: offering CERTIFY on an open_question (there is nothing to verify) or
+     failing to offer REMOVE — the scenario rejects a `~` open_question by
+     removing it (#110). */
+  it('an open_question is removable but never certifiable', () => {
+    const snapshot = data();
+    snapshot.objects.push({
+      id: 'q-1',
+      roomId: 'room',
+      type: 'open_question',
+      payload: { question: QUESTION_TEXT, status: 'open' },
+      objectiveId: null,
+      proposalId: 'prop-q-1',
+      revision: 0,
+      retractedAt: null,
+      supersededById: null,
+      acceptedBy: null,
+      acceptedByKind: 'agent',
+      humanTouchedAt: null,
+      createdAt: at,
+      updatedAt: at,
+    } as unknown as ReplayData['objects'][number]);
+    const view = replayView(snapshot, 'alice');
+    const question = view.objects.find((object) => object.id === 'q-1');
+    if (!question) throw new Error('the open_question did not reach the view');
+    const receipt = replayReceipt(snapshot, view.records, question, {
+      viewer: { id: 'bob', kind: 'human' },
+    });
+    expect(receipt.certifiable).toBe(false);
+    expect(receipt.removable).toBe(true);
+    expect(receipt.certifyRefusal).toBeNull();
+  });
+
+  /* CATCHES (#110 finding 1): the round-1 build offered Remove on a `✓ verified`
+     claim — INCLUDING another person's certified reading — because `removable`
+     omitted the `~`-only check. Withdrawing another's verified reading is a
+     judgement act the server now refuses (`retractConfirmedRefusal`); the button
+     must not invite it. A `✓ verified` claim is neither certifiable (done) nor
+     removable (a person's reading, not a machine's `~`). */
+  it('a human-verified claim is offered NEITHER certify NOR remove', () => {
+    const snapshot = data();
+    snapshot.objects.push({
+      id: 'claim-verified',
+      roomId: 'room',
+      type: 'claim',
+      payload: { statement: CLAIM_TEXT, claimant: 'alice', verification: 'verified' },
+      objectiveId: null,
+      proposalId: null,
+      revision: 0,
+      retractedAt: null,
+      supersededById: null,
+      acceptedBy: 'bob',
+      acceptedByKind: 'human',
+      humanTouchedAt: at,
+      createdAt: at,
+      updatedAt: at,
+    } as unknown as ReplayData['objects'][number]);
+    const view = replayView(snapshot, 'alice');
+    const claim = view.objects.find((object) => object.id === 'claim-verified');
+    if (!claim) throw new Error('the verified claim did not reach the view');
+    expect(glyphFor(claim.state)).toBe('✓');
+    const receipt = replayReceipt(snapshot, view.records, claim, {
+      viewer: { id: 'bob', kind: 'human' },
+    });
+    expect(receipt.certifiable).toBe(false);
+    expect(receipt.removable).toBe(false);
+  });
+
+  /* CATCHES (#110 finding 3 + finding 1): a human-ACCEPTED claim that is not yet
+     verified still renders `✓` — a person has touched it. The round-1
+     `certifiable = verification !== 'verified'` offered Certify on it (a `~`→`✓`
+     label that misdescribes an already-`✓` reading), and `removable` offered
+     Remove on it (another person's `✓`). Both must now be false: `✓ accepted` is
+     a confirmed reading, not a machine's `~`. */
+  it('a human-accepted (but unverified) `✓` claim is neither certifiable nor removable', () => {
+    const snapshot = data();
+    snapshot.objects.push({
+      id: 'claim-accepted',
+      roomId: 'room',
+      type: 'claim',
+      payload: { statement: CLAIM_TEXT, claimant: 'alice', verification: 'unverified' },
+      objectiveId: null,
+      proposalId: null,
+      revision: 0,
+      retractedAt: null,
+      supersededById: null,
+      acceptedBy: 'bob',
+      acceptedByKind: 'human',
+      humanTouchedAt: at,
+      createdAt: at,
+      updatedAt: at,
+    } as unknown as ReplayData['objects'][number]);
+    const view = replayView(snapshot, 'alice');
+    const claim = view.objects.find((object) => object.id === 'claim-accepted');
+    if (!claim) throw new Error('the accepted claim did not reach the view');
+    expect(glyphFor(claim.state)).toBe('✓');
+    const receipt = replayReceipt(snapshot, view.records, claim, {
+      viewer: { id: 'bob', kind: 'human' },
+    });
+    expect(receipt.certifiable).toBe(false);
+    expect(receipt.removable).toBe(false);
+  });
+
+  /* CATCHES (#110 finding 1): a `~` open_question that a person answered but
+     nobody certified is still a machine's reading — removable. But once a person
+     certifies the answer (`✓`, verification 'accepted'), it is a confirmed
+     reading and Remove must not be offered. */
+  it('an answered-and-certified `✓` question is not removable', () => {
+    const snapshot = data();
+    snapshot.objects.push({
+      id: 'q-certified',
+      roomId: 'room',
+      type: 'open_question',
+      payload: { question: QUESTION_TEXT, status: 'answered' },
+      objectiveId: null,
+      proposalId: null,
+      revision: 0,
+      retractedAt: null,
+      supersededById: null,
+      acceptedBy: 'bob',
+      acceptedByKind: 'human',
+      humanTouchedAt: at,
+      createdAt: at,
+      updatedAt: at,
+    } as unknown as ReplayData['objects'][number]);
+    const view = replayView(snapshot, 'alice');
+    const question = view.objects.find((object) => object.id === 'q-certified');
+    if (!question) throw new Error('the certified question did not reach the view');
+    expect(glyphFor(question.state)).toBe('✓');
+    const receipt = replayReceipt(snapshot, view.records, question, {
+      viewer: { id: 'bob', kind: 'human' },
+    });
+    expect(receipt.certifiable).toBe(false);
+    expect(receipt.removable).toBe(false);
   });
 });

@@ -13,10 +13,16 @@ import {
 import type { ReplayData } from '@/lib/replay-data';
 import {
   activeAnswerMatchesClientMessage,
+  authenticatedViewerGate,
   replayReceipt,
   replayReceiptSubject,
 } from '@/lib/replay-view';
-import type { AttentionClass, ComposerBinding, SurfaceId } from '@/src/components';
+import type {
+  AttentionClass,
+  ComposerBinding,
+  ParticipantSummary,
+  SurfaceId,
+} from '@/src/components';
 import { AttachmentPreview, boundTo, withFilter } from '@/src/components';
 import type { MessageAttachmentRecord } from '@/src/components/model/quotation';
 import { quotationFrom } from '@/src/components/model/quotation';
@@ -252,11 +258,29 @@ export function LiveRoomSession({ data, viewerId }: { data: ReplayData; viewerId
     ...objective,
     open: openObjectives[objective.id] ?? objective.open,
   }));
+  // #110 finding 2: certify/remove gate on the AUTHENTICATED viewer, resolved
+  // from THIS snapshot by `viewerId` — never `replayView`'s spectator
+  // substitute (an attention owner / the first participant / a literal `human`),
+  // which is what `view.viewer` falls back to when the authenticated identity is
+  // absent from the participant snapshot. That substitute is safe for rendering
+  // a name, but feeding it into an affordance gate is the #99/#101
+  // fail-open-to-person pattern: it would offer certify/remove to a spectator
+  // the server would refuse. When the authenticated viewer cannot be resolved
+  // here, the gate FAILS CLOSED to `unknown` (no affordance), not to a person.
+  const gatedViewer: ParticipantSummary = authenticatedViewerGate(
+    view.participants,
+    viewerId,
+    view.viewer,
+  );
   const receiptObject = replayReceiptSubject(data, view.objects, receiptId);
   const receipt = receiptObject
     ? // Live receipts are derived only from the refreshed persisted projection.
-      // No semantic command is rendered optimistically.
-      replayReceipt(data, view.records, receiptObject)
+      // No semantic command is rendered optimistically. The viewer rides along so
+      // the certify affordance can name a #102 self-verification refusal ahead of
+      // the server; the server still enforces it.
+      replayReceipt(data, view.records, receiptObject, {
+        viewer: { id: gatedViewer.id, kind: gatedViewer.kind },
+      })
     : undefined;
   const acceptedActiveIds = new Set(
     data.objects
@@ -571,6 +595,20 @@ export function LiveRoomSession({ data, viewerId }: { data: ReplayData; viewerId
           onRetypeToClaim: (objectId) =>
             clientRef.current?.correctObject(roomId, objectId, 'retype', { toType: 'claim' }),
           onReopen: (objectId) => clientRef.current?.correctObject(roomId, objectId, 'reopen'),
+          // Certify a `~` claim → `✓ verified`. The one door: an `amend` whose
+          // patch sets `verification: 'verified'` (#102). The reducer refuses a
+          // self-verifying claimant/stager and a machine; the command layer
+          // refuses the source-message author. A refusal comes back as a nack and
+          // surfaces in `error` — the covenant enforced, not bypassed.
+          onCertifyReceipt: (objectId) =>
+            clientRef.current?.correctObject(roomId, objectId, 'amend', {
+              patch: { verification: 'verified' },
+            }),
+          // Remove an accepted `~` reading — the correction retract path. Human-
+          // only server-side; the object is withdrawn from current state and kept
+          // on the append-only record (restorable), never erased.
+          onRemoveReceipt: (objectId) =>
+            clientRef.current?.correctObject(roomId, objectId, 'retract'),
           onAnswerReceipt: (objectId) => {
             const object = view.objects.find((candidate) => candidate.id === objectId);
             if (!object) return;
@@ -673,7 +711,7 @@ export function LiveRoomSession({ data, viewerId }: { data: ReplayData; viewerId
         rooms={view.rooms}
         trailer={view.trailer}
         updatedAt={view.updatedAt}
-        viewer={view.viewer}
+        viewer={gatedViewer}
       />
       {previewAttachment === null ? null : (
         <AttachmentPreview

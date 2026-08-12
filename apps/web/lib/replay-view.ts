@@ -13,6 +13,7 @@ import type {
   EpistemicState,
   MessageRecord,
   ObjectiveRecord,
+  ParticipantKind,
   ParticipantSummary,
   ProvenanceEntry,
   ReceiptRecord,
@@ -464,6 +465,50 @@ export function replayView(data: ReplayData, viewerId?: string) {
 }
 
 /**
+ * The three faces of #102's self-verification refusal, in the covenant's own
+ * words. The reducer refuses actor==claimant/stager; the command layer refuses
+ * actor==source-author (`apps/server`'s `selfVerificationAuthorRefusal`). The UI
+ * mirrors those three relations only to DISABLE the affordance and say why — the
+ * server stays the sole authority, so a case this misses is still refused there.
+ */
+const CERTIFY_REFUSAL_CLAIMANT =
+  'You are named as this claim’s claimant — certifying is a second pair of eyes, so a sentence may not vouch for itself. It waits for another member to verify it.';
+const CERTIFY_REFUSAL_STAGER =
+  'You staged this reading — certifying is a second pair of eyes, so the member who staged a claim may not be the one who confirms it. It waits for another member to verify it.';
+const CERTIFY_REFUSAL_AUTHOR =
+  'This claim rests on a message you wrote — certifying is a second pair of eyes, so the author of its source may not vouch it is true. It waits for another member to verify it.';
+
+/**
+ * The AUTHENTICATED viewer for the certify/remove gate — resolved STRICTLY from
+ * the room's own participant snapshot, never `replayView`'s spectator substitute
+ * (an attention owner / the first participant / a literal `human`, chosen only to
+ * render a page for an identity that isn't in the room).
+ *
+ * #110 finding 2, and the third time the #99/#101 pattern surfaced: an affordance
+ * gate that reads a substituted identity fails OPEN to a person — it would offer
+ * certify/remove to a spectator the server refuses. This resolves the viewer by
+ * the authenticated `viewerId`, and when that id is NOT a participant in THIS
+ * snapshot it returns a fail-closed `unknown`-kind viewer, so the human-only
+ * allowlist in `ReceiptView` offers neither act. The server enforces every act
+ * regardless of this; the gate's only job is to never offer one it would refuse.
+ * It keeps the fallback's NAME for display but overrides id + kind, so a
+ * spectator is rendered honestly rather than as somebody they are not.
+ */
+export function authenticatedViewerGate(
+  participants: readonly ParticipantSummary[],
+  viewerId: string,
+  fallback: ParticipantSummary,
+): ParticipantSummary {
+  return (
+    participants.find((person) => person.id === viewerId) ?? {
+      ...fallback,
+      id: viewerId,
+      kind: 'unknown',
+    }
+  );
+}
+
+/**
  * Build the inspectable record for one persisted semantic row.
  *
  * The excerpt is minted from the message register, never copied out of a
@@ -477,6 +522,14 @@ export function replayReceipt(
   changes: {
     readonly answerMessageId?: string;
     readonly correction?: ReplayCorrectionTransition;
+    /**
+     * The person reading the receipt. Supplied by the LIVE route so the certify
+     * affordance can name, ahead of the server, a refusal the viewer would hit
+     * (#102): certifying is a second pair of eyes, so a claim's own claimant, the
+     * member who staged its reading, or the author of a message it rests on may
+     * not verify it. Omitted on the replay route, where no certify act is offered.
+     */
+    readonly viewer?: { readonly id: string; readonly kind: ParticipantKind };
   } = {},
 ): ReceiptRecord {
   const recordById = new Map(records.map((record) => [record.id, record]));
@@ -587,6 +640,55 @@ export function replayReceipt(
     (answerRelation !== undefined || boundAnswer !== undefined) &&
     (correction === undefined || boundAnswer !== undefined);
 
+  // ── Certify + remove: the two acts the live route was missing (#110) ────────
+  //
+  // Both are properties of the SUBJECT here — an accepted, active row of the
+  // right kind. Who among humans may certify is `certifyRefusal` below, and an
+  // agent viewer is refused the affordance entirely in `ReceiptView` (the
+  // human-only allowlist). Neither the kind gate nor the relation gate lives on
+  // this flag: it says only "this reading is the sort a person could certify".
+  //
+  // A claim is certifiable until it is `✓ verified` — that is the truth axis the
+  // #102-gated `amend {verification:'verified'}` moves. A retracted row is
+  // withdrawn, so it is neither certifiable nor removable.
+  const isActive = accepted !== undefined && accepted.retractedAt === null;
+  // Certify is the `~`→`✓` vouch, so it is offered ONLY on a genuinely `~` claim
+  // — one whose acceptance is still a machine's reading (`self_reported`). The
+  // old `!== 'verified'` also admitted `accepted` (a human-accepted claim that
+  // already renders `✓`), so a settled reading was offered "Certify … (~→✓)"
+  // that misdescribed it (#110 finding 3). `self_reported` is the ONLY `~` claim
+  // state — `accepted` and `verified` are both `✓` — so this is the exact gate.
+  const certifiable =
+    isActive && object.state.kind === 'claim' && object.state.verification === 'self_reported';
+  // Remove withdraws a `~` reading — the covenant's removal act, on a reading no
+  // person has stood behind. It must NOT be offered on a `✓` (#110 finding 1):
+  // withdrawing another person's certified reading is a judgement act the server
+  // now refuses (`retractConfirmedRefusal`), and the button must not invite what
+  // the covenant forbids. The `~` states are exactly `self_reported` for a claim
+  // and `open`/`proposed` for a question (answered-and-confirmed is `accepted`,
+  // the `✓`); every `✓` state is excluded here, matching the server gate.
+  const removable =
+    isActive &&
+    ((object.state.kind === 'claim' && object.state.verification === 'self_reported') ||
+      (object.state.kind === 'question' && object.state.verification !== 'accepted'));
+
+  const viewer = changes.viewer;
+  let certifyRefusal: string | null = null;
+  if (certifiable && viewer && accepted?.type === 'claim') {
+    const claimant = ClaimPayload.safeParse(accepted.payload).data?.claimant ?? null;
+    const stagedById =
+      (proposalId ? data.proposals.find((candidate) => candidate.id === proposalId) : undefined)
+        ?.stagedById ?? null;
+    const sourceAuthorIds = new Set(
+      [...new Set(sourceIds)]
+        .map((messageId) => data.messages.find((message) => message.id === messageId)?.authorId)
+        .filter((id): id is string => typeof id === 'string'),
+    );
+    if (viewer.id === claimant) certifyRefusal = CERTIFY_REFUSAL_CLAIMANT;
+    else if (viewer.id === stagedById) certifyRefusal = CERTIFY_REFUSAL_STAGER;
+    else if (sourceAuthorIds.has(viewer.id)) certifyRefusal = CERTIFY_REFUSAL_AUTHOR;
+  }
+
   return {
     id: object.id,
     state: object.state,
@@ -605,6 +707,9 @@ export function replayReceipt(
       object.kind === 'decision' &&
       object.state.verification === 'accepted' &&
       correction === undefined,
+    certifiable,
+    certifyRefusal,
+    removable,
     reopenable: canReopen,
     reopenNote:
       correction?.action === 'reopen'
