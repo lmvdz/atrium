@@ -959,17 +959,28 @@ describe('the actor floor — gate 4: superseding a decision is human-only', () 
     at: at(9),
   });
 
-  it('allows a model to supersede an UNCONFIRMED open question — #4 auto-accepts that one', () => {
-    // The covenant's left-hand side, and it has to stay open: a machine
-    // replacing its own reading with a newer reading destroys nobody's word.
+  it('refuses a model retiring an UNCONFIRMED open question — #96 r3, and this test used to assert the opposite', () => {
+    // **The `~` half of #95, which #96 r2 left open and its blind critic found.**
+    // `obj_question_3` is a model's own unconfirmed reading — but retiring it is
+    // still a `supersedes` relation on a *standing accepted* object, not the
+    // `proposal_superseded` dedup of a pending proposal (the route that stays
+    // open, exercised where proposals are staged, not here). #95 reserves every
+    // such retirement to a person: an agent owns no proposal, so every
+    // unconfirmed accepted object a machine reaches was accepted by another
+    // machine, and unmaking one is not a machine's to do. The open route is to
+    // draft a fresh `~`, never to retire the standing one.
     const state = reduce([
       ...sampleLog(),
       stagedQuestion,
       modelAcceptedQuestion,
       supersede(model(), 'obj_question_3', 'ev_ms'),
     ]);
-    expect(state.issues).toEqual([]);
-    expect(state.objects.obj_question_3?.supersededById).toBe('obj_decision_2');
+    expect(state.issues).toHaveLength(1);
+    expect(state.issues[0]?.reason).toContain('may never retire a standing accepted object');
+    expect(state.issues[0]?.reason).toContain('even an unconfirmed reading');
+    expect(state.issues[0]?.reason).toContain('model actor');
+    // The fold, not the verdict: the reading is still standing.
+    expect(state.objects.obj_question_3?.supersededById).toBeNull();
   });
 
   it('refuses a model retiring a CONFIRMED open question — #95, and this test used to assert the opposite', () => {
@@ -1776,11 +1787,14 @@ describe('the actor floor — gate 11: supersession follows the policy, all of i
     expect(state.objects.obj_objective_x?.supersededById).toBeNull();
   });
 
-  it('still lets a model retire an UNCONFIRMED claim — #4 puts that one in the auto-accept row', () => {
-    // Staged by a model and accepted by one: a `~` claim, which is the shape #4
-    // calls cheap to correct. Two events rather than a human acceptance, because
-    // a human acceptance is what makes it a `✓` — see the case below, which this
-    // test used to be.
+  it('refuses a model retiring an UNCONFIRMED claim — #96 r3, and this test used to assert the opposite', () => {
+    // Staged by a model and accepted by one: a `~` claim, which #4 calls cheap
+    // to correct — but "correct" is drafting a *newer* reading, not retiring the
+    // standing one on a machine's word. This is a `supersedes` relation on an
+    // accepted object, and #95 reserves it to a person, confirmed or not: an
+    // agent owns no proposal, so the accepter (`model()`) is another machine and
+    // the retirement is foreign. The pending-proposal dedup a worker actually
+    // runs is `proposal_superseded`, a different event, and stays open.
     const state = reduce([
       ...sampleLog(),
       proposalEvent({
@@ -1800,8 +1814,12 @@ describe('the actor floor — gate 11: supersession follows the policy, all of i
       newer('claim'),
       retire('obj_claim_old', model(), 'ev_r'),
     ]);
-    expect(state.issues).toEqual([]);
-    expect(state.objects.obj_claim_old?.supersededById).toBe('obj_newer');
+    expect(state.issues).toHaveLength(1);
+    expect(state.issues[0]?.reason).toContain('may never retire a standing accepted object');
+    expect(state.issues[0]?.reason).toContain('even an unconfirmed reading');
+    expect(state.issues[0]?.reason).toContain('model actor');
+    // The fold, not the verdict: the reading is still standing.
+    expect(state.objects.obj_claim_old?.supersededById).toBeNull();
   });
 
   it('refuses a model retiring a claim a PERSON accepted — #95, and this test used to assert the opposite', () => {

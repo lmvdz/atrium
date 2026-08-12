@@ -1049,25 +1049,33 @@ export function createCommandService({
             }
             // ── The `conditional` half of `certificationClassOf` ─────────────
             //
-            // #95: a non-human may never retire anything the room has
-            // confirmed. It is a fact about *this object*, not about the verb,
-            // which is why it is answered here where the object is in hand and
-            // not in the table up top.
+            // #95: a non-human may never retire an accepted object by
+            // superseding it — confirmed or not — it may only draft a
+            // superseding reading (~). It is a fact about *this object* and the
+            // actor's relation to it, not about the verb, which is why it is
+            // answered here where the object is in hand and not in the table up
+            // top.
             //
-            // `epistemicStateOf` rather than a second reading of "has a person
-            // touched this": it is the predicate the ✓ is rendered from, and the
-            // reducer's gate asks the same function. Two answers to "is this
-            // confirmed" is how a gate and a glyph disagree in front of a user.
+            // #96 r3 broadened it from the confirmed subset: keying on
+            // `epistemicStateOf(retired) === 'confirmed'` left a machine free to
+            // retire another machine's unconfirmed `~`, which #95 also reserves
+            // to a person. `epistemicStateOf` now decides only which reason the
+            // room hears — the predicate the ✓ is rendered from, and the
+            // reducer's gate asks the same function, so a gate and a glyph never
+            // disagree in front of a user.
             //
             // The reducer refuses this too, and its refusal is the one that
             // binds a replay. This one is what makes the refusal *hard* — with
             // `requireClean: true` above, the reducer's issue already aborts the
             // batch, so what this adds is the reason: a room hears which rule
             // refused it instead of an atomic-command summary.
-            if (!isHuman(actorOf(session)) && epistemicStateOf(retired) === 'confirmed') {
+            if (!isHuman(actorOf(session))) {
+              const confirmed = epistemicStateOf(retired) === 'confirmed';
               throw new CommandError(
                 'invalid',
-                `object "${command.retiredObjectId}" has been confirmed by a person and this session is a ${session.principalKind} principal — a machine may never retire what the room has confirmed (#95); draft a superseding reading (~) and let a person retire the old one`,
+                confirmed
+                  ? `object "${command.retiredObjectId}" has been confirmed by a person and this session is a ${session.principalKind} principal — a machine may never retire what the room has confirmed (#95); draft a superseding reading (~) and let a person retire the old one`
+                  : `object "${command.retiredObjectId}" is an accepted reading and this session is a ${session.principalKind} principal — a machine may never retire an accepted object by superseding it (#95), even an unconfirmed one; draft a superseding reading (~) and let a person retire the old one`,
               );
             }
           },

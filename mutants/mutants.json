@@ -1268,12 +1268,25 @@
       "suite": "unit",
       "kind": "file",
       "file": "packages/core/src/reduce.ts",
-      "why": "#95's rule deleted from the REDUCER — #96 r2's ship-blocker, agreed on by both foreign lineages and pinned as CORRECT by this build's own authority matrix until r2 corrected the oracle. decideSupersession puts claim and open_question in #4's auto-accept row, so without this clause a non-human retires an object A PERSON ACCEPTED: a checkmark unmade on a machine's word. Every type-row supersession test stays green under the mutation, because the type table is untouched — the axis this closes is the object's epistemic state, not its type. Scoped to the unit suite deliberately: over a socket this is refused twice (the command layer first, then the fold), so an integration-scoped mutant of this clause ESCAPES while the rule is gone from the layer that binds a replay, a second writer and the interpretation worker. Measured, not assumed — it escaped exactly that way on the first run of this ledger entry.",
-      "find": "    if (!isHuman(actor) && epistemicStateOf(target) === 'confirmed') {",
-      "replace": "    if ((false as boolean) && epistemicStateOf(target) === 'confirmed') {",
+      "why": "The CONFIRMED half of #95's reducer rule removed. #96 r3 collapsed the two supersession refusals into one relation gate — `if (!isHuman(actor))` — whose message alone splits on confirmed state; mutating the condition to `epistemicStateOf(target) !== 'confirmed'` keeps a machine refused on an unconfirmed `~` but lets it retire a person's `✓`, the exact checkmark-unmade-on-a-machine's-word that r2 closed. Every type-row supersession test stays green, because the type table is untouched — the axis this reopens is the object's epistemic state. Scoped to the unit suite deliberately: over a socket this is refused twice (the command layer first, then the fold), so an integration-scoped mutant of this clause ESCAPES while the rule is gone from the layer that binds a replay, a second writer and the interpretation worker — measured escaping exactly that way in r2.",
+      "find": "    if (!isHuman(actor)) {\n      // #95 decided the whole rule, not the confirmed subset of it: a non-human",
+      "replace": "    if (!isHuman(actor) && epistemicStateOf(target) !== 'confirmed') {\n      // #95 decided the whole rule, not the confirmed subset of it: a non-human",
       "catches": [
         "refuses a model retiring a claim a PERSON accepted — #95, and this test used to assert the opposite",
         "refuses an AGENT retiring a human-accepted claim — the session #96 actually hands out"
+      ]
+    },
+    {
+      "id": "a_machine_retires_an_unconfirmed_reading",
+      "suite": "unit",
+      "kind": "file",
+      "file": "packages/core/src/reduce.ts",
+      "why": "The UNCONFIRMED half of #95's reducer rule removed — #96 r3's ship-blocker, the exact regression r2 shipped: keying the gate on `&& epistemicStateOf(target) === 'confirmed'` refuses a machine retiring a person's `✓` but lets it retire another machine's unconfirmed `~`. Because an agent owns no proposal, every unconfirmed accepted object it can reach was accepted by a model, so that path is a foreign retirement always reachable once #96 hands out a session, and #95 reserves it to a person exactly as it reserves a `✓`. This is the r2 defect a blind foreign-lineage critic found in the source after the other lineage cleared it. Scoped to the UNIT suite on purpose and by measurement: the reducer is the layer that binds replay, a second writer and the interpret worker, and it must refuse this alone — the twin unit tests below reduce a bare log with no command layer present, so they catch the reducer mutation even though over a socket the command guard would refuse it a second time.",
+      "find": "    if (!isHuman(actor)) {\n      // #95 decided the whole rule, not the confirmed subset of it: a non-human",
+      "replace": "    if (!isHuman(actor) && epistemicStateOf(target) === 'confirmed') {\n      // #95 decided the whole rule, not the confirmed subset of it: a non-human",
+      "catches": [
+        "refuses a model retiring an UNCONFIRMED claim — #96 r3, and this test used to assert the opposite",
+        "refuses a model retiring an UNCONFIRMED open question — #96 r3, and this test used to assert the opposite"
       ]
     },
     {
@@ -1281,9 +1294,9 @@
       "suite": "integration",
       "kind": "file",
       "file": "apps/server/src/commands.ts",
-      "why": "The command layer's half of #95's rule removed, leaving only the reducer's. The object still stands — `supersede_object` carries requireClean: true, so the fold's issue aborts the batch — and what is lost is that the room is told WHICH rule refused it: the nack degrades from 'this object has been confirmed by a person' to an atomic-command summary quoting whatever the reducer happened to say. The pair with a_machine_retires_what_a_person_confirmed: two defences, either removable without the other noticing, which is why each has its own mutant in its own suite.",
-      "find": "            if (!isHuman(actorOf(session)) && epistemicStateOf(retired) === 'confirmed') {",
-      "replace": "            if ((false as boolean) && epistemicStateOf(retired) === 'confirmed') {",
+      "why": "The command layer's half of #95's rule removed — for the confirmed reason specifically. #96 r3 broadened the command guard to `if (!isHuman(actorOf(session)))`, whose message alone splits on confirmed state; mutating to `&& epistemicStateOf(retired) !== 'confirmed'` skips the guard for a confirmed object, so no CommandError is thrown and the room hears the reducer's atomic-command summary instead of 'has been confirmed by a person'. The object still stands — `supersede_object` carries requireClean: true, so the fold's issue aborts the batch — what is lost is WHICH rule the room is told refused it. The pair with the reducer mutants above: two defences, either removable without the other noticing, which is why each has its own mutant in its own suite.",
+      "find": "            if (!isHuman(actorOf(session))) {\n              const confirmed = epistemicStateOf(retired) === 'confirmed';",
+      "replace": "            if (!isHuman(actorOf(session)) && epistemicStateOf(retired) !== 'confirmed') {\n              const confirmed = epistemicStateOf(retired) === 'confirmed';",
       "catches": ["refuses an agent’s supersession of a human-accepted claim, and the claim stands"]
     }
   ]

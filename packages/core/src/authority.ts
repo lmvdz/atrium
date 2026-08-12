@@ -182,13 +182,30 @@ export type HumanOnlyGate =
    * table calls `auto_accept` — a confirmed claim and a confirmed open question
    * — which are exactly the cells that were open.
    *
-   * What stays open, and must: a machine may still retire an **unconfirmed**
-   * claim or open question, which is one reading replacing an older one with no
-   * person's word destroyed. And it may always draft a superseding reading and
-   * let a person retire the old one. That is the covenant's left-hand side and
-   * nothing here narrows it.
+   * What stays open, and must: a machine may always **draft** a superseding
+   * reading and let a person retire the old one. That is the covenant's
+   * left-hand side and nothing here narrows it — `proposal_superseded` on a
+   * *pending* proposal, a different event, stays open too. What is closed is
+   * retiring a *standing accepted* object by a `supersedes` relation.
    */
   | 'confirmed_supersession'
+  /**
+   * `supersedes` pointed at an accepted object no person has confirmed —
+   * a model's own unconfirmed `~`. **#96 r3.**
+   *
+   * The gate above closed the `✓` half of #95; its blind critic found the `~`
+   * half still open, because `!isHuman(actor) && epistemicStateOf === 'confirmed'`
+   * refused only a person's judgement and let a machine unmake another machine's
+   * reading. #95's decided rule is on the *relation*, not the epistemic state: a
+   * non-human **never** retires a standing accepted object by superseding it, it
+   * only drafts a fresh `~`. Since an agent owns no proposal of its own, every
+   * unconfirmed accepted object it can reach was accepted by a model, so this
+   * cell is always a foreign retirement — which is why closing it is the whole
+   * of #95's non-human-supersede rule, not a further narrowing. The distinct
+   * gate value keeps the *reason* honest: this retirement destroyed no person's
+   * `✓`, and the refusal says so.
+   */
+  | 'unconfirmed_supersession'
   /** An `answers` edge — declaring a question settled. */
   | 'answer_relation'
   /** `object_corrected`, every verb. */
@@ -314,6 +331,8 @@ export function humanOnlyRefusal(
       return `${subject} retires an accepted ${retiredType ?? 'object'} on ${a} ${kind} actor's word — ${retiredType ? decideSupersession(retiredType).reason : 'this type needs a human'}; ${a} ${kind} actor may propose the replacement and let a person retire it`;
     case 'confirmed_supersession':
       return `${subject} retires an object a person has already confirmed, on a ${kind} actor's word — a non-human may never retire anything the room has confirmed (#95), whatever its type: the ✓ is a person's judgement and unmaking it is the same act as making it; a ${kind} actor may draft a superseding reading (~) and let a person retire the old one`;
+    case 'unconfirmed_supersession':
+      return `${subject} supersedes an accepted ${retiredType ?? 'object'} on a ${kind} actor's word — a non-human may never retire a standing accepted object by superseding it (#95), even an unconfirmed reading another machine accepted; a ${kind} actor may draft a superseding reading (~) and let a person retire the old one`;
     case 'answer_relation':
       return `${subject} declares an open question answered on ${a} ${kind} actor's word — only a human may bind an answer (#4: a decision reaches the room through answer-binding or an explicit accept, never through inference); ${a} ${kind} actor may propose the answer and let a person bind it`;
     case 'correction':

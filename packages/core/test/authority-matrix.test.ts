@@ -126,6 +126,12 @@ const GATES = {
   // reaches the wrong one is a failing cell rather than a silently satisfied
   // assertion.
   confirmed_supersession: 'retires an object a person has already confirmed',
+  // #96 r3. The other axis of the same relation rule: retiring a machine's own
+  // unconfirmed `~`. #95 reserves that to a person too — an agent owns no
+  // proposal, so every unconfirmed accepted object it reaches belongs to
+  // another machine, and unmaking it is not the machine's to do. The marker is
+  // the clause that names the `~` case and appears in no other refusal.
+  unconfirmed_supersession: 'even an unconfirmed reading',
   answer_relation: 'declares an open question answered',
   correction: 'corrections (amend, retract, restore)',
   // #4's sentence has two halves and so does the correction gate: a name
@@ -193,7 +199,7 @@ const FLOOR: Record<AcceptedObjectType, number> = {
  * #96's blind critics found it, from opposite lineages, in the source rather
  * than here.
  *
- * The other half is `RETIRING_A_CONFIRMED_OBJECT_NEEDS_HUMAN` below. Both are
+ * The other half is `RETIRING_AN_ACCEPTED_OBJECT_NEEDS_HUMAN` below. Both are
  * restated from #4 and #95 rather than imported, like everything else in this
  * oracle.
  */
@@ -206,20 +212,28 @@ const SUPERSESSION_NEEDS_HUMAN: Record<AcceptedObjectType, boolean> = {
 };
 
 /**
- * #95's rule, restated: **a non-human may never retire anything the room has
- * confirmed**, whatever the type table above says about its type.
+ * #95's rule, restated: **a non-human may never retire a standing accepted
+ * object by superseding it**, whatever the type table above says about its
+ * type, and *whether or not a person has confirmed it*.
  *
  * Not a `Record` because it is not keyed by type — that is the whole point of
- * it. Kind answers *may this species certify at all*; this answers *has a person
- * already put their name to this particular object*. Both must pass.
+ * it. Kind answers *may this species certify at all*; this answers *may this
+ * actor unmake this standing object*. Both must pass. #96 r2 read this as the
+ * confirmed subset (`… && retires.confirmed`); r2's blind critic found the
+ * unconfirmed cells still `allowed`, because an agent owns no proposal so every
+ * unconfirmed accepted object it reaches was accepted by a *model* — a foreign
+ * reading, and #95 reserves unmaking one to a person exactly as it reserves a
+ * `✓`. The rule is on the relation, so the flag is unconditional; only the
+ * *reason* still splits on confirmed state.
  *
- * And "confirmed" is restated here too, rather than read from `epistemicStateOf`
- * — an object is confirmed once a person has accepted or corrected it. The cells
+ * "Confirmed" is restated here too, rather than read from `epistemicStateOf` —
+ * an object is confirmed once a person has accepted or corrected it. The cells
  * below build the two states the only two ways the reducer allows: a human
  * acceptance (confirmed) and a model acceptance of a cited proposal at θ
- * (unconfirmed).
+ * (unconfirmed), the latter accepted by `model_a` so a differing actor is a
+ * genuinely foreign retirement.
  */
-const RETIRING_A_CONFIRMED_OBJECT_NEEDS_HUMAN = true;
+const RETIRING_AN_ACCEPTED_OBJECT_NEEDS_HUMAN = true;
 
 /**
  * The types a machine can put on the board at all, so the only ones that have an
@@ -393,9 +407,14 @@ function expectedForRelation(
     // a decision should hear "a decision needs the hand that accepted one"
     // rather than the general rule.
     if (SUPERSESSION_NEEDS_HUMAN[retires.type]) return 'supersession';
-    // Then #95's row, which is what the two `false`s above were leaving open.
-    if (RETIRING_A_CONFIRMED_OBJECT_NEEDS_HUMAN && retires.confirmed) {
-      return 'confirmed_supersession';
+    // Then #95's relation row, which is what the two `false`s above leave to it:
+    // a non-human never retires a standing accepted object by superseding it,
+    // confirmed or not. #96 r2 closed only the confirmed cells; r3 closes the
+    // unconfirmed ones its critic found still `allowed`. The two report
+    // different reasons — a `✓` unmade vs a `~` unmade — but neither is a
+    // machine's to do, so the flag is unconditional and only the reason splits.
+    if (RETIRING_AN_ACCEPTED_OBJECT_NEEDS_HUMAN) {
+      return retires.confirmed ? 'confirmed_supersession' : 'unconfirmed_supersession';
     }
   }
   return 'allowed';
@@ -1380,15 +1399,24 @@ describe('authority matrix — relation_added, every actor × kind × retired ty
       // round 2 that enumeration has to cover the whole policy table, not just
       // the decision row of it.
       //
-      // **#96 r2 adds the second axis: the epistemic state of the thing being
+      // **#96 r2 added the second axis: the epistemic state of the thing being
       // retired.** Every cell here used to build its target with a *human*
       // acceptance, so every one of them retired a `✓` — and the ones the type
       // table calls `auto_accept` asserted that a machine may unmake a person's
-      // judgement. One dimension, and it moves fifty cells from "allowed" to a
-      // refusal. The unconfirmed half is enumerated too, because the rule this
-      // closes is not "a machine may not supersede": a machine replacing its own
-      // `~` reading with a newer one is the covenant's left-hand side and has to
-      // stay open, which only a cell can prove.
+      // judgement. r2 moved those from "allowed" to a refusal, but only for the
+      // confirmed cells.
+      //
+      // **#96 r3 finishes it: the unconfirmed half refuses too.** r2 left it
+      // open on the theory that a machine replacing its own `~` is the
+      // covenant's left-hand side — but that path is `proposal_superseded` on a
+      // *pending* proposal (the `superseded a proposal` block above, still
+      // `allowed`), not a `supersedes` relation retiring a *standing accepted*
+      // object. This block only builds the latter, and #95 reserves every such
+      // retirement to a person: the unconfirmed target here is accepted by
+      // `model_a`, so any non-`model_a` actor retiring it is a machine unmaking
+      // another machine's reading — foreign, and refused. The cell proves the
+      // relation rule fires without a `✓` in sight; drafting a fresh `~` stays
+      // open and is the acceptance suites' business, not this relation's.
       const targets: { type: AcceptedObjectType; confirmed: boolean }[] =
         kind === 'supersedes'
           ? (['decision', 'commitment', 'objective', 'claim', 'open_question'] as const).flatMap(

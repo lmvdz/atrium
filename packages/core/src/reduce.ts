@@ -1774,11 +1774,14 @@ function applyRelationAdded(
       return false;
     }
     // …and the rule the type table cannot express, because it is not about the
-    // type. #95: **a non-human may never retire anything a person has already
-    // confirmed.** `decideSupersession` calls a claim and an open question
-    // `auto_accept` — cheap to correct, one reading replacing another — and that
-    // reading is right for a `~`. It is wrong for a `✓`: a person accepted that
-    // sentence, and unmaking a person's judgement is the same act as making one.
+    // type. #95: **a non-human may never retire an accepted object by
+    // superseding it — it may only draft a superseding reading (`~`).**
+    // `decideSupersession` calls a claim and an open question `auto_accept` —
+    // cheap to correct, one reading replacing another — which reads as though a
+    // machine may swap one for the next. It may not: the swap is a `supersedes`
+    // relation that retires an *accepted* object, and #95 puts every such
+    // retirement in a person's hand. Drafting a fresh `~` is the open route;
+    // retiring the standing one never is.
     //
     // Harmless while every non-human was anonymous and could not hold a room
     // membership. #96 gives a machine a session, and both of that round's blind
@@ -1786,16 +1789,49 @@ function applyRelationAdded(
     // human-accepted claims and open questions. The matrix in
     // `authority-matrix.test.ts` asserted that was correct.
     //
-    // `epistemicStateOf` is the predicate the product renders `✓` from — one
-    // definition, so the thing a room is shown and the thing this refuses cannot
-    // drift into two answers. #90's audit asked for exactly this check and this
-    // is where it became a product consumer of `epistemic.ts` rather than a
-    // renderer's private opinion.
-    if (!isHuman(actor) && epistemicStateOf(target) === 'confirmed') {
+    // #96 r2 closed the `✓` half; #96 r3 closes the `~` half its critic found
+    // still open. Keying on `epistemicStateOf(target) === 'confirmed'` refused a
+    // machine retiring a person's `✓` but let it retire a model's unconfirmed
+    // `~` — and since an agent owns no proposal of its own, every unconfirmed
+    // accepted object it reaches belongs to another machine, so that path was a
+    // machine unmaking another machine's reading, foreign and always reachable.
+    // #95's rule is on the *relation* (a non-human retiring anything accepted),
+    // not on the epistemic state, so the gate is now `!isHuman(actor)`.
+    //
+    // `epistemicStateOf` still decides only the *message* — the predicate the
+    // product renders `✓` from, one definition, so the reason a room is shown
+    // names the `✓`/`~` distinction without a second opinion on it. #90's audit
+    // asked for exactly this check and this is where it became a product
+    // consumer of `epistemic.ts` rather than a renderer's private opinion.
+    if (!isHuman(actor)) {
+      // #95 decided the whole rule, not the confirmed subset of it: a non-human
+      // **never** retires an accepted object by superseding it. The gate above
+      // already refused the `requires_human` types; what reaches here is the
+      // `auto_accept` pair (claim, open_question) — and #96 r2's blind critic
+      // found that keying this on `=== 'confirmed'` left every *unconfirmed*
+      // accepted reading open. Because an agent cannot stage or accept its own
+      // proposal yet, every unconfirmed accepted object it can reach was
+      // accepted by a *model*, so every such retirement is foreign — a machine
+      // unmaking another machine's reading, which #95 reserves to a person just
+      // as it reserves unmaking a `✓`. The route that stays open is the
+      // covenant's left-hand side: draft a superseding reading (`~`) and let a
+      // person retire the old one. A non-human cannot draft one today (Proposer
+      // has no agent variant), so this is a hard refusal until it can — which is
+      // the honest current state, not a narrowing of the rule.
+      //
+      // The message still distinguishes the two: retiring a person's `✓` and
+      // retiring a machine's `~` are refused for the same reason but are not the
+      // same act, and a room reads which one it attempted.
+      const confirmed = epistemicStateOf(target) === 'confirmed';
       fail(
         state,
         event.id,
-        humanOnlyRefusal('confirmed_supersession', actor, `relation "${relation.id}"`, retired),
+        humanOnlyRefusal(
+          confirmed ? 'confirmed_supersession' : 'unconfirmed_supersession',
+          actor,
+          `relation "${relation.id}"`,
+          retired,
+        ),
       );
       return false;
     }
