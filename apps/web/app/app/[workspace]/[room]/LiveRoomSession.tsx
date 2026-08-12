@@ -32,7 +32,7 @@ import {
   type RealtimeClient,
   type RoomView,
 } from '@/src/lib/realtime';
-import type { ReferenceTarget } from '@/src/lib/typed-references';
+import { mentionCandidateTargets, type ReferenceTarget } from '@/src/lib/typed-references';
 import { RoomFrame } from '../../../gallery/RoomFrame';
 import styles from './live-room.module.css';
 
@@ -274,17 +274,14 @@ export function LiveRoomSession({ data, viewerId }: { data: ReplayData; viewerId
     .map((objective) => ({ id: objective.id, label: objective.title }));
   const referenceTargets: readonly ReferenceTarget[] = [
     // A mention candidate is any NAMEABLE participant — a person or an agent
-    // (#100). The filter allowlists the two identity kinds rather than
+    // (#100). `mentionCandidateTargets` is the one definition of that allowlist
+    // (see typed-references.ts): it allowlists the two identity kinds rather than
     // denylisting the item kinds, so `'unknown'` — the fail-closed rendering of a
     // participant whose kind could not be read (records.ts) — is never offered as
     // a mention target and never becomes an attention row from a name it should
     // not carry. Each candidate keeps its own kind, so the reference that lands
     // records whether a person or an agent was named.
-    ...view.participants.flatMap((participant) =>
-      participant.kind === 'human' || participant.kind === 'agent'
-        ? [{ kind: participant.kind, id: participant.id, label: participant.name }]
-        : [],
-    ),
+    ...mentionCandidateTargets(view.participants),
     ...attachments.map((attachment) => ({
       kind: 'attachment' as const,
       id: attachment.id,

@@ -29,6 +29,24 @@ describe('typed reference spans', () => {
     ).toEqual([{ ordinal: 0, kind: 'human', targetId: 'u2', start: 11, end: 15, surface: '@sam' }]);
   });
 
+  /* An agent reference (#100) is carried across an edit by the SAME offset-only
+     rule as a human one — `reconcileMessageReferences` never reads `kind`, so an
+     agent mention shifts, holds and invalidates identically. Every other
+     edit-survival fixture uses `human`; this one flips the kind.
+
+     CATCHES: any kind-conditional branch that treated an agent reference
+     differently from a human one during reconciliation (e.g. dropping it, or
+     failing to shift it). */
+  it('shifts an agent reference after an earlier edit exactly like a human one', () => {
+    expect(
+      reconcileMessageReferences('ask @atrium', 'please ask @atrium', [
+        { ordinal: 0, kind: 'agent', targetId: 'a1', start: 4, end: 11, surface: '@atrium' },
+      ]),
+    ).toEqual([
+      { ordinal: 0, kind: 'agent', targetId: 'a1', start: 11, end: 18, surface: '@atrium' },
+    ]);
+  });
+
   /* CATCHES: treating the one computed edit delta as applicable to every
      reference, moving an earlier token when the user only appends text. */
   it('leaves a reference unchanged when the edit is wholly after it', () => {

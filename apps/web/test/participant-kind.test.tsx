@@ -35,6 +35,7 @@ import {
   participantKindOf,
   participantTally,
 } from '../src/components/model';
+import { mentionCandidateTargets } from '../src/lib/typed-references';
 
 afterEach(cleanup);
 
@@ -127,19 +128,36 @@ describe('participantTally counts the unknown kind on its own, never as a person
   });
 });
 
-describe('the human-only filter the composer uses excludes agents AND unknowns', () => {
-  /* The composer's mention candidates are `participants.filter(kind === 'human')`
-     — an allowlist, so a fail-closed `'unknown'` falls out of it for free, which
-     is the scope boundary #100 depends on. Neither an agent nor an unknown-kind
-     member is a mention candidate. */
-  it('leaves only the people', () => {
-    const roster = [
-      participant({ id: 'a', kind: 'human' }),
-      participant({ id: 'b', kind: 'agent' }),
-      participant({ id: 'c', kind: 'unknown' }),
-    ];
-    const candidates = roster.filter((p) => p.kind === 'human').map((p) => p.id);
-    expect(candidates).toEqual(['a']);
+describe('the REAL composer allowlist names people and agents, never unknown', () => {
+  /* Round-2 rewrite. The old test here re-implemented the filter LOCALLY
+     (`roster.filter((p) => p.kind === 'human')`) and asserted against its own
+     copy — a tautology that stayed green whatever the composer actually did, and
+     could never catch a change to the real rule. It calls the SHIPPING allowlist
+     now: `mentionCandidateTargets` is the single definition the live composer
+     (LiveRoomSession.tsx) builds its `referenceTargets` from.
+
+     CATCHES: deleting `|| participant.kind === 'agent'` from the allowlist (an
+     agent stops being a candidate — first assertion fails), or widening it to
+     admit `'unknown'`/a denylist shape (the fail-closed member becomes a
+     candidate — second assertion fails). */
+  const roster = [
+    participant({ id: 'a', kind: 'human', name: 'Ada' }),
+    participant({ id: 'b', kind: 'agent', name: 'Bot' }),
+    participant({ id: 'c', kind: 'unknown', name: 'Mystery' }),
+  ];
+
+  it('offers the person AND the agent as mention candidates', () => {
+    expect(mentionCandidateTargets(roster)).toEqual([
+      { kind: 'human', id: 'a', label: 'Ada' },
+      { kind: 'agent', id: 'b', label: 'Bot' },
+    ]);
+  });
+
+  it('never offers an unknown-kind member — the allowlist fails closed', () => {
+    const ids = mentionCandidateTargets(roster).map((target) => target.id);
+    expect(ids).toContain('a');
+    expect(ids).toContain('b');
+    expect(ids).not.toContain('c');
   });
 });
 

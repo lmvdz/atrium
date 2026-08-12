@@ -333,5 +333,31 @@ describe('durable typed reference conformance', () => {
         reference(messageId, 'agent', room.people.ben as string, '@ben'),
       );
     });
+
+    /* The cross-room matrix above (line ~201) covers the four older kinds; the
+       agent branch is new and needs its own cross-room proof, because its room
+       predicate lives in a separate SELECT. An agent that is a member of ANOTHER
+       room must not be nameable from this one — the trigger's agent branch joins
+       on `m.room_id = NEW.room_id`, so the foreign agent is not a member HERE.
+
+       CATCHES: removing `m.room_id = NEW.room_id` from the agent branch — the
+       foreign agent then matches on principal_kind alone and the reference is
+       wrongly accepted, which this refusal expectation would no longer see. */
+    it('refuses an agent reference to an agent who is a member of another room', async () => {
+      const elsewhere = await seedRoom(handle, ['zara'], {
+        slug: 'reference-agent-elsewhere',
+        agents: ['zara'],
+      });
+      const messageId = await message(room, '@zara please look');
+      await refusedWith('message reference target unavailable', () =>
+        reference(messageId, 'agent', elsewhere.people.zara as string, '@zara'),
+      );
+      expect(
+        await handle.db
+          .select({ id: messageReferences.id })
+          .from(messageReferences)
+          .where(eq(messageReferences.messageId, messageId)),
+      ).toEqual([]);
+    });
   });
 });

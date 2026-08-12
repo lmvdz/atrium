@@ -119,9 +119,43 @@ COMMENT ON FUNCTION "validate_message_reference_target"() IS
 -- ─────────────────────────────────────────────────────────────────────────────
 -- 3. The retired register. `message_references` is the only one now.
 --
--- Nothing depends on this column: only drizzle/0013 ever named it, no trigger,
--- view or generated column reads it, and the sole product reader (mentionSignals)
--- has been repointed at message_references in the same change set. The client
--- has never filled it.
+-- Nothing in the SCHEMA depends on this column: only drizzle/0013 ever named it,
+-- no trigger, view or generated column reads it, and the sole product reader
+-- (mentionSignals) has been repointed at message_references in the same change
+-- set. But the DATA is a different question. An earlier claim here read "the
+-- client has never filled it" — true of the CLIENT, and false as stated: the
+-- SERVER write path existed (projections.ts wrote `event.mentionUserIds` and
+-- room-events.ts accepted it on the wire), so git history contradicts "never
+-- filled" and a real deployment could carry legacy values in this column.
+--
+-- Dropping it outright would silently lose those values, and with them the
+-- mention attention of every message that carried one — a lossy drop where the
+-- decision (#92) said *collapse*. A backfill into `message_references` is NOT
+-- available as the safe alternative: a reference is anchored to a body span
+-- (`start`/`end`/`surface`, validated by the trigger above against the authored
+-- text), and `mention_user_ids` is a bare `uuid[]` with no offset, no surface
+-- and no ordinal — there is no honest span to synthesise from a naked id list,
+-- so any backfill would be a fabrication the trigger would (rightly) reject.
+--
+-- So the migration REFUSES rather than guesses: if any row still carries a
+-- non-empty `mention_user_ids`, it raises and leaves the column in place, and an
+-- operator must collapse those legacy values into `message_references`
+-- deliberately (re-deriving each mention's span from the message body) before
+-- re-running. A fresh database — the launch case (#103) — has no such rows and
+-- passes straight through. The guard reads the same column the DROP removes, so
+-- it cannot be satisfied by anything the caller supplies.
 -- ─────────────────────────────────────────────────────────────────────────────
+DO $$
+BEGIN
+  IF EXISTS (
+    SELECT 1 FROM messages
+    WHERE mention_user_ids IS NOT NULL AND array_length(mention_user_ids, 1) > 0
+  ) THEN
+    RAISE EXCEPTION
+      'refusing to drop messages.mention_user_ids: % row(s) still carry a non-empty legacy value, and the drop would silently lose their mention attention. Collapse each into message_references (re-deriving the @-span from the message body) before re-running this migration; a bare uuid[] has no offset/surface to back-fill automatically.',
+      (SELECT count(*) FROM messages WHERE mention_user_ids IS NOT NULL AND array_length(mention_user_ids, 1) > 0)
+      USING ERRCODE = '23514';
+  END IF;
+END $$;--> statement-breakpoint
+
 ALTER TABLE "messages" DROP COLUMN "mention_user_ids";
