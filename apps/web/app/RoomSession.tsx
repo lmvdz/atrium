@@ -160,6 +160,10 @@ export function RoomSession() {
       actor: f.VIEWER.name,
       text: text.trim(),
       origin: 'typed',
+      // The sender's own kind decides the voice register (#101), the same as the
+      // live app's optimistic pending row (`liveRoomView`). Declared, so an
+      // absent kind never falls through to the fail-closed `'unknown'`.
+      authorKind: f.VIEWER.kind,
       room: hereName.current,
     };
     setRecords((current) => [...current, record]);
@@ -191,7 +195,7 @@ export function RoomSession() {
       entries={entries}
       filter={filter}
       focused={focused}
-      humans={f.HUMANS}
+      participants={f.PARTICIPANTS}
       handlers={{
         onSelectRoom: (next: string) => {
           const chosen = sessionView(next, actedOn);

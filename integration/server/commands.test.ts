@@ -356,6 +356,57 @@ describe('send_message', () => {
     expect(await ledgerCount()).toBe(1);
   });
 
+  /*
+   * The command-layer kind pre-check (`validateMessageReferences`), exercised
+   * through the wire rather than by inserting straight into the DB. It turns a
+   * mislabelled reference into the CLEAN `reference is unavailable` refusal
+   * BEFORE any append, so the caller never sees a raw Postgres trigger error and
+   * nothing lands in the ledger.
+   *
+   * CATCHES: deleting the `agentIds` agreement clause from the pre-check. Without
+   * it the agent-at-a-human reference slips past the command layer, reaches the
+   * append, and is refused by the DB trigger instead — a different message
+   * ('message reference target unavailable'), so this exact-message expectation
+   * fails.
+   */
+  it('refuses an agent reference aimed at a human with the clean pre-check message', async () => {
+    const agentRoom = await seedRoom(handle, ['dana', 'aria'], {
+      slug: 'command-agent-ref',
+      agents: ['aria'],
+    });
+    const dana = await connect(agentRoom.people.dana as string);
+    const before = await ledgerCount();
+
+    const refused = await dana.command({
+      ...send(agentRoom.roomId, '@dana take a look'),
+      references: [
+        {
+          ordinal: 0,
+          // The mislabel: `dana` is a human member, named with an `agent` kind.
+          kind: 'agent' as const,
+          targetId: agentRoom.people.dana as string,
+          start: 0,
+          end: 5,
+          surface: '@dana',
+        },
+      ],
+    });
+
+    expect(refused).toMatchObject({
+      type: 'nack',
+      code: 'invalid',
+      message: 'reference is unavailable',
+    });
+    // The fold is the fact: nothing appended, no reference row written.
+    expect(await ledgerCount()).toBe(before);
+    expect(
+      await handle.db
+        .select({ id: messageReferences.id })
+        .from(messageReferences)
+        .where(eq(messageReferences.roomId, agentRoom.roomId)),
+    ).toEqual([]);
+  });
+
   it('broadcasts the event to every subscriber, sender included', async () => {
     const alice = await connect(room.people.alice as string);
     const bob = await connect(room.people.bob as string);

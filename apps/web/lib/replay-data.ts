@@ -65,11 +65,15 @@ async function loadReplayDataSnapshot(database: Database, roomId: string) {
       seq: messages.seq,
       authorId: messages.authorId,
       author: users.displayName,
+      // The author's kind, off the same join the name comes from. #101: an
+      // agent authors in its own voice register, and the register is read from
+      // this column — NULL only when the author row is gone (a deleted user),
+      // which the view constructor reads as `'unknown'` through `participantKindOf`.
+      authorKind: users.principalKind,
       body: messages.body,
       clientMessageId: messages.clientMessageId,
       replyToId: messages.replyToId,
       attachments: messages.attachments,
-      mentionUserIds: messages.mentionUserIds,
       createdAt: messages.createdAt,
     })
     .from(messages)
@@ -86,8 +90,16 @@ async function loadReplayDataSnapshot(database: Database, roomId: string) {
           .from(messageReferences)
           .where(inArray(messageReferences.messageId, messageIds))
           .orderBy(asc(messageReferences.messageId), asc(messageReferences.ordinal));
-  const referencedHumanIds = [
-    ...new Set(references.filter((reference) => reference.kind === 'human').map((r) => r.targetId)),
+  // Both participant reference kinds resolve to a `users` row — an agent holds
+  // one exactly as a person does (drizzle/0017) — so a `@`-mention of either
+  // renders with the target's current display name. Item references (attachment,
+  // proposal, object) are resolved separately below.
+  const referencedParticipantIds = [
+    ...new Set(
+      references
+        .filter((reference) => reference.kind === 'human' || reference.kind === 'agent')
+        .map((r) => r.targetId),
+    ),
   ];
   const referencedAttachmentIds = [
     ...new Set(
@@ -106,13 +118,22 @@ async function loadReplayDataSnapshot(database: Database, roomId: string) {
     fixes,
     messageEvents,
     roomCursor,
-    referenceHumans,
+    referenceParticipants,
     referenceAttachments,
   ] = await Promise.all([
     participantIds.length === 0
       ? Promise.resolve([])
       : database
-          .select({ id: users.id, name: users.displayName, avatarUrl: users.avatarUrl })
+          .select({
+            id: users.id,
+            name: users.displayName,
+            avatarUrl: users.avatarUrl,
+            // What the identity IS, read from the same row its name is. The view
+            // constructors translate this into the participant record's `kind`,
+            // so the roster, the presence marker, the monogram and the counts
+            // render an agent member as an agent instead of stamping it a person.
+            principalKind: users.principalKind,
+          })
           .from(users)
           .where(inArray(users.id, participantIds))
           .orderBy(asc(users.displayName), asc(users.id)),
@@ -159,12 +180,12 @@ async function loadReplayDataSnapshot(database: Database, roomId: string) {
       .where(eq(coreEvents.roomId, roomId))
       .orderBy(desc(coreEvents.roomSeq))
       .limit(1),
-    referencedHumanIds.length === 0
+    referencedParticipantIds.length === 0
       ? Promise.resolve([])
       : database
           .select({ id: users.id, name: users.displayName })
           .from(users)
-          .where(inArray(users.id, referencedHumanIds)),
+          .where(inArray(users.id, referencedParticipantIds)),
     referencedAttachmentIds.length === 0
       ? Promise.resolve([])
       : database
@@ -218,7 +239,7 @@ async function loadReplayDataSnapshot(database: Database, roomId: string) {
     participants,
     messages: roomMessages,
     messageReferences: references,
-    referenceHumans,
+    referenceParticipants,
     referenceAttachments,
     interpretations: roomInterpretations,
     proposals: roomProposals,
@@ -236,6 +257,7 @@ async function loadReplayDataSnapshot(database: Database, roomId: string) {
 type LoadedReplayData = NonNullable<Awaited<ReturnType<typeof loadReplayData>>>;
 type LoadedReplayMessage = LoadedReplayData['messages'][number];
 type LoadedReplayAttention = LoadedReplayData['attention'][number];
+type LoadedReplayParticipant = LoadedReplayData['participants'][number];
 export type ReplayData = Omit<
   LoadedReplayData,
   | 'loadReceipt'
@@ -243,21 +265,40 @@ export type ReplayData = Omit<
   | 'messagePositions'
   | 'messages'
   | 'messageReferences'
-  | 'referenceHumans'
+  | 'referenceParticipants'
   | 'referenceAttachments'
   | 'attention'
+  | 'participants'
 > & {
+  /**
+   * Optional `principalKind` only for hand-built fixtures created before an
+   * identity carried a kind; a real load always selects it (the column is NOT
+   * NULL). The view constructor reads it through `participantKindOf`, which fails
+   * CLOSED — an absent or unreadable value renders as `'unknown'` (a neutral
+   * marker, visibly not a person), never silently as a human. So a fixture that
+   * forgets to set a kind shows up as unknown on screen rather than joining the
+   * people count, which is the round-1 gauntlet's finding 1.
+   */
+  participants: (Omit<LoadedReplayParticipant, 'principalKind'> & {
+    readonly principalKind?: LoadedReplayParticipant['principalKind'];
+  })[];
   /** Optional only for hand-built fixtures; every server load mints a fresh commit receipt. */
   readonly loadReceipt?: string;
-  /** Optional only for hand-built fixtures created before live client ids existed. */
-  messages: (Omit<LoadedReplayMessage, 'clientMessageId' | 'mentionUserIds'> & {
+  /**
+   * `clientMessageId` optional for fixtures created before live client ids;
+   * `authorKind` optional for fixtures created before an author carried a kind
+   * (#101). A real load always selects `authorKind` off the author join; the
+   * view constructor reads it through `participantKindOf`, so a fixture that
+   * omits it — or an author row that is gone — renders as `'unknown'`, never
+   * silently as a person.
+   */
+  messages: (Omit<LoadedReplayMessage, 'clientMessageId' | 'authorKind'> & {
     readonly clientMessageId?: string | null;
-    /** Optional only for hand-built fixtures created before structured mentions existed. */
-    readonly mentionUserIds?: readonly string[];
+    readonly authorKind?: LoadedReplayMessage['authorKind'];
   })[];
   /** Optional only for hand-built fixtures and pre-0015 snapshots. */
   readonly messageReferences?: LoadedReplayData['messageReferences'];
-  readonly referenceHumans?: LoadedReplayData['referenceHumans'];
+  readonly referenceParticipants?: LoadedReplayData['referenceParticipants'];
   readonly referenceAttachments?: LoadedReplayData['referenceAttachments'];
   /** Generated FK columns are database enforcement plumbing, not view input. */
   readonly attention: Array<

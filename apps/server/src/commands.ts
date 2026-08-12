@@ -20,7 +20,7 @@ import {
   type Relation,
 } from '@atrium/core';
 import type { Database } from '@atrium/db';
-import { acceptedObjects, messages, proposals } from '@atrium/db/schema';
+import { acceptedObjects, messages, proposals, users } from '@atrium/db/schema';
 import { and, eq, inArray } from 'drizzle-orm';
 import { z } from 'zod';
 import { CommandError, type Ledger, type Tx } from './ledger.js';
@@ -529,12 +529,30 @@ async function validateMessageReferences(input: {
     ...new Set(references.filter((reference) => reference.kind === kind).map((r) => r.targetId)),
   ];
   const humanIds = ids('human');
+  const agentIds = ids('agent');
   const attachmentIds = ids('attachment');
   const proposalIds = ids('proposal');
   const objectIds = ids('object');
+  // A `human` and an `agent` reference name the same sort of thing — a
+  // participant with a `users` row and a room membership — so both are checked
+  // together, and the target's own `principal_kind` must MATCH the kind the
+  // author claimed. That agreement is what stops a `human` reference from
+  // silently naming an agent (or the reverse) now that both are members; the
+  // append-boundary trigger (drizzle/0016, replaced in 0019) is the authority,
+  // this is the clean pre-check that turns a mislabel into REFERENCE_UNAVAILABLE
+  // instead of a raw constraint error.
+  const participantIds = [...new Set([...humanIds, ...agentIds])];
 
-  const [effectiveHumanIds, proposalRows, objectRows] = await Promise.all([
-    humanIds.length === 0 ? ([] as string[]) : roomMemberIds(tx as unknown as Database, roomId),
+  const [effectiveMemberIds, principalRows, proposalRows, objectRows] = await Promise.all([
+    participantIds.length === 0
+      ? ([] as string[])
+      : roomMemberIds(tx as unknown as Database, roomId),
+    participantIds.length === 0
+      ? ([] as { id: string; principalKind: 'human' | 'agent' }[])
+      : tx
+          .select({ id: users.id, principalKind: users.principalKind })
+          .from(users)
+          .where(inArray(users.id, participantIds)),
     proposalIds.length === 0
       ? []
       : tx
@@ -548,9 +566,14 @@ async function validateMessageReferences(input: {
           .from(acceptedObjects)
           .where(and(eq(acceptedObjects.roomId, roomId), inArray(acceptedObjects.id, objectIds))),
   ]);
+  const members = new Set(effectiveMemberIds);
+  const principalOf = new Map(principalRows.map((row) => [row.id, row.principalKind]));
+  const namesMember = (id: string, kind: 'human' | 'agent') =>
+    members.has(id) && principalOf.get(id) === kind;
   const uploaded = new Set(input.attachments.map((attachment) => attachment.id));
   if (
-    humanIds.some((id) => !effectiveHumanIds.includes(id)) ||
+    humanIds.some((id) => !namesMember(id, 'human')) ||
+    agentIds.some((id) => !namesMember(id, 'agent')) ||
     proposalRows.length !== proposalIds.length ||
     objectRows.length !== objectIds.length ||
     attachmentIds.some((id) => !uploaded.has(id))

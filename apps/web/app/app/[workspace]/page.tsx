@@ -103,16 +103,32 @@ export default async function WorkspacePage({
         {rooms.length === 0 ? <p className={styles.empty}>No rooms you can see yet.</p> : null}
       </section>
 
-      <section className={styles.section} aria-labelledby="people">
-        <h2 className={styles.sectionTitle} id="people">
-          People
+      <section className={styles.section} aria-labelledby="members">
+        {/* "Members", not "People": a workspace holds people AND agents (and, if a
+            kind is ever unreadable, an unknown-kind member), so the collection
+            heading names the register neutrally rather than calling every row a
+            person while the rows themselves already read their kind. */}
+        <h2 className={styles.sectionTitle} id="members">
+          Members
         </h2>
         <ul className={styles.list} data-testid="member-list">
           {members.map((member) => (
-            <li className={styles.row} data-member-id={member.memberId} key={member.userId}>
+            <li
+              className={styles.row}
+              data-member-id={member.memberId}
+              data-participant-kind={member.principalKind}
+              key={member.userId}
+            >
               <span className={styles.rowMain}>
                 <span className={styles.rowName}>{member.displayName}</span>
-                <span className={styles.rowMeta}>{member.email}</span>
+                {/* An agent's address is a non-deliverable placeholder, so the
+                    row names the register instead of an email that reads as a
+                    way to contact a person — and an unknown-kind member names its
+                    register too, for the same fail-closed reason: only a member
+                    we can read as a person shows a person's address. */}
+                <span className={styles.rowMeta}>
+                  {member.principalKind === 'human' ? member.email : member.principalKind}
+                </span>
               </span>
               <span className={styles.roleTag}>{member.role}</span>
               {/* Managing yourself out of your own workspace is a separate

@@ -31,7 +31,7 @@ const base = {
      frame's own pin — the ITEMS, since round 10, because the chip's glyph is
      derived from the hardest of them. */
   rooms: railFor(f.ROOM.name, f.ATTENTION),
-  humans: f.HUMANS,
+  participants: f.PARTICIPANTS,
   viewer: f.VIEWER,
   focused: 'conversation' as const,
   attention: f.ATTENTION,
@@ -158,7 +158,7 @@ const FRAMES: readonly GalleryFrame[] = [
   },
   {
     id: 'rail-open',
-    title: 'Rooms and people, unfolded',
+    title: 'Rooms and participants, unfolded',
     note: 'v8 folds the room rail, so every other still on this page shows the canvas without it. This is the same frame one click later. It is here because a state a person can reach and no still ever shows is a state nobody reviews — and because three of the six registered non-text graphics live in this column: the here presence fill, the idle/away presence ring, and the disabled count chip’s dashed border. With the rail folded they render nowhere, and a sweep that measured none of them still reported a pass.',
     props: {
       ...base,

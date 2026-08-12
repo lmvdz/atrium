@@ -54,6 +54,7 @@
  *   a property of the brand.
  * ------------------------------------------------------------------------- */
 
+import { type ParticipantKind, participantKindOf } from './kind';
 import type { Maybe } from './text';
 
 export type MessageId = string;
@@ -81,6 +82,39 @@ export interface MessageRecord {
   readonly actor: string;
   readonly text: string;
   readonly origin: MessageOrigin;
+  /**
+   * WHAT KIND OF PARTICIPANT AUTHORED THESE WORDS — a person or an agent.
+   *
+   * `origin` is about provenance (typed live, seeded from history, page-authored);
+   * this is about the author's nature, and the two are orthogonal — an agent's
+   * message is `seeded` history exactly as a person's is. It exists because
+   * AGENTS.md's "no synthesized speech" rule has a second edge the quotation
+   * model did not anticipate: not only may the page never render its own words as
+   * a person's, an AGENT's genuine words may never render as a person's either.
+   * So the render boundary reads the author's kind and gives an agent its own
+   * voice register — a neutral squared kind marker, the kind stated in a word,
+   * and `data-author-kind` — never the human treatment. The register is
+   * STRUCTURAL, not a font swap: WIRE is one typeface everywhere (CONVENTIONS.md,
+   * "Typography"), so the distinction is the square and the word, not a typeface.
+   *
+   * Optional in the TYPE (a fixture need not spell it out), but absent FAILS
+   * CLOSED to `'unknown'`, never to `'human'` — the round-2 gauntlet found the
+   * old absent→human default rendering a deleted author (its `users` row gone,
+   * `author_id` set NULL) as a person in the human register, the exact
+   * masquerade AGENTS.md forbids. Every render-boundary default below reads an
+   * absent kind as `'unknown'` (see `recordFingerprint` and `resolveQuotation`),
+   * and the data paths never rely on that default: both view constructors read
+   * the stored `principal_kind` through `participantKindOf`, which also fails
+   * CLOSED, so a value that cannot be read is painted visibly-not-a-person.
+   *
+   * The real path never produces a legitimate absent-kind human:
+   * `users.principal_kind` is NOT NULL, so a live author is always `'human'` or
+   * `'agent'`; the only NULL is a deleted author, which IS genuinely unknown. So
+   * "field absent" and "author deleted" both resolve to `'unknown'` on purpose,
+   * and a hand-built fixture that omits the field shows up as unknown (prompting
+   * it to declare a kind) rather than silently counted as a person.
+   */
+  readonly authorKind?: ParticipantKind;
   readonly attachments?: readonly MessageAttachmentRecord[];
   /**
    * THE ROOM THIS MESSAGE LIVES IN. Absolute, and about the record only.
@@ -199,6 +233,11 @@ export interface Attribution {
   readonly text: string;
   readonly at: string;
   readonly origin: QuotableOrigin;
+  /** the author's kind, re-derived from the record — `'unknown'` (fail closed,
+   *  never `'human'`) when the record carried none, so every render boundary
+   *  reads the voice register off the same lookup it reads the name and words
+   *  off, never off a carried flag. */
+  readonly authorKind: ParticipantKind;
   readonly room: string | null;
   readonly attachments: readonly MessageAttachmentRecord[];
 }
@@ -342,6 +381,9 @@ export function recordFingerprint(record: MessageRecord): string {
     record.at,
     record.actor,
     record.text,
+    // Absent fails closed to `'unknown'`, matching every render-boundary
+    // default, so a record that omits the kind hashes the same everywhere.
+    record.authorKind ?? 'unknown',
     record.room ?? '∅',
     JSON.stringify(record.attachments ?? []),
   ]
@@ -413,6 +455,11 @@ export function resolveQuotation(
     text: record.text,
     at: record.at,
     origin: record.origin,
+    // Absent kind FAILS CLOSED to `'unknown'`, never `'human'` (see
+    // MessageRecord.authorKind): a deleted author must not render as a person. A
+    // stored kind reaches here already narrowed by `participantKindOf` in the
+    // view constructor, so `'agent'`/`'unknown'` survive to the render as themselves.
+    authorKind: record.authorKind ?? 'unknown',
     room: record.room ?? null,
     attachments: record.attachments ?? [],
   };
@@ -545,7 +592,7 @@ export function parseQuotation(value: unknown, ledger: MessageLedger): Quotation
 /** Same boundary, one step earlier: a message record from untrusted data. */
 export function parseMessageRecord(value: unknown): MessageRecord {
   if (!isRecord(value)) throw new Error('parseMessageRecord: not an object');
-  const { id, at, actor, text, origin, room, attachments } = value;
+  const { id, at, actor, text, origin, authorKind, room, attachments } = value;
   if (!nonEmptyString(id)) throw new Error('parseMessageRecord: a message needs an id');
   if (typeof at !== 'string') throw new Error('parseMessageRecord: a message needs a timestamp');
   if (!nonEmptyString(actor)) throw new Error('parseMessageRecord: a message needs an actor');
@@ -580,6 +627,12 @@ export function parseMessageRecord(value: unknown): MessageRecord {
     actor,
     text,
     origin: origin as MessageOrigin,
+    // Fail CLOSED at the untrusted boundary, and bake it in: an author kind that
+    // arrived as a value `participantKindOf` cannot match — and an absent one —
+    // become `'unknown'`, never `'human'`. Data crossing this boundary is adopted
+    // into this page's register, so an unstated kind is recorded as the
+    // fail-closed one here rather than left to a downstream default.
+    authorKind: participantKindOf(authorKind),
     ...(room === undefined ? {} : { room }),
     ...(attachments === undefined
       ? {}

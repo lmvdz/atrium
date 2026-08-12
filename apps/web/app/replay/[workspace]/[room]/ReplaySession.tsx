@@ -202,6 +202,10 @@ export function ReplaySession({ data, viewerId }: { data: ReplayData; viewerId?:
       actor: view.viewer.name,
       text: body,
       origin: 'typed',
+      // The sender's own kind decides the voice register (#101), like the live
+      // app's optimistic row; declared so it never falls through to the
+      // fail-closed `'unknown'` default.
+      authorKind: view.viewer.kind,
       room: view.room.name,
     };
     setLocalRecords((current) => [...current, record]);
@@ -363,7 +367,7 @@ export function ReplaySession({ data, viewerId }: { data: ReplayData; viewerId?:
               [objectiveId]: !(current[objectiveId] ?? true),
             })),
         }}
-        humans={view.humans}
+        participants={view.participants}
         hideEmptyAttention
         label="replay"
         lastCheck={view.updatedAt}

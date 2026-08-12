@@ -74,7 +74,7 @@ test.describe('gallery', () => {
         const box = page.locator(`[data-gallery-frame="${frame}"]`);
         await expect(box).toBeVisible();
         // a full frame, not a crop of one: all four regions present inside it
-        await expect(box.locator('nav[aria-label="Rooms and people"]')).toHaveCount(1);
+        await expect(box.locator('nav[aria-label="Rooms and participants"]')).toHaveCount(1);
         await expect(box.locator('[data-region="needs-you"]')).toHaveCount(1);
         await expect(box.locator('[data-region="conversation"]')).toHaveCount(1);
         await expect(box.locator('[data-region="current-state"]')).toHaveCount(1);
@@ -225,7 +225,7 @@ test.describe('gallery', () => {
     // the head, the rail's current chip and the composer agree on the room
     await expect(jump.locator('[data-region="current-state"]')).toContainText('#identity-service');
     await expect(
-      jump.locator('nav[aria-label="Rooms and people"] [aria-current="true"]'),
+      jump.locator('nav[aria-label="Rooms and participants"] [aria-current="true"]'),
     ).toHaveAttribute('aria-label', /^#identity-service/);
     await expect(jump.locator('textarea')).toHaveAttribute(
       'aria-label',
@@ -246,7 +246,7 @@ test.describe('gallery', () => {
     /* THE SAME FOUR ITEMS ARE NOT COUNTED TWICE. r9's rail read
        `#users-migration ◆4` beside `#identity-service ◆4`, which reads as eight. */
     const chips = await jump
-      .locator('nav[aria-label="Rooms and people"] [data-owed-chip]')
+      .locator('nav[aria-label="Rooms and participants"] [data-owed-chip]')
       .evaluateAll((els) =>
         els.map((el) => `${el.getAttribute('data-owed-chip')}:${(el.textContent ?? '').trim()}`),
       );
@@ -324,7 +324,7 @@ test.describe('gallery', () => {
      a sweep that opened one fold would report the other five as folded. Clicks
      are sequential because each one re-lays out the grid it sits in. */
   async function openFolds(page: import('@playwright/test').Page): Promise<void> {
-    const folds = page.getByRole('button', { name: 'Show rooms and people' });
+    const folds = page.getByRole('button', { name: 'Show rooms and participants' });
     for (let i = 0; i < (await folds.count()); i += 1) {
       await folds.nth(i).click();
     }

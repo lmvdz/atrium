@@ -91,7 +91,7 @@ const OPEN_QUESTION = {
   irreversible: false,
 } as const;
 
-const MESSAGES: Readonly<Record<string, MessageRecord>> = {
+const RAW_MESSAGES: Readonly<Record<string, MessageRecord>> = {
   i1: {
     id: 'i1',
     at: '08:50',
@@ -143,6 +143,15 @@ const MESSAGES: Readonly<Record<string, MessageRecord>> = {
  * records exist — and `messageLedger` refuses two records under one id, which is
  * what makes merging four rooms' registers honest.
  */
+// These cross-room demo messages are all authored by PEOPLE; each declares it,
+// since #101 made an absent kind fail CLOSED to `'unknown'` rather than silently
+// human. `MESSAGES` and `RECORDS` reference the SAME normalized objects, so an
+// entry built from `MESSAGES` resolves against the `RECORDS` ledger (identical
+// fingerprint). The spread lets any record override (an agent would set `'agent'`).
+const MESSAGES: Readonly<Record<string, MessageRecord>> = Object.fromEntries(
+  Object.entries(RAW_MESSAGES).map(([id, message]) => [id, { authorKind: 'human', ...message }]),
+);
+
 export const RECORDS: readonly MessageRecord[] = [...f.RECORDS, ...Object.values(MESSAGES)];
 
 function row(id: string, input: Parameters<typeof messageEntry>[1]): MessageEntry {
@@ -175,7 +184,9 @@ export interface FeedOptions {
  */
 interface RoomView {
   readonly id: string;
-  readonly room: RoomHeadRecord;
+  /** name + topic only — the head's member chips derive from `participants` in
+   *  `RoomFrame`, so a room is never a second member register. */
+  readonly room: Omit<RoomHeadRecord, 'members'>;
   readonly objectives: readonly ObjectiveRecord[];
   readonly objects: readonly StateObject[];
   readonly attention: readonly AttentionItem[];
@@ -288,7 +299,6 @@ const VIEWS: Readonly<Record<string, RoomView>> = {
     room: {
       name: 'identity-service',
       topic: 'own the signing key and the session lifecycle for every service',
-      members: ['priya', 'dana', 'lars'],
     },
     objectives: [
       { id: 'io1', title: 'Rotate the signing key safely', status: 'active', open: true },
@@ -312,7 +322,6 @@ const VIEWS: Readonly<Record<string, RoomView>> = {
     room: {
       name: 'platform',
       topic: 'the substrate everything else runs on — clusters, images, build times',
-      members: ['mateo', 'justin', 'lars'],
     },
     objectives: [
       { id: 'po1', title: 'Keep the fleet on a supported version', status: 'active', open: true },
@@ -334,7 +343,6 @@ const VIEWS: Readonly<Record<string, RoomView>> = {
     room: {
       name: 'design',
       topic: 'the shared grammar — glyphs, density, and what a claim may look like',
-      members: ['lars', 'mateo'],
     },
     objectives: [
       { id: 'do1', title: 'Settle the epistemic glyph legend', status: 'active', open: true },
@@ -389,7 +397,9 @@ export const ROOM_IDS: readonly string[] = Object.keys(VIEWS);
 
 export interface SessionView {
   readonly id: string;
-  readonly room: RoomHeadRecord;
+  /** name + topic only — see `RoomView.room`; the head derives its members from
+   *  the participant source, not from a copy carried here. */
+  readonly room: Omit<RoomHeadRecord, 'members'>;
   readonly objectives: readonly ObjectiveRecord[];
   /** the lens's objects, with anything acted on no longer owed */
   readonly objects: readonly StateObject[];

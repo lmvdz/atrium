@@ -15,7 +15,6 @@ import { reopenQuestion } from '../lib/replay-transitions';
 import {
   activeAnswerMatchesClientMessage,
   activeAnswerMessageId,
-  mentionBody,
   replayAt,
   replayReceipt,
   replayView,
@@ -33,17 +32,6 @@ const at = new Date('2026-08-02T12:00:00.000Z');
  */
 const liveRoomSession = workspacePath('apps/web/app/app/[workspace]/[room]/LiveRoomSession.tsx');
 const replayDataSource = workspacePath('apps/web/lib/replay-data.ts');
-
-describe('structured mention rendering', () => {
-  /* CATCHES: laundering pre-span mentionUserIds into the new validated typed
-     representation by regex-searching a current display name. No historical
-     source span can be fabricated, so the body remains plain. */
-  it('segments only certified mention targets without rewriting their words', () => {
-    expect(
-      mentionBody('ask @Priya, not @unknown', ['u-priya'], new Map([['u-priya', 'priya']])),
-    ).toBeUndefined();
-  });
-});
 
 describe('contextual direct-reference placement', () => {
   const mention = (id: string, messageId: string, userId = 'alice') => ({
@@ -179,7 +167,11 @@ function data(): ReplayData {
       workspaceName: 'Atrium replay',
       workspaceSlug: 'replay',
     },
-    participants: [{ id: 'alice', name: 'alice', avatarUrl: null }],
+    // A real load selects `users.principal_kind` (NOT NULL), so the fixture
+    // carries one too; `participantKindOf` now fails CLOSED to `'unknown'` for an
+    // absent value rather than defaulting to a person, and this participant is a
+    // person on purpose.
+    participants: [{ id: 'alice', name: 'alice', avatarUrl: null, principalKind: 'human' }],
     messages: [
       {
         id: 'm1',
@@ -624,7 +616,12 @@ describe('persisted replay view', () => {
     expect(view.entries[2]?.type).toBe('message');
     if (view.entries[2]?.type !== 'message') throw new Error('third row is not a message');
     expect(view.entries[2].replyTo?.messageId).toBe('m1');
-    expect(view.room.members).toEqual(['alice']);
+    // The head's members are DERIVED from this single participant source now, not
+    // carried a second time on `view.room`; asserting the source is asserting
+    // what the head renders.
+    expect(view.participants.map((p) => ({ name: p.name, kind: p.kind }))).toEqual([
+      { name: 'alice', kind: 'human' },
+    ]);
   });
 
   /**
@@ -933,15 +930,26 @@ describe('persisted replay view', () => {
    * Mutation: turn a nullable author join into a named human. The adapter then
    * invents an identity that is absent from the persisted message record.
    */
-  it('labels a missing attribution as unavailable instead of inventing a participant', () => {
+  it('a deleted author reads as unavailable AND fails closed to the not-a-person register', () => {
+    /* THE DELETED-AUTHOR PATH, FAIL CLOSED (#101, round-2 finding 1). When an
+       author's `users` row is gone (`messages.author_id` is ON DELETE SET NULL),
+       the join yields no display name and no `principal_kind`. Round 1 mapped the
+       absent kind to `'human'`, so an agent's genuine message rendered
+       "author unavailable" in the HUMAN register — the exact masquerade AGENTS.md
+       forbids. It now fails CLOSED to `'unknown'`: visibly not a person. */
     const snapshot = data();
     const first = snapshot.messages[0];
     if (!first) throw new Error('fixture message missing');
-    snapshot.messages[0] = { ...first, author: null };
+    snapshot.messages[0] = { ...first, author: null, authorKind: null };
 
     const view = replayView(snapshot, 'alice');
     expect(view.records[0]?.actor).toBe('author unavailable');
-    expect(view.room.members).toEqual(['alice']);
+    // the kind is 'unknown', NOT 'human' — the record is painted not-a-person
+    expect(view.records[0]?.authorKind).toBe('unknown');
+    // The room head's members derive from this participant source; assert it.
+    expect(view.participants.map((p) => ({ name: p.name, kind: p.kind }))).toEqual([
+      { name: 'alice', kind: 'human' },
+    ]);
   });
 
   /**
@@ -1306,7 +1314,7 @@ describe('live room view', () => {
       entryIds: ['m2'],
     });
     expect(view.rooms[0]?.unseen).toBe(1);
-    expect(view.humans[0]?.presence).toBe('here');
+    expect(view.participants[0]?.presence).toBe('here');
   });
 
   /**

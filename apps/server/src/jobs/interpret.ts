@@ -763,17 +763,19 @@ async function readContext(
       id: messages.id,
       authorId: messages.authorId,
       body: messages.body,
-      mentionUserIds: messages.mentionUserIds,
     })
     .from(messages)
     .where(and(eq(messages.roomId, roomId), gte(messages.seq, from)))
     .orderBy(asc(messages.seq))
     .limit(config.contextMessagesBefore + config.maxWindowMessages * 2);
+  // No mention targets are read here: mention → attention is produced once, by
+  // the live reference path in projections.ts (decision #92), not by this worker.
+  // `ProvenanceMessage` carries only what the acceptance/receipt checks need —
+  // the id, the author, and the body.
   return rows.map((row) => ({
     id: row.id,
     authorId: row.authorId ?? '',
     body: row.body,
-    mentionUserIds: row.mentionUserIds,
   }));
 }
 

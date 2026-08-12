@@ -52,7 +52,7 @@ interface Screen {
    step whose absence made all twelve of these cases time out at every width
    against a button that was in the DOM and could never be seen. */
 async function openRail(page: import('@playwright/test').Page): Promise<void> {
-  const fold = page.getByRole('button', { name: 'Show rooms and people' });
+  const fold = page.getByRole('button', { name: 'Show rooms and participants' });
   await fold.click();
   await expect(page.locator('[data-frame][data-rail="open"]').first()).toBeVisible();
 }
@@ -179,7 +179,7 @@ test.describe('two elements on one screen, one question', () => {
        chip for the room you are standing in still says 1 owed. */
     await page.evaluate(() => {
       const chip = document.querySelector(
-        'nav[aria-label="Rooms and people"] [aria-current="true"]',
+        'nav[aria-label="Rooms and participants"] [aria-current="true"]',
       );
       if (chip === null) throw new Error('no current room chip to mutate');
       chip.setAttribute('aria-label', '#identity-service — 1 owed to you');

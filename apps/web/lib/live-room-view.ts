@@ -1,8 +1,8 @@
-import type { HumanSummary, MessageRecord, TimelineEntry } from '../src/components';
+import type { MessageRecord, ParticipantSummary, TimelineEntry } from '../src/components';
 import { messageEntry, sinceYouLeft, systemStatement } from '../src/components';
 import type { RoomView } from '../src/lib/realtime';
 import type { ReplayData } from './replay-data';
-import { mentionBody, replayView, typedReferenceBody } from './replay-view';
+import { replayView, typedReferenceBody } from './replay-view';
 
 const TALK = {
   kind: 'event',
@@ -11,7 +11,7 @@ const TALK = {
   irreversible: false,
 } as const;
 
-function presenceFor(state: string | undefined): HumanSummary['presence'] {
+function presenceFor(state: string | undefined): ParticipantSummary['presence'] {
   if (state === 'online') return 'here';
   if (state === 'away') return 'idle';
   return 'away';
@@ -47,13 +47,17 @@ export function liveRoomView(
   unreadWindow?: LiveUnreadWindow,
 ) {
   const base = replayView(data, viewerId);
-  const participantName = new Map(base.humans.map((human) => [human.id, human.name]));
+  const participantName = new Map(base.participants.map((person) => [person.id, person.name]));
   const pendingRecords: MessageRecord[] = live.pending.map((pending) => ({
     id: `pending:${pending.clientMessageId}`,
     at: clock(pending.at),
     actor: base.viewer.name,
     text: pending.body,
     origin: 'typed',
+    // A pending row is the viewer's own optimistic send, so its author kind is
+    // the viewer's — an agent driving its session sees its own words in the
+    // agent register the instant it sends, before the server round-trips (#101).
+    authorKind: base.viewer.kind,
     room: base.room.name,
     // Upload capabilities authorize a retry but are not product metadata and
     // must never enter the rendered attribution register.
@@ -72,13 +76,15 @@ export function liveRoomView(
         pending?.commandName === 'send_message'
           ? pending.references.length > 0
             ? typedReferenceBody(pending.body, pending.references, (kind, targetId) => {
-                if (kind === 'human') {
+                // Person or agent: both resolve to a participant name off the same
+                // map, keeping their kind. Item kinds fall through to `label: kind`.
+                if (kind === 'human' || kind === 'agent') {
                   const label = participantName.get(targetId);
                   return label === undefined ? undefined : { kind, targetId, label };
                 }
                 return { kind, targetId, label: kind };
               })
-            : mentionBody(pending.body, pending.mentionUserIds, participantName)
+            : undefined
           : undefined,
       viewer: base.viewer.name,
       tag:
@@ -88,18 +94,14 @@ export function liveRoomView(
       note:
         pending?.status === 'failed'
           ? systemStatement(pending.error ?? 'the send did not complete')
-          : pending?.commandName === 'send_message' &&
-              pending.mentionUserIds.length > 0 &&
-              pending.references.length === 0
-            ? systemStatement('legacy mention metadata has no verified authored span')
-            : null,
+          : null,
     });
   });
-  const humans = base.humans.map((human) => ({
-    ...human,
-    presence: presenceFor(live.presence[human.id]),
+  const participants = base.participants.map((person) => ({
+    ...person,
+    presence: presenceFor(live.presence[person.id]),
   }));
-  const viewer = humans.find((human) => human.id === viewerId) ?? base.viewer;
+  const viewer = participants.find((person) => person.id === viewerId) ?? base.viewer;
   const sourcedMessageIds = new Set(data.proposalSources.map((source) => source.messageId));
   const semanticRetryIds = new Set(
     data.messages.flatMap((message) =>
@@ -172,7 +174,7 @@ export function liveRoomView(
     ...base,
     records: [...base.records, ...pendingRecords],
     entries: [...entries, ...pendingEntries],
-    humans,
+    participants,
     viewer,
     rooms: base.rooms.map((room) => ({
       ...room,

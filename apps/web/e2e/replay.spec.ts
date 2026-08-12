@@ -210,23 +210,28 @@ test.describe('persisted three-surface replay', () => {
     expect(Math.min(...bodyWidths)).toBeGreaterThanOrEqual(160);
 
     /* ROOM NAVIGATION IS BEHIND THE FOLD, SO THE CHECK OPENS IT.
-       `1 room · 5 humans` is the rail's `workspaceSub`, and v8 ships the rail
+       `1 room · 5 people` is the rail's `workspaceSub`, and v8 ships the rail
        folded — `.rail` is `display: none` until `.appRailOpen` is set. This
        asserted it visible with no interaction, which was true of the pre-v8
        tree where the rail was a permanent 190px column.
 
+       The count reads `people`, not `humans`: the roster names participants by
+       kind now, and the corpus's five are all people. Flip one to an agent and
+       this line would read `4 people · 1 agent` — the agent-participant spec
+       drives exactly that transition.
+
        WHAT THE OLD ONE CAUGHT: the rail's workspace summary being absent, or
-       reporting a room or human count that is not the corpus's.
+       reporting a room or participant count that is not the corpus's.
        WHAT THIS ONE CATCHES: the same, PLUS the fold control failing to reveal
        the rail — the exact defect the v8 adoption batch shipped, where the rail
        was hidden with no control to open it and every check that drove it timed
        out. The old check could not have caught that; it would simply have gone
        on failing for the same reason it fails against a rail that is merely
        missing. The count is still read off the rendered rail. */
-    await page.getByRole('button', { name: 'Show rooms and people' }).click();
+    await page.getByRole('button', { name: 'Show rooms and participants' }).click();
     await expect(page.locator('[data-rail="open"]')).toBeVisible();
-    await expect(page.getByText('1 room · 5 humans', { exact: true })).toBeVisible();
-    await page.getByRole('button', { name: 'Hide rooms and people' }).click();
+    await expect(page.getByText('1 room · 5 people', { exact: true })).toBeVisible();
+    await page.getByRole('button', { name: 'Hide rooms and participants' }).click();
     const controls = page.getByRole('navigation', { name: 'Replay controls' });
     await expect(controls).toContainText('all 111 messages shown · machine read through 111');
     await expect(

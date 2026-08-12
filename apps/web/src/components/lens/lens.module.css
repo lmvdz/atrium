@@ -468,6 +468,35 @@
   color: var(--tx1);
 }
 
+/* A CITED MACHINE IN A RECEIPT keeps the machine register (#101, round-2 finding
+   2): the neutral squared marker before the name, the kind in a word, and
+   `data-author-kind` on the row — so a receipt citing an agent's message does not
+   render its words in the human quoted register. Structural (a square and a
+   word), never a hue and never a font swap (WIRE is one typeface, CONVENTIONS.md).
+   The dashed hollow variant is the fail-closed `unknown`. */
+.provMachineWho::before {
+  content: '';
+  display: inline-block;
+  width: 6px;
+  height: 6px;
+  margin-right: 4px;
+  vertical-align: baseline;
+  border-radius: 1px;
+  background: var(--tx2);
+}
+
+.provMachineWho[data-participant-kind='unknown']::before {
+  background: transparent;
+  border: 1px dashed var(--tx2);
+}
+
+.provKindWord {
+  color: var(--tx2);
+  text-transform: uppercase;
+  font-size: 9px;
+  letter-spacing: 0.12em;
+}
+
 .provJump {
   margin-left: auto;
   opacity: 0;

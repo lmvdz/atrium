@@ -86,20 +86,76 @@ export function owedSummary(items: readonly { readonly state: EpistemicState }[]
 
 export type Presence = 'here' | 'idle' | 'away';
 
-export interface HumanSummary {
+/**
+ * `ParticipantKind` and `participantKindOf` now live in `./kind`, a lower module
+ * that `quotation.ts` can also import without a cycle — a message needs its
+ * author's kind for the voice register (#101), and `records.ts` already imports
+ * `quotation.ts`. Re-exported here so every existing `from './records'` caller,
+ * and the barrel, keep resolving the same single definition.
+ */
+export type { ParticipantKind } from './kind';
+export { participantKindOf } from './kind';
+
+import type { ParticipantKind } from './kind';
+
+/**
+ * A participant in a room — a person or an agent. Formerly `HumanSummary`, which
+ * hardcoded the one assumption this record now carries as data: a roster, a
+ * presence dot, a monogram and a count all read `kind` and render an agent
+ * distinctly instead of stamping every member a person.
+ */
+export interface ParticipantSummary {
   readonly id: string;
+  readonly kind: ParticipantKind;
   readonly name: string;
   readonly presence: Presence;
   readonly note: Maybe<string>;
   readonly isViewer: boolean;
 }
 
+/**
+ * The roster subtitle, counted by kind. Formerly `${n} humans`, a label that
+ * called every member a person; it now names people, agents and unknown-kind
+ * members separately, so the count itself moves when a member's kind flips —
+ * `5 people` becomes `4 people · 1 agent` the moment one of them becomes an
+ * agent. All-human rooms still read as a plain people count.
+ *
+ * An unknown-kind member is counted as `unknown`, NEVER folded into `people`:
+ * that fold is the exact fail-open the round-1 gauntlet found, where an
+ * unreadable-kind machine was counted as a person. `people` is the count of
+ * members whose kind is exactly `'human'`, not "everything that is not an
+ * agent" — an allowlist, so a third kind lands in its own clause instead of the
+ * people one.
+ */
+export function participantTally(participants: readonly ParticipantSummary[]): string {
+  const people = participants.filter((participant) => participant.kind === 'human').length;
+  const agents = participants.filter((participant) => participant.kind === 'agent').length;
+  const unknown = participants.filter((participant) => participant.kind === 'unknown').length;
+  const parts: string[] = [];
+  if (people > 0 || (agents === 0 && unknown === 0)) {
+    parts.push(`${people} ${people === 1 ? 'person' : 'people'}`);
+  }
+  if (agents > 0) parts.push(`${agents} ${agents === 1 ? 'agent' : 'agents'}`);
+  if (unknown > 0) parts.push(`${unknown} unknown`);
+  return parts.join(' · ');
+}
+
 /* --- room head ----------------------------------------------------------- */
+
+/**
+ * A member as the room head paints it: a name and what kind of participant it is.
+ * A bare string before — the head's face chips could not tell a person from an
+ * agent because the record it read from did not carry the difference.
+ */
+export interface MemberChip {
+  readonly name: string;
+  readonly kind: ParticipantKind;
+}
 
 export interface RoomHeadRecord {
   readonly name: string;
   readonly topic: string;
-  readonly members: readonly string[];
+  readonly members: readonly MemberChip[];
 }
 
 /** The three surfaces are all on screen at once — these focus, they do not navigate. */
@@ -130,7 +186,7 @@ export type BodySegment =
   | {
       readonly kind: 'mention';
       readonly text: string;
-      readonly referenceKind?: 'human' | 'attachment' | 'proposal' | 'object';
+      readonly referenceKind?: 'human' | 'agent' | 'attachment' | 'proposal' | 'object';
       readonly targetId?: string;
       readonly resolution?: string;
       readonly legacy?: boolean;

@@ -15,6 +15,7 @@
 
 import { useState } from 'react';
 import { systemText } from '../model/quotation';
+import type { ParticipantKind } from '../model/records';
 import type { Slot } from '../model/slot';
 import styles from './frame.module.css';
 
@@ -105,7 +106,7 @@ export function AppFrame({
               goes; `aria-expanded` says which way it currently is. */}
           <button
             aria-expanded={railOpen}
-            aria-label={railOpen ? 'Hide rooms and people' : 'Show rooms and people'}
+            aria-label={railOpen ? 'Hide rooms and participants' : 'Show rooms and participants'}
             className={styles.railFold}
             onClick={() => setRailOpen((open) => !open)}
             type="button"
@@ -159,11 +160,30 @@ export function WorkspaceSpacer() {
 export interface WorkspaceYouProps {
   readonly initials: string;
   readonly title: string;
+  /**
+   * The viewer's own kind. The strip's "you" monogram carried the round-person
+   * treatment unconditionally, so an agent (or an unknown-kind) session saw its
+   * own tile as a human while every other surface — roster, monogram, count —
+   * said otherwise. It reads the kind now, and the shape moves with it: an agent
+   * gets the squared rule the room head's agent chip wears, an unknown-kind
+   * viewer the dashed one, both in the neutral tokens, no new hue.
+   */
+  readonly kind: ParticipantKind;
 }
 
-export function WorkspaceYou({ initials, title }: WorkspaceYouProps) {
+export function WorkspaceYou({ initials, title, kind }: WorkspaceYouProps) {
+  const kindClass =
+    kind === 'agent'
+      ? ` ${styles.wsYouAgent}`
+      : kind === 'unknown'
+        ? ` ${styles.wsYouUnknown}`
+        : '';
   return (
-    <div className={styles.wsYou} title={systemText(title, 'WorkspaceYou title')}>
+    <div
+      className={`${styles.wsYou}${kindClass}`}
+      data-participant-kind={kind}
+      title={systemText(title, 'WorkspaceYou title')}
+    >
       {systemText(initials, 'WorkspaceYou')}
     </div>
   );

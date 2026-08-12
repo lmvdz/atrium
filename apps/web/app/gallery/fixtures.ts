@@ -18,11 +18,11 @@ import type {
   CorrectionEntry,
   CrossRoomJumpRecord,
   HappenedKind,
-  HumanSummary,
   Maybe,
   MessageEntry,
   MessageRecord,
   ObjectiveRecord,
+  ParticipantSummary,
   ProvenanceEntry,
   Quotation,
   ReceiptRecord,
@@ -70,7 +70,7 @@ import {
  */
 const HERE = 'users-migration';
 
-export const MESSAGES: Readonly<Record<string, MessageRecord>> = {
+const RAW_MESSAGES: Readonly<Record<string, MessageRecord>> = {
   m2: {
     id: 'm2',
     at: '09:04',
@@ -221,6 +221,19 @@ export const MESSAGES: Readonly<Record<string, MessageRecord>> = {
 };
 
 /**
+ * Every message in this gallery conversation is authored by a PERSON, so each
+ * record declares `authorKind: 'human'`. #101 made an absent kind fail CLOSED to
+ * `'unknown'` (a deleted author must never render as a person), so this demo's
+ * human speech says it is human rather than leaning on a default — and the spread
+ * lets any individual record override it (an agent message would set `'agent'`).
+ * `MESSAGES` and `RECORDS` reference the SAME normalized objects, so a citation
+ * minted from one resolves against the other (the fingerprint is identical).
+ */
+export const MESSAGES: Readonly<Record<string, MessageRecord>> = Object.fromEntries(
+  Object.entries(RAW_MESSAGES).map(([id, message]) => [id, { authorKind: 'human', ...message }]),
+);
+
+/**
  * The register as a list, for `<AttributionLedger>`. Every citation any frame
  * renders resolves against exactly this — a quotation for a message that is not
  * here does not degrade, it throws.
@@ -276,26 +289,65 @@ export const ROSTER: readonly RoomRoster[] = [
   { id: 'r4', name: 'design', unseen: 0 },
 ];
 
-export const VIEWER: HumanSummary = {
+export const VIEWER: ParticipantSummary = {
   id: 'lars',
+  kind: 'human',
   name: 'lars',
   presence: 'here',
   note: null,
   isViewer: true,
 };
 
-export const HUMANS: readonly HumanSummary[] = [
+export const PARTICIPANTS: readonly ParticipantSummary[] = [
   VIEWER,
-  { id: 'priya', name: 'priya', presence: 'here', note: 'in #identity-service', isViewer: false },
-  { id: 'dana', name: 'dana', presence: 'idle', note: '20m', isViewer: false },
-  { id: 'justin', name: 'justin', presence: 'here', note: null, isViewer: false },
-  { id: 'mateo', name: 'mateo', presence: 'away', note: 'back tomorrow', isViewer: false },
+  {
+    id: 'priya',
+    kind: 'human',
+    name: 'priya',
+    presence: 'here',
+    note: 'in #identity-service',
+    isViewer: false,
+  },
+  { id: 'dana', kind: 'human', name: 'dana', presence: 'idle', note: '20m', isViewer: false },
+  { id: 'justin', kind: 'human', name: 'justin', presence: 'here', note: null, isViewer: false },
+  {
+    id: 'mateo',
+    kind: 'human',
+    name: 'mateo',
+    presence: 'away',
+    note: 'back tomorrow',
+    isViewer: false,
+  },
+  // An agent member sits in the roster beside the people, so the gallery — the
+  // one page that renders the whole component library from fixtures — shows the
+  // agent-vs-human treatment directly: a squared presence marker, an `agent`
+  // register on the row, a squared monogram in the room head, and a count that
+  // reads `5 people · 1 agent`. Flip this `kind` to `human` and every one of
+  // those surfaces reverts, which is the acceptance test made visible.
+  {
+    id: 'atrium-agent',
+    kind: 'agent',
+    name: 'atrium',
+    presence: 'here',
+    note: 'drafts readings',
+    isViewer: false,
+  },
 ];
 
-export const ROOM: RoomHeadRecord = {
+/** Back-compat alias for callers still naming the roster `HUMANS`. */
+export const HUMANS = PARTICIPANTS;
+
+/**
+ * The room head's non-member facts. There is NO `members` array: the head's
+ * chips are derived from `PARTICIPANTS` by `RoomFrame`, so this room and its
+ * roster are one source. A hand-written member list here was the round-1
+ * gauntlet's finding 3 — a parallel copy that flipping a participant's kind did
+ * not move. `Omit<RoomHeadRecord, 'members'>` is what `RoomFrameProps.room`
+ * takes, and it makes the second copy unrepresentable rather than merely absent.
+ */
+export const ROOM: Omit<RoomHeadRecord, 'members'> = {
   name: 'users-migration',
   topic: 'cut auth over to the new users table without dropping a live session',
-  members: ['lars', 'priya', 'dana', 'justin', 'mateo'],
 };
 
 /** All three surfaces are on screen at once; only two of them carry a count. */

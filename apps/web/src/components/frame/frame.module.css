@@ -180,6 +180,21 @@
   color: var(--stx);
 }
 
+/* THE VIEWER'S OWN MONOGRAM CARRIES ITS KIND. The "you" tile was the round
+   person circle for everyone, so an agent session saw itself as a human while
+   the roster, the room head and the count said agent. It reads the kind now, by
+   the same shape-and-tone grammar every other participant surface uses — an
+   agent is a squared tile, an unknown-kind viewer a dashed square, both in the
+   strip's own tokens, no new hue. Defined after `.wsYou` so the radius and
+   border win when a kind class is also applied. */
+.wsYouAgent {
+  border-radius: 5px;
+}
+.wsYouUnknown {
+  border-radius: 5px;
+  border-style: dashed;
+}
+
 .iconbtn {
   /* THE FIFTH, and this one is the theme control. v8 hid it, so the only
      in-product way to switch light and dark was gone while the button stayed in
@@ -368,6 +383,63 @@
 .presAway {
   background: transparent;
   border: 1.5px solid var(--tx2);
+}
+
+/* AN AGENT IS A SQUARE, NOT A DOT. The same 7px marker, squared and in the
+   neutral text token, so an agent reads as a machine holding a session rather
+   than a person present. A shape-and-tone distinction, never a new hue: blue is
+   presence and green is verified, and an agent may borrow neither. Defined after
+   the three presence classes so its fill and radius win when both are applied;
+   the here/idle/away an agent also has is written down in the row's words, where
+   the audit reads it, not folded into this marker. --tx2 is 6.26:1 on the rail
+   surface, above AA for a non-text graphic. */
+.presAgent {
+  border-radius: 1px;
+  background: var(--tx2);
+  border: none;
+}
+
+/* THE FAIL-CLOSED MARKER, for a kind we could not read. Neither the person's
+   dot nor the agent's filled square: a dashed hollow square, so a glance reads
+   "not resolved" rather than defaulting to either. Same neutral --tx2 token, no
+   hue. It renders when `participantKindOf` could not match the stored value to
+   `human` or `agent` — a later enum member, a fixture that forgot a kind — and
+   the row's words say `unknown` beside it. Defined after the presence classes so
+   its shape wins when both are applied. */
+.presUnknown {
+  border-radius: 1px;
+  background: transparent;
+  border: 1.5px dashed var(--tx2);
+}
+
+/* A CITED MACHINE IN THE REPLY BANNER keeps the machine register (#101, round-2
+   finding 2): the neutral squared marker before the replied-to name, the kind in
+   a word, and `data-author-kind` on the banner — so an agent one is replying to
+   is not laundered into the human quote register. Structural (a square and a
+   word), never a hue and never a font swap; WIRE is one typeface (CONVENTIONS.md).
+   The dashed hollow variant is the fail-closed `unknown`, matching `.presUnknown`. */
+.ctxMachineWho::before {
+  content: '';
+  display: inline-block;
+  width: 6px;
+  height: 6px;
+  margin-right: 4px;
+  vertical-align: baseline;
+  border-radius: 1px;
+  background: var(--tx2);
+}
+
+.ctxMachineWho[data-participant-kind='unknown']::before {
+  background: transparent;
+  border: 1px dashed var(--tx2);
+}
+
+.ctxKindWord {
+  margin: 0 4px 0 2px;
+  color: var(--tx2);
+  text-transform: uppercase;
+  font-size: 9.5px;
+  letter-spacing: 0.12em;
 }
 
 /* A PERSON'S NAME IS NOT CLIPPED HERE ANY MORE. Round 7: its declared route was
@@ -663,9 +735,25 @@
   height: 22px;
   place-items: center;
 }
-.atriumAvatar {
-  background: var(--grnav);
-  color: #9bd4ac;
+/* THE AGENT AVATAR ON THE CALL IS SQUARED AND NEUTRAL. The person avatars are
+   round and blue; an agent gets a rounded square in the neutral surface tokens,
+   so the call strip separates the machine from the people by shape, not by a
+   hue that already carries meaning (the old hardcoded `atrium` avatar wore green
+   — the one colour that means "verified" — which this replaces). */
+.callAvatarAgent {
+  background: var(--bg6);
+  border: 1px solid var(--line3);
+  border-radius: 5px;
+  color: var(--tx1);
+}
+/* THE FAIL-CLOSED AVATAR on the call strip. The agent's squared neutral tile
+   with a DASHED rule, so an unreadable kind reads as unresolved rather than
+   borrowing the person's round-and-blue treatment. Same tokens, no hue. */
+.callAvatarUnknown {
+  background: var(--bg6);
+  border: 1px dashed var(--line3);
+  border-radius: 5px;
+  color: var(--tx1);
 }
 .speaking {
   box-shadow: 0 0 0 1.5px var(--grn);
@@ -850,6 +938,27 @@
      under. These are the initials that say WHO is in the room, so the brighter
      body token is the honest pick rather than a rounding argument. */
   color: var(--tx1);
+}
+
+/* AN AGENT'S MONOGRAM IS SQUARED. The person chips are circles; an agent gets a
+   rounded square and a brighter rule, so a glance at the room head separates the
+   machine from the people without a legend and without a hue — the same
+   shape-carries-kind rule the rail's presence marker follows. The initials stay:
+   an agent has a name, and the chip says it (the `title` names the kind in
+   words, since a shape is not a name). */
+.faceAgent {
+  border-radius: 4px;
+  border-color: var(--line3);
+}
+
+/* THE FAIL-CLOSED MONOGRAM in the room head. The agent's squared chip with a
+   DASHED rule — visibly not the round person chip and visibly not the solid
+   agent one — for a member whose kind we could not read. No hue; the `title`
+   names it `unknown`, since a shape is not a name. */
+.faceUnknown {
+  border-radius: 4px;
+  border-style: dashed;
+  border-color: var(--line3);
 }
 
 /* --- surface indicators -------------------------------------------------- */

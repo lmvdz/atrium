@@ -186,22 +186,33 @@ test.describe
       const pages = await Promise.all(contexts.map((context) => context.newPage()));
       const emails = Array.from({ length: 5 }, (_, index) => uniqueEmail(`multi-${index}`));
       const names = ['Aster', 'Birch', 'Cedar', 'Dahlia', 'Elm'];
-      /* STILL RED, and the remaining failure is NOT any of the six problems
-         fixed on the way here — it ALTERNATES between two later points in the
-         semantic-acceptance stage across otherwise identical runs at one
-         worker: "claim <id> has no live attention route" (the pin has no route
-         to a staged claim yet) and the accepted-object walk below it. That is a
-         timing dependency between the interpretation worker and the attention
-         projection, and it is the next thing to chase here — it has nothing to
-         do with mentions, composers or locators.
+      /* THE ALTERNATION THIS COMMENT ONCE CALLED "STILL RED" IS MITIGATED, and
+         the mitigation is below rather than in a product change. It alternated
+         between two later points in the semantic-acceptance stage at one worker:
+         "claim <id> has no live attention route" and the accepted-object walk.
+         Both were diagnosed as timing between the interpretation worker and the
+         attention projection, NOT a product ordering bug, and both were closed
+         here without touching the product: the `claim`/`open_question` types are
+         auto-accepted and owe nobody, so they were removed from the owed set
+         (see `owedProposals` below), and the surviving owed routes are POLLED for
+         rather than read once (see the `expect.poll` below). #100's mention/
+         attention work does not touch this path — a mention becomes attention
+         synchronously in projections.ts, never through the worker — and a full
+         run of this spec at four workers reached the mention and accepted-object
+         assertions with the worker/projection timing no longer racing. If it
+         recurs it is harness timing under a heavy five-context load (AGENTS.md's
+         "suspect the machine before the page"), to be re-run in isolation, not a
+         product ordering defect.
 
          What was fixed to reach it, all measured, all recorded at the line they
          touch: the two stale locators; the mention picked AFTER the body so
          `reconcileMessageReferences` keeps the reference; the mention row's
          statement read from `reason.request` where the projection puts it; the
          subject asserted as `message` rather than `proposal`; the pin/reference
-         split; and the certified id read from `message_references` rather than
-         from `messages.mention_user_ids`, which this product never fills.
+         split; and the certified id read from `message_references` — now the ONE
+         register, since `messages.mention_user_ids` was dropped in drizzle/0019
+         (#92/#100) and its dead worker consumer (`mentionSignals`) was retired so
+         `projections.ts` is the sole mention→attention path.
 
          THE BODY A MENTIONED MESSAGE IS ACTUALLY SENT WITH.
          The mention has to be IN the text. `reconcileMessageReferences` drops
@@ -833,12 +844,18 @@ test.describe
            because the reference carries the span and surface too, so a mention
            whose id is right but whose text no longer matches is caught as well.
 
-           NOT FIXED, and worth a decision: `mention_user_ids` is a second
-           register for the same fact, and it is not merely unused —
-           `attention-projection.ts:93` still computes its targets from it. That
-           path is reading a column the client never fills. Either the column
-           goes, or something fills it; leaving both is the "two registers for
-           one fact" shape AGENTS.md names. */
+           NOW FIXED (#92 / #100): the second register is gone. The
+           `messages.mention_user_ids` column has been dropped (drizzle/0019) and
+           its dead worker consumer (`mentionSignals`) retired, so `projections.ts`
+           is the ONE mention→attention path and this assertion reads the same
+           register the product writes. Reviving the worker consumer against the
+           reference register would double-count — the same @name would raise both
+           this live message-subject row and a worker proposal/object-subject row —
+           which is exactly what this scenario's `expectedAttention` equality
+           (one mention per mention) catches. The schema- and projection-level
+           guards that fail if a second register reappears live in
+           `packages/db/test/schema.test.ts` and
+           `apps/server/test/attention-projection.test.ts`. */
         const [mentionedMessage] = await sql<
           { body: string; kind: string; targetId: string; surface: string }[]
         >`

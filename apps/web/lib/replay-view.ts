@@ -11,9 +11,9 @@ import type {
   BodySegment,
   CorrectionEntry,
   EpistemicState,
-  HumanSummary,
   MessageRecord,
   ObjectiveRecord,
+  ParticipantSummary,
   ProvenanceEntry,
   ReceiptRecord,
   RoomHeadRecord,
@@ -26,6 +26,7 @@ import {
   happenedKindFor,
   messageEntry,
   owedSummary,
+  participantKindOf,
   quotationFrom,
   rationale,
   sinceYouLeft,
@@ -83,18 +84,6 @@ export function typedReferenceBody(
   }
   if (cursor < text.length) body.push({ kind: 'text', text: text.slice(cursor) });
   return body;
-}
-
-export function mentionBody(
-  _text: string,
-  _mentionUserIds: readonly string[],
-  _participantName: ReadonlyMap<string, string>,
-): readonly BodySegment[] | undefined {
-  // Pre-0015 rows recorded target ids but no authored spans. Searching the
-  // body for a current display name would fabricate provenance, especially
-  // after rename. Render the immutable body plainly and disclose degradation
-  // in system voice on the row instead.
-  return undefined;
 }
 
 const TALK: EpistemicState = {
@@ -156,6 +145,15 @@ export function replayView(data: ReplayData, viewerId?: string) {
     actor: message.author ?? 'author unavailable',
     text: message.body,
     origin: 'seeded',
+    // The author's kind decides the voice register (#101), read through
+    // `participantKindOf` so it FAILS CLOSED: a value that cannot be read — and
+    // a NULL from a deleted author row (`messages.author_id` is ON DELETE SET
+    // NULL, so the join yields no `principal_kind`) — becomes `'unknown'`, a
+    // visibly-not-a-person register, NEVER softened to a person. Always set,
+    // never omitted: a deleted agent's genuine message must not fall through to
+    // a human default. `users.principal_kind` is NOT NULL, so a live author is
+    // always `'human'`/`'agent'` and only a gone author reads as `'unknown'`.
+    authorKind: participantKindOf(message.authorKind),
     room: data.room.name,
     attachments: message.attachments,
   }));
@@ -229,8 +227,8 @@ export function replayView(data: ReplayData, viewerId?: string) {
       objectives: objectives.map((objective) => objective.id),
     }));
   const objects = [...accepted, ...staged];
-  const currentHumanName = new Map(
-    (data.referenceHumans ?? data.participants).map((person) => [person.id, person.name]),
+  const currentParticipantName = new Map(
+    (data.referenceParticipants ?? data.participants).map((person) => [person.id, person.name]),
   );
   const currentParticipantIds = new Set(data.participants.map((person) => person.id));
   const attachmentById = new Map(
@@ -246,8 +244,11 @@ export function replayView(data: ReplayData, viewerId?: string) {
     kind: MessageReferenceKind,
     targetId: string,
   ): ReferenceResolution | undefined => {
-    if (kind === 'human') {
-      const label = currentHumanName.get(targetId);
+    if (kind === 'human' || kind === 'agent') {
+      // A person and an agent are both `users` rows and both resolve to a
+      // display name off the same map; the reference kind is preserved so the
+      // renderer can still distinguish them, but neither is stamped the other.
+      const label = currentParticipantName.get(targetId);
       return label === undefined
         ? undefined
         : {
@@ -298,19 +299,19 @@ export function replayView(data: ReplayData, viewerId?: string) {
          in its source message. Human speech stays discussion; the Current-state
          object and its receipt carry the derived epistemic status. */
       state: TALK,
+      // Mentions render from the ONE register: authored `message_references`
+      // spans (decision #92). A message with no references is plain speech; there
+      // is no second `mention_user_ids` column to fall back to or to disclose.
       body: referencesByMessage.has(message.id)
         ? typedReferenceBody(
             message.body,
             referencesByMessage.get(message.id) ?? [],
             resolveReference,
           )
-        : mentionBody(message.body, message.mentionUserIds ?? [], participantName),
+        : undefined,
       replyTo: reply ? quotationFrom(reply) : null,
       viewer: viewerName,
-      note:
-        referencesByMessage.has(message.id) || (message.mentionUserIds?.length ?? 0) === 0
-          ? null
-          : systemStatement('legacy mention metadata has no verified authored span'),
+      note: null,
     });
   });
   const entries: TimelineEntry[] =
@@ -404,24 +405,37 @@ export function replayView(data: ReplayData, viewerId?: string) {
   });
   const referenceAttention = contextualReferenceAttention(data, viewer?.id);
 
-  const humans: HumanSummary[] = data.participants.map((person) => ({
+  const participants: ParticipantSummary[] = data.participants.map((person) => ({
     id: person.id,
+    // An allowlist, not `=== 'agent' ? … : …`: an unreadable kind renders a
+    // person, and that default is only ever safe because this is a monogram and
+    // not a certification gate. The gates that must fail closed read the `Actor`
+    // server-side, never this record.
+    kind: participantKindOf(person.principalKind),
     name: person.name,
     presence: 'away',
     note: null,
     isViewer: person.id === viewer?.id,
   }));
-  const viewerRecord: HumanSummary = humans.find((person) => person.isViewer) ?? {
+  const viewerRecord: ParticipantSummary = participants.find((person) => person.isViewer) ?? {
     id: 'replay-viewer',
+    // The viewer is whoever loaded the page, and an agent does not load a page —
+    // it holds a session the harness drives. The fallback viewer is a person.
+    kind: 'human',
     name: viewerName,
     presence: 'away',
     note: null,
     isViewer: true,
   };
-  const room: RoomHeadRecord = {
+  /* Name and topic only. The head's member chips are derived from `participants`
+     by `RoomFrame` — one source, read once through `participantKindOf` above —
+     rather than mapped a second time here. Mapping the same rows twice was the
+     round-1 gauntlet's finding 3: two member registers that nothing kept in
+     step. `Omit<RoomHeadRecord, 'members'>` is what the frame's `room` prop
+     takes now, so the second map has nowhere to go. */
+  const room: Omit<RoomHeadRecord, 'members'> = {
     name: data.room.name,
     topic: data.room.workspaceName,
-    members: data.participants.map((person) => person.name),
   };
   const rooms: RoomSummary[] = [
     {
@@ -440,7 +454,7 @@ export function replayView(data: ReplayData, viewerId?: string) {
     objects,
     attention,
     referenceAttention,
-    humans,
+    participants,
     viewer: viewerRecord,
     room,
     rooms,

@@ -141,6 +141,13 @@
       "when": 1786358400004,
       "tag": "0019_the_read_model_names_who_certified",
       "breakpoints": true
+    },
+    {
+      "idx": 20,
+      "version": "7",
+      "when": 1786358400005,
+      "tag": "0020_mention_register",
+      "breakpoints": true
     }
   ]
 }
