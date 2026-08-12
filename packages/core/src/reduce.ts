@@ -1207,11 +1207,31 @@ function applyObjectCorrected(
     before.payload.verification === 'verified' &&
     after.type === 'claim' &&
     after.payload.verification === 'verified' &&
-    (after.payload.statement !== before.payload.statement ||
+    // Materiality is decided under `normalizeForReceipt`, NOT raw string
+    // equality. A ✓ certifies a *sentence*, and this project's definition of
+    // "the same sentence" is the receipt fold (r8) — a collapsed whitespace run
+    // or a typographic-vs-straight apostrophe is the same sentence entered twice,
+    // so the vouch still covers it and the ✓ must not lapse. Only a genuinely
+    // different sentence is a change of what was certified. Exact `!==` (the old
+    // test) over-lapsed on `"deploy clean"` → `"deploy  clean"`. The claimant is
+    // compared exactly: a different name is always a different person, and
+    // `normalizeForReceipt` is for prose, not identifiers.
+    (normalizeForReceipt(after.payload.statement) !==
+      normalizeForReceipt(before.payload.statement) ||
       after.payload.claimant !== before.payload.claimant)
   ) {
-    after = { ...after, payload: { ...after.payload, verification: 'unverified' } };
+    const lapsedPayload = { ...after.payload, verification: 'unverified' as const };
+    after = { ...after, payload: lapsedPayload };
     outcome.plan.object = after;
+    // Finding #1: the correction log's `after` must equal the lapsed payload, or
+    // the record contradicts itself — `commitPlan` writes `plan.after` into the
+    // correction chain and the projection persists it, so a stale
+    // `after: verified` would sit beside `accepted_objects.payload: unverified`,
+    // and a replay would read two answers to "was this ✓ after the edit?". Only
+    // `amend`/`reattribute` reach here (both `before` and `after` are claims), and
+    // for those verbs `plan.after` is the full new payload — so it carries the
+    // lapse the fold just applied.
+    outcome.plan.after = lapsedPayload;
   }
 
   // ── Verification is a second pair of eyes, even for a human (#68/H2, #95) ───

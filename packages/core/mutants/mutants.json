@@ -1704,14 +1704,34 @@
     },
     {
       "id": "verified_survives_material_change_disabled",
-      "why": "#102 finding 1's finding 3: a ✓ is verification of a specific sentence under a specific name, and `becomesVerified` only re-gates the *transition* to verified — so an edit to an already-verified claim was not re-checked. The reset drops verification to `unverified` when a verified claim's statement or claimant materially changes under a correction, forcing a fresh disinterested verification. Deleting the reset (keeping the plan assignment so `after` stays referenced and tsc is silent) lets ALICE verify BOB's claim, reattribute it to herself, and keep a ✓ on her own reworded sentence no second party ever verified.",
+      "why": "#102 finding 3: a ✓ is verification of a specific sentence under a specific name, and `becomesVerified` only re-gates the *transition* to verified — so an edit to an already-verified claim was not re-checked. The reset drops verification to `unverified` when a verified claim's statement or claimant materially changes under a correction, forcing a fresh disinterested verification. Neutralising the lapse (holding the payload at its current `verified` value, so `lapsedPayload`/`after` stay referenced and tsc is silent) lets ALICE verify BOB's claim, reattribute it to herself, and keep a ✓ on her own reworded sentence no second party ever verified.",
       "file": "src/reduce.ts",
-      "find": "    after = { ...after, payload: { ...after.payload, verification: 'unverified' } };\n    outcome.plan.object = after;",
-      "replace": "    outcome.plan.object = after;",
+      "find": "    const lapsedPayload = { ...after.payload, verification: 'unverified' as const };",
+      "replace": "    const lapsedPayload = { ...after.payload, verification: after.payload.verification };",
       "catches": [
         "drops verification when a verified claim is reattributed to the verifier",
         "will not let the new claimant re-verify their own now-self claim",
-        "drops verification when the claimant rewords their own verified sentence"
+        "drops verification when the claimant rewords their own verified sentence",
+        "lapses verification when a verified claim is reworded to a genuinely different sentence (#102 finding 2)",
+        "lapses the correction RECEIPT too, not only the folded object (#102 finding 1)"
+      ]
+    },
+    {
+      "id": "verified_lapse_receipt_stays_stale",
+      "why": "#102 finding 1: the lapse resets the folded object to `unverified` but the correction log's `after` must lapse with it. `commitPlan` writes `plan.after` into the correction chain and the projection persists it into `corrections.after`; leaving it at the pre-lapse `verified` payload makes `accepted_objects.payload` (unverified) and `corrections.after` (verified) contradict — a replay reads two answers to whether the ✓ survived. Deleting the `plan.after` assignment (the `after = {...payload: lapsedPayload}` binding keeps `lapsedPayload` referenced, so tsc is silent) restores the self-contradicting record.",
+      "file": "src/reduce.ts",
+      "find": "    outcome.plan.after = lapsedPayload;",
+      "replace": "    void lapsedPayload;",
+      "catches": ["lapses the correction RECEIPT too, not only the folded object (#102 finding 1)"]
+    },
+    {
+      "id": "material_change_uses_raw_string_equality",
+      "why": "#102 finding 2: materiality of a statement change is decided under `normalizeForReceipt` — the same 'same sentence' fold r8 verifies a quote under — not raw string equality. Reverting to exact `!==` over-lapses: a receipt-equivalent edit (a collapsed whitespace run, a typographic apostrophe) is the same sentence, so the ✓ still covers it and must not lapse. The exact comparison drops verification on `\"deploy clean\" → \"deploy  clean\"`, destroying a legitimate ✓ on an unchanged sentence.",
+      "file": "src/reduce.ts",
+      "find": "    (normalizeForReceipt(after.payload.statement) !==\n      normalizeForReceipt(before.payload.statement) ||",
+      "replace": "    (after.payload.statement !== before.payload.statement ||",
+      "catches": [
+        "keeps verification when a verified claim is edited to a receipt-equivalent sentence (#102 finding 2)"
       ]
     },
     {

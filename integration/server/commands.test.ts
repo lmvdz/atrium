@@ -2091,4 +2091,135 @@ describe('#102 finding 1 — self-verification vs the source author', () => {
     expect(ack.type).toBe('ack');
     expect(await verificationOf(objectId)).toBe('verified');
   });
+
+  it('refuses accepting a BORN-verified proposal when the accepter wrote its source (#102 finding 4)', async () => {
+    // The verification act at ACCEPTANCE via `proposal_sources`, not a later amend.
+    // ALICE writes the source; BOB stages a `verification:'verified'` claim about
+    // himself citing it; ALICE accepts — minting a ✓ she is the author behind. The
+    // reducer waves her through (actor ALICE ≠ claimant BOB, stager BOB); the guard
+    // reads the proposal's committed payload and refuses via `proposal_sources`.
+    const alice = await connect(room.people.alice as string);
+    const bob = await connect(room.people.bob as string);
+    const source = await postMessage(alice, SENTENCE);
+    await bob.command({
+      name: 'record_proposal',
+      roomId: room.roomId,
+      proposal: {
+        type: 'claim',
+        payload: {
+          statement: SENTENCE,
+          claimant: room.people.bob as string,
+          verification: 'verified',
+        },
+        confidence: 0.7,
+        provenance: [source],
+        quote: SENTENCE,
+        interpretationId: null,
+      },
+    });
+    const proposalId = (await lastEvent<{ proposal: { id: string } }>(room.roomId)).proposal.id;
+    const refused = await alice.command({
+      name: 'accept_proposal',
+      roomId: room.roomId,
+      proposalId,
+      objectiveId: null,
+    });
+    expect(refused.type).toBe('nack');
+    expect((refused as { message: string }).message).toContain('a message they wrote');
+  });
+
+  it('refuses a verifier who wrote only the NON-FIRST cited source (#102 finding 4)', async () => {
+    // The guard compares the session user against EVERY source author, not just the
+    // first row. BOB writes source 1, ALICE writes source 2; a claim about CAROL
+    // cites both and CAROL accepts it verbatim (disinterested). ALICE then verifies —
+    // she authored only the second source, but a ✓ from ANY source author is the
+    // hole, so she is still refused and nothing durable moves.
+    const alice = await connect(room.people.alice as string);
+    const bob = await connect(room.people.bob as string);
+    const carolClient = await connect(carol);
+    const first = await postMessage(bob, SENTENCE);
+    const second = await postMessage(alice, `${SENTENCE} — confirmed`);
+    await bob.command({
+      name: 'record_proposal',
+      roomId: room.roomId,
+      proposal: {
+        type: 'claim',
+        payload: { statement: SENTENCE, claimant: carol, verification: 'unverified' },
+        confidence: 0.7,
+        provenance: [first, second],
+        quote: SENTENCE,
+        interpretationId: null,
+      },
+    });
+    const proposalId = (await lastEvent<{ proposal: { id: string } }>(room.roomId)).proposal.id;
+    const accepted = await carolClient.command({
+      name: 'accept_proposal',
+      roomId: room.roomId,
+      proposalId,
+      objectiveId: null,
+    });
+    expect(accepted.type).toBe('ack');
+    const objectId = (await lastEvent<{ object: { id: string } }>(room.roomId)).object.id;
+    const refused = await alice.command(verify(objectId));
+    expect(refused.type).toBe('nack');
+    expect((refused as { message: string }).message).toContain('a message they wrote');
+    expect(await verificationOf(objectId)).toBe('unverified');
+  });
+
+  it('lets the claim’s own author amend statement+verified — it LAPSES, not a self-verification nack (#102 finding 3)', async () => {
+    // The over-refusal finding #3 fixes: the guard used to fire on the mere
+    // presence of `verification:'verified'` in the patch. BOB authors a claim about
+    // himself; CAROL verifies it disinterestedly; BOB then amends
+    // `{statement:'corrected wording', verification:'verified'}`. The reducer accepts
+    // this and LAPSES the ✓ (a material reword) — so it is NOT a verification act and
+    // must not be nacked. The command guard now keys on the transition: the claim is
+    // already verified, so `becomesVerified` is false and the guard skips.
+    const bob = await connect(room.people.bob as string);
+    const carolClient = await connect(carol);
+    const source = await postMessage(bob, SENTENCE);
+    await bob.command({
+      name: 'record_proposal',
+      roomId: room.roomId,
+      proposal: {
+        type: 'claim',
+        payload: {
+          statement: SENTENCE,
+          claimant: room.people.bob as string,
+          verification: 'unverified',
+        },
+        confidence: 0.7,
+        provenance: [source],
+        quote: SENTENCE,
+        interpretationId: null,
+      },
+    });
+    const proposalId = (await lastEvent<{ proposal: { id: string } }>(room.roomId)).proposal.id;
+    const accepted = await carolClient.command({
+      name: 'accept_proposal',
+      roomId: room.roomId,
+      proposalId,
+      objectiveId: null,
+    });
+    expect(accepted.type).toBe('ack');
+    const objectId = (await lastEvent<{ object: { id: string } }>(room.roomId)).object.id;
+    // CAROL, disinterested (wrote none of the source, not claimant/stager), verifies.
+    const verified = await carolClient.command(verify(objectId));
+    expect(verified.type).toBe('ack');
+    expect(await verificationOf(objectId)).toBe('verified');
+    // BOB — the claimant AND the source author — rewords and re-asserts verified.
+    // The old guard would nack this on field-presence; the reshaped guard lets it
+    // through, and the reducer lapses the ✓ because the sentence materially changed.
+    const amended = await bob.command({
+      name: 'correct',
+      roomId: room.roomId,
+      objectId,
+      action: 'amend',
+      patch: { statement: 'the rollback ran clean at midnight', verification: 'verified' },
+      toType: null,
+      provenance: { messageIds: [], proposalId: null, interpretationId: null },
+      note: null,
+    });
+    expect(amended.type).toBe('ack');
+    expect(await verificationOf(objectId)).toBe('unverified');
+  });
 });

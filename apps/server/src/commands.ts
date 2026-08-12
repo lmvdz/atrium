@@ -485,14 +485,28 @@ function isVerifiedClaimPayload(payload: unknown): boolean {
   );
 }
 
-/** Is the object currently a claim? (An `amend {verification}` targets a claim.) */
-async function isExistingClaim(tx: Tx, roomId: string, objectId: string): Promise<boolean> {
+/**
+ * The stored object's current type and verification — enough to key the
+ * self-verification guard on the reducer's `becomesVerified` *transition* rather
+ * than on the mere presence of `verification: 'verified'` in a patch (#102
+ * finding 3). An `amend {…, verification:'verified'}` on a claim that is ALREADY
+ * verified mints no new ✓ (and a materially-changed one lapses back to
+ * `unverified` inside the reducer) — neither is a verification act, so a
+ * legitimate full-form amendment like `{statement:'corrected wording',
+ * verification:'verified'}` by the claim's own author must NOT be refused here.
+ */
+async function currentClaimState(
+  tx: Tx,
+  roomId: string,
+  objectId: string,
+): Promise<{ isClaim: boolean; verified: boolean }> {
   const [row] = await tx
-    .select({ type: acceptedObjects.type })
+    .select({ type: acceptedObjects.type, payload: acceptedObjects.payload })
     .from(acceptedObjects)
     .where(and(eq(acceptedObjects.id, objectId), eq(acceptedObjects.roomId, roomId)))
     .limit(1);
-  return row?.type === 'claim';
+  const isClaim = row?.type === 'claim';
+  return { isClaim, verified: isClaim && isVerifiedClaimPayload(row.payload) };
 }
 
 async function refuseSelfVerificationByAuthor(
@@ -1151,20 +1165,29 @@ export function createCommandService({
             provenance: command.provenance,
             note: command.note,
           }),
-          // #102 finding 1: a correction that sets `verification: 'verified'` on a
-          // claim (an `amend`, or a `retype` into a claim) is a verification act.
-          // Anchor it to the real source author, which the reducer cannot see.
+          // #102 finding 1: a correction that mints a `✓ verified` claim (an
+          // `amend`, or a `retype` into a claim) is a verification act, anchored to
+          // the real source author the reducer cannot see. #102 finding 3: key it
+          // on the reducer's `becomesVerified` *transition*, not the bare presence
+          // of `verification:'verified'`. A claim already verified re-asserting it
+          // mints no new ✓, and a material edit lapses it back to `unverified` in
+          // the reducer — neither is a verification act, so the author's own
+          // full-form amendment must not be nacked as self-verification.
           async (tx) => {
             if (command.patch.verification !== 'verified') return;
-            const becomesClaim =
-              command.action === 'retype'
-                ? command.toType === 'claim'
-                : await isExistingClaim(tx, command.roomId, command.objectId);
-            if (becomesClaim) {
-              await refuseSelfVerificationByAuthor(tx, session, command.roomId, {
-                objectId: command.objectId,
-              });
-            }
+            const { isClaim, verified } = await currentClaimState(
+              tx,
+              command.roomId,
+              command.objectId,
+            );
+            const willBeClaim = command.action === 'retype' ? command.toType === 'claim' : isClaim;
+            if (!willBeClaim) return;
+            // Already a verified claim → the reducer's `becomesVerified` is false,
+            // so no new certification is happening: nothing to refuse.
+            if (isClaim && verified) return;
+            await refuseSelfVerificationByAuthor(tx, session, command.roomId, {
+              objectId: command.objectId,
+            });
           },
         );
 

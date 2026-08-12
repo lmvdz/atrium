@@ -415,20 +415,67 @@ describe('#95 relation — a ✓ does not survive a change to what it certifies 
     expect(claim?.type === 'claim' && claim.payload.verification).toBe('unverified');
   });
 
-  it('keeps verification when a verified claim is edited without touching its sentence or name', () => {
-    // The flip: a `disputed → verified` is a transition (gated), but editing a
-    // field that is neither the statement nor the claimant leaves the ✓ standing —
-    // the reset is about *what was certified*, not about any edit at all. Here BOB
-    // owns his verified claim and a `reopen`-shaped no-text edit is not available,
-    // so the invariant is shown the other way: an unrelated verified claim, left
-    // alone, keeps its ✓ (guarding against an over-eager reset).
+  it('keeps verification when a verified claim is edited to a receipt-equivalent sentence (#102 finding 2)', () => {
+    // "The same sentence" is `normalizeForReceipt`, the fold r8 verifies a quote
+    // under — not raw string equality. CARL verifies BOB's claim disinterestedly;
+    // BOB then collapses a whitespace run (`clean at` → `clean  at`), which is the
+    // SAME sentence under the fold. The vouch still covers it, so the ✓ holds. The
+    // old exact-`!==` materiality test lapsed this — a false over-lapse.
+    //
+    // This is a REAL edit, unlike the false-green this replaces (which performed no
+    // amend at all and only re-showed a fresh verification landing). It fails on
+    // exact-string materiality and passes under the receipt fold.
+    const spaced = 'the deploy went out  clean at noon'; // CLAIM_TEXT, doubled space
     const state = reduce([
       stageClaim('f4', BOB),
       acceptClaim('f4', 'prop_f4', human(ALICE), { claimant: BOB }),
       amendVerified('ev_f4_verify', 'obj_f4', human(CARL)),
+      amendStatement('ev_f4_reword', 'obj_f4', human(BOB), spaced),
     ]);
     const claim = state.objects.obj_f4?.object;
+    expect(claim?.type === 'claim' && claim.payload.statement).toBe(spaced);
     expect(claim?.type === 'claim' && claim.payload.verification).toBe('verified');
     expect(state.issues).toEqual([]);
+  });
+
+  it('lapses verification when a verified claim is reworded to a genuinely different sentence (#102 finding 2)', () => {
+    // The contrast to the receipt-equivalent edit: a real change of words is a
+    // change of what was certified, so the ✓ lapses under `normalizeForReceipt`
+    // too — the fold folds whitespace and apostrophes, nothing more.
+    const state = reduce([
+      stageClaim('f5', BOB),
+      acceptClaim('f5', 'prop_f5', human(ALICE), { claimant: BOB }),
+      amendVerified('ev_f5_verify', 'obj_f5', human(CARL)),
+      amendStatement(
+        'ev_f5_reword',
+        'obj_f5',
+        human(BOB),
+        'the deploy went out broken at midnight',
+      ),
+    ]);
+    const claim = state.objects.obj_f5?.object;
+    expect(claim?.type === 'claim' && claim.payload.verification).toBe('unverified');
+  });
+
+  it('lapses the correction RECEIPT too, not only the folded object (#102 finding 1)', () => {
+    // The receipt must not contradict the fold. When a verified claim is materially
+    // reworded the object drops to `unverified` — and the correction log's `after`,
+    // which `commitPlan` writes and the projection persists into `corrections.after`,
+    // must say the same. A stale `after: verified` beside `object: unverified` is a
+    // self-contradicting record: replay reads two answers to "was this ✓ after the
+    // edit?". Asserts BOTH the fold and the chain agree on `unverified`.
+    const state = reduce([
+      stageClaim('f6', BOB),
+      acceptClaim('f6', 'prop_f6', human(ALICE), { claimant: BOB }),
+      amendVerified('ev_f6_verify', 'obj_f6', human(CARL)),
+      amendStatement('ev_f6_reword', 'obj_f6', human(BOB), 'the deploy actually failed at noon'),
+    ]);
+    const claim = state.objects.obj_f6?.object;
+    expect(claim?.type === 'claim' && claim.payload.verification).toBe('unverified');
+
+    const correction = state.corrections.find((entry) => entry.eventId === 'ev_f6_reword');
+    expect(correction).toBeDefined();
+    const after = correction?.after as { verification?: string } | undefined;
+    expect(after?.verification).toBe('unverified');
   });
 });
