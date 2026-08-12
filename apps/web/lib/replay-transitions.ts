@@ -1,3 +1,4 @@
+import { epistemicStateFromAcceptance } from '@atrium/core';
 import type { StateObject } from '../src/components';
 
 export type ReplayCorrectionTransition =
@@ -46,14 +47,22 @@ export function retypeAsClaim(
          * A retype is a HUMAN correction: a person has now read this and taken
          * responsibility for it, so it is CERTIFIED (`✓`) — the same split the
          * persisted `stateForObject` makes. Certification and claim-truth are
-         * separate axes: `accepted` is "a person took this reading" (the tick),
-         * NOT "something fact-checked the claim". The truth stays unverified, and
-         * it stays honestly visible — in the fact below, and in the dotted
-         * underline `ClaimText` keeps on a certified-but-unverified claim.
-         * Setting `unverified` here re-conflated the two and de-certified a human
-         * touch, rendering `~` where the covenant says `✓`.
+         * separate axes: the tick is "a person took this reading", NOT "something
+         * fact-checked the claim". The truth stays unverified, and it stays
+         * honestly visible — in the fact below, and in the dotted underline
+         * `ClaimText` keeps on a certified-but-unverified claim.
+         *
+         * ROUND 4 (#98): the tick is DERIVED from `epistemicStateFromAcceptance`
+         * — the one predicate — rather than the literal `'accepted'` this used to
+         * hand-set. A human correction is a human acceptance, so the predicate
+         * returns `confirmed`; routing it here means a mutation of
+         * `epistemicStateOf` moves this optimistic glyph the same way it moves
+         * the persisted one, closing the last hand-set tick (was #110's purity
+         * gap). Truth is the separate `self_reported` axis until something checks
+         * it, so a de-certified predicate falls back to that, never a stray `✓`.
          */
-        verification: 'accepted',
+        verification:
+          epistemicStateFromAcceptance('human', at) === 'confirmed' ? 'accepted' : 'self_reported',
         owedToViewer: false,
         irreversible: false,
       },

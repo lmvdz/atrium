@@ -38,7 +38,7 @@
  * ------------------------------------------------------------------------- */
 
 import frame from '../frame/frame.module.css';
-import { needsViewer } from '../model/glyph';
+import { needsViewer, truthUnchecked } from '../model/glyph';
 import { systemText } from '../model/quotation';
 import type { ContextualReferenceAttention, ObjectiveRecord, StateObject } from '../model/records';
 import type { Slot } from '../model/slot';
@@ -73,9 +73,14 @@ export function StateLens({
   onOpenReferences,
 }: StateLensProps) {
   const settled = objects.filter((o) => ['verified', 'accepted'].includes(o.state.verification));
-  const unverified = objects.filter((o) =>
-    ['proposed', 'unverified', 'self_reported'].includes(o.state.verification),
-  );
+  // TRUTH axis, via the one `truthUnchecked` predicate — NOT the CERTIFICATION
+  // axis `settled` reads. A claim a person certified but nothing fact-checked is
+  // BOTH settled (a `✓`) and unverified (dotted), so it is counted in both, and
+  // the head's remainder is a Set-union of ids (below) so the overlap never
+  // double-counts a failure. Before the round-4 sweep this open-coded `isClaim`
+  // and silently dropped exactly that certified-unverified claim — the row
+  // dotted it while this count called the room fully settled.
+  const unverified = objects.filter((o) => truthUnchecked(o.state));
   const open = objects.filter((o) => o.state.verification === 'open');
   const owed = objects.filter((o) => needsViewer(o.state));
   const accounted = new Set([...settled, ...unverified, ...open].map((o) => o.id));

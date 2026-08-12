@@ -103,37 +103,60 @@
 ALTER TABLE "accepted_objects"
   ADD COLUMN "accepted_by_kind" "actor_kind" NOT NULL DEFAULT 'model';--> statement-breakpoint
 
--- The accepter's kind is the `actor_kind` of the `object_accepted` event that
--- minted the row — immutable, NOT NULL, and never a deletable FK. Matched by the
--- object id the event carries in its payload (`payload->'object'->>'id'`),
--- room-scoped. Takes the kind verbatim, so `agent` (0017) is `agent`, not a
--- `human` mis-read from a surviving `accepted_by` uuid.
+-- The second predicate column, nullable, added HERE (before the backfill) because
+-- the acceptance UPDATE below now sets BOTH columns from the one applied event —
+-- kind and touch in a single write, so they cannot disagree about who accepted.
+-- Its own section-2 header and full COMMENT are below, next to the correction
+-- half of its backfill.
+ALTER TABLE "accepted_objects" ADD COLUMN "human_touched_at" timestamptz;--> statement-breakpoint
+
+-- The accepter's kind AND the human-acceptance touch both come from the ONE
+-- acceptance that ACTUALLY APPLIED — never from a refused duplicate.
+--
+-- "Applied" is the load-bearing word, exactly as it is for the correction half
+-- below. The reducer folds `object_accepted` events in `(occurred_at, id)` order
+-- and refuses every one after the FIRST for an object id — `applyObjectAccepted`
+-- returns `already accepted` (reduce.ts). So exactly ONE `object_accepted` event
+-- per object ever applied (the earliest), and a LATER human `object_accepted`
+-- for a model-accepted object — the fold rejects it as a duplicate, but it still
+-- sits on the append-only ledger — must not certify anything. The old backfill
+-- keyed on ANY matching event: it saw that refused human duplicate, read its
+-- `human` kind, and promoted a machine's `~` to `✓` in history (#98 r3/r4, the
+-- acceptance-side twin of the correction over-promotion r3 fixed).
+--
+-- This picks the single applied acceptance per object with `DISTINCT ON` in the
+-- same order the reducer folds (`occurred_at`, then `id`), room-scoped, and reads
+-- BOTH columns from it: the kind verbatim (so `agent` (0017) is `agent`, not a
+-- `human` mis-read from a surviving `accepted_by` uuid), and — when that one
+-- applied event was a HUMAN's — the touch instant from its immutable
+-- `occurred_at`. A model-accepted object with a refused human duplicate keeps
+-- `accepted_by_kind = 'model'` and `human_touched_at = NULL`: it stays `~`.
 UPDATE "accepted_objects" a
-SET "accepted_by_kind" = e."actor_kind"
-FROM "core_events" e
-WHERE e."type" = 'object_accepted'
-  AND e."room_id" = a."room_id"
-  AND (e."payload" -> 'object' ->> 'id') = a."id"::text;--> statement-breakpoint
+SET "accepted_by_kind" = e."actor_kind",
+    "human_touched_at" = CASE WHEN e."actor_kind" = 'human' THEN e."occurred_at" ELSE NULL END
+FROM (
+  SELECT DISTINCT ON (ev."room_id", ev."payload" -> 'object' ->> 'id')
+         ev."room_id",
+         (ev."payload" -> 'object' ->> 'id') AS "object_id",
+         ev."actor_kind",
+         ev."occurred_at"
+  FROM "core_events" ev
+  WHERE ev."type" = 'object_accepted'
+  ORDER BY ev."room_id", ev."payload" -> 'object' ->> 'id', ev."occurred_at", ev."id"
+) e
+WHERE e."room_id" = a."room_id"
+  AND e."object_id" = a."id"::text;--> statement-breakpoint
 
 COMMENT ON COLUMN "accepted_objects"."accepted_by_kind" IS
-  'The kind of the actor that accepted this object, projected from the fold''s ObjectRecord.acceptedBy.kind. The read model''s half of @atrium/core''s one certification predicate epistemicStateOf = isHuman(acceptedBy) || humanTouchedAt !== null: accepted_by alone cannot answer isHuman because an agent (0017) also carries a users id, so the KIND is projected. NOT NULL — every accepted row has an accepter kind, and a null would let a forgotten projection render a machine''s reading as a fact. Pinned to Actor[''kind''] by _ActorKindParity. Read by replay-view.ts via epistemicStateFromAcceptance so the rendered ✓ and the reducer''s gate are one function (#98/H5/H6).';--> statement-breakpoint
+  'The kind of the actor that accepted this object, projected from the fold''s ObjectRecord.acceptedBy.kind. The read model''s half of @atrium/core''s one certification predicate epistemicStateOf = isHuman(acceptedBy) || humanTouchedAt !== null: accepted_by alone cannot answer isHuman because an agent (0017) also carries a users id, so the KIND is projected. NOT NULL — every accepted row has an accepter kind, and a null would let a forgotten projection render a machine''s reading as a fact. Pinned to Actor[''kind''] by _ActorKindParity. Read by replay-view.ts via epistemicStateFromAcceptance so the rendered ✓ and the reducer''s gate are one function (#98/H5/H6). Backfilled from the single APPLIED object_accepted event (the earliest per object; the reducer refuses later duplicates), so a refused human re-acceptance never certifies a machine''s reading (#98 r4).';--> statement-breakpoint
 
 -- ─────────────────────────────────────────────────────────────────────────────
 -- ## 2. human_touched_at — nullable, backfilled from acceptances and corrections
 -- ─────────────────────────────────────────────────────────────────────────────
-ALTER TABLE "accepted_objects" ADD COLUMN "human_touched_at" timestamptz;--> statement-breakpoint
-
--- A HUMAN acceptance set humanTouchedAt to the acceptance instant (created_at).
--- Whether it was a human is the accepting event's `actor_kind`, off the ledger —
--- not `accepted_by IS NOT NULL`, which a deleted user row silently falsifies.
-UPDATE "accepted_objects" a
-SET "human_touched_at" = a."created_at"
-FROM "core_events" e
-WHERE e."type" = 'object_accepted'
-  AND e."room_id" = a."room_id"
-  AND (e."payload" -> 'object' ->> 'id') = a."id"::text
-  AND e."actor_kind" = 'human'
-  AND a."human_touched_at" IS NULL;--> statement-breakpoint
+-- The column was added at the top and the ACCEPTANCE half of its backfill already
+-- ran above, from the same single applied event that set `accepted_by_kind`, so
+-- the two halves of the predicate can never disagree about who accepted. What
+-- remains here is the CORRECTION-promotion half.
 
 -- A human correction of a machine-accepted object promoted it — but ONLY a
 -- correction that ACTUALLY APPLIED. The reducer appends an `object_corrected`

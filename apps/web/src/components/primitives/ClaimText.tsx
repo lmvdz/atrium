@@ -14,7 +14,7 @@
  * ------------------------------------------------------------------------- */
 
 import type { EpistemicState, NoGlyph } from '../model/glyph';
-import { isClaim } from '../model/glyph';
+import { truthUnchecked } from '../model/glyph';
 import type { Slot } from '../model/slot';
 
 export type ClaimTextProps = {
@@ -28,18 +28,11 @@ export type ClaimTextProps = {
  * TRUTH axis, independent of the `✓`/`~` CERTIFICATION glyph. After #98 split
  * the two, a person accepting a self-reported claim certifies it (`accepted`,
  * `✓`) without anything fact-checking its truth; that is a settled certification
- * but still an unchecked claim, so the underline must stay. `isClaim` alone
- * misses it — `accepted` is settled — and it cannot simply be widened, because a
- * decision or an answered question is `accepted` too and carries no truth axis
- * to leave open. So the truth-unchecked claim is exactly `kind === 'claim'` that
- * is certified-but-not-`verified`; a `verified` claim (checked by another) and a
- * certified non-claim both stay clean.
+ * but still an unchecked claim, so the underline must stay. That predicate,
+ * `truthUnchecked`, lived here as a private copy until the round-4 root sweep
+ * moved it to `model/glyph` so `StateLens`'s count and `trailerFor`'s copy speak
+ * of the SAME set the row underlines — one truth predicate, every consumer.
  */
-function truthUnchecked(state: EpistemicState): boolean {
-  if (isClaim(state)) return true;
-  return state.kind === 'claim' && state.verification === 'accepted';
-}
-
 export function ClaimText({ state, content, className }: ClaimTextProps) {
   const claim = truthUnchecked(state);
   return (

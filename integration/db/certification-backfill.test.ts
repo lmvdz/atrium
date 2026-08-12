@@ -197,7 +197,7 @@ describe('migration 0019 backfill reconstructs certification from the immutable 
     const { roomId, people } = await seedRoom(handle, ['alice'], { slug: 'certify' });
     const alice = people.alice as string;
 
-    // Four historical rows, each with `accepted_by` NULL (its user deleted):
+    // Five historical rows, each with `accepted_by` NULL (its user deleted):
     //  H   — accepted by a HUMAN; the ledger says so even though the FK is gone.
     //  M   — accepted by a MODEL; a machine's reading, stays `~`.
     //  MCA — accepted by a MODEL, later CORRECTED by a human whose correction
@@ -205,15 +205,26 @@ describe('migration 0019 backfill reconstructs certification from the immutable 
     //  MCR — accepted by a MODEL, with a human `object_corrected` event on the
     //        ledger that the reducer REFUSED/NO-OP'd (no `corrections` row);
     //        must NOT promote — it stays `~`.
+    //  MHD — accepted by a MODEL, with a LATER human `object_accepted` for the
+    //        same object that the reducer refuses ("already accepted") but that
+    //        still sits on the ledger. The ACCEPTANCE-side twin of MCR: keying
+    //        the backfill on any matching event would read the refused human
+    //        duplicate and certify a machine's reading. Must stay `~` (#98 r4).
     const objectH = randomUUID();
     const objectM = randomUUID();
     const objectMCA = randomUUID();
     const objectMCR = randomUUID();
+    const objectMHD = randomUUID();
 
     const acceptedH = await appendAccepted(roomId, objectH, 'human', alice);
     await appendAccepted(roomId, objectM, 'model', 'test-model');
     await appendAccepted(roomId, objectMCA, 'model', 'test-model');
     await appendAccepted(roomId, objectMCR, 'model', 'test-model');
+    // MHD: the model acceptance APPLIES (earliest), the human one is a refused
+    // duplicate appended after it — a real human `object_accepted` on the ledger,
+    // the exact shape that would over-certify if the backfill trusted any match.
+    await appendAccepted(roomId, objectMHD, 'model', 'test-model');
+    await appendAccepted(roomId, objectMHD, 'human', alice);
     const correctedMCA = await appendCorrected(roomId, objectMCA, 'human', alice);
     // The refused correction is a real ledger event by a human — the exact shape
     // that would over-promote if the backfill trusted the raw event.
@@ -223,6 +234,7 @@ describe('migration 0019 backfill reconstructs certification from the immutable 
     await seedPreMigrationObject(roomId, objectM, nextAt());
     await seedPreMigrationObject(roomId, objectMCA, nextAt());
     await seedPreMigrationObject(roomId, objectMCR, nextAt());
+    await seedPreMigrationObject(roomId, objectMHD, nextAt());
 
     // Only the APPLIED correction leaves a `corrections` row (the projection's
     // apply signal). The refused one does not — its ledger event stands alone.
@@ -257,6 +269,7 @@ describe('migration 0019 backfill reconstructs certification from the immutable 
     const m = await read(objectM);
     const mca = await read(objectMCA);
     const mcr = await read(objectMCR);
+    const mhd = await read(objectMHD);
 
     // H: the immutable ledger recovers the HUMAN acceptance the nulled FK lost —
     // a `✓` the old backfill would have silently downgraded to `~`.
@@ -279,5 +292,12 @@ describe('migration 0019 backfill reconstructs certification from the immutable 
     // from a touch that never landed: it stays a machine's reading, `~`.
     expect(mcr?.acceptedByKind).toBe('model');
     expect(mcr?.humanTouchedAt).toBeNull();
+
+    // MHD: model-accepted, then a LATER human `object_accepted` the reducer
+    // refused as a duplicate. Only the APPLIED (earliest, model) acceptance
+    // decides the columns — a refused human re-acceptance never certifies a
+    // machine's reading. Stays `~`.
+    expect(mhd?.acceptedByKind).toBe('model');
+    expect(mhd?.humanTouchedAt).toBeNull();
   });
 });
