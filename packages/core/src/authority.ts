@@ -31,7 +31,9 @@ import { canonicalJson } from './state.js';
  * | **Commitments never auto-accept** (r5)                   | human   | **here**  |
  * | **Objectives never auto-accept** (r5)                    | human   | **here**  |
  * | **Decisions never auto-accept**                          | human   | **here**  |
- * | A claim becomes `verified`                               | human   | **here**  |
+ * | A claim becomes `verified`                               | a human who is neither its claimant nor its stager (#68/#95) | **here** |
+ * | **Confirming a third-party commitment** (#67/#95)        | its named owner | **here** |
+ * | **Amending a reading at acceptance** (#81/#95)           | only under the accepter's own name | **here** |
  * | Supersession, split by the type being retired            | per policy | **here** |
  * | **Retiring anything a person has confirmed** (#95, r2)   | human   | **here**  |
  * | **Corrections (amend / retract / restore / …)**          | human   | **here**  |
@@ -39,6 +41,11 @@ import { canonicalJson } from './state.js';
  * | **Declaring a question answered**                        | human   | **here**  |
  * | **A name arriving on a sentence** (#4: *committed*)      | only its bearer | **here** |
  * | **A sentence arriving under a name** (#4: *quoted*)      | only its bearer | **here** |
+ *
+ * The first three rows are #95's relation matrix, decided in #102: kind answers
+ * *may this species certify at all* (the rows below), relation answers *may this
+ * actor certify this object* (`selfVerificationRefusal`, `ownerConfirmRefusal`,
+ * `acceptanceAttributionRefusal`). Both must pass.
  *
  * The last two rows are one sentence of #4's split in half — *nobody gets
  * committed, **or quoted**, by someone else's sentence* — and they are written
@@ -478,13 +485,14 @@ export function actorMatchesProposer(actor: Actor, proposer: Proposer): boolean 
  *  - **A person staging and accepting an objective or an open question**, and a
  *    decision they did not put anybody else's name on. Those name nobody but the
  *    person asserting them; see above.
- *  - **A different human accepting a machine-labelled reading**, and a different
- *    human confirming a third-party commitment. That is the design position,
- *    unchanged and load-bearing: they read it, and their judgement is the
- *    receipt. Whether *any* human should be able to confirm a commitment on
- *    somebody else's behalf, or only the named owner, is a real question and a
- *    different one — this rule does not touch it, and the answer today is "any
- *    human other than the stager".
+ *  - **A different human accepting a machine-labelled reading.** That is the
+ *    design position, unchanged and load-bearing: they read it, and their
+ *    judgement is the receipt. **Confirming a third-party *commitment* is no
+ *    longer part of it** — #67 asked whether any human or only the named owner
+ *    may, #95 decided the owner, and #102's `ownerConfirmRefusal` enforces that
+ *    beside this gate. So this rule still refuses the *stager* accepting their
+ *    own third-party reading, and `ownerConfirmRefusal` refuses *every other
+ *    non-owner* accepting a commitment; between them, only the owner confirms one.
  *  - **A non-human accepter.** Already covered, and harder: `actorMatchesProposer`
  *    binds it to its own model id and `acceptanceReceiptRefusal` runs in full.
  *
@@ -700,6 +708,136 @@ export function correctionAttributionRefusal(input: {
   const quoted = namedAfter.filter(isForeign)[0];
   if (quoted === undefined) return null;
   return `${actorName(actor)} applied "${input.action}" to object "${input.objectId}", rewording a sentence that stands under user "${quoted}"'s name — nobody gets committed, or quoted, by someone else's sentence (#4), and a correction is one person's act with no second party in it, so it may only reword a sentence that names nobody but that person. It waits for "${quoted}" to reword it, or retract this and stage a reading somebody else can accept`;
+}
+
+/**
+ * Verification is a second pair of eyes, on the human path too (#68, #95).
+ *
+ * `claim_verification` (the `HumanOnlyGate`) answers *may this species verify at
+ * all* — no machine may. This answers the relation question #95 decided for the
+ * one species that can: **a human may verify a claim only when they are neither
+ * the person it quotes nor the person who staged the reading.** Self-verification
+ * is #68's hole — `record_proposal {claimant: mallory, verification: 'verified'}`
+ * then `accept_proposal`, or an `amend {verification}` on one's own claim, mints
+ * a `✓` self-exculpatory claim with no second party anywhere in it.
+ *
+ * What it does **not** narrow, and must not (see #68's own redirect): a
+ * disinterested third party verifying somebody else's claim. "X says this claim
+ * of Bob's checks out" is X's own recorded judgement, and gating it toward the
+ * claimant would mean only Bob may ever verify Bob — the sentence agreeing with
+ * itself, which is the very shape this refuses. So the two forbidden relations
+ * are the claimant and the stager; every other member is who verification is for.
+ *
+ * The claimant is the author of the claim's source message by construction — a
+ * claim's `claimant` is the person it quotes, and `acceptanceReceiptRefusal`'s
+ * `attributed_person_not_author` gate is what holds the two equal on the machine
+ * path. So the reducer reads `claimant` and needs no message window to answer
+ * "the author of its source message"; the session context the command layer
+ * holds is not required for this rule, and the reducer enforces it alone.
+ */
+export function selfVerificationRefusal(input: {
+  actor: Actor;
+  /** The claim's claimant — the person it quotes, i.e. the author of its source. */
+  claimant: string;
+  /** Who staged the reading, or `null` when it was minted with no proposal. */
+  stagedBy: Actor | null;
+}): string | null {
+  const { actor, claimant, stagedBy } = input;
+  // The species question is `claim_verification`'s; this is only the relation
+  // one, so it has nothing to say about a non-human actor — that actor was
+  // already refused for what it is, one gate up.
+  if (actor.kind !== 'human') return null;
+  if (actor.userId === claimant) {
+    return `${actorName(actor)} would mark a claim verified that names them as its claimant — verification is a second pair of eyes (#68, #95), and the person a claim quotes may not be the one who vouches it is true: that is the sentence agreeing with itself. It waits for another member to verify it`;
+  }
+  if (stagedBy !== null && stagedBy.kind === 'human' && stagedBy.userId === actor.userId) {
+    return `${actorName(actor)} would mark a claim verified that they staged the reading of — verification is a second pair of eyes (#68, #95): the member who staged a reading may not be the one who confirms it true. It waits for another member to verify it`;
+  }
+  return null;
+}
+
+/**
+ * A third-party commitment is confirmed by its **owner**, not by any member
+ * (#67, #95).
+ *
+ * `commitment_acceptance` (the `HumanOnlyGate`) refuses a *machine* minting a
+ * commitment at all. This answers the relation question for the humans it lets
+ * through, which #67 filed as open and #95 decided: #4's rule is *nobody gets
+ * committed by someone else's sentence*, and a colleague confirming on the
+ * owner's behalf is that same act one step removed — the confirmation the room
+ * needs is the named person's. `selfStagedReadingRefusal` already refuses the
+ * *stager* confirming their own third-party reading; this is the other side of
+ * the same rule, and together they leave exactly one member who may confirm: the
+ * owner.
+ *
+ * The owner is on the payload, so the reducer answers this alone — no session
+ * context is required. What it costs is stated in #67 and accepted by #95: a
+ * correct reading of an absent colleague's commitment now waits for that
+ * colleague rather than for any member, and the record already says who confirmed.
+ */
+export function ownerConfirmRefusal(input: { actor: Actor; owner: string }): string | null {
+  const { actor, owner } = input;
+  // The species question belongs to `commitment_acceptance`; a machine is already
+  // refused there. This is the relation gate for the members it admits.
+  if (actor.kind !== 'human') return null;
+  if (actor.userId === owner) return null;
+  return `${actorName(actor)} accepted a commitment owned by user "${owner}", who is somebody else — a third-party commitment is confirmed by the person it names, not by any member on their behalf (#67, #95): nobody gets committed by someone else's sentence, and confirming for them is that same act one step removed. It waits for "${owner}" to confirm it, or a member may leave the reading staged for them`;
+}
+
+/**
+ * #81/H3, and it is `correctionAttributionRefusal`'s clause two moved one act
+ * earlier — to acceptance. A human accepting somebody else's staged reading may
+ * fix its wording (that is much of what acceptance is for) but may not mint a
+ * *different sentence under a third party's name*, nor add a third party's name
+ * to it. The driven case: BOB stages `claim {claimant: BOB, "the build is green"}`,
+ * ALICE accepts it as `claim {claimant: BOB, "I take kickbacks"}` — a sentence in
+ * BOB's name that BOB never wrote, `issues: []`, `✓`.
+ *
+ * `acceptanceReceiptRefusal`'s payload binding forbids this for a *machine*; the
+ * human path skips it, on the correct theory that a person's acceptance is a
+ * receipt. But a receipt for whose sentence? Only for one that names nobody but
+ * the accepter, or one accepted **verbatim** — the two clauses below, computed
+ * from `payloadAttributions` (who) and `objectStatement` (what), never at the
+ * call site (r10's lesson).
+ *
+ * Runs on the human path only, and pairs with `selfStagedReadingRefusal`, which
+ * handles the accepter who also *staged* the reading. This handles the accepter
+ * who did not — the #81 case, where the staged reading is somebody else's and the
+ * accepter mints a changed one over the top of it. Unreachable from today's wire
+ * (`objectFromProposal` rebuilds the payload from the stored proposal), so it is
+ * a reducer-boundary rule exactly as r10's `decidedBy` and r11's clause two were:
+ * the reducer is the gatekeeper of what becomes state, not the command layer.
+ */
+export function acceptanceAttributionRefusal(input: {
+  actor: Actor;
+  objectId: string;
+  proposalId: string;
+  /** The staged reading, shaped as the object it would have minted verbatim. */
+  staged: AcceptedObject;
+  /** What is actually being minted. */
+  object: AcceptedObject;
+}): string | null {
+  const { actor, staged, object } = input;
+  if (actor.kind !== 'human') return null;
+  const isForeign = (userId: string): boolean => userId !== actor.userId;
+  const namedStaged = payloadAttributions(staged.type, staged.payload);
+  const namedMinted = payloadAttributions(object.type, object.payload);
+
+  // Clause one: a name arriving on the minted object that the staged reading did
+  // not carry. `retype`/`reattribute`'s acceptance-time twin.
+  const arriving = namedMinted.filter((userId) => !namedStaged.includes(userId)).filter(isForeign);
+  const gained = arriving[0];
+  if (gained !== undefined) {
+    return `${actorName(actor)} accepted proposal "${input.proposalId}" but minted object "${input.objectId}" with user "${gained}"'s name on a sentence the staged reading did not carry — a human acceptance may fix a reading's wording, but nobody gets committed, or quoted, by someone else's sentence (#4, #81): it may mint only the accepter's own name. Accept it as staged, or stage a reading "${gained}" can accept`;
+  }
+
+  // Clause two: the sentence changed and still stands under a foreign name.
+  // `objectStatement` (via `TEXT_FIELD`) is what makes this comparable across
+  // types, so a reworded acceptance is caught wherever the text lives.
+  if (objectStatement(object) === objectStatement(staged)) return null;
+  const quoted = namedMinted.filter(isForeign)[0];
+  if (quoted === undefined) return null;
+  return `${actorName(actor)} accepted proposal "${input.proposalId}" but minted object "${input.objectId}" restating a sentence that stands under user "${quoted}"'s name — a human acceptance may fix a reading's wording only when it names nobody but the accepter; nobody gets quoted by someone else's sentence (#4, #81). Accept it as staged, or stage a reading "${quoted}" can accept`;
 }
 
 /** A short name for a proposer, for refusal texts. */

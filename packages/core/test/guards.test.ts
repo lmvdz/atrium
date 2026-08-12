@@ -813,11 +813,20 @@ describe('the actor floor — gate 3: only a human marks a claim verified', () =
     expect(state.issues[0]?.reason).not.toContain('verified claim');
   });
 
-  it('allows a human to accept a verified claim', () => {
+  it('refuses the claimant minting their own claim verified — self-verification (#68/#95)', () => {
+    // BOB is the claimant, so BOB verifying BOB's own claim is the sentence
+    // agreeing with itself. #95 keys verification on the relation, not only the
+    // kind: a claim reaches ✓ verified only through a human who is neither its
+    // claimant nor its stager (#102). **This fixture was the false-green that
+    // pinned the #68 hole open** — it asserted this exact self-mint was `allowed`
+    // until #102 corrected the oracle. The disinterested-human path stays open:
+    // the authority matrix accepts a model-staged verified claim about BOB as
+    // ALICE, and the amend-to-verified test below verifies through a third party.
     const state = reduce([claimEvent({ verification: 'verified' })]);
-    expect(state.issues).toEqual([]);
-    const accepted = state.objects.obj_claim?.object;
-    expect(accepted?.type === 'claim' && accepted.payload.verification).toBe('verified');
+    expect(state.objects).toEqual({});
+    expect(state.issues).toHaveLength(1);
+    expect(state.issues[0]?.reason).toContain('names them as its claimant');
+    expect(state.issues[0]?.reason).toContain('second pair of eyes');
   });
 
   it('refuses a model amending a claim to verified, naming the verification rule', () => {

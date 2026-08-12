@@ -156,9 +156,13 @@ describe('r10 — dedup consults the whole payload, not the sentence', () => {
         payload: commitmentFor(ALICE),
         cites: ['m1'],
         at: at(3),
-        actor: human(CARL),
+        // The owner confirms her own commitment (#67/#95, #102): a third-party
+        // commitment is the named person's to confirm, so CARL — who wrote the
+        // message but owns neither obligation — may not. The dedup this test is
+        // about is unchanged by who accepts; Bob's half below is accepted by BOB.
+        actor: human(ALICE),
       }).event,
-      trustedContext({ actor: human(CARL), messages }),
+      trustedContext({ actor: human(ALICE), messages }),
     );
     expect(acceptedAlice.outcome).toBe('applied');
     state = acceptedAlice.state;

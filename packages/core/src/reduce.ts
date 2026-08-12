@@ -1,6 +1,7 @@
 import type { z } from 'zod';
 import { ATTRIBUTION_FIELD, payloadAttributions } from './attribution.js';
 import {
+  acceptanceAttributionRefusal,
   acceptanceReceiptRefusal,
   actorMatchesProposer,
   confidenceFloorRefusal,
@@ -8,8 +9,10 @@ import {
   humanOnlyRefusal,
   isHuman,
   modelMintingGate,
+  ownerConfirmRefusal,
   proposalBindingRefusal,
   selfStagedReadingRefusal,
+  selfVerificationRefusal,
   uncertifiedTypeRefusal,
 } from './authority.js';
 import { type Actor, instantKey } from './common.js';
@@ -902,6 +905,66 @@ function applyObjectAccepted(
     return false;
   }
 
+  // ── #95's HUMAN relation matrix (#102), the three rules keyed on the actor's
+  // relation to the object rather than only on its kind. The kind gates above
+  // (`modelMintingGate`, `claim_verification`, `direct_acceptance`) answer *may
+  // this species certify at all*; these answer *may this actor certify THIS
+  // object*, and both must pass. Each is reducer-enforceable from state alone —
+  // the stager (`proposal.stagedBy`), the owner and claimant (payload) — so none
+  // needs the command layer's session context.
+
+  // Verification is a second pair of eyes (#68/H2): a claim reaches `verified`
+  // only through a human who is neither its claimant nor the stager of its
+  // reading. A disinterested member verifying stays open — that is verification
+  // working, not a hole (#68's redirect). The gate at the top of this function
+  // still refuses a *machine* verifying; this is the relation layer above it.
+  if (object.type === 'claim' && object.payload.verification === 'verified' && isHuman(actor)) {
+    const refusal = selfVerificationRefusal({
+      actor,
+      claimant: object.payload.claimant,
+      stagedBy: proposal?.stagedBy ?? actor,
+    });
+    if (refusal) {
+      fail(state, event.id, refusal);
+      return false;
+    }
+  }
+
+  // Owner-confirm (#67): a third-party commitment is confirmed by its named
+  // owner, not by any member on their behalf. `commitment_acceptance` above
+  // refuses a machine minting one at all; this is the relation rule for the
+  // humans it admits, and #95 reversed the "any human other than the stager"
+  // design position `selfStagedReadingRefusal` used to document.
+  if (object.type === 'commitment' && isHuman(actor)) {
+    const refusal = ownerConfirmRefusal({ actor, owner: object.payload.owner });
+    if (refusal) {
+      fail(state, event.id, refusal);
+      return false;
+    }
+  }
+
+  // Amended acceptance (#81/H3): the human path skips payload binding, so an
+  // accepter may reword a reading — but only into a sentence naming nobody but
+  // themselves, or accept it verbatim. `selfStagedReadingRefusal` above caught
+  // the accepter who *staged* the reading; this catches the one who did not and
+  // mints a changed sentence over somebody else's staged one. If the amended
+  // sentence states a third party's commitment, `ownerConfirmRefusal` above has
+  // already required the owner to be the accepter.
+  if (proposalId !== null && proposal && isHuman(actor)) {
+    const staged = { ...object, payload: proposal.proposal.payload } as AcceptedObject;
+    const refusal = acceptanceAttributionRefusal({
+      actor,
+      objectId: object.id,
+      proposalId,
+      staged,
+      object,
+    });
+    if (refusal) {
+      fail(state, event.id, refusal);
+      return false;
+    }
+  }
+
   // An `objectiveId` that points at nothing is the same defect as a `proposalId`
   // that points at nothing, and is refused for the same reason: it is provenance
   // the UI renders, and an unverifiable one is worse than none. The object files
@@ -1088,6 +1151,36 @@ function applyObjectCorrected(
   if (attributionRefusal) {
     fail(state, event.id, attributionRefusal);
     return false;
+  }
+
+  // ── Verification is a second pair of eyes, even for a human (#68/H2, #95) ───
+  //
+  // The blanket gate above refuses a *machine* correcting at all. This refuses
+  // the human relation #95 forbids on the one correction that mints a `✓
+  // verified`: the claimant may not verify their own claim, nor may the member
+  // who staged it. A third party verifying stays open (#68's redirect) — that is
+  // the product. Keyed on the *transition* to verified (`becomesVerified`), so a
+  // later edit to an already-verified claim by anyone is not re-gated as a fresh
+  // verification. `correctionAttributionRefusal` above has already refused
+  // rewording somebody else's sentence, so this adds only the verification act.
+  const before = record.object;
+  const after = outcome.plan.object;
+  const becomesVerified =
+    after.type === 'claim' &&
+    after.payload.verification === 'verified' &&
+    !(before.type === 'claim' && before.payload.verification === 'verified');
+  if (isHuman(actor) && becomesVerified && after.type === 'claim') {
+    const proposalId = after.provenance.proposalId;
+    const stagedBy = proposalId !== null ? (state.proposals[proposalId]?.stagedBy ?? null) : null;
+    const refusal = selfVerificationRefusal({
+      actor,
+      claimant: after.payload.claimant,
+      stagedBy,
+    });
+    if (refusal) {
+      fail(state, event.id, refusal);
+      return false;
+    }
   }
 
   commitPlan(state, event, record, actor, outcome.plan);
