@@ -9,7 +9,7 @@ import {
   plans,
   sessions,
 } from '@atrium/db/schema';
-import { and, asc, eq, sql } from 'drizzle-orm';
+import { and, asc, eq, inArray, sql } from 'drizzle-orm';
 import { afterAll, afterEach, beforeEach, describe, expect, it } from 'vitest';
 import {
   openDatabase,
@@ -54,6 +54,10 @@ beforeEach(async () => {
   room = await seedRoom(handle, ['alice', 'hexi'], { agents: ['hexi'] });
   humanId = room.people.alice as string;
   agentId = room.people.hexi as string;
+  // Claim the channel before the sidecar: 0024's composite FK reads it.
+  await handle.db.execute(sql`
+    UPDATE rooms SET agent_user_id = ${agentId} WHERE id = ${room.roomId}
+  `);
   await handle.db.execute(sql`
     INSERT INTO agents (user_id, owner_user_id, channel_room_id, host, harness, model)
     VALUES (${agentId}, ${humanId}, ${room.roomId}, 'localhost', 'claude', 'opus')
@@ -191,12 +195,14 @@ describe('the agent/plan/session lifecycle appends, projects, and touches no cov
   });
 
   /**
-   * THE FLIP (#114 T3). A `~` is read, then a full lifecycle runs — plan opened,
-   * session opened, session settled AND a second failed — over the same room. The
-   * `~` is read again: byte-identical, still `~`. If a settle could reach a
-   * judgement column, this is where it would show; it cannot, so it does not.
+   * THE FLIP (#114 T3). A `~` is read, then a full lifecycle runs over the same
+   * room — and, per the round-1 gauntlet finding 6, ALL SIX lifecycle events, not
+   * three: plan opened, a session opened+settled, a second session opened+FAILED,
+   * a signal raised, and the plan settled. The `~` is read again: byte-identical,
+   * still `~`. If any of the six could reach a judgement column, this is where it
+   * would show; none can, so none does.
    */
-  it('runs a full lifecycle without moving a ~ to a ✓ (the covenant is untouched)', async () => {
+  it('runs ALL SIX lifecycle events without moving a ~ to a ✓ (the covenant is untouched)', async () => {
     const claimId = await seedMachineReading();
 
     const before = await handle.db
@@ -214,7 +220,10 @@ describe('the agent/plan/session lifecycle appends, projects, and touches no cov
       }),
     ).toBe('unconfirmed');
 
+    const alice = await connect(humanId, 'human');
     const hexi = await connect(agentId, 'agent');
+
+    // (1) plan_opened
     await hexi.command({
       name: 'open_plan',
       roomId: room.roomId,
@@ -226,6 +235,8 @@ describe('the agent/plan/session lifecycle appends, projects, and touches no cov
       .select({ id: plans.id })
       .from(plans)
       .where(eq(plans.roomId, room.roomId));
+
+    // (2) session_opened, (3) session_settled
     await hexi.command({
       name: 'open_session',
       roomId: room.roomId,
@@ -247,13 +258,81 @@ describe('the agent/plan/session lifecycle appends, projects, and touches no cov
       contextPct: 0.5,
     });
 
+    // (4) session_failed — a second session under the same plan, this one fails.
+    await hexi.command({
+      name: 'open_session',
+      roomId: room.roomId,
+      planId,
+      harness: 'omp',
+      model: 'haiku',
+    });
+    const [{ id: failedSessionId } = { id: '' }] = await handle.db
+      .select({ id: sessions.id })
+      .from(sessions)
+      .where(and(eq(sessions.roomId, room.roomId), eq(sessions.status, 'open')));
+    await hexi.command({
+      name: 'settle_session',
+      roomId: room.roomId,
+      sessionId: failedSessionId,
+      outcome: 'failed',
+      exitSummary: 'harness died',
+      spendMicros: null,
+      contextPct: null,
+    });
+
+    // (5) signal_raised — an escalation about a real message, to the human.
+    const post = await alice.command({
+      name: 'send_message',
+      roomId: room.roomId,
+      body: 'a message to escalate about',
+      clientMessageId: null,
+      replyToId: null,
+      attachments: [],
+      references: [],
+    });
+    expect(post.type).toBe('ack');
+    const [msg] = await handle.db
+      .select({ id: messages.id })
+      .from(messages)
+      .where(eq(messages.roomId, room.roomId));
+    await hexi.command({
+      name: 'raise_signal',
+      roomId: room.roomId,
+      targetUserId: humanId,
+      subjectKind: 'message',
+      subjectId: msg?.id as string,
+      class: 'blocking_question',
+      reason: { kind: 'question_names_you', question: 'sign off?' },
+    });
+
+    // (6) plan_settled — close the board last.
+    await hexi.command({ name: 'settle_plan', roomId: room.roomId, planId });
+
+    // All six kinds rode the spine.
+    const kinds = await handle.db
+      .select({ type: coreEvents.type })
+      .from(coreEvents)
+      .where(eq(coreEvents.roomId, room.roomId))
+      .orderBy(asc(coreEvents.roomSeq));
+    expect(new Set(kinds.map((k) => k.type))).toEqual(
+      new Set([
+        'plan_opened',
+        'session_opened',
+        'session_settled',
+        'session_failed',
+        'message_posted',
+        'signal_raised',
+        'plan_settled',
+      ]),
+    );
+
     const after = await handle.db
       .select()
       .from(acceptedObjects)
       .where(eq(acceptedObjects.id, claimId));
     const a = after[0];
-    // Byte-for-byte: the settle moved nothing on the object. Same kind, same
-    // (absent) human touch, same payload, same revision.
+    // Byte-for-byte: not one of the six moved anything on the object. Same kind,
+    // same (absent) human touch, same payload, same revision.
     expect(a).toEqual(b);
     expect(
       epistemicStateOf({
@@ -261,6 +340,130 @@ describe('the agent/plan/session lifecycle appends, projects, and touches no cov
         humanTouchedAt: a?.humanTouchedAt?.toISOString() ?? null,
       }),
     ).toBe('unconfirmed');
+  });
+
+  /**
+   * ONE EXIT PER SESSION, ONCE (#116 fix r2, finding 4). A settle of a session
+   * that does not exist in this room, and a re-settle of one that already exited,
+   * must both `nack` and write NO ledger row — a zero-row projection UPDATE aborts
+   * the append, the same shape `projectAttentionResolved` uses.
+   */
+  it('refuses settling a session that does not exist, and writes nothing', async () => {
+    const hexi = await connect(agentId, 'agent');
+    await hexi.command({
+      name: 'open_plan',
+      roomId: room.roomId,
+      agentUserId: agentId,
+      title: 'p',
+      budgetLimitMicros: null,
+    });
+    const refused = await hexi.command({
+      name: 'settle_session',
+      roomId: room.roomId,
+      sessionId: randomUUID(), // a ghost
+      outcome: 'settled',
+      exitSummary: 'never happened',
+      spendMicros: null,
+      contextPct: null,
+    });
+    expect(refused.type).toBe('nack');
+    const [{ n } = { n: 0 }] = await handle.db
+      .select({ n: sql<number>`count(*)::int` })
+      .from(coreEvents)
+      .where(and(eq(coreEvents.roomId, room.roomId), eq(coreEvents.type, 'session_settled')));
+    expect(n).toBe(0);
+  });
+
+  it('refuses a SECOND exit for a session, so settled cannot flip to failed', async () => {
+    const hexi = await connect(agentId, 'agent');
+    await hexi.command({
+      name: 'open_plan',
+      roomId: room.roomId,
+      agentUserId: agentId,
+      title: 'p',
+      budgetLimitMicros: null,
+    });
+    const [{ id: planId } = { id: '' }] = await handle.db
+      .select({ id: plans.id })
+      .from(plans)
+      .where(eq(plans.roomId, room.roomId));
+    await hexi.command({
+      name: 'open_session',
+      roomId: room.roomId,
+      planId,
+      harness: 'claude',
+      model: 'opus',
+    });
+    const [{ id: sessionId } = { id: '' }] = await handle.db
+      .select({ id: sessions.id })
+      .from(sessions)
+      .where(eq(sessions.roomId, room.roomId));
+    const first = await hexi.command({
+      name: 'settle_session',
+      roomId: room.roomId,
+      sessionId,
+      outcome: 'settled',
+      exitSummary: 'clean',
+      spendMicros: null,
+      contextPct: null,
+    });
+    expect(first.type).toBe('ack');
+    // The re-settle as a FAILURE: without the `status = 'open'` predicate this
+    // would rewrite the receipt settled→failed. It must nack instead.
+    const second = await hexi.command({
+      name: 'settle_session',
+      roomId: room.roomId,
+      sessionId,
+      outcome: 'failed',
+      exitSummary: 'contradiction',
+      spendMicros: null,
+      contextPct: null,
+    });
+    expect(second.type).toBe('nack');
+    const [row] = await handle.db.select().from(sessions).where(eq(sessions.id, sessionId));
+    expect(row?.status).toBe('settled'); // still settled — the flip was refused
+    // And exactly one exit event landed, not two.
+    const [{ n } = { n: 0 }] = await handle.db
+      .select({ n: sql<number>`count(*)::int` })
+      .from(coreEvents)
+      .where(
+        and(
+          eq(coreEvents.roomId, room.roomId),
+          inArray(coreEvents.type, ['session_settled', 'session_failed']),
+        ),
+      );
+    expect(n).toBe(1);
+  });
+
+  it('refuses re-settling a plan, and settling a ghost plan (one exit per plan)', async () => {
+    const hexi = await connect(agentId, 'agent');
+    await hexi.command({
+      name: 'open_plan',
+      roomId: room.roomId,
+      agentUserId: agentId,
+      title: 'p',
+      budgetLimitMicros: null,
+    });
+    const [{ id: planId } = { id: '' }] = await handle.db
+      .select({ id: plans.id })
+      .from(plans)
+      .where(eq(plans.roomId, room.roomId));
+    expect((await hexi.command({ name: 'settle_plan', roomId: room.roomId, planId })).type).toBe(
+      'ack',
+    );
+    // Re-settle: refused.
+    expect((await hexi.command({ name: 'settle_plan', roomId: room.roomId, planId })).type).toBe(
+      'nack',
+    );
+    // A ghost plan: refused.
+    expect(
+      (await hexi.command({ name: 'settle_plan', roomId: room.roomId, planId: randomUUID() })).type,
+    ).toBe('nack');
+    const [{ n } = { n: 0 }] = await handle.db
+      .select({ n: sql<number>`count(*)::int` })
+      .from(coreEvents)
+      .where(and(eq(coreEvents.roomId, room.roomId), eq(coreEvents.type, 'plan_settled')));
+    expect(n).toBe(1);
   });
 
   /**
@@ -273,6 +476,9 @@ describe('the agent/plan/session lifecycle appends, projects, and touches no cov
     // A second agent channel with a plan of its own.
     const other = await seedRoom(handle, ['carol', 'nova'], { slug: 'ops', agents: ['nova'] });
     const novaId = other.people.nova as string;
+    await handle.db.execute(sql`
+      UPDATE rooms SET agent_user_id = ${novaId} WHERE id = ${other.roomId}
+    `);
     await handle.db.execute(sql`
       INSERT INTO agents (user_id, owner_user_id, channel_room_id, host, harness, model)
       VALUES (${novaId}, ${other.people.carol}, ${other.roomId}, 'h', 'claude', 'opus')

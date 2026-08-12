@@ -1,4 +1,4 @@
-import { agents, type Database, users } from '@atrium/db';
+import { agents, type Database, rooms, users } from '@atrium/db';
 import { makeSignature } from 'better-auth/crypto';
 import { eq } from 'drizzle-orm';
 import type { AtriumAuth } from './auth.js';
@@ -195,30 +195,51 @@ export interface AgentConfig {
  * and there is no second copy of the rule in this file to drift from the first.
  * This function's job is to state the config; the database's job is to refuse a
  * config that would break the chain.
+ *
+ * ## Claiming the channel is part of the same write (#116 fix r2)
+ *
+ * `drizzle/0024`'s composite FK `agents_channel_owned_fk` requires the channel
+ * room to already name this agent (`rooms.agent_user_id = user_id`) before the
+ * `agents` row can land — that is what makes "an agent's channel is a room it
+ * owns" a fact rather than a hope. So this claims the room and writes the config
+ * in ONE transaction: an agent identity never exists with a config that points at
+ * a channel it does not own, and the two either both land or neither does. The
+ * `rooms_agent_user_is_agent` trigger and the `rooms_agent_user_id_key` unique
+ * index refuse a claim that would name a non-agent or steal another agent's
+ * channel; a room already owned by a different agent refuses through THAT agent's
+ * composite FK. This function still checks none of it — the database does.
  */
 export async function provisionAgentConfig(input: ProvisionAgentConfigInput): Promise<AgentConfig> {
-  const [row] = await input.db
-    .insert(agents)
-    .values({
-      userId: input.userId,
-      ownerUserId: input.ownerUserId,
-      channelRoomId: input.channelRoomId,
-      host: input.host,
-      harness: input.harness,
-      model: input.model,
-      budgetLimitMicros: input.budgetLimitMicros ?? null,
-    })
-    .returning({
-      userId: agents.userId,
-      ownerUserId: agents.ownerUserId,
-      channelRoomId: agents.channelRoomId,
-      host: agents.host,
-      harness: agents.harness,
-      model: agents.model,
-      budgetLimitMicros: agents.budgetLimitMicros,
-    });
-  if (!row) throw new Error('provisionAgentConfig: insert returned no row');
-  return row;
+  return input.db.transaction(async (tx) => {
+    // Claim the channel first: the composite FK the INSERT below lands on reads
+    // this back-reference, so it must be true before the agents row exists.
+    await tx
+      .update(rooms)
+      .set({ agentUserId: input.userId })
+      .where(eq(rooms.id, input.channelRoomId));
+    const [row] = await tx
+      .insert(agents)
+      .values({
+        userId: input.userId,
+        ownerUserId: input.ownerUserId,
+        channelRoomId: input.channelRoomId,
+        host: input.host,
+        harness: input.harness,
+        model: input.model,
+        budgetLimitMicros: input.budgetLimitMicros ?? null,
+      })
+      .returning({
+        userId: agents.userId,
+        ownerUserId: agents.ownerUserId,
+        channelRoomId: agents.channelRoomId,
+        host: agents.host,
+        harness: agents.harness,
+        model: agents.model,
+        budgetLimitMicros: agents.budgetLimitMicros,
+      });
+    if (!row) throw new Error('provisionAgentConfig: insert returned no row');
+    return row;
+  });
 }
 
 /** A real Better Auth session, plus the cookie header that presents it. */
@@ -264,6 +285,21 @@ export async function sessionCookieHeader(auth: AtriumAuth, token: string): Prom
  * The refusal is deliberately *not* "the caller said agent". `principal_kind` is
  * read from the row, and the row is immutable in that column, so what this
  * function permits is a property of the identity rather than of the call.
+ *
+ * ## An operating agent must have an owner sidecar (#116 fix r2)
+ *
+ * Round 1 checked only `principal_kind = 'agent'` and never that an `agents`
+ * config row existed, so a bare agent identity — provisioned but never
+ * configured — could be handed a session and post, open plans and settle
+ * sessions with NO `owner_user_id`: the "the ownership chain terminates at a
+ * human" invariant (#114) bypassed at the one point it matters, when the agent
+ * OPERATES. `mintAgentSession` is the sole route to an agent session (there is no
+ * credential and no interactive sign-in for an agent, by design, above), so
+ * requiring the `agents` row HERE is sufficient to guarantee that every agent
+ * that can act has a human owner — an `agents` row cannot exist without one
+ * (`agents_owner_is_human`, 0021). Read from the row, same discipline as the kind
+ * check: the config's existence is a property of the identity, not a parameter a
+ * caller can assert past.
  */
 export async function mintAgentSession(input: {
   auth: AtriumAuth;
@@ -280,6 +316,17 @@ export async function mintAgentSession(input: {
   if (row.principalKind !== 'agent') {
     throw new Error(
       `mintAgentSession: identity "${input.userId}" is a ${row.principalKind} principal — a session for a person is minted by signing in, and this is not a route around that`,
+    );
+  }
+
+  const [config] = await input.db
+    .select({ ownerUserId: agents.ownerUserId })
+    .from(agents)
+    .where(eq(agents.userId, input.userId))
+    .limit(1);
+  if (!config) {
+    throw new Error(
+      `mintAgentSession: agent "${input.userId}" has no config sidecar and so no owner — an agent operates only once it has an owner_user_id (agents row); provision its config before minting a session`,
     );
   }
 

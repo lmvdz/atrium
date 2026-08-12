@@ -42,6 +42,12 @@ async function seedAgentChannel(slug: string) {
   });
   const ownerId = seeded.people[`${slug}-owner`] as string;
   const agentId = seeded.people[`${slug}-agent`] as string;
+  // The channel must name the agent BEFORE the config lands: the composite FK
+  // `agents_channel_owned_fk` (0024) reads this back-reference. Claim it, then
+  // write the sidecar — the same order `provisionAgentConfig` uses.
+  await handle.db.execute(sql`
+    UPDATE rooms SET agent_user_id = ${agentId} WHERE id = ${seeded.roomId}
+  `);
   await handle.db.execute(sql`
     INSERT INTO agents (user_id, owner_user_id, channel_room_id, host, harness, model)
     VALUES (${agentId}, ${ownerId}, ${seeded.roomId}, 'localhost', 'claude', 'opus')
@@ -187,6 +193,129 @@ describe('the pstree invariant is a DB fact, not a convention', () => {
         INSERT INTO agents (user_id, owner_user_id, channel_room_id, host, harness, model)
         VALUES (${carol}, ${carol}, ${seeded.roomId}, 'h', 'claude', 'opus')
       `),
+    );
+  });
+
+  // ── the invariant is closed under UPDATE, not only INSERT (#116 fix r2) ──────
+  //
+  // Round 1's triggers all fire `BEFORE INSERT OR UPDATE`, but only INSERT was
+  // ever exercised — a regression to `BEFORE INSERT` alone would have stayed
+  // green. These drive the UPDATE arm of every pstree trigger, so that regression
+  // now fails a test, and pin the two new guards 0024 adds.
+
+  it("REFUSES moving a plan out of its agent's channel by UPDATE (way 3, under mutation)", async () => {
+    const a = await seedAgentChannel('fleet');
+    const b = await seedAgentChannel('ops');
+    const planId = await insertPlan(a.roomId, a.agentId);
+    // The plan is legal where it was born. Now try to relocate it into room B —
+    // a room agent A does not own. If `plans_room_matches_agent_channel` were
+    // INSERT-only, this UPDATE would slip through and orphan the plan.
+    await violatesConstraint('plans_room_matches_agent_channel', () =>
+      handle.db.execute(sql`UPDATE plans SET room_id = ${b.roomId} WHERE id = ${planId}`),
+    );
+  });
+
+  it("REFUSES re-pointing a plan's agent to one whose channel differs, by UPDATE", async () => {
+    const a = await seedAgentChannel('fleet');
+    const b = await seedAgentChannel('ops');
+    const planId = await insertPlan(a.roomId, a.agentId);
+    // Same trigger, the other column: keep the room, swap the agent to B (whose
+    // channel is room B, not this plan's room A).
+    await violatesConstraint('plans_room_matches_agent_channel', () =>
+      handle.db.execute(sql`UPDATE plans SET agent_user_id = ${b.agentId} WHERE id = ${planId}`),
+    );
+  });
+
+  it('REFUSES changing an agent owner to a non-human by UPDATE (way 4, under mutation)', async () => {
+    const a = await seedAgentChannel('fleet');
+    const b = await seedAgentChannel('ops');
+    // A legitimate agents row exists (owner is human). Flip its owner to an agent
+    // — a machine owning a machine. INSERT-only immutability would miss this.
+    await violatesConstraint('agents_owner_is_human', () =>
+      handle.db.execute(
+        sql`UPDATE agents SET owner_user_id = ${b.agentId} WHERE user_id = ${a.agentId}`,
+      ),
+    );
+  });
+
+  it('REFUSES changing an agent config to a human user_id by UPDATE (way 4, under mutation)', async () => {
+    const a = await seedAgentChannel('fleet');
+    // Try to re-key the config onto the human owner — a person holding agent
+    // config. The BEFORE UPDATE arm of `agents_user_is_agent` refuses it.
+    await violatesConstraint('agents_user_is_agent', () =>
+      handle.db.execute(sql`UPDATE agents SET user_id = ${a.ownerId} WHERE user_id = ${a.agentId}`),
+    );
+  });
+
+  // ── #116 fix r2: reciprocity — an agent's channel is a room IT owns ──────────
+
+  it('REFUSES an agents row whose channel room it does not own (reciprocity)', async () => {
+    // A room that belongs to nobody as a channel: seed a plain room, leave its
+    // agent_user_id NULL, and try to name it as a fresh agent's channel.
+    const seeded = await seedRoom(handle, ['owner', 'drone'], {
+      slug: 'unowned',
+      agents: ['drone'],
+    });
+    const ownerId = seeded.people.owner as string;
+    const droneId = seeded.people.drone as string;
+    // No `UPDATE rooms SET agent_user_id` first, so rooms.agent_user_id is NULL:
+    // (channel_room_id, user_id) has no matching (id, agent_user_id) row.
+    await violatesConstraint('agents_channel_owned_fk', () =>
+      handle.db.execute(sql`
+        INSERT INTO agents (user_id, owner_user_id, channel_room_id, host, harness, model)
+        VALUES (${droneId}, ${ownerId}, ${seeded.roomId}, 'h', 'claude', 'opus')
+      `),
+    );
+  });
+
+  it('REFUSES a channel pointing at a room a DIFFERENT agent owns (reciprocity)', async () => {
+    // A room owned (in rooms.agent_user_id) by a bare agent principal `other` that
+    // holds no config of its own — so the room is NOT any agent's channel and the
+    // unique agents_channel_room_key does not intercept. drone then tries to name
+    // it as ITS channel: the composite FK finds (room, other), not (room, drone).
+    const seeded = await seedRoom(handle, ['owner2', 'drone2', 'other'], {
+      slug: 'poach',
+      agents: ['drone2', 'other'],
+    });
+    const ownerId = seeded.people.owner2 as string;
+    const droneId = seeded.people.drone2 as string;
+    const otherId = seeded.people.other as string;
+    await handle.db.execute(
+      sql`UPDATE rooms SET agent_user_id = ${otherId} WHERE id = ${seeded.roomId}`,
+    );
+    await violatesConstraint('agents_channel_owned_fk', () =>
+      handle.db.execute(sql`
+        INSERT INTO agents (user_id, owner_user_id, channel_room_id, host, harness, model)
+        VALUES (${droneId}, ${ownerId}, ${seeded.roomId}, 'h', 'claude', 'opus')
+      `),
+    );
+  });
+
+  it('makes channel_room_id immutable, so a channel change cannot orphan plans (finding 1)', async () => {
+    const a = await seedAgentChannel('fleet');
+    await insertPlan(a.roomId, a.agentId); // a plan lives in a's channel
+    // A fresh room a's agent does not own (agent_user_id NULL). The finding-1
+    // exploit verbatim: point the agent's channel at it. The composite FK finds
+    // no (spare, a.agentId) tuple, so the channel cannot move — and with the
+    // one-channel-per-agent unique index there is no room a's agent DOES own to
+    // move to either, so channel_room_id is immutable and the plan in a.roomId
+    // cannot be orphaned.
+    const spare = await seedRoom(handle, ['bystander'], { slug: 'spare' });
+    await violatesConstraint('agents_channel_owned_fk', () =>
+      handle.db.execute(
+        sql`UPDATE agents SET channel_room_id = ${spare.roomId} WHERE user_id = ${a.agentId}`,
+      ),
+    );
+  });
+
+  it('REFUSES naming a non-agent as a room owner (rooms_agent_user_is_agent)', async () => {
+    // A plain room and a human. Point the room's agent_user_id at the human — the
+    // reciprocity half a foreign key cannot state. This is the UPDATE path, and
+    // the only test that pins this trigger on its own.
+    const seeded = await seedRoom(handle, ['dave'], { slug: 'daves-room' });
+    const dave = seeded.people.dave as string;
+    await violatesConstraint('rooms_agent_user_is_agent', () =>
+      handle.db.execute(sql`UPDATE rooms SET agent_user_id = ${dave} WHERE id = ${seeded.roomId}`),
     );
   });
 

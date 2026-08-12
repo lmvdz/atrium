@@ -3441,6 +3441,10 @@ describe('foreign keys — the audit is the catalog, not a paragraph', () => {
     // provenance link tables the reducer never reads.
     expect(of('c')).toEqual([
       'accepted_objects_room_id_rooms_id_fk',
+      // #116 fix r2's reciprocity FK: an agent's channel is a room it owns. Cascade
+      // for the same reason the single channel edge does — a channel without its
+      // room is meaningless. Sorts before `agents_channel_room_id_fk` ('o' < 'r').
+      'agents_channel_owned_fk',
       // #116's agent config: the sidecar and its channel edge are meaningless
       // without the identity/room they configure, so both cascade.
       'agents_channel_room_id_fk',

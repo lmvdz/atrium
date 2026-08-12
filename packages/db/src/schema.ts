@@ -380,9 +380,13 @@ export const rooms = pgTable(
      * the agent's deletion rather than cascading the room away: the channel's
      * history outlives the identity, the same way a person's messages do.
      *
-     * `drizzle/0021` adds this as the reciprocal of `agents.channel_room_id`;
-     * the pstree room trigger keys on the latter, so this column is the readable
-     * back-reference rather than the enforced edge.
+     * `drizzle/0021` adds this as the reciprocal of `agents.channel_room_id`. It
+     * began as a readable back-reference, but `drizzle/0024`'s composite FK
+     * `agents_channel_owned_fk (channel_room_id, user_id) → rooms(id, agent_user_id)`
+     * makes it an ENFORCED edge: an agent's channel must be a room that names it
+     * here. The `rooms_agent_user_is_agent` trigger (0024) holds the other half a
+     * foreign key cannot — that when set, this names an `agent`-kind user, not a
+     * person or a model.
      */
     agentUserId: uuid('agent_user_id').references(() => users.id, { onDelete: 'set null' }),
     createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
@@ -394,6 +398,13 @@ export const rooms = pgTable(
     index('rooms_workspace_idx').on(t.workspaceId),
     // At most one agent per channel and at most one channel per agent.
     uniqueIndex('rooms_agent_user_id_key').on(t.agentUserId),
+    /**
+     * The composite-FK TARGET `agents_channel_owned_fk` lands on (#116 fix r2,
+     * drizzle/0024). `id` is already unique, so this pins nothing new about rooms;
+     * it exists only so a foreign key can reference (id, agent_user_id) and hold
+     * an agent's channel to a room it owns.
+     */
+    uniqueIndex('rooms_id_agent_user_id_key').on(t.id, t.agentUserId),
   ],
 );
 
@@ -827,8 +838,10 @@ export const coreEvents = pgTable(
      * Two clauses, and the first is the one that closes the class:
      *
      *  1. **The set of room-bearing keys present is exactly the set this kind's
-     *     shape declares** — one for the five kinds that carry a room, and *empty*
-     *     for the three that name a subject instead. A key belonging to another
+     *     shape declares** — one for the eleven kinds that carry a room (the five
+     *     originals plus the six agent/plan/session lifecycle kinds #116 added to
+     *     the enum and to migration 0023, mirrored here), and *empty* for the
+     *     three that name a subject instead. A key belonging to another
      *     kind's shape is not ignored, it is a refusal, so there is nothing to
      *     smuggle. This also closes the room-less kinds, which under the coalesce
      *     were satisfied by *anything* because the fall-through reached the column.
@@ -881,6 +894,12 @@ export const coreEvents = pgTable(
         WHEN 'relation_added' THEN ARRAY['relation.roomId']
         WHEN 'message_posted' THEN ARRAY['roomId']
         WHEN 'attention_resolved' THEN ARRAY['roomId']
+        WHEN 'plan_opened' THEN ARRAY['roomId']
+        WHEN 'plan_settled' THEN ARRAY['roomId']
+        WHEN 'session_opened' THEN ARRAY['roomId']
+        WHEN 'session_settled' THEN ARRAY['roomId']
+        WHEN 'session_failed' THEN ARRAY['roomId']
+        WHEN 'signal_raised' THEN ARRAY['roomId']
         WHEN 'proposal_rejected' THEN ARRAY[]::text[]
         WHEN 'proposal_superseded' THEN ARRAY[]::text[]
         WHEN 'object_corrected' THEN ARRAY[]::text[]
@@ -890,6 +909,12 @@ export const coreEvents = pgTable(
         WHEN 'relation_added' THEN ${t.payload}->'relation'->>'roomId'
         WHEN 'message_posted' THEN ${t.payload}->>'roomId'
         WHEN 'attention_resolved' THEN ${t.payload}->>'roomId'
+        WHEN 'plan_opened' THEN ${t.payload}->>'roomId'
+        WHEN 'plan_settled' THEN ${t.payload}->>'roomId'
+        WHEN 'session_opened' THEN ${t.payload}->>'roomId'
+        WHEN 'session_settled' THEN ${t.payload}->>'roomId'
+        WHEN 'session_failed' THEN ${t.payload}->>'roomId'
+        WHEN 'signal_raised' THEN ${t.payload}->>'roomId'
         ELSE ${t.roomId}::text
       END, false)`,
     ),
@@ -1209,6 +1234,23 @@ export const agents = pgTable(
   (t) => [
     index('agents_owner_idx').on(t.ownerUserId),
     uniqueIndex('agents_channel_room_key').on(t.channelRoomId),
+    /**
+     * Reciprocity: an agent's channel is a room IT owns (#116 fix r2,
+     * drizzle/0024). `(channel_room_id, user_id) → rooms(id, agent_user_id)` holds
+     * `rooms.agent_user_id = agents.user_id` for the channel — refused at INSERT
+     * and under UPDATE of either side, closing the round-1 leak where a channel
+     * could point at a room owned by NULL / a human / a different agent. With the
+     * unique `rooms_agent_user_id_key` (one channel per agent) this also makes
+     * `channel_room_id` immutable as a theorem: there is no other room the agent
+     * owns to move the channel to, so the plan-orphaning UPDATE has no legal
+     * spelling. `plans_room_matches_agent_channel` (0022) then needs no lock, as
+     * its comment already assumed.
+     */
+    foreignKey({
+      name: 'agents_channel_owned_fk',
+      columns: [t.channelRoomId, t.userId],
+      foreignColumns: [rooms.id, rooms.agentUserId],
+    }).onDelete('cascade'),
   ],
 );
 

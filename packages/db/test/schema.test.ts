@@ -8,7 +8,7 @@ import {
   RelationKind,
 } from '@atrium/core';
 import { is } from 'drizzle-orm';
-import { getTableConfig, PgTable } from 'drizzle-orm/pg-core';
+import { getTableConfig, PgDialect, PgTable } from 'drizzle-orm/pg-core';
 import { describe, expect, it } from 'vitest';
 import * as authSchemaModule from '../src/auth-schema.js';
 import * as schemaModule from '../src/schema.js';
@@ -265,6 +265,41 @@ describe('the durable ledger (issue #22)', () => {
       'session_failed',
       'signal_raised',
     ]);
+  });
+
+  it('keeps the payload-room CHECK in step with migration 0023 — all six lifecycle arms (#116 fix r2)', () => {
+    // Round-1 gauntlet, finding 5: migration 0023 added six lifecycle arms to
+    // `core_events_payload_room_matches`, but `schema.ts`'s CASE omitted them. It
+    // failed CLOSED (the `coalesce(…, false)` tail refuses an un-enumerated kind),
+    // so it was safe — but a future `drizzle-kit generate` would reinstate the
+    // stale CASE and take all six lifecycle appends offline. This is the parity
+    // assertion that catches that drift: the CHECK `schema.ts` DECLARES must name
+    // every lifecycle kind the MIGRATION deployed.
+    const check = getTableConfig(coreEvents).checks.find(
+      (c) => c.name === 'core_events_payload_room_matches',
+    );
+    expect(check, 'core_events_payload_room_matches must exist in schema.ts').toBeTruthy();
+    // Render the schema's CHECK expression to SQL text. The kind literals live in
+    // the template verbatim, so a missing arm is a missing substring.
+    const rendered = new PgDialect().sqlToQuery(check?.value as never).sql;
+    const migration = migrationSql();
+    const lifecycleKinds = [
+      'plan_opened',
+      'plan_settled',
+      'session_opened',
+      'session_settled',
+      'session_failed',
+      'signal_raised',
+    ];
+    for (const kind of lifecycleKinds) {
+      // In the schema (drift target) AND in the migration (deployed truth): if
+      // either forgets a kind, the two are out of step and this fails.
+      expect(rendered, `schema.ts CHECK omits '${kind}'`).toContain(kind);
+      expect(migration, `migration omits '${kind}'`).toContain(kind);
+    }
+    // The fail-closed tail must survive: a ninth kind with no room policy is still
+    // refused, not waved through.
+    expect(rendered.toLowerCase()).toContain('false)');
   });
 
   it('carries the trusted actor as two columns, and no actor in the payload', () => {

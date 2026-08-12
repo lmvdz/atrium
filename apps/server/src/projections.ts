@@ -650,10 +650,25 @@ async function projectPlanSettled(
   { tx, roomId, event: { id } }: ProjectionContext<RoomEvent>,
   event: EventOf<'plan_settled'>,
 ): Promise<void> {
-  await tx
+  // One exit, once (#116 fix r2, mirroring `projectAttentionResolved`'s owner
+  // scope). The UPDATE is scoped to an `open` plan IN THIS ROOM, `.returning()`s
+  // what it touched, and a zero-row result throws — which aborts the append
+  // transaction, so a `plan_settled` naming a nonexistent, cross-room, or
+  // already-settled plan leaves NO ledger row and the caller gets a `nack`
+  // instead of an `ack` for a settle that did not happen. Without the
+  // `status = 'open'` predicate a re-settle would flip a settled plan's fields
+  // again; with it, a plan settles at most once.
+  const settled = await tx
     .update(plans)
     .set({ status: 'settled', settledByEventId: id, updatedAt: new Date(event.at) })
-    .where(and(eq(plans.id, event.planId), eq(plans.roomId, roomId)));
+    .where(and(eq(plans.id, event.planId), eq(plans.roomId, roomId), eq(plans.status, 'open')))
+    .returning({ id: plans.id });
+  if (settled.length === 0) {
+    throw new CommandError(
+      'invalid',
+      `no open plan "${event.planId}" to settle in room "${roomId}" — it does not exist here or has already settled`,
+    );
+  }
 }
 
 async function projectSessionOpened(
@@ -689,7 +704,14 @@ async function projectSessionExit(
   event: EventOf<'session_settled'> | EventOf<'session_failed'>,
   status: 'settled' | 'failed',
 ): Promise<void> {
-  await tx
+  // One exit per session, once (#116 fix r2). Scoped to an `open` session IN THIS
+  // ROOM, `.returning()`ing what it touched. A zero-row result throws and aborts
+  // the append, so a settle of a random/cross-room session id writes nothing and
+  // `nack`s. The `status = 'open'` predicate is the load-bearing half: without
+  // it a second exit would rewrite a session's receipt, and repeated
+  // settled/failed frames would flip `settled ↔ failed`, two contradictory exit
+  // receipts for one process. With it, a session takes exactly one exit.
+  const exited = await tx
     .update(sessions)
     .set({
       status,
@@ -699,7 +721,20 @@ async function projectSessionExit(
       settledByEventId: eventId,
       updatedAt: new Date(event.at),
     })
-    .where(and(eq(sessions.id, event.sessionId), eq(sessions.roomId, roomId)));
+    .where(
+      and(
+        eq(sessions.id, event.sessionId),
+        eq(sessions.roomId, roomId),
+        eq(sessions.status, 'open'),
+      ),
+    )
+    .returning({ id: sessions.id });
+  if (exited.length === 0) {
+    throw new CommandError(
+      'invalid',
+      `no open session "${event.sessionId}" to ${status} in room "${roomId}" — it does not exist here or has already exited`,
+    );
+  }
 }
 
 async function projectSessionSettled(

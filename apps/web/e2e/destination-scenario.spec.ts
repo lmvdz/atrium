@@ -2,6 +2,7 @@ import { randomUUID } from 'node:crypto';
 import {
   createAtriumAuth,
   mintAgentSession,
+  provisionAgentConfig,
   provisionAgentPrincipal,
   sessionCookieHeader,
 } from '@atrium/auth';
@@ -391,6 +392,31 @@ test.describe
         { roomId, userId: scribe.userId, role: 'member' },
         { roomId, userId: echo.userId, role: 'member' },
       ]);
+
+      // Each agent operates only with an owner sidecar (#116 fix r2): a channel
+      // room it owns and a human owner (ada). `provisionAgentConfig` claims the
+      // channel and writes the config atomically; `mintAgentSession` requires it.
+      for (const agent of [scribe, echo]) {
+        const [channel] = await db
+          .insert(rooms)
+          .values({
+            workspaceId: workspace.id,
+            slug: `chan-${agent.userId.slice(0, 8)}`,
+            name: `${agent.displayName}'s channel`,
+            createdBy: adaId,
+          })
+          .returning({ id: rooms.id });
+        if (!channel) throw new Error('channel room insert returned nothing');
+        await provisionAgentConfig({
+          db,
+          userId: agent.userId,
+          ownerUserId: adaId,
+          channelRoomId: channel.id,
+          host: 'localhost',
+          harness: 'claude',
+          model: 'opus',
+        });
+      }
 
       try {
         const ada = (await seat(browser, await mintHumanSession(adaId))).page;

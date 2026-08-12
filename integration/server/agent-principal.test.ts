@@ -3,6 +3,7 @@ import {
   createAtriumAuth,
   getAtriumSession,
   mintAgentSession,
+  provisionAgentConfig,
   provisionAgentPrincipal,
   sessionCookieHeader,
 } from '@atrium/auth';
@@ -13,6 +14,7 @@ import {
   coreEvents,
   memberships,
   messages,
+  rooms,
   users,
   workspaceMembers,
 } from '@atrium/db';
@@ -184,6 +186,26 @@ async function agentInTheRoom(name = 'scribe') {
     displayName: name,
   });
   await admit(principal.userId);
+  // An operating agent must have an owner sidecar (#116 fix r2): `mintAgentSession`
+  // now refuses an agent with no `agents` row. Give it a channel room it owns and
+  // a human owner (ada) so the config — and therefore the session — can exist.
+  const [channel] = await handle.db
+    .insert(rooms)
+    .values({
+      workspaceId: room.workspaceId,
+      slug: `chan-${name}-${randomUUID()}`,
+      name: `${name}'s channel`,
+    })
+    .returning({ id: rooms.id });
+  await provisionAgentConfig({
+    db: handle.db,
+    userId: principal.userId,
+    ownerUserId: room.people.ada as string,
+    channelRoomId: (channel as { id: string }).id,
+    host: 'localhost',
+    harness: 'claude',
+    model: 'opus',
+  });
   const session = await mintAgentSession({ auth, db: handle.db, userId: principal.userId });
   return { ...principal, session };
 }
@@ -258,6 +280,22 @@ describe('an agent principal, from provisioning to the ledger', () => {
     const person = await personInTheRoom();
     await expect(mintAgentSession({ auth, db: handle.db, userId: person.userId })).rejects.toThrow(
       /is a human principal/,
+    );
+  });
+
+  it('refuses to mint a session for an agent with NO owner sidecar (#116 fix r2)', async () => {
+    // The round-1 leak: an agent principal provisioned but never CONFIGURED had
+    // no `agents` row and so no `owner_user_id`, yet round 1 minted it a session
+    // and let it operate — the "chain terminates at a human" invariant bypassed.
+    // `mintAgentSession` now reads the config row, not just the kind: no sidecar,
+    // no session. Catches: dropping the agents-row check back to a kind-only test.
+    const bare = await provisionAgentPrincipal({
+      db: handle.db,
+      email: `bare-${randomUUID()}@agents.invalid`,
+      displayName: 'bare',
+    });
+    await expect(mintAgentSession({ auth, db: handle.db, userId: bare.userId })).rejects.toThrow(
+      /has no config sidecar/,
     );
   });
 
