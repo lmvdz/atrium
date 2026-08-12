@@ -281,8 +281,6 @@ export type PendingMessage = PendingMessageBase &
     | {
         commandName: 'send_message';
         replyToId: string | null;
-        /** Degraded metadata retained only while old clients/rows coexist. */
-        mentionUserIds: string[];
       }
     | {
         commandName: 'answer_message';
@@ -943,7 +941,6 @@ export interface RealtimeClient {
         size: number;
         capability: string;
       }>;
-      mentionUserIds?: string[];
       references?: import('./typed-references').MessageReference[];
       /** Marks explicit semantic intent so a reload can finish proposal staging. */
       semantic?: boolean;
@@ -1536,7 +1533,6 @@ export function createRealtimeClient(options: RealtimeClientOptions): RealtimeCl
         replyToId: messageOptions.replyToId ?? null,
         attachments,
         references: messageOptions.references?.map((reference) => ({ ...reference })) ?? [],
-        mentionUserIds: [...(messageOptions.mentionUserIds ?? [])],
       });
       const commandId = command({
         name: 'send_message',
@@ -1546,7 +1542,6 @@ export function createRealtimeClient(options: RealtimeClientOptions): RealtimeCl
         replyToId: messageOptions.replyToId ?? null,
         attachments,
         references: messageOptions.references ?? [],
-        mentionUserIds: messageOptions.mentionUserIds ?? [],
       });
       inFlight.set(commandId, { roomId, clientMessageId });
       changed(roomId);
@@ -1574,7 +1569,6 @@ export function createRealtimeClient(options: RealtimeClientOptions): RealtimeCl
               replyToId: pending.replyToId,
               attachments: pending.attachments,
               references: pending.references,
-              mentionUserIds: pending.mentionUserIds,
             })
           : command({
               name: 'answer_message',

@@ -71,7 +71,7 @@ export type MessageAttachment = z.infer<typeof MessageAttachment>;
 
 export const MessageReference = z.object({
   ordinal: z.number().int().min(0),
-  kind: z.enum(['human', 'attachment', 'proposal', 'object']),
+  kind: z.enum(['human', 'agent', 'attachment', 'proposal', 'object']),
   targetId: Id,
   start: z.number().int().min(0),
   end: z.number().int().positive(),
@@ -90,8 +90,6 @@ export const MessagePosted = z.object({
   clientMessageId: z.string().min(1).nullable().default(null),
   attachments: z.array(MessageAttachment).default([]),
   references: z.array(MessageReference).max(100).default([]),
-  /** Pre-0015 degraded human references. No source spans can be invented. */
-  mentionUserIds: z.array(Id).max(20).optional(),
 });
 export type MessagePosted = z.infer<typeof MessagePosted>;
 

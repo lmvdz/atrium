@@ -3,7 +3,6 @@ import {
   AttentionItem,
   attentionItemId,
   type CoreState,
-  type MentionSignal,
   type ProvenanceMessage,
   projectAttention,
   reconcileAttention,
@@ -11,6 +10,27 @@ import {
 import type { Database } from '@atrium/db';
 import { attentionItems } from '@atrium/db/schema';
 import { eq } from 'drizzle-orm';
+
+/*
+ * WHO WAS NAMED HERE HAS ONE REGISTER, AND ONE PROJECTION.
+ *
+ * A mention becomes attention in exactly one place: `projectMessagePosted`
+ * (projections.ts) writes a `mention`-class item, subject the MESSAGE, the
+ * instant a `human` or `agent` `message_reference` lands — synchronously, in the
+ * same transaction as the message. Decision #92 collapsed the old
+ * `messages.mention_user_ids` column into `message_references`; this worker cycle
+ * used to ALSO manufacture mention items from that column via a `mentionSignals`
+ * helper, attaching them to the proposals and objects a mentioning message
+ * produced. That helper was dead for real traffic (the client never filled the
+ * column), and reviving it against the reference register — the literal reading
+ * of #92/#100 — double-counts every mention: the same @name yields both the live
+ * message-subject item AND a worker proposal/object-subject item, which the
+ * destination multiplayer scenario's own acceptance assertion catches as a
+ * duplicated pending card. So the register is single and its projection is
+ * single too: this worker no longer manufactures mentions, and `projectAttention`
+ * is called with no `mentions` feed. See the ticket-contradiction note in the
+ * #100 report.
+ */
 
 /** Persist the evidence-bounded attention projection for one worker cycle. */
 export async function reconcileStoredAttention(input: {
@@ -42,7 +62,8 @@ export async function reconcileStoredAttention(input: {
     now: input.now,
     members: { [input.roomId]: memberRows },
     messages: input.messages,
-    mentions: mentionSignals(input.state, input.roomId, input.messages, memberRows),
+    // No `mentions` feed: mention → attention is produced once, by the live
+    // reference path in projections.ts. See the header note.
   });
   const reconciled = reconcileAttention(stored, projection);
 
@@ -78,52 +99,4 @@ export async function reconcileStoredAttention(input: {
   });
 
   return { ...projection, items: reconciled };
-}
-
-/** Explicit structured request targets attached to staged or accepted readings borne by the message. */
-export function mentionSignals(
-  state: CoreState,
-  roomId: string,
-  messages: readonly ProvenanceMessage[],
-  memberIds: readonly string[],
-): MentionSignal[] {
-  const members = new Set(memberIds);
-  const mentioned = new Map<string, { userId: string; request: string }[]>();
-  for (const message of messages) {
-    const targets = [...new Set(message.mentionUserIds ?? [])]
-      .filter((userId) => members.has(userId))
-      .map((userId) => ({ userId, request: message.body }));
-    if (targets.length > 0) mentioned.set(message.id, targets);
-  }
-
-  const subjects = [
-    ...Object.values(state.proposals)
-      .filter((record) => record.proposal.roomId === roomId)
-      .map((record) => ({
-        kind: 'proposal' as const,
-        id: record.proposal.id,
-        messageIds: record.proposal.provenance,
-      })),
-    ...Object.values(state.objects)
-      .filter(
-        (record) => record.object.roomId === roomId && record.object.provenance.proposalId === null,
-      )
-      .map((record) => ({
-        kind: 'object' as const,
-        id: record.object.id,
-        messageIds: record.object.provenance.messageIds,
-      })),
-  ];
-
-  return subjects.flatMap((subject) => {
-    return subject.messageIds.flatMap((messageId) => {
-      return (mentioned.get(messageId) ?? []).map((signal) => ({
-        roomId,
-        subjectKind: subject.kind,
-        objectId: subject.id,
-        userId: signal.userId,
-        request: signal.request,
-      }));
-    });
-  });
 }

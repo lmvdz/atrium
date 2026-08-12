@@ -228,7 +228,7 @@ export type BodySegment =
   | {
       readonly kind: 'mention';
       readonly text: string;
-      readonly referenceKind?: 'human' | 'attachment' | 'proposal' | 'object';
+      readonly referenceKind?: 'human' | 'agent' | 'attachment' | 'proposal' | 'object';
       readonly targetId?: string;
       readonly resolution?: string;
       readonly legacy?: boolean;

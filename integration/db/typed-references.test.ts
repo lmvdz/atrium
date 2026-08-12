@@ -251,7 +251,11 @@ describe('durable typed reference conformance', () => {
         AND t.tgname='message_references_validate_target'
         AND NOT t.tgisinternal
     `);
-    expect(row?.kinds).toEqual(['human', 'attachment', 'proposal', 'object']);
+    // The two participant kinds a reference can name (a person and an agent,
+    // #100) plus the three item kinds — the exact DB enum, kept in lockstep with
+    // the trigger's CASE. Adding a kind to the enum without teaching the trigger
+    // fails the loop below.
+    expect(row?.kinds).toEqual(['human', 'agent', 'attachment', 'proposal', 'object']);
     expect(row?.enabled).toBe('O');
     for (const kind of row?.kinds ?? []) {
       expect(row?.definition).toContain(`WHEN '${kind}'`);
@@ -259,22 +263,75 @@ describe('durable typed reference conformance', () => {
     expect(row?.definition).toContain('ELSE');
   });
 
-  /* CATCHES: fabricating typed spans by searching an old body for a current
-     display name. The pre-0016 array remains explicitly degraded metadata. */
-  it('does not fabricate typed rows for a legacy mention array', async () => {
-    const id = randomUUID();
-    await handle.db.insert(messages).values({
-      id,
-      roomId: roomA.roomId,
-      authorId: roomA.people.alice,
-      body: 'legacy words without a certified source span',
-      mentionUserIds: [roomA.people.alice as string],
+  /*
+   * An agent is a mention target (#100). These pin the trigger's participant
+   * branches to the target's OWN principal_kind, so neither identity kind can be
+   * named as the other now that both hold memberships.
+   *
+   * CATCHES: anchoring an `agent` reference to bare membership (which would let a
+   * human be named as an agent, or the reverse), or forgetting the agent branch
+   * entirely (ELSE → 'unsupported message reference kind').
+   */
+  describe('a reference names a person or an agent, never one as the other', () => {
+    let room: SeededRoom;
+    beforeEach(async () => {
+      // aria is provisioned as an agent principal; ben is a person. Both are
+      // members of the same room.
+      room = await seedRoom(handle, ['aria', 'ben'], { slug: 'reference-agent', agents: ['aria'] });
     });
-    expect(
-      await handle.db
-        .select({ id: messageReferences.id })
-        .from(messageReferences)
-        .where(eq(messageReferences.messageId, id)),
-    ).toEqual([]);
+
+    async function reference(
+      messageId: string,
+      kind: 'human' | 'agent',
+      targetId: string,
+      surface: string,
+    ) {
+      await handle.db.insert(messageReferences).values({
+        roomId: room.roomId,
+        messageId,
+        ordinal: 0,
+        kind,
+        targetId,
+        start: 0,
+        end: surface.length,
+        surface,
+      });
+    }
+
+    it('accepts an agent reference to an agent member', async () => {
+      const messageId = await message(room, '@aria please look');
+      await reference(messageId, 'agent', room.people.aria as string, '@aria');
+      expect(
+        await handle.db
+          .select({ kind: messageReferences.kind })
+          .from(messageReferences)
+          .where(eq(messageReferences.messageId, messageId)),
+      ).toEqual([{ kind: 'agent' }]);
+    });
+
+    it('accepts a human reference to a human member', async () => {
+      const messageId = await message(room, '@ben please look');
+      await reference(messageId, 'human', room.people.ben as string, '@ben');
+      expect(
+        await handle.db
+          .select({ kind: messageReferences.kind })
+          .from(messageReferences)
+          .where(eq(messageReferences.messageId, messageId)),
+      ).toEqual([{ kind: 'human' }]);
+    });
+
+    it('refuses a human reference that names an agent member', async () => {
+      const messageId = await message(room, '@aria please look');
+      await refusedWith('message reference target unavailable', () =>
+        reference(messageId, 'human', room.people.aria as string, '@aria'),
+      );
+    });
+
+    it('refuses an agent reference that names a human member', async () => {
+      const messageId = await message(room, '@ben please look');
+      await refusedWith('message reference target unavailable', () =>
+        reference(messageId, 'agent', room.people.ben as string, '@ben'),
+      );
+    });
   });
 });

@@ -425,8 +425,10 @@ export function Composer({
               tabIndex={-1}
               type="button"
             >
-              {target.kind === 'human' ? null : <span aria-hidden="true">▤ </span>}@
-              {systemText(target.label, 'Composer reference target')}
+              {target.kind === 'human' || target.kind === 'agent' ? null : (
+                <span aria-hidden="true">▤ </span>
+              )}
+              @{systemText(target.label, 'Composer reference target')}
               {target.detail === undefined ? null : (
                 <small> · {systemText(target.detail, 'Composer reference detail')}</small>
               )}

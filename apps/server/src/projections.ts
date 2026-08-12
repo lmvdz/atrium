@@ -159,7 +159,6 @@ async function projectMessagePosted(
     replyToId: event.replyToId,
     clientMessageId: event.clientMessageId,
     attachments: event.attachments,
-    mentionUserIds: event.mentionUserIds ?? [],
   });
   if (event.attachments.length > 0) {
     await tx.insert(storedAttachments).values(
@@ -176,7 +175,16 @@ async function projectMessagePosted(
       .values({ ...reference, roomId, messageId: event.messageId })
       .returning({ id: messageReferences.id });
     if (!stored) throw new Error('message reference insert returned no identity');
-    if (reference.kind === 'human') {
+    // A mention lands as attention for whoever was NAMED — a person or an agent.
+    // Both `human` and `agent` reference targets carry a `users` row and a room
+    // membership (drizzle/0017), which is what `attention_items.user_id` FKs, so
+    // routing is kind-agnostic across the two identity kinds: an agent receiving
+    // a mention gets the same pending `mention` item a human does. The other
+    // reference kinds — attachment, proposal, object — are room *items*, not
+    // participants, and have nothing to pay attention. An allowlist of the two
+    // participant kinds, not a denylist of the three item kinds, so a later kind
+    // added to the alphabet is not silently routed as attention.
+    if (reference.kind === 'human' || reference.kind === 'agent') {
       await tx
         .insert(attentionItems)
         .values({

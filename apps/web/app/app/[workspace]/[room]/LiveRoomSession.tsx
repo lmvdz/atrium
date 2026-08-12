@@ -273,19 +273,18 @@ export function LiveRoomSession({ data, viewerId }: { data: ReplayData; viewerId
     .filter((objective) => objective.status !== 'proposed')
     .map((objective) => ({ id: objective.id, label: objective.title }));
   const referenceTargets: readonly ReferenceTarget[] = [
-    // Mention candidates stay people-only. An agent is a participant everywhere
-    // it is NAMED — roster, presence, monogram, counts — but making it a mention
-    // target is #100's register work, not this ticket's, so the composer's
-    // candidate source filters to `kind === 'human'` rather than inheriting the
-    // agents the roster now carries. Flip that filter and agents become
-    // mentionable; leaving it here is the scope boundary, stated in one line.
-    ...view.participants
-      .filter((participant) => participant.kind === 'human')
-      .map((participant) => ({
-        kind: 'human' as const,
-        id: participant.id,
-        label: participant.name,
-      })),
+    // A mention candidate is any NAMEABLE participant — a person or an agent
+    // (#100). The filter allowlists the two identity kinds rather than
+    // denylisting the item kinds, so `'unknown'` — the fail-closed rendering of a
+    // participant whose kind could not be read (records.ts) — is never offered as
+    // a mention target and never becomes an attention row from a name it should
+    // not carry. Each candidate keeps its own kind, so the reference that lands
+    // records whether a person or an agent was named.
+    ...view.participants.flatMap((participant) =>
+      participant.kind === 'human' || participant.kind === 'agent'
+        ? [{ kind: participant.kind, id: participant.id, label: participant.name }]
+        : [],
+    ),
     ...attachments.map((attachment) => ({
       kind: 'attachment' as const,
       id: attachment.id,

@@ -105,9 +105,24 @@ export const attentionClass = pgEnum('attention_class', [
 
 export const attentionStatus = pgEnum('attention_status', ['pending', 'resolved', 'dismissed']);
 
-/** Closed alphabet for durable authored references. */
+/**
+ * Closed alphabet for durable authored references.
+ *
+ * `agent` (drizzle/0019) joins `human` as the second **participant** kind a
+ * reference can name: an agent holds a `users` row, a membership and a session
+ * (drizzle/0017), so an author can @-mention it exactly as they mention a
+ * person, and the same reference lands its target in the attention register.
+ * The two anonymous actor kinds — `model`, `system` — are deliberately NOT here:
+ * they carry no identity to be a reference target, and `unknown` (the
+ * fail-closed view kind) is never mentionable by construction. The
+ * `validate_message_reference_target` trigger (drizzle/0016, replaced in 0019)
+ * anchors a `human` target to a member whose `principal_kind` is `human` and an
+ * `agent` target to a member whose `principal_kind` is `agent`, so neither kind
+ * can mislabel the other.
+ */
 export const messageReferenceKind = pgEnum('message_reference_kind', [
   'human',
+  'agent',
   'attachment',
   'proposal',
   'object',
@@ -1005,8 +1020,6 @@ export const messages = pgTable(
     clientMessageId: text('client_message_id'),
     /** `[{ key, name, contentType, size }]` — objects live in S3/MinIO. */
     attachments: jsonb('attachments').$type<MessageAttachment[]>().notNull().default([]),
-    /** Explicit request targets selected by the author, separate from authored speech. */
-    mentionUserIds: uuid('mention_user_ids').array().notNull().default(sql`'{}'::uuid[]`),
     createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
   },
   (t) => [

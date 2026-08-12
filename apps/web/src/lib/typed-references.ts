@@ -1,4 +1,4 @@
-export type MessageReferenceKind = 'human' | 'attachment' | 'proposal' | 'object';
+export type MessageReferenceKind = 'human' | 'agent' | 'attachment' | 'proposal' | 'object';
 
 /** Authored reference metadata sent on the wire. Offsets are JavaScript UTF-16 indices. */
 export interface MessageReference {

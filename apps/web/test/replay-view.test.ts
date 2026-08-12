@@ -7,7 +7,6 @@ import { reopenQuestion } from '../lib/replay-transitions';
 import {
   activeAnswerMatchesClientMessage,
   activeAnswerMessageId,
-  mentionBody,
   replayAt,
   replayReceipt,
   replayView,
@@ -24,17 +23,6 @@ const at = new Date('2026-08-02T12:00:00.000Z');
  */
 const liveRoomSession = workspacePath('apps/web/app/app/[workspace]/[room]/LiveRoomSession.tsx');
 const replayDataSource = workspacePath('apps/web/lib/replay-data.ts');
-
-describe('structured mention rendering', () => {
-  /* CATCHES: laundering pre-span mentionUserIds into the new validated typed
-     representation by regex-searching a current display name. No historical
-     source span can be fabricated, so the body remains plain. */
-  it('segments only certified mention targets without rewriting their words', () => {
-    expect(
-      mentionBody('ask @Priya, not @unknown', ['u-priya'], new Map([['u-priya', 'priya']])),
-    ).toBeUndefined();
-  });
-});
 
 describe('contextual direct-reference placement', () => {
   const mention = (id: string, messageId: string, userId = 'alice') => ({

@@ -1841,7 +1841,6 @@ describe('optimism is limited to your own message row', () => {
     };
     const clientMessageId = client.sendMessage(ROOM, '@priya exact words survive the wire', {
       replyToId: '00000000-0000-4000-8000-000000000001',
-      mentionUserIds: ['00000000-0000-4000-8000-000000000002'],
       attachments: [attachment],
       references: [reference],
     });

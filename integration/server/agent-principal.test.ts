@@ -568,11 +568,23 @@ describe('attention resolves by ownership, not by humanity', () => {
   async function pendingItemFor(sender: TestClient, targetId: string): Promise<string> {
     const surface = '@you';
     const body = `${surface} could you take a look`;
+    // The reference kind IS the target's principal kind — a person is named by a
+    // `human` reference, an agent by an `agent` reference (#100). The product
+    // builds it that way (the composer candidate carries the participant's kind),
+    // and the append-boundary trigger refuses a reference whose kind disagrees
+    // with the target's own principal_kind, so deriving it here is the faithful
+    // way to "make one the way the product makes one".
+    const [target] = await handle.db
+      .select({ principalKind: users.principalKind })
+      .from(users)
+      .where(eq(users.id, targetId));
+    const kind = (target as { principalKind: 'human' | 'agent' } | undefined)?.principalKind;
+    if (kind === undefined) throw new Error(`no principal for mention target ${targetId}`);
     const ack = await sender.command({
       name: 'send_message',
       roomId: room.roomId,
       body,
-      references: [{ ordinal: 0, kind: 'human', targetId, start: 0, end: surface.length, surface }],
+      references: [{ ordinal: 0, kind, targetId, start: 0, end: surface.length, surface }],
     } as unknown as CommandInput);
     expect(issuesOf(ack)).toEqual([]);
     const rows = await handle.db

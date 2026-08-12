@@ -25,6 +25,7 @@ import {
   interpretations,
   isCoreEventType,
   memberships,
+  messageReferenceKind,
   messages,
   objectRelations,
   proposalStatus,
@@ -111,6 +112,41 @@ describe('table shape', () => {
     expect(columns).toContain('seq');
     expect(columns).not.toContain('updated_at');
     expect(columns).not.toContain('deleted_at');
+  });
+
+  /**
+   * CATCHES: a second register for "who was named here" reappearing at the schema
+   * layer. Decision #92 made `message_references` the single register and dropped
+   * `messages.mention_user_ids` (drizzle/0019). If a migration or a schema edit
+   * re-adds the column — the exact split this ticket closed — this fails. Paired
+   * with the projection-level guard in
+   * `apps/server/test/attention-projection.test.ts` (the worker manufactures no
+   * mention attention; the live reference path in projections.ts is the sole
+   * producer), both ends of the split are pinned.
+   */
+  it('carries no second mention register — mention_user_ids is gone for good', () => {
+    const columns = getTableConfig(messages).columns.map((c) => c.name);
+    expect(columns).not.toContain('mention_user_ids');
+  });
+
+  /**
+   * The reference alphabet names the two PARTICIPANT kinds — a person and an
+   * agent, both identities that can be @-mentioned and can receive attention —
+   * and the three room-item kinds, and nothing else. An allowlist assertion: the
+   * two anonymous actor kinds (model, system) must never be spellable as a
+   * reference target, because they carry no identity to be one.
+   */
+  it('lets a reference name a person or an agent, plus the three item kinds', () => {
+    expect([...messageReferenceKind.enumValues]).toEqual([
+      'human',
+      'agent',
+      'attachment',
+      'proposal',
+      'object',
+    ]);
+    expect(messageReferenceKind.enumValues).not.toContain('model');
+    expect(messageReferenceKind.enumValues).not.toContain('system');
+    expect(messageReferenceKind.enumValues).not.toContain('unknown');
   });
 
   it('stores the five object types in one table with a discriminator + jsonb payload', () => {

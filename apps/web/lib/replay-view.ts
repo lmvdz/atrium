@@ -85,18 +85,6 @@ export function typedReferenceBody(
   return body;
 }
 
-export function mentionBody(
-  _text: string,
-  _mentionUserIds: readonly string[],
-  _participantName: ReadonlyMap<string, string>,
-): readonly BodySegment[] | undefined {
-  // Pre-0015 rows recorded target ids but no authored spans. Searching the
-  // body for a current display name would fabricate provenance, especially
-  // after rename. Render the immutable body plainly and disclose degradation
-  // in system voice on the row instead.
-  return undefined;
-}
-
 const TALK: EpistemicState = {
   kind: 'event',
   verification: 'routine',
@@ -224,8 +212,8 @@ export function replayView(data: ReplayData, viewerId?: string) {
       objectives: objectives.map((objective) => objective.id),
     }));
   const objects = [...accepted, ...staged];
-  const currentHumanName = new Map(
-    (data.referenceHumans ?? data.participants).map((person) => [person.id, person.name]),
+  const currentParticipantName = new Map(
+    (data.referenceParticipants ?? data.participants).map((person) => [person.id, person.name]),
   );
   const currentParticipantIds = new Set(data.participants.map((person) => person.id));
   const attachmentById = new Map(
@@ -241,8 +229,11 @@ export function replayView(data: ReplayData, viewerId?: string) {
     kind: MessageReferenceKind,
     targetId: string,
   ): ReferenceResolution | undefined => {
-    if (kind === 'human') {
-      const label = currentHumanName.get(targetId);
+    if (kind === 'human' || kind === 'agent') {
+      // A person and an agent are both `users` rows and both resolve to a
+      // display name off the same map; the reference kind is preserved so the
+      // renderer can still distinguish them, but neither is stamped the other.
+      const label = currentParticipantName.get(targetId);
       return label === undefined
         ? undefined
         : {
@@ -293,19 +284,19 @@ export function replayView(data: ReplayData, viewerId?: string) {
          in its source message. Human speech stays discussion; the Current-state
          object and its receipt carry the derived epistemic status. */
       state: TALK,
+      // Mentions render from the ONE register: authored `message_references`
+      // spans (decision #92). A message with no references is plain speech; there
+      // is no second `mention_user_ids` column to fall back to or to disclose.
       body: referencesByMessage.has(message.id)
         ? typedReferenceBody(
             message.body,
             referencesByMessage.get(message.id) ?? [],
             resolveReference,
           )
-        : mentionBody(message.body, message.mentionUserIds ?? [], participantName),
+        : undefined,
       replyTo: reply ? quotationFrom(reply) : null,
       viewer: viewerName,
-      note:
-        referencesByMessage.has(message.id) || (message.mentionUserIds?.length ?? 0) === 0
-          ? null
-          : systemStatement('legacy mention metadata has no verified authored span'),
+      note: null,
     });
   });
   const entries: TimelineEntry[] =

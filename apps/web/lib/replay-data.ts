@@ -69,7 +69,6 @@ async function loadReplayDataSnapshot(database: Database, roomId: string) {
       clientMessageId: messages.clientMessageId,
       replyToId: messages.replyToId,
       attachments: messages.attachments,
-      mentionUserIds: messages.mentionUserIds,
       createdAt: messages.createdAt,
     })
     .from(messages)
@@ -86,8 +85,16 @@ async function loadReplayDataSnapshot(database: Database, roomId: string) {
           .from(messageReferences)
           .where(inArray(messageReferences.messageId, messageIds))
           .orderBy(asc(messageReferences.messageId), asc(messageReferences.ordinal));
-  const referencedHumanIds = [
-    ...new Set(references.filter((reference) => reference.kind === 'human').map((r) => r.targetId)),
+  // Both participant reference kinds resolve to a `users` row — an agent holds
+  // one exactly as a person does (drizzle/0017) — so a `@`-mention of either
+  // renders with the target's current display name. Item references (attachment,
+  // proposal, object) are resolved separately below.
+  const referencedParticipantIds = [
+    ...new Set(
+      references
+        .filter((reference) => reference.kind === 'human' || reference.kind === 'agent')
+        .map((r) => r.targetId),
+    ),
   ];
   const referencedAttachmentIds = [
     ...new Set(
@@ -106,7 +113,7 @@ async function loadReplayDataSnapshot(database: Database, roomId: string) {
     fixes,
     messageEvents,
     roomCursor,
-    referenceHumans,
+    referenceParticipants,
     referenceAttachments,
   ] = await Promise.all([
     participantIds.length === 0
@@ -168,12 +175,12 @@ async function loadReplayDataSnapshot(database: Database, roomId: string) {
       .where(eq(coreEvents.roomId, roomId))
       .orderBy(desc(coreEvents.roomSeq))
       .limit(1),
-    referencedHumanIds.length === 0
+    referencedParticipantIds.length === 0
       ? Promise.resolve([])
       : database
           .select({ id: users.id, name: users.displayName })
           .from(users)
-          .where(inArray(users.id, referencedHumanIds)),
+          .where(inArray(users.id, referencedParticipantIds)),
     referencedAttachmentIds.length === 0
       ? Promise.resolve([])
       : database
@@ -227,7 +234,7 @@ async function loadReplayDataSnapshot(database: Database, roomId: string) {
     participants,
     messages: roomMessages,
     messageReferences: references,
-    referenceHumans,
+    referenceParticipants,
     referenceAttachments,
     interpretations: roomInterpretations,
     proposals: roomProposals,
@@ -253,7 +260,7 @@ export type ReplayData = Omit<
   | 'messagePositions'
   | 'messages'
   | 'messageReferences'
-  | 'referenceHumans'
+  | 'referenceParticipants'
   | 'referenceAttachments'
   | 'attention'
   | 'participants'
@@ -273,14 +280,12 @@ export type ReplayData = Omit<
   /** Optional only for hand-built fixtures; every server load mints a fresh commit receipt. */
   readonly loadReceipt?: string;
   /** Optional only for hand-built fixtures created before live client ids existed. */
-  messages: (Omit<LoadedReplayMessage, 'clientMessageId' | 'mentionUserIds'> & {
+  messages: (Omit<LoadedReplayMessage, 'clientMessageId'> & {
     readonly clientMessageId?: string | null;
-    /** Optional only for hand-built fixtures created before structured mentions existed. */
-    readonly mentionUserIds?: readonly string[];
   })[];
   /** Optional only for hand-built fixtures and pre-0015 snapshots. */
   readonly messageReferences?: LoadedReplayData['messageReferences'];
-  readonly referenceHumans?: LoadedReplayData['referenceHumans'];
+  readonly referenceParticipants?: LoadedReplayData['referenceParticipants'];
   readonly referenceAttachments?: LoadedReplayData['referenceAttachments'];
   /** Generated FK columns are database enforcement plumbing, not view input. */
   readonly attention: Array<
