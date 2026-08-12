@@ -60,6 +60,10 @@ import {
 } from '../../src/components/model';
 import * as f from './fixtures';
 
+/** Room-head member chips for a list of people — the gallery's rooms are human. */
+const people = (...names: readonly string[]): RoomHeadRecord['members'] =>
+  names.map((name) => ({ name, kind: 'human' as const }));
+
 const ACCEPTED = {
   kind: 'decision',
   verification: 'accepted',
@@ -288,7 +292,7 @@ const VIEWS: Readonly<Record<string, RoomView>> = {
     room: {
       name: 'identity-service',
       topic: 'own the signing key and the session lifecycle for every service',
-      members: ['priya', 'dana', 'lars'],
+      members: people('priya', 'dana', 'lars'),
     },
     objectives: [
       { id: 'io1', title: 'Rotate the signing key safely', status: 'active', open: true },
@@ -312,7 +316,7 @@ const VIEWS: Readonly<Record<string, RoomView>> = {
     room: {
       name: 'platform',
       topic: 'the substrate everything else runs on — clusters, images, build times',
-      members: ['mateo', 'justin', 'lars'],
+      members: people('mateo', 'justin', 'lars'),
     },
     objectives: [
       { id: 'po1', title: 'Keep the fleet on a supported version', status: 'active', open: true },
@@ -334,7 +338,7 @@ const VIEWS: Readonly<Record<string, RoomView>> = {
     room: {
       name: 'design',
       topic: 'the shared grammar — glyphs, density, and what a claim may look like',
-      members: ['lars', 'mateo'],
+      members: people('lars', 'mateo'),
     },
     objectives: [
       { id: 'do1', title: 'Settle the epistemic glyph legend', status: 'active', open: true },

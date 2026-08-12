@@ -86,20 +86,90 @@ export function owedSummary(items: readonly { readonly state: EpistemicState }[]
 
 export type Presence = 'here' | 'idle' | 'away';
 
-export interface HumanSummary {
+/**
+ * What a participant IS, read from the identity, not from the copy around it.
+ *
+ * `'human'` and `'agent'` mirror `@atrium/auth`'s `PrincipalKind` — the same two
+ * values the DB's `users.principal_kind` carries. The view model keeps its own
+ * copy of the union rather than importing the server package, so the component
+ * library stays free of a database dependency; the single translation from the
+ * stored column happens in the two view constructors, where the row is read.
+ *
+ * Every surface that names a participant reads this field. It is a **presented**
+ * discriminant, never an authority one — an unreadable kind renders as a human
+ * (the harmless default for a monogram) while the certification gates that must
+ * fail closed live server-side, in the reducer, on the `Actor`. The two failures
+ * are opposite on purpose: a chip that guesses "human" is a cosmetic miss; a gate
+ * that guesses "human" is a machine certifying a person's judgement.
+ */
+export type ParticipantKind = 'human' | 'agent';
+
+const PARTICIPANT_KINDS: readonly string[] = ['human', 'agent'];
+
+/**
+ * Read a participant kind off a stored value, defaulting to `'human'`.
+ *
+ * The browser-safe twin of `@atrium/auth`'s `parsePrincipalKind` — the view
+ * layer is bundled for the client and may not import the auth package (it reaches
+ * `node:fs` through Better Auth). An **allowlist**: anything that is not exactly
+ * `'agent'` or `'human'` — a renamed column, an undefined hand-built fixture — is
+ * a person, because this decides a monogram and a monogram that guesses a person
+ * is a cosmetic miss. The gate that must fail CLOSED on an unreadable kind is
+ * `getAtriumSession`, server-side, on the session — not this record.
+ */
+export function participantKindOf(value: unknown): ParticipantKind {
+  return typeof value === 'string' && PARTICIPANT_KINDS.includes(value)
+    ? (value as ParticipantKind)
+    : 'human';
+}
+
+/**
+ * A participant in a room — a person or an agent. Formerly `HumanSummary`, which
+ * hardcoded the one assumption this record now carries as data: a roster, a
+ * presence dot, a monogram and a count all read `kind` and render an agent
+ * distinctly instead of stamping every member a person.
+ */
+export interface ParticipantSummary {
   readonly id: string;
+  readonly kind: ParticipantKind;
   readonly name: string;
   readonly presence: Presence;
   readonly note: Maybe<string>;
   readonly isViewer: boolean;
 }
 
+/**
+ * The roster subtitle, counted by kind. Formerly `${n} humans`, a label that
+ * called every member a person; it now names people and agents separately, so
+ * the count itself moves when a member's kind flips — `5 people` becomes
+ * `4 people · 1 agent` the moment one of them becomes an agent. All-human rooms
+ * still read as a plain people count; an all-agent room reads as agents alone.
+ */
+export function participantTally(participants: readonly ParticipantSummary[]): string {
+  const agents = participants.filter((participant) => participant.kind === 'agent').length;
+  const people = participants.length - agents;
+  const parts: string[] = [];
+  if (people > 0 || agents === 0) parts.push(`${people} ${people === 1 ? 'person' : 'people'}`);
+  if (agents > 0) parts.push(`${agents} ${agents === 1 ? 'agent' : 'agents'}`);
+  return parts.join(' · ');
+}
+
 /* --- room head ----------------------------------------------------------- */
+
+/**
+ * A member as the room head paints it: a name and what kind of participant it is.
+ * A bare string before — the head's face chips could not tell a person from an
+ * agent because the record it read from did not carry the difference.
+ */
+export interface MemberChip {
+  readonly name: string;
+  readonly kind: ParticipantKind;
+}
 
 export interface RoomHeadRecord {
   readonly name: string;
   readonly topic: string;
-  readonly members: readonly string[];
+  readonly members: readonly MemberChip[];
 }
 
 /** The three surfaces are all on screen at once — these focus, they do not navigate. */

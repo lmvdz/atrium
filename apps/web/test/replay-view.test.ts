@@ -288,7 +288,7 @@ describe('persisted replay view', () => {
     expect(view.entries[2]?.type).toBe('message');
     if (view.entries[2]?.type !== 'message') throw new Error('third row is not a message');
     expect(view.entries[2].replyTo?.messageId).toBe('m1');
-    expect(view.room.members).toEqual(['alice']);
+    expect(view.room.members).toEqual([{ name: 'alice', kind: 'human' }]);
   });
 
   /**
@@ -599,7 +599,7 @@ describe('persisted replay view', () => {
 
     const view = replayView(snapshot, 'alice');
     expect(view.records[0]?.actor).toBe('author unavailable');
-    expect(view.room.members).toEqual(['alice']);
+    expect(view.room.members).toEqual([{ name: 'alice', kind: 'human' }]);
   });
 
   /**
@@ -956,7 +956,7 @@ describe('live room view', () => {
       entryIds: ['m2'],
     });
     expect(view.rooms[0]?.unseen).toBe(1);
-    expect(view.humans[0]?.presence).toBe('here');
+    expect(view.participants[0]?.presence).toBe('here');
   });
 
   /**

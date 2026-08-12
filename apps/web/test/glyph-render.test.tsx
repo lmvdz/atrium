@@ -198,7 +198,7 @@ describe('an aggregate glyph moves when the set it counts moves', () => {
   it.each(SETS)('the rail chip wears the hardest of $what', ({ items }) => {
     const { container } = render(
       <Rail
-        humans={[]}
+        participants={[]}
         rooms={[{ id: 'r1', name: 'here', unseen: 0, owed: owedSummary(items), current: true }]}
         workspaceName="atrium"
         workspaceSub="1 room"

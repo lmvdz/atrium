@@ -191,7 +191,7 @@ export function RoomSession() {
       entries={entries}
       filter={filter}
       focused={focused}
-      humans={f.HUMANS}
+      participants={f.PARTICIPANTS}
       handlers={{
         onSelectRoom: (next: string) => {
           const chosen = sessionView(next, actedOn);

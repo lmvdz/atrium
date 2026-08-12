@@ -273,7 +273,19 @@ export function LiveRoomSession({ data, viewerId }: { data: ReplayData; viewerId
     .filter((objective) => objective.status !== 'proposed')
     .map((objective) => ({ id: objective.id, label: objective.title }));
   const referenceTargets: readonly ReferenceTarget[] = [
-    ...view.humans.map((human) => ({ kind: 'human' as const, id: human.id, label: human.name })),
+    // Mention candidates stay people-only. An agent is a participant everywhere
+    // it is NAMED — roster, presence, monogram, counts — but making it a mention
+    // target is #100's register work, not this ticket's, so the composer's
+    // candidate source filters to `kind === 'human'` rather than inheriting the
+    // agents the roster now carries. Flip that filter and agents become
+    // mentionable; leaving it here is the scope boundary, stated in one line.
+    ...view.participants
+      .filter((participant) => participant.kind === 'human')
+      .map((participant) => ({
+        kind: 'human' as const,
+        id: participant.id,
+        label: participant.name,
+      })),
     ...attachments.map((attachment) => ({
       kind: 'attachment' as const,
       id: attachment.id,
@@ -644,7 +656,7 @@ export function LiveRoomSession({ data, viewerId }: { data: ReplayData; viewerId
               [objectiveId]: !(current[objectiveId] ?? true),
             })),
         }}
-        humans={view.humans}
+        participants={view.participants}
         hideEmptyAttention
         label="live"
         lastCheck={view.updatedAt}

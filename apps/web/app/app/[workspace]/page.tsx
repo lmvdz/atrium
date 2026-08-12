@@ -109,10 +109,20 @@ export default async function WorkspacePage({
         </h2>
         <ul className={styles.list} data-testid="member-list">
           {members.map((member) => (
-            <li className={styles.row} data-member-id={member.memberId} key={member.userId}>
+            <li
+              className={styles.row}
+              data-member-id={member.memberId}
+              data-participant-kind={member.principalKind}
+              key={member.userId}
+            >
               <span className={styles.rowMain}>
                 <span className={styles.rowName}>{member.displayName}</span>
-                <span className={styles.rowMeta}>{member.email}</span>
+                {/* An agent's address is a non-deliverable placeholder, so the
+                    row names the register instead of an email that reads as a
+                    way to contact a person. */}
+                <span className={styles.rowMeta}>
+                  {member.principalKind === 'agent' ? 'agent' : member.email}
+                </span>
               </span>
               <span className={styles.roleTag}>{member.role}</span>
               {/* Managing yourself out of your own workspace is a separate

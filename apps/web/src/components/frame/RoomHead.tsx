@@ -37,15 +37,23 @@ export function RoomHead({ room, surfaces, working, settled }: RoomHeadProps) {
             unavailable navigation. */}
         <span className={styles.modeStatus}>view: tree · by goal</span>
         <div className={styles.faces}>
-          {room.members.map((member) => (
-            <span
-              className={styles.face}
-              key={member}
-              title={systemText(member, 'RoomHead member')}
-            >
-              {initials(systemText(member, 'RoomHead member'))}
-            </span>
-          ))}
+          {room.members.map((member) => {
+            const memberName = systemText(member.name, 'RoomHead member');
+            const isAgent = member.kind === 'agent';
+            return (
+              <span
+                className={`${styles.face}${isAgent ? ` ${styles.faceAgent}` : ''}`}
+                data-participant-kind={member.kind}
+                key={`${member.kind}:${member.name}`}
+                /* The chip's own accessible route to who it is. An agent's says
+                   so — the monogram alone is a shape distinction, and a shape is
+                   not a name. */
+                title={isAgent ? `${memberName} — agent` : memberName}
+              >
+                {initials(memberName)}
+              </span>
+            );
+          })}
         </div>
         <span className={styles.hereCount}>{room.members.length} here</span>
         <span className={styles.roomheadSpacer} />

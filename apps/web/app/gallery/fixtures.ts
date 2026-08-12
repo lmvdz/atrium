@@ -18,11 +18,11 @@ import type {
   CorrectionEntry,
   CrossRoomJumpRecord,
   HappenedKind,
-  HumanSummary,
   Maybe,
   MessageEntry,
   MessageRecord,
   ObjectiveRecord,
+  ParticipantSummary,
   ProvenanceEntry,
   Quotation,
   ReceiptRecord,
@@ -276,26 +276,65 @@ export const ROSTER: readonly RoomRoster[] = [
   { id: 'r4', name: 'design', unseen: 0 },
 ];
 
-export const VIEWER: HumanSummary = {
+export const VIEWER: ParticipantSummary = {
   id: 'lars',
+  kind: 'human',
   name: 'lars',
   presence: 'here',
   note: null,
   isViewer: true,
 };
 
-export const HUMANS: readonly HumanSummary[] = [
+export const PARTICIPANTS: readonly ParticipantSummary[] = [
   VIEWER,
-  { id: 'priya', name: 'priya', presence: 'here', note: 'in #identity-service', isViewer: false },
-  { id: 'dana', name: 'dana', presence: 'idle', note: '20m', isViewer: false },
-  { id: 'justin', name: 'justin', presence: 'here', note: null, isViewer: false },
-  { id: 'mateo', name: 'mateo', presence: 'away', note: 'back tomorrow', isViewer: false },
+  {
+    id: 'priya',
+    kind: 'human',
+    name: 'priya',
+    presence: 'here',
+    note: 'in #identity-service',
+    isViewer: false,
+  },
+  { id: 'dana', kind: 'human', name: 'dana', presence: 'idle', note: '20m', isViewer: false },
+  { id: 'justin', kind: 'human', name: 'justin', presence: 'here', note: null, isViewer: false },
+  {
+    id: 'mateo',
+    kind: 'human',
+    name: 'mateo',
+    presence: 'away',
+    note: 'back tomorrow',
+    isViewer: false,
+  },
+  // An agent member sits in the roster beside the people, so the gallery — the
+  // one page that renders the whole component library from fixtures — shows the
+  // agent-vs-human treatment directly: a squared presence marker, an `agent`
+  // register on the row, a squared monogram in the room head, and a count that
+  // reads `5 people · 1 agent`. Flip this `kind` to `human` and every one of
+  // those surfaces reverts, which is the acceptance test made visible.
+  {
+    id: 'atrium-agent',
+    kind: 'agent',
+    name: 'atrium',
+    presence: 'here',
+    note: 'drafts readings',
+    isViewer: false,
+  },
 ];
+
+/** Back-compat alias for callers still naming the roster `HUMANS`. */
+export const HUMANS = PARTICIPANTS;
 
 export const ROOM: RoomHeadRecord = {
   name: 'users-migration',
   topic: 'cut auth over to the new users table without dropping a live session',
-  members: ['lars', 'priya', 'dana', 'justin', 'mateo'],
+  members: [
+    { name: 'lars', kind: 'human' },
+    { name: 'priya', kind: 'human' },
+    { name: 'dana', kind: 'human' },
+    { name: 'justin', kind: 'human' },
+    { name: 'mateo', kind: 'human' },
+    { name: 'atrium', kind: 'agent' },
+  ],
 };
 
 /** All three surfaces are on screen at once; only two of them carry a count. */

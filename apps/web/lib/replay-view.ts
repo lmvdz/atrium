@@ -10,9 +10,9 @@ import type {
   BodySegment,
   CorrectionEntry,
   EpistemicState,
-  HumanSummary,
   MessageRecord,
   ObjectiveRecord,
+  ParticipantSummary,
   ProvenanceEntry,
   ReceiptRecord,
   RoomHeadRecord,
@@ -25,6 +25,7 @@ import {
   happenedKindFor,
   messageEntry,
   owedSummary,
+  participantKindOf,
   quotationFrom,
   rationale,
   sinceYouLeft,
@@ -396,15 +397,23 @@ export function replayView(data: ReplayData, viewerId?: string) {
   });
   const referenceAttention = contextualReferenceAttention(data, viewer?.id);
 
-  const humans: HumanSummary[] = data.participants.map((person) => ({
+  const participants: ParticipantSummary[] = data.participants.map((person) => ({
     id: person.id,
+    // An allowlist, not `=== 'agent' ? … : …`: an unreadable kind renders a
+    // person, and that default is only ever safe because this is a monogram and
+    // not a certification gate. The gates that must fail closed read the `Actor`
+    // server-side, never this record.
+    kind: participantKindOf(person.principalKind),
     name: person.name,
     presence: 'away',
     note: null,
     isViewer: person.id === viewer?.id,
   }));
-  const viewerRecord: HumanSummary = humans.find((person) => person.isViewer) ?? {
+  const viewerRecord: ParticipantSummary = participants.find((person) => person.isViewer) ?? {
     id: 'replay-viewer',
+    // The viewer is whoever loaded the page, and an agent does not load a page —
+    // it holds a session the harness drives. The fallback viewer is a person.
+    kind: 'human',
     name: viewerName,
     presence: 'away',
     note: null,
@@ -413,7 +422,10 @@ export function replayView(data: ReplayData, viewerId?: string) {
   const room: RoomHeadRecord = {
     name: data.room.name,
     topic: data.room.workspaceName,
-    members: data.participants.map((person) => person.name),
+    members: data.participants.map((person) => ({
+      name: person.name,
+      kind: participantKindOf(person.principalKind),
+    })),
   };
   const rooms: RoomSummary[] = [
     {
@@ -432,7 +444,7 @@ export function replayView(data: ReplayData, viewerId?: string) {
     objects,
     attention,
     referenceAttention,
-    humans,
+    participants,
     viewer: viewerRecord,
     room,
     rooms,

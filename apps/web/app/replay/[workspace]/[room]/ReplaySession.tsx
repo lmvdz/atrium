@@ -363,7 +363,7 @@ export function ReplaySession({ data, viewerId }: { data: ReplayData; viewerId?:
               [objectiveId]: !(current[objectiveId] ?? true),
             })),
         }}
-        humans={view.humans}
+        participants={view.participants}
         hideEmptyAttention
         label="replay"
         lastCheck={view.updatedAt}

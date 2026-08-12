@@ -67,7 +67,7 @@ export default async function PinLoadPage({ params }: { params: Promise<{ n: str
         entries={f.timeline({ seen: false, filter: null, routineOpen: false, owed: new Set() })}
         filter={null}
         focused="needs-you"
-        humans={f.HUMANS}
+        participants={f.PARTICIPANTS}
         label={`pin-load-${count}`}
         messages={f.RECORDS}
         lastCheck="12:29"

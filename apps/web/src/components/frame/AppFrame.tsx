@@ -105,7 +105,7 @@ export function AppFrame({
               goes; `aria-expanded` says which way it currently is. */}
           <button
             aria-expanded={railOpen}
-            aria-label={railOpen ? 'Hide rooms and people' : 'Show rooms and people'}
+            aria-label={railOpen ? 'Hide rooms and participants' : 'Show rooms and participants'}
             className={styles.railFold}
             onClick={() => setRailOpen((open) => !open)}
             type="button"

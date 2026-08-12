@@ -26,7 +26,7 @@ test.describe('shell', () => {
     // the fold control existed this line asserted a nav that no reader could
     // reach, and passed, because the nav was in the DOM the whole time.
     await openRail(page);
-    await expect(page.getByRole('navigation', { name: 'Rooms and people' })).toBeVisible();
+    await expect(page.getByRole('navigation', { name: 'Rooms and participants' })).toBeVisible();
   });
 
   /* -------------------------------------------------------------------------
@@ -420,12 +420,12 @@ test.describe('shell', () => {
        and the rail to stop marking the room you left. */
     const feedBefore = await page.locator('[data-row="message"]').count();
     await openRail(page);
-    await page.locator('nav[aria-label="Rooms and people"] button').nth(1).click();
+    await page.locator('nav[aria-label="Rooms and participants"] button').nth(1).click();
     await expect(note).toContainText('switched to #identity-service');
     await expect(page.locator('header h2')).toContainText('identity-service');
     expect(await page.locator('[data-row="message"]').count()).not.toBe(feedBefore);
     await expect(
-      page.locator('nav[aria-label="Rooms and people"] [aria-current="true"]'),
+      page.locator('nav[aria-label="Rooms and participants"] [aria-current="true"]'),
     ).toHaveAttribute('aria-label', /#identity-service/);
     await expect(page.locator('[data-objective-id="o2"]')).toHaveCount(0);
   });

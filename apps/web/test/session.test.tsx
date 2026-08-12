@@ -143,7 +143,7 @@ describe('the session under a driver faster than a render', () => {
  * ------------------------------------------------------------------------- */
 describe('switching rooms', () => {
   function chips() {
-    return [...document.querySelectorAll('nav[aria-label="Rooms and people"] button')];
+    return [...document.querySelectorAll('nav[aria-label="Rooms and participants"] button')];
   }
 
   function snapshot() {
@@ -159,7 +159,7 @@ describe('switching rooms', () => {
         n.getAttribute('data-object-id'),
       ),
       current: document
-        .querySelector('nav[aria-label="Rooms and people"] [aria-current="true"]')
+        .querySelector('nav[aria-label="Rooms and participants"] [aria-current="true"]')
         ?.getAttribute('aria-label'),
     };
   }

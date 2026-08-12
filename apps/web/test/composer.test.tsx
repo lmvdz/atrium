@@ -34,7 +34,7 @@ const FRAME: RoomFrameProps = {
   messages: f.RECORDS,
   room: f.ROOM,
   rooms: ROOMS,
-  humans: f.HUMANS,
+  participants: f.PARTICIPANTS,
   viewer: f.VIEWER,
   focused: 'conversation',
   attention: f.ATTENTION,

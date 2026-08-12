@@ -1,4 +1,4 @@
-import type { HumanSummary, MessageRecord, TimelineEntry } from '../src/components';
+import type { MessageRecord, ParticipantSummary, TimelineEntry } from '../src/components';
 import { messageEntry, sinceYouLeft, systemStatement } from '../src/components';
 import type { RoomView } from '../src/lib/realtime';
 import type { ReplayData } from './replay-data';
@@ -11,7 +11,7 @@ const TALK = {
   irreversible: false,
 } as const;
 
-function presenceFor(state: string | undefined): HumanSummary['presence'] {
+function presenceFor(state: string | undefined): ParticipantSummary['presence'] {
   if (state === 'online') return 'here';
   if (state === 'away') return 'idle';
   return 'away';
@@ -47,7 +47,7 @@ export function liveRoomView(
   unreadWindow?: LiveUnreadWindow,
 ) {
   const base = replayView(data, viewerId);
-  const participantName = new Map(base.humans.map((human) => [human.id, human.name]));
+  const participantName = new Map(base.participants.map((person) => [person.id, person.name]));
   const pendingRecords: MessageRecord[] = live.pending.map((pending) => ({
     id: `pending:${pending.clientMessageId}`,
     at: clock(pending.at),
@@ -95,11 +95,11 @@ export function liveRoomView(
             : null,
     });
   });
-  const humans = base.humans.map((human) => ({
-    ...human,
-    presence: presenceFor(live.presence[human.id]),
+  const participants = base.participants.map((person) => ({
+    ...person,
+    presence: presenceFor(live.presence[person.id]),
   }));
-  const viewer = humans.find((human) => human.id === viewerId) ?? base.viewer;
+  const viewer = participants.find((person) => person.id === viewerId) ?? base.viewer;
   const sourcedMessageIds = new Set(data.proposalSources.map((source) => source.messageId));
   const semanticRetryIds = new Set(
     data.messages.flatMap((message) =>
@@ -172,7 +172,7 @@ export function liveRoomView(
     ...base,
     records: [...base.records, ...pendingRecords],
     entries: [...entries, ...pendingEntries],
-    humans,
+    participants,
     viewer,
     rooms: base.rooms.map((room) => ({
       ...room,

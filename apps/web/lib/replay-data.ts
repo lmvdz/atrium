@@ -112,7 +112,16 @@ async function loadReplayDataSnapshot(database: Database, roomId: string) {
     participantIds.length === 0
       ? Promise.resolve([])
       : database
-          .select({ id: users.id, name: users.displayName, avatarUrl: users.avatarUrl })
+          .select({
+            id: users.id,
+            name: users.displayName,
+            avatarUrl: users.avatarUrl,
+            // What the identity IS, read from the same row its name is. The view
+            // constructors translate this into the participant record's `kind`,
+            // so the roster, the presence marker, the monogram and the counts
+            // render an agent member as an agent instead of stamping it a person.
+            principalKind: users.principalKind,
+          })
           .from(users)
           .where(inArray(users.id, participantIds))
           .orderBy(asc(users.displayName), asc(users.id)),
@@ -236,6 +245,7 @@ async function loadReplayDataSnapshot(database: Database, roomId: string) {
 type LoadedReplayData = NonNullable<Awaited<ReturnType<typeof loadReplayData>>>;
 type LoadedReplayMessage = LoadedReplayData['messages'][number];
 type LoadedReplayAttention = LoadedReplayData['attention'][number];
+type LoadedReplayParticipant = LoadedReplayData['participants'][number];
 export type ReplayData = Omit<
   LoadedReplayData,
   | 'loadReceipt'
@@ -246,7 +256,17 @@ export type ReplayData = Omit<
   | 'referenceHumans'
   | 'referenceAttachments'
   | 'attention'
+  | 'participants'
 > & {
+  /**
+   * Optional `principalKind` only for hand-built fixtures created before an
+   * identity carried a kind; a real load always selects it. The view
+   * constructor reads it through `parsePrincipalKind`, so an absent value
+   * renders as a person — the harmless default for a monogram, never for a gate.
+   */
+  participants: (Omit<LoadedReplayParticipant, 'principalKind'> & {
+    readonly principalKind?: LoadedReplayParticipant['principalKind'];
+  })[];
   /** Optional only for hand-built fixtures; every server load mints a fresh commit receipt. */
   readonly loadReceipt?: string;
   /** Optional only for hand-built fixtures created before live client ids existed. */

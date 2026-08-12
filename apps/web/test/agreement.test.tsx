@@ -87,9 +87,9 @@ describe('an act moves every surface that counts it', () => {
      still not reach it, which is exactly what r9 shipped. */
   it('the pin on `/` says an acted-on item no longer needs you', () => {
     render(<RoomSession />);
-    const chip = [...document.querySelectorAll('nav[aria-label="Rooms and people"] button')].find(
-      (button) => /#identity-service/.test(button.getAttribute('aria-label') ?? ''),
-    );
+    const chip = [
+      ...document.querySelectorAll('nav[aria-label="Rooms and participants"] button'),
+    ].find((button) => /#identity-service/.test(button.getAttribute('aria-label') ?? ''));
     act(() => {
       fireEvent.click(chip as Element);
     });
@@ -417,9 +417,9 @@ describe('no two elements on screen state different answers to the same question
 
     step('as it loads');
 
-    const chip = [...document.querySelectorAll('nav[aria-label="Rooms and people"] button')].find(
-      (button) => /#identity-service/.test(button.getAttribute('aria-label') ?? ''),
-    );
+    const chip = [
+      ...document.querySelectorAll('nav[aria-label="Rooms and participants"] button'),
+    ].find((button) => /#identity-service/.test(button.getAttribute('aria-label') ?? ''));
     act(() => {
       fireEvent.click(chip as Element);
     });
@@ -440,9 +440,9 @@ describe('no two elements on screen state different answers to the same question
      rail chip is given back the stale number r8 painted; nothing else moves. */
   it('and it fails on the screen r8 shipped', () => {
     render(<RoomSession />);
-    const chip = [...document.querySelectorAll('nav[aria-label="Rooms and people"] button')].find(
-      (button) => /#identity-service/.test(button.getAttribute('aria-label') ?? ''),
-    );
+    const chip = [
+      ...document.querySelectorAll('nav[aria-label="Rooms and participants"] button'),
+    ].find((button) => /#identity-service/.test(button.getAttribute('aria-label') ?? ''));
     act(() => {
       fireEvent.click(chip as Element);
     });
@@ -452,7 +452,7 @@ describe('no two elements on screen state different answers to the same question
     expect(look().contradictions).toEqual([]);
 
     const current = document.querySelector(
-      'nav[aria-label="Rooms and people"] [aria-current="true"]',
+      'nav[aria-label="Rooms and participants"] [aria-current="true"]',
     );
     current?.setAttribute('aria-label', '#identity-service — 1 owed to you');
     expect(

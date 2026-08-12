@@ -103,7 +103,7 @@ const isCI = !!process.env.CI;
  * no-op where there is no fold, so it is safe to call on any route.
  */
 export async function openRail(page: Page): Promise<void> {
-  const folds = page.getByRole('button', { name: 'Show rooms and people' });
+  const folds = page.getByRole('button', { name: 'Show rooms and participants' });
   const count = await folds.count();
   for (let i = 0; i < count; i += 1) {
     await folds.nth(i).click();

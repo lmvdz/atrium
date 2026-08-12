@@ -1,5 +1,11 @@
 import 'server-only';
-import { type AuthorizedRoom, listAuthorizedRooms, loadAuthorizedRoom } from '@atrium/auth';
+import {
+  type AuthorizedRoom,
+  listAuthorizedRooms,
+  loadAuthorizedRoom,
+  type PrincipalKind,
+  parsePrincipalKind,
+} from '@atrium/auth';
 import { users, workspaceInvitations, workspaceMembers, workspaces } from '@atrium/db';
 import { and, asc, desc, eq } from 'drizzle-orm';
 import { db } from './db';
@@ -92,22 +98,36 @@ export interface MemberSummary {
   userId: string;
   displayName: string;
   email: string;
+  /**
+   * What the identity IS. An agent member has an `email` — `users.email` is NOT
+   * NULL and it is keyed by one — but the address is a non-deliverable
+   * placeholder the deployment owns, so the People list reads the kind and shows
+   * the register instead of an address that looks like a way to reach a person.
+   */
+  principalKind: PrincipalKind;
   role: string;
 }
 
 export async function listMembers(workspaceId: string): Promise<MemberSummary[]> {
-  return db()
+  const rows = await db()
     .select({
       memberId: workspaceMembers.id,
       userId: users.id,
       displayName: users.displayName,
       email: users.email,
+      principalKind: users.principalKind,
       role: workspaceMembers.role,
     })
     .from(workspaceMembers)
     .innerJoin(users, eq(workspaceMembers.userId, users.id))
     .where(eq(workspaceMembers.organizationId, workspaceId))
     .orderBy(asc(users.displayName));
+  return rows.map((row) => ({
+    ...row,
+    // An allowlist off the stored column, defaulting to human — a People row is
+    // display, and the gates that must fail closed are elsewhere.
+    principalKind: parsePrincipalKind(row.principalKind) ?? 'human',
+  }));
 }
 
 export interface InvitationSummary {

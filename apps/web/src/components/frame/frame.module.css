@@ -370,6 +370,20 @@
   border: 1.5px solid var(--tx2);
 }
 
+/* AN AGENT IS A SQUARE, NOT A DOT. The same 7px marker, squared and in the
+   neutral text token, so an agent reads as a machine holding a session rather
+   than a person present. A shape-and-tone distinction, never a new hue: blue is
+   presence and green is verified, and an agent may borrow neither. Defined after
+   the three presence classes so its fill and radius win when both are applied;
+   the here/idle/away an agent also has is written down in the row's words, where
+   the audit reads it, not folded into this marker. --tx2 is 6.26:1 on the rail
+   surface, above AA for a non-text graphic. */
+.presAgent {
+  border-radius: 1px;
+  background: var(--tx2);
+  border: none;
+}
+
 /* A PERSON'S NAME IS NOT CLIPPED HERE ANY MORE. Round 7: its declared route was
    "the row's title" — and `title=` is precisely what CONVENTIONS refuses as a
    route ("invisible to touch, invisible to a keyboard, announced inconsistently
@@ -663,9 +677,16 @@
   height: 22px;
   place-items: center;
 }
-.atriumAvatar {
-  background: var(--grnav);
-  color: #9bd4ac;
+/* THE AGENT AVATAR ON THE CALL IS SQUARED AND NEUTRAL. The person avatars are
+   round and blue; an agent gets a rounded square in the neutral surface tokens,
+   so the call strip separates the machine from the people by shape, not by a
+   hue that already carries meaning (the old hardcoded `atrium` avatar wore green
+   — the one colour that means "verified" — which this replaces). */
+.callAvatarAgent {
+  background: var(--bg6);
+  border: 1px solid var(--line3);
+  border-radius: 5px;
+  color: var(--tx1);
 }
 .speaking {
   box-shadow: 0 0 0 1.5px var(--grn);
@@ -850,6 +871,17 @@
      under. These are the initials that say WHO is in the room, so the brighter
      body token is the honest pick rather than a rounding argument. */
   color: var(--tx1);
+}
+
+/* AN AGENT'S MONOGRAM IS SQUARED. The person chips are circles; an agent gets a
+   rounded square and a brighter rule, so a glance at the room head separates the
+   machine from the people without a legend and without a hue — the same
+   shape-carries-kind rule the rail's presence marker follows. The initials stay:
+   an agent has a name, and the chip says it (the `title` names the kind in
+   words, since a shape is not a name). */
+.faceAgent {
+  border-radius: 4px;
+  border-color: var(--line3);
 }
 
 /* --- surface indicators -------------------------------------------------- */
