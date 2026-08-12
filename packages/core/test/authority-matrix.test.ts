@@ -119,6 +119,14 @@ const GATES = {
   commitment_acceptance: 'writes an obligation onto a named person',
   objective_acceptance: 'what everything else in the room is filed under',
   claim_verification: 'would become a verified claim',
+  // #68/#95, the relation twin of `claim_verification` (#102). The kind gate
+  // above refuses a *machine* verifying; this refuses the human #95 forbids — the
+  // claimant vouching for their own claim. grok's round-1 coverage gap: every
+  // claim cell in the acceptance loop names BOB and accepts as ALICE, so
+  // accepter≠claimant throughout and this relation was never reached here even as
+  // its kind twin was. A direct probe below reaches it. The marker is the
+  // claimant clause, which appears in no other refusal.
+  self_verification: 'names them as its claimant',
   direct_acceptance: 'only a human may accept an object directly',
   supersession: 'retires an accepted',
   // #95, #96 r2. A second supersession gate, on the other axis: the one above
@@ -844,6 +852,39 @@ describe('authority matrix — object_accepted, every actor × type × citation 
       expect(Object.keys(state.objects)).toEqual(expected === 'allowed' ? [`obj_${suffix}`] : []);
     });
   }
+
+  it('refuses the accepter verifying a claim that names THEM as its claimant (#68/#95, #102)', () => {
+    // grok's coverage gap, direct: the loop above names every claim for BOB and
+    // accepts as ALICE, so `self_verification` — the relation #102 adds beside the
+    // `claim_verification` kind gate — is never reached there. Here a model stages
+    // a born-verified claim and the human accepter mints it under their OWN name:
+    // the sentence agreeing with itself, refused, no object minted. (The accepter
+    // taking their own name onto the reading is #81-legal — a person may reword
+    // under their own name — so what fires is the verification relation, not the
+    // amended-acceptance one.)
+    const proposalId = 'prop_self_verify';
+    const state = reduce([
+      proposalEvent({
+        id: proposalId,
+        type: 'claim',
+        proposer: 'model_a',
+        confidence: 0.95,
+        verified: true,
+        recordedBy: 'model_proposer',
+      }),
+      acceptEvent({
+        id: 'acc_self_verify',
+        objectId: 'obj_self_verify',
+        type: 'claim',
+        actor: 'human',
+        proposalId,
+        verified: true,
+        names: ALICE,
+      }),
+    ]);
+    expect(verdictOf(state, 'ev_acc_self_verify')).toBe('self_verification');
+    expect(state.objects.obj_self_verify).toBeUndefined();
+  });
 });
 
 describe('authority matrix — the receipt, every actor × shape', () => {

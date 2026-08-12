@@ -123,15 +123,56 @@ function acceptCommitment(id: string, propId: string, actor: Actor, owner: strin
   } as Parameters<typeof event>[0]);
 }
 
-function amendVerified(id: string, objectId: string, actor: Actor) {
+function amendVerified(id: string, objectId: string, actor: Actor, atStep = at(3)) {
+  return event({
+    id,
+    at: atStep,
+    actor,
+    type: 'object_corrected',
+    objectId,
+    action: 'amend',
+    patch: { verification: 'verified' },
+  } as Parameters<typeof event>[0]);
+}
+
+function reattributeClaimant(id: string, objectId: string, actor: Actor, claimant: string) {
+  return event({
+    id,
+    at: at(4),
+    actor,
+    type: 'object_corrected',
+    objectId,
+    action: 'reattribute',
+    patch: { claimant },
+  } as Parameters<typeof event>[0]);
+}
+
+function amendStatement(id: string, objectId: string, actor: Actor, statement: string) {
+  return event({
+    id,
+    at: at(5),
+    actor,
+    type: 'object_corrected',
+    objectId,
+    action: 'amend',
+    patch: { statement },
+  } as Parameters<typeof event>[0]);
+}
+
+function retypeTo(
+  id: string,
+  objectId: string,
+  actor: Actor,
+  toType: 'claim' | 'commitment' | 'decision' | 'open_question' | 'objective',
+) {
   return event({
     id,
     at: at(3),
     actor,
     type: 'object_corrected',
     objectId,
-    action: 'amend',
-    patch: { verification: 'verified' },
+    action: 'retype',
+    toType,
   } as Parameters<typeof event>[0]);
 }
 
@@ -224,6 +265,40 @@ describe('#95 relation — confirm a commitment (#67)', () => {
     expect(commitment?.type === 'commitment' && commitment.payload.owner).toBe(BOB);
     expect(state.issues).toEqual([]);
   });
+
+  it('refuses a non-owner MINTING a commitment via retype (#102 finding 2)', () => {
+    // The correction-path hole codex found: `ownerConfirmRefusal` ran only at
+    // acceptance. A model stages a claim quoting BOB; ALICE (disinterested)
+    // accepts it as a `~` claim; then CARL retypes it into a commitment. No
+    // *foreign* name arrives — `retypeCarryOver` carries `claimant: BOB` straight
+    // onto `owner: BOB`, so BOB was already on the object and the attribution gate
+    // waves it through — but a claim quoting BOB is not an obligation BOB
+    // confirmed, and CARL just minted one against him. Owner-confirm now runs on
+    // the transition INTO commitment too.
+    const state = reduce([
+      stageClaim('c3', BOB),
+      acceptClaim('c3', 'prop_c3', human(ALICE), { claimant: BOB }),
+      retypeTo('ev_c3_retype', 'obj_c3', human(CARL), 'commitment'),
+    ]);
+    expect(state.objects.obj_c3?.object.type).toBe('claim');
+    expect(state.corrections.some((entry) => entry.action === 'retype')).toBe(false);
+    expect(reasonOf(state, 'ev_c3_retype')).toContain(
+      'a third-party commitment is confirmed by the person it names',
+    );
+  });
+
+  it('lets the owner retype their own claim into their own commitment', () => {
+    // The flip: BOB owns the obligation the retype mints, so there is no third
+    // party and owner-confirm has nothing to refuse.
+    const state = reduce([
+      stageClaim('c4', BOB),
+      acceptClaim('c4', 'prop_c4', human(ALICE), { claimant: BOB }),
+      retypeTo('ev_c4_retype', 'obj_c4', human(BOB), 'commitment'),
+    ]);
+    const commitment = state.objects.obj_c4?.object;
+    expect(commitment?.type === 'commitment' && commitment.payload.owner).toBe(BOB);
+    expect(state.issues).toEqual([]);
+  });
 });
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -276,6 +351,84 @@ describe('#95 relation — amended acceptance (#81/H3)', () => {
     ]);
     const claim = state.objects.obj_a4?.object;
     expect(claim?.type === 'claim' && claim.payload.claimant).toBe(DANA);
+    expect(state.issues).toEqual([]);
+  });
+});
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Rule 1, the correction-path corollary (#102 finding 3): a ✓ is verification of
+// a specific sentence under a specific name. Change either and the ✓ lapses.
+// ─────────────────────────────────────────────────────────────────────────────
+
+describe('#95 relation — a ✓ does not survive a change to what it certifies (#102 finding 3)', () => {
+  it('drops verification when a verified claim is reattributed to the verifier', () => {
+    // The bypass: `becomesVerified` only re-gates the *transition* to verified,
+    // so an edit to an already-verified claim was not re-checked. ALICE verifies
+    // BOB's claim disinterestedly (legitimate), then reattributes it to herself.
+    // Clause one waves her own name through, `becomesVerified` is false — and
+    // without the reset she is left holding a ✓ on her own claim that no second
+    // party ever verified. The ✓ must lapse.
+    const state = reduce([
+      stageClaim('f1', BOB),
+      acceptClaim('f1', 'prop_f1', human(ALICE), { claimant: BOB }),
+      amendVerified('ev_f1_verify', 'obj_f1', human(ALICE)),
+      reattributeClaimant('ev_f1_reattr', 'obj_f1', human(ALICE), ALICE),
+    ]);
+    const claim = state.objects.obj_f1?.object;
+    // The reattribution itself lands (a person may take a claim onto their own
+    // name); what does not survive is the verification of the old attribution.
+    expect(claim?.type === 'claim' && claim.payload.claimant).toBe(ALICE);
+    expect(claim?.type === 'claim' && claim.payload.verification).toBe('unverified');
+    expect(reasonOf(state, 'ev_f1_reattr')).toBeNull();
+  });
+
+  it('will not let the new claimant re-verify their own now-self claim', () => {
+    // And the reset is not cosmetic: once it is her claim, she cannot restore the
+    // ✓ — `selfVerificationRefusal` refuses the claimant, so the room must find a
+    // disinterested verifier for the sentence as it now reads.
+    const state = reduce([
+      stageClaim('f2', BOB),
+      acceptClaim('f2', 'prop_f2', human(ALICE), { claimant: BOB }),
+      amendVerified('ev_f2_verify', 'obj_f2', human(ALICE)),
+      reattributeClaimant('ev_f2_reattr', 'obj_f2', human(ALICE), ALICE),
+      amendVerified('ev_f2_reverify', 'obj_f2', human(ALICE), at(6)),
+    ]);
+    const claim = state.objects.obj_f2?.object;
+    expect(claim?.type === 'claim' && claim.payload.verification).toBe('unverified');
+    expect(reasonOf(state, 'ev_f2_reverify')).toContain('names them as its claimant');
+  });
+
+  it('drops verification when the claimant rewords their own verified sentence', () => {
+    // The other material change: BOB owns and reworks his own verified claim.
+    // A disinterested member vouched for the OLD sentence; the new one has had no
+    // second reading, so the ✓ lapses and BOB (the claimant) cannot restore it.
+    const state = reduce([
+      stageClaim('f3', BOB),
+      acceptClaim('f3', 'prop_f3', human(ALICE), { claimant: BOB }),
+      amendVerified('ev_f3_verify', 'obj_f3', human(ALICE)),
+      amendStatement('ev_f3_reword', 'obj_f3', human(BOB), 'the deploy actually failed at noon'),
+    ]);
+    const claim = state.objects.obj_f3?.object;
+    expect(claim?.type === 'claim' && claim.payload.statement).toBe(
+      'the deploy actually failed at noon',
+    );
+    expect(claim?.type === 'claim' && claim.payload.verification).toBe('unverified');
+  });
+
+  it('keeps verification when a verified claim is edited without touching its sentence or name', () => {
+    // The flip: a `disputed → verified` is a transition (gated), but editing a
+    // field that is neither the statement nor the claimant leaves the ✓ standing —
+    // the reset is about *what was certified*, not about any edit at all. Here BOB
+    // owns his verified claim and a `reopen`-shaped no-text edit is not available,
+    // so the invariant is shown the other way: an unrelated verified claim, left
+    // alone, keeps its ✓ (guarding against an over-eager reset).
+    const state = reduce([
+      stageClaim('f4', BOB),
+      acceptClaim('f4', 'prop_f4', human(ALICE), { claimant: BOB }),
+      amendVerified('ev_f4_verify', 'obj_f4', human(CARL)),
+    ]);
+    const claim = state.objects.obj_f4?.object;
+    expect(claim?.type === 'claim' && claim.payload.verification).toBe('verified');
     expect(state.issues).toEqual([]);
   });
 });

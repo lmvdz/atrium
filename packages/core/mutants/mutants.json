@@ -1695,6 +1695,26 @@
       "catches": ["refuses a non-owner confirming a third party’s commitment"]
     },
     {
+      "id": "owner_confirm_gate_disabled_at_correction",
+      "why": "#102 finding 1's round-1 gauntlet: `ownerConfirmRefusal` ran only at acceptance, so a correction that transitions an object INTO a commitment minted an obligation with no owner-confirm. `retypeCarryOver` carries a claim's `claimant` onto the new `owner`, so no *foreign* name arrives and `correctionAttributionRefusal` waves it through — a non-owner retyping BOB's claim into a BOB-owned commitment BOB never confirmed. Deleting the correction-path owner-confirm restores that hole; the `after.payload.owner` reference (vs the acceptance path's `object.payload.owner`) is what keys this to the correction site.",
+      "file": "src/reduce.ts",
+      "find": "    const refusal = ownerConfirmRefusal({ actor, owner: after.payload.owner });",
+      "replace": "    const refusal = null;",
+      "catches": ["refuses a non-owner MINTING a commitment via retype (#102 finding 2)"]
+    },
+    {
+      "id": "verified_survives_material_change_disabled",
+      "why": "#102 finding 1's finding 3: a ✓ is verification of a specific sentence under a specific name, and `becomesVerified` only re-gates the *transition* to verified — so an edit to an already-verified claim was not re-checked. The reset drops verification to `unverified` when a verified claim's statement or claimant materially changes under a correction, forcing a fresh disinterested verification. Deleting the reset (keeping the plan assignment so `after` stays referenced and tsc is silent) lets ALICE verify BOB's claim, reattribute it to herself, and keep a ✓ on her own reworded sentence no second party ever verified.",
+      "file": "src/reduce.ts",
+      "find": "    after = { ...after, payload: { ...after.payload, verification: 'unverified' } };\n    outcome.plan.object = after;",
+      "replace": "    outcome.plan.object = after;",
+      "catches": [
+        "drops verification when a verified claim is reattributed to the verifier",
+        "will not let the new claimant re-verify their own now-self claim",
+        "drops verification when the claimant rewords their own verified sentence"
+      ]
+    },
+    {
       "id": "amended_acceptance_attribution_disabled",
       "why": "#81/H3: a human acceptance skips payload binding, so an accepter may reword a reading — but only into a sentence that names nobody but themselves, or accept it verbatim. Deleting this check lets an accepter mint a different sentence under a third party's name (the driven case: BOB stages a green-build claim, ALICE accepts it as a kickbacks confession still claimant BOB), which the correction gate would only catch one act later.",
       "file": "src/reduce.ts",

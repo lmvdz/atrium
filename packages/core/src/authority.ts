@@ -331,7 +331,7 @@ export function humanOnlyRefusal(
     case 'decision_acceptance':
       return `${subject} is a decision accepted by ${a} ${kind} actor — a decision never auto-accepts (issue #4): ${a} ${kind} actor may propose one, but only a human may accept it`;
     case 'commitment_acceptance':
-      return `${subject} is a commitment accepted by ${a} ${kind} actor — accepting it writes an obligation onto a named person who never agreed to it, and #4's rule is that nobody gets committed by someone else's sentence; ${a} ${kind} actor may propose the commitment and let the person named, or a person in the room, accept it`;
+      return `${subject} is a commitment accepted by ${a} ${kind} actor — accepting it writes an obligation onto a named person who never agreed to it, and #4's rule is that nobody gets committed by someone else's sentence; ${a} ${kind} actor may propose the commitment and let the person it names — its owner, and only its owner (#67) — confirm it`;
     case 'objective_acceptance':
       return `${subject} is an objective accepted by ${a} ${kind} actor — an objective is what everything else in the room is filed under, and retiring one already needs a person (#4's supersession split), so minting one does too; ${a} ${kind} actor may propose it and let a person accept`;
     case 'claim_verification':
@@ -503,8 +503,9 @@ export function actorMatchesProposer(actor: Actor, proposer: Proposer): boolean 
  * today nothing reachable from the wire can even build the input this refuses.
  * That closes today's door; this closes the class. When #21's pipeline lands and
  * a legitimate seam mints model proposals again, the pipeline is the stager
- * (`stagedBy.kind !== 'human'`), any person in the room may accept its readings,
- * and the only thing still refused is the case that was never legitimate.
+ * (`stagedBy.kind !== 'human'`), any person in the room may accept its readings
+ * — a commitment still only by its owner (#67, `ownerConfirmRefusal`) — and the
+ * only thing still refused is the case that was never legitimate.
  */
 export function selfStagedReadingRefusal(input: {
   actor: Actor;
@@ -545,7 +546,7 @@ export function selfStagedReadingRefusal(input: {
   const foreign = attributedTo.filter((userId) => userId !== actor.userId);
   const named = foreign[0];
   if (named !== undefined) {
-    return `${actorName(actor)} accepted ${cites}, which they staged themselves and which puts user "${named}"'s name on it — nobody gets committed, or quoted, by someone else's sentence (#4), and a person confirming their own sentence is that sentence agreeing with itself. It waits for "${named}", or for somebody else in the room to accept it`;
+    return `${actorName(actor)} accepted ${cites}, which they staged themselves and which puts user "${named}"'s name on it — nobody gets committed, or quoted, by someone else's sentence (#4), and a person confirming their own sentence is that sentence agreeing with itself. It waits for "${named}" — and if it names them as a commitment's owner, only "${named}" may confirm it (#67); a claim somebody else names, any other member may accept`;
   }
   return null;
 }
@@ -728,16 +729,37 @@ export function correctionAttributionRefusal(input: {
  * itself, which is the very shape this refuses. So the two forbidden relations
  * are the claimant and the stager; every other member is who verification is for.
  *
- * The claimant is the author of the claim's source message by construction — a
- * claim's `claimant` is the person it quotes, and `acceptanceReceiptRefusal`'s
- * `attributed_person_not_author` gate is what holds the two equal on the machine
- * path. So the reducer reads `claimant` and needs no message window to answer
- * "the author of its source message"; the session context the command layer
- * holds is not required for this rule, and the reducer enforces it alone.
+ * ## `claimant` is a spoofable stand-in, and this gate is only the cheap layer
+ *
+ * An earlier version of this header claimed `claimant` is "the author of the
+ * source message by construction, held equal by `acceptanceReceiptRefusal`'s
+ * `attributed_person_not_author` gate." **That is false, and #102's round-1
+ * gauntlet is what it cost.** That receipt gate binds a *commitment*'s `owner`
+ * to the bearing message's author (`commitmentAttribution`); a claim's
+ * attribution resolves to `null` in the receipt (see `judgeAcceptance`), so
+ * nothing anywhere holds `claimant` equal to the source author — and on the
+ * human path the receipt gates do not run at all. So a claim minted with
+ * `claimant: Bob` whose source message was authored by Alice is representable,
+ * and this gate — comparing the actor to `claimant` — waves Alice through to
+ * verify her own sentence.
+ *
+ * The reducer cannot close that on its own: it has no message window on the
+ * human path (`atrium_receipt_window` is NULL for humans by construction) and no
+ * messages in `CoreState` at all, so it cannot resolve the real author. So this
+ * gate stays as the cheap first layer — it still refuses the honest case where
+ * the actor *is* the named claimant, and is mutation-covered in `packages/core`
+ * — and the **authoritative** check, "the verifier is not the author of the
+ * claim's source message", lives one layer up in `apps/server`
+ * (`selfVerificationAuthorRefusal`), which holds the message context the reducer
+ * lacks. Two layers, one rule; see that function and #102 finding 1.
  */
 export function selfVerificationRefusal(input: {
   actor: Actor;
-  /** The claim's claimant — the person it quotes, i.e. the author of its source. */
+  /**
+   * The claim's `claimant` — the reducer's (spoofable) stand-in for the author
+   * of the source message. Anchoring to the *real* author is the command layer's
+   * job; see the header.
+   */
   claimant: string;
   /** Who staged the reading, or `null` when it was minted with no proposal. */
   stagedBy: Actor | null;

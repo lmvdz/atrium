@@ -20,7 +20,13 @@ import {
   type Relation,
 } from '@atrium/core';
 import type { Database } from '@atrium/db';
-import { acceptedObjects, messages, proposals } from '@atrium/db/schema';
+import {
+  acceptedObjects,
+  messages,
+  objectSources,
+  proposalSources,
+  proposals,
+} from '@atrium/db/schema';
 import { and, eq, inArray } from 'drizzle-orm';
 import { z } from 'zod';
 import { CommandError, type Ledger, type Tx } from './ledger.js';
@@ -428,6 +434,111 @@ export function certificationClassOf(name: CommandName): CertificationClass {
 export function nonHumanCertificationRefusal(name: CommandName, kind: string): string {
   return `"${name}" is a certification and this session is a ${kind} principal — a machine may draft a reading (~) and may never certify one (✓); nothing was appended. Stage the reading and let a person in the room accept it`;
 }
+
+/**
+ * #102 finding 1 — the refusal a self-verifying source author gets.
+ *
+ * Names the *act* (verifying a claim drawn from your own message) and the route
+ * that stays open (another member), and says outright that the payload
+ * `claimant` is not what this is about — because the whole point of this gate is
+ * that `claimant` is a spoofable stand-in the reducer trusts and this layer does
+ * not.
+ */
+export function selfVerificationAuthorRefusal(userId: string): string {
+  return `user "${userId}" would verify a claim drawn from a message they wrote — verification is a second pair of eyes (#68, #95): the author of the source a claim rests on may not be the one who vouches it is true, whatever the claim's \`claimant\` field says. It waits for another member to verify it`;
+}
+
+/**
+ * The authoritative half of the self-verification rule (#102 finding 1), and the
+ * half the reducer structurally cannot enforce.
+ *
+ * `@atrium/core`'s `selfVerificationRefusal` compares the actor to the claim's
+ * payload `claimant` — but nothing holds `claimant` equal to the author of the
+ * source message the claim was read out of (for a claim the acceptance receipt
+ * resolves attribution to `null`), and on the human path the reducer has no
+ * message window at all (`atrium_receipt_window` is NULL for humans). So a claim
+ * with `claimant: Bob` drawn from a message Alice wrote lets Alice verify her own
+ * sentence: the reducer sees actor Alice ≠ claimant Bob and waves it through.
+ *
+ * Only this layer holds the messages, so only this layer can anchor the rule to
+ * the *real* author. It refuses a human whose id matches the author of any
+ * message in the claim's provenance (`object_sources` / `proposal_sources` →
+ * `messages.author_id`), read under the append lock on the transaction about to
+ * write — the same place and the same trust boundary as `requireMembership`.
+ *
+ * **Conservative on purpose.** The machine path narrows to the single *bearing*
+ * message (the one containing the quote) because padding provenance could flip a
+ * third-party statement into a self-statement to *auto-accept* it — a
+ * fail-*open*. This gate runs the other direction: it *refuses*, so widening the
+ * net to every provenance message can only refuse a verification that would
+ * otherwise stand, never admit one that should not. A member who wrote any of
+ * the source a claim rests on is not the disinterested second reader #68 wants.
+ * (An accepted object does not carry the quote — see core's `Provenance` — so the
+ * bearing-message narrowing is not available here even if it were wanted.)
+ */
+/** Does this stored payload carry `verification: 'verified'`? */
+function isVerifiedClaimPayload(payload: unknown): boolean {
+  return (
+    typeof payload === 'object' &&
+    payload !== null &&
+    (payload as { verification?: unknown }).verification === 'verified'
+  );
+}
+
+/** Is the object currently a claim? (An `amend {verification}` targets a claim.) */
+async function isExistingClaim(tx: Tx, roomId: string, objectId: string): Promise<boolean> {
+  const [row] = await tx
+    .select({ type: acceptedObjects.type })
+    .from(acceptedObjects)
+    .where(and(eq(acceptedObjects.id, objectId), eq(acceptedObjects.roomId, roomId)))
+    .limit(1);
+  return row?.type === 'claim';
+}
+
+async function refuseSelfVerificationByAuthor(
+  tx: Tx,
+  session: Session,
+  roomId: string,
+  source: { proposalId: string } | { objectId: string },
+): Promise<void> {
+  // A machine cannot certify at all — refused by the covenant one door up. This
+  // is the relation gate for the humans it admits.
+  if (session.principalKind !== 'human') return;
+  const authorRows =
+    'proposalId' in source
+      ? await tx
+          .select({ authorId: messages.authorId })
+          .from(proposalSources)
+          .innerJoin(
+            messages,
+            and(
+              eq(messages.id, proposalSources.messageId),
+              eq(messages.roomId, proposalSources.roomId),
+            ),
+          )
+          .where(
+            and(
+              eq(proposalSources.proposalId, source.proposalId),
+              eq(proposalSources.roomId, roomId),
+            ),
+          )
+      : await tx
+          .select({ authorId: messages.authorId })
+          .from(objectSources)
+          .innerJoin(
+            messages,
+            and(
+              eq(messages.id, objectSources.messageId),
+              eq(messages.roomId, objectSources.roomId),
+            ),
+          )
+          .where(
+            and(eq(objectSources.objectId, source.objectId), eq(objectSources.roomId, roomId)),
+          );
+  if (authorRows.some((row) => row.authorId === session.userId)) {
+    throw new CommandError('invalid', selfVerificationAuthorRefusal(session.userId));
+  }
+}
 /**
  * A command as a *caller* writes it — defaults not yet applied.
  *
@@ -626,6 +737,14 @@ export function createCommandService({
     session: Session,
     roomId: string,
     build: (assigned: { id: string; at: string }) => RoomEvent,
+    /**
+     * An extra hard refusal to run under the append lock, after membership and
+     * before the build — for a rule that needs DB reads the reducer cannot do
+     * (today: #102 finding 1's source-author self-verification check). Throwing
+     * aborts the transaction: no row, an error to the caller, same shape as a
+     * membership failure.
+     */
+    guard?: (tx: Tx) => Promise<void>,
   ): Promise<CommandResult> {
     const appended = await ledger.append({
       roomId,
@@ -634,6 +753,7 @@ export function createCommandService({
       // append lock, on the transaction that is about to write.
       authorize: async (tx) => {
         await requireMembership(session, roomId, tx);
+        if (guard) await guard(tx);
       },
       build,
       project: (context) => projectRoomEvent(context, projectionHooks),
@@ -976,37 +1096,77 @@ export function createCommandService({
         }));
 
       case 'accept_proposal': {
-        return appendAndProject(session, command.roomId, ({ id, at }) => {
-          // Read inside `build`, which the ledger calls after catching up under
-          // the append lock: the proposal this cites must be the one the state
-          // holds *now*, not the one it held when the socket frame arrived.
-          const record = ledger.coreState().proposals[command.proposalId];
-          if (!record) {
-            throw new CommandError('invalid', `unknown proposal "${command.proposalId}"`);
-          }
-          if (record.proposal.roomId !== command.roomId) {
-            throw new CommandError(
-              'invalid',
-              `proposal "${command.proposalId}" belongs to another room`,
-            );
-          }
-          const object = objectFromProposal(record.proposal, command.objectiveId, at);
-          return { id, at, type: 'object_accepted', object };
-        });
+        return appendAndProject(
+          session,
+          command.roomId,
+          ({ id, at }) => {
+            // Read inside `build`, which the ledger calls after catching up under
+            // the append lock: the proposal this cites must be the one the state
+            // holds *now*, not the one it held when the socket frame arrived.
+            const record = ledger.coreState().proposals[command.proposalId];
+            if (!record) {
+              throw new CommandError('invalid', `unknown proposal "${command.proposalId}"`);
+            }
+            if (record.proposal.roomId !== command.roomId) {
+              throw new CommandError(
+                'invalid',
+                `proposal "${command.proposalId}" belongs to another room`,
+              );
+            }
+            const object = objectFromProposal(record.proposal, command.objectiveId, at);
+            return { id, at, type: 'object_accepted', object };
+          },
+          // #102 finding 1: accepting a proposal that mints a `✓ verified` claim
+          // is a verification act, and the verifier may not be the author of the
+          // claim's source. Read the proposal's committed shape under the lock.
+          async (tx) => {
+            const [row] = await tx
+              .select({ type: proposals.type, payload: proposals.payload })
+              .from(proposals)
+              .where(
+                and(eq(proposals.id, command.proposalId), eq(proposals.roomId, command.roomId)),
+              )
+              .limit(1);
+            if (row?.type === 'claim' && isVerifiedClaimPayload(row.payload)) {
+              await refuseSelfVerificationByAuthor(tx, session, command.roomId, {
+                proposalId: command.proposalId,
+              });
+            }
+          },
+        );
       }
 
       case 'correct':
-        return appendAndProject(session, command.roomId, ({ id, at }) => ({
-          id,
-          at,
-          type: 'object_corrected',
-          objectId: command.objectId,
-          action: command.action,
-          patch: command.patch,
-          toType: command.toType,
-          provenance: command.provenance,
-          note: command.note,
-        }));
+        return appendAndProject(
+          session,
+          command.roomId,
+          ({ id, at }) => ({
+            id,
+            at,
+            type: 'object_corrected',
+            objectId: command.objectId,
+            action: command.action,
+            patch: command.patch,
+            toType: command.toType,
+            provenance: command.provenance,
+            note: command.note,
+          }),
+          // #102 finding 1: a correction that sets `verification: 'verified'` on a
+          // claim (an `amend`, or a `retype` into a claim) is a verification act.
+          // Anchor it to the real source author, which the reducer cannot see.
+          async (tx) => {
+            if (command.patch.verification !== 'verified') return;
+            const becomesClaim =
+              command.action === 'retype'
+                ? command.toType === 'claim'
+                : await isExistingClaim(tx, command.roomId, command.objectId);
+            if (becomesClaim) {
+              await refuseSelfVerificationByAuthor(tx, session, command.roomId, {
+                objectId: command.objectId,
+              });
+            }
+          },
+        );
 
       case 'answer_bind':
         return appendAndProject(session, command.roomId, ({ id, at }) => {
