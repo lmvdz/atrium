@@ -111,25 +111,27 @@ type EventOf<T extends RoomEvent['type']> = Extract<RoomEvent, { type: T }>;
  * authenticated identity or NULL — which is what those columns were always
  * supposed to mean.
  *
- * ## An agent has a user id and still gets NULL here, on purpose
+ * ## This is the *judgement* columns' id, and an agent never reaches them
  *
  * The name is the specification: this is the *human's* id, and the columns it
  * feeds all mean "the person whose judgement this was" — `decided_by`,
- * `accepted_by`, `by_user_id`. An agent never reaches those columns at all,
- * because the reducer refuses every event that would write one before a
- * projection runs.
+ * `accepted_by`, `by_user_id`, `created_by`. An agent never reaches those
+ * columns at all, because the reducer refuses every event that would write one
+ * before a projection runs.
  *
- * `author_id` on `messages` is the one column where an agent legitimately could
- * be written and is not, and that is a deferral rather than an oversight. Making
- * an agent's message carry its author is the *front half* of a change whose back
- * half is a voice register — AGENTS.md's "no synthesized speech" rule says
- * nothing rendered as a person's words may be words they did not write, and the
- * feed's attribution cell is unkinded today (`MessageRecord.actor` is a display
- * name string). Filling in `author_id` alone would render an agent's sentences
- * as a participant's typed words with nothing to distinguish them, which is a
- * worse falsehood than an unattributed row. The two land together, in the ticket
- * that gives the renderer a kind to read; this function is where that ticket
- * starts, and it does not start here.
+ * `author_id` on `messages` is NOT one of them, and no longer comes from here.
+ * Authoring a message is not a judgement; it is speech, and an agent speaks in
+ * the conversation as itself. #101 made `projectMessagePosted` write
+ * `actorUserId(actor)` — the identity of whoever spoke, agent or person — so an
+ * agent's message carries its own author instead of landing NULL and rendering
+ * unattributed. That was the *front half*; its *back half* is the web voice
+ * register (`MessageRecord.authorKind`, `data-author-kind` on the feed row),
+ * which is what keeps AGENTS.md's "no synthesized speech" rule true — an agent's
+ * words are attributed to the agent, in a register a reader can tell from a
+ * person's typed words, never rendered as a human's. The two landed in one
+ * ticket, which is what the pin in `integration/server/agent-principal.test.ts`
+ * exists to enforce: attribution here is only ever correct because the register
+ * ships with it.
  *
  * ## What this function is NOT for, learned the expensive way
  *
@@ -154,7 +156,11 @@ async function projectMessagePosted(
   await tx.insert(messages).values({
     id: event.messageId,
     roomId,
-    authorId: humanId(actor),
+    // Not `humanId`: authoring is speech, not judgement. Whoever spoke owns the
+    // words — an agent's message carries the agent's own id (its `users` row),
+    // so it renders attributed and in the agent voice register rather than as an
+    // unattributed NULL. See the note on `humanId` above and #101.
+    authorId: actorUserId(actor),
     body: event.body,
     replyToId: event.replyToId,
     clientMessageId: event.clientMessageId,

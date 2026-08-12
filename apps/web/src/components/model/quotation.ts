@@ -54,6 +54,7 @@
  *   a property of the brand.
  * ------------------------------------------------------------------------- */
 
+import { type ParticipantKind, participantKindOf } from './kind';
 import type { Maybe } from './text';
 
 export type MessageId = string;
@@ -81,6 +82,29 @@ export interface MessageRecord {
   readonly actor: string;
   readonly text: string;
   readonly origin: MessageOrigin;
+  /**
+   * WHAT KIND OF PARTICIPANT AUTHORED THESE WORDS — a person or an agent.
+   *
+   * `origin` is about provenance (typed live, seeded from history, page-authored);
+   * this is about the author's nature, and the two are orthogonal — an agent's
+   * message is `seeded` history exactly as a person's is. It exists because
+   * AGENTS.md's "no synthesized speech" rule has a second edge the quotation
+   * model did not anticipate: not only may the page never render its own words as
+   * a person's, an AGENT's genuine words may never render as a person's either.
+   * So the render boundary reads the author's kind and gives an agent its own
+   * voice register (`data-author-kind`, the machine's monospace, a squared kind
+   * marker), never the human treatment.
+   *
+   * Optional, and absent means `'human'`: every message on the record before
+   * agents existed was a person's, and every hand-built fixture is a person's
+   * unless it says otherwise, so an omitted field and an explicit `'human'`
+   * render identically and hash identically (see `recordFingerprint`). The real
+   * data path is not the default: both view constructors read the stored
+   * `principal_kind` through `participantKindOf`, which fails CLOSED to
+   * `'unknown'` — an author whose kind cannot be read is painted not-a-person,
+   * never softened into one.
+   */
+  readonly authorKind?: ParticipantKind;
   readonly attachments?: readonly MessageAttachmentRecord[];
   /**
    * THE ROOM THIS MESSAGE LIVES IN. Absolute, and about the record only.
@@ -199,6 +223,10 @@ export interface Attribution {
   readonly text: string;
   readonly at: string;
   readonly origin: QuotableOrigin;
+  /** the author's kind, re-derived from the record — `'human'` when the record
+   *  carried none, so every render boundary reads the voice register off the
+   *  same lookup it reads the name and words off, never off a carried flag. */
+  readonly authorKind: ParticipantKind;
   readonly room: string | null;
   readonly attachments: readonly MessageAttachmentRecord[];
 }
@@ -342,6 +370,7 @@ export function recordFingerprint(record: MessageRecord): string {
     record.at,
     record.actor,
     record.text,
+    record.authorKind ?? 'human',
     record.room ?? '∅',
     JSON.stringify(record.attachments ?? []),
   ]
@@ -413,6 +442,10 @@ export function resolveQuotation(
     text: record.text,
     at: record.at,
     origin: record.origin,
+    // Absent kind renders as human — the historical default (see MessageRecord).
+    // A stored kind reaches here already narrowed by `participantKindOf` in the
+    // view constructor, so `'unknown'` survives to the render as itself.
+    authorKind: record.authorKind ?? 'human',
     room: record.room ?? null,
     attachments: record.attachments ?? [],
   };
@@ -545,7 +578,7 @@ export function parseQuotation(value: unknown, ledger: MessageLedger): Quotation
 /** Same boundary, one step earlier: a message record from untrusted data. */
 export function parseMessageRecord(value: unknown): MessageRecord {
   if (!isRecord(value)) throw new Error('parseMessageRecord: not an object');
-  const { id, at, actor, text, origin, room, attachments } = value;
+  const { id, at, actor, text, origin, authorKind, room, attachments } = value;
   if (!nonEmptyString(id)) throw new Error('parseMessageRecord: a message needs an id');
   if (typeof at !== 'string') throw new Error('parseMessageRecord: a message needs a timestamp');
   if (!nonEmptyString(actor)) throw new Error('parseMessageRecord: a message needs an actor');
@@ -580,6 +613,11 @@ export function parseMessageRecord(value: unknown): MessageRecord {
     actor,
     text,
     origin: origin as MessageOrigin,
+    // Fail CLOSED at the untrusted boundary: an author kind that arrived as a
+    // value `participantKindOf` cannot match becomes `'unknown'`, never
+    // `'human'`. Absent stays absent, which the model reads as `'human'` — the
+    // historical default for a record that predates the field.
+    ...(authorKind === undefined ? {} : { authorKind: participantKindOf(authorKind) }),
     ...(room === undefined ? {} : { room }),
     ...(attachments === undefined
       ? {}

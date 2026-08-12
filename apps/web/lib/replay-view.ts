@@ -144,6 +144,12 @@ export function replayView(data: ReplayData, viewerId?: string) {
     actor: message.author ?? 'author unavailable',
     text: message.body,
     origin: 'seeded',
+    // The author's kind decides the voice register (#101). A present value is
+    // read through `participantKindOf` so a kind that cannot be read fails
+    // CLOSED to `'unknown'`, never softened to a person; an absent one (a
+    // pre-kind fixture, or an author row that is gone) is left off, which the
+    // record model reads as the historical `'human'` default.
+    ...(message.authorKind == null ? {} : { authorKind: participantKindOf(message.authorKind) }),
     room: data.room.name,
     attachments: message.attachments,
   }));

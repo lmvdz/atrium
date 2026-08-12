@@ -316,22 +316,31 @@ describe('an agent principal, from provisioning to the ledger', () => {
     ]);
   });
 
-  it('leaves an agent’s message unattributed in the read model, on purpose and not by accident', async () => {
+  it('attributes an agent’s message to the agent in the read model — front half and back half landed together', async () => {
     /**
-     * A deliberate deferral, pinned so it cannot become a silent one.
+     * The pin that used to hold `author_id` at NULL, now inverted by the ticket
+     * it was waiting for (#101).
      *
-     * `projectMessagePosted` writes `humanId(actor)`, which is NULL for an agent,
-     * so an agent's message row carries no author. Filling it in is the front
-     * half of a change whose back half is a voice register — AGENTS.md's "no
-     * synthesized speech" rule — and the feed's attribution cell has no kind to
-     * read yet. Half of that change renders an agent's sentences as a
-     * participant's typed words with nothing to distinguish them, which is a
-     * worse falsehood than an unattributed row.
+     * Until #101, `projectMessagePosted` wrote `humanId(actor)` → NULL for an
+     * agent, on purpose: an author with no voice register renders an agent's
+     * sentences as a participant's typed words with nothing to distinguish them,
+     * which is a worse falsehood than an unattributed row — AGENTS.md's "no
+     * synthesized speech" rule reached from the author end. So filling in
+     * `author_id` ALONE was the failure this test existed to catch, and NULL was
+     * the honest state while the renderer had no kind to read.
      *
-     * This test exists to fail when somebody lands the front half alone. It is
-     * not asserting that NULL is right; it is asserting that the current state is
-     * the one that was chosen, and that the ledger row — which does carry the
-     * agent's id — is where attribution actually lives meanwhile.
+     * #101 landed both halves at once: `projectMessagePosted` now writes
+     * `actorUserId(actor)` — the agent's own id — AND the web renderer paints an
+     * agent's row in the machine voice register (`MessageRecord.authorKind`,
+     * `data-author-kind`, the monospace body, the worded kind), proven by
+     * `apps/web/e2e/agent-participant.spec.ts`. So the pin flips: the read model
+     * now MUST attribute the agent, because the register that keeps that
+     * attribution honest ships with it. A regression that dropped the register
+     * would be caught by the web spec; a regression that dropped the attribution
+     * is caught here.
+     *
+     * The invariant this still enforces is the one it always did — attribution
+     * and register are never apart — only the true side of it moved.
      */
     const agent = await agentInTheRoom();
     const client = await connectWithCookie(agent.userId, agent.session.cookie);
@@ -346,8 +355,17 @@ describe('an agent principal, from provisioning to the ledger', () => {
       .select({ authorId: messages.authorId })
       .from(messages)
       .where(eq(messages.roomId, room.roomId));
-    expect(row?.authorId).toBeNull();
-    expect((await actorRows())[0]?.id).toBe(agent.userId);
+    // The message carries its author — the agent's own `users` id — so the feed
+    // reads a real author and its kind, not a NULL that renders unattributed.
+    expect(row?.authorId).toBe(agent.userId);
+    // And the ledger's trusted actor columns still say a non-human wrote it: the
+    // attribution is an agent's, carried by the same discriminant every gate
+    // reads, never softened into a person's on the way to the read model.
+    expect((await actorRows())[0]).toEqual({
+      kind: 'agent',
+      id: agent.userId,
+      type: 'message_posted',
+    });
   });
 });
 

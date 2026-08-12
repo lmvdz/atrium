@@ -3,6 +3,7 @@ import {
   createDatabase,
   type Database,
   memberships,
+  messages,
   rooms,
   users,
   workspaceMembers,
@@ -154,6 +155,34 @@ async function swapAgentForHuman(at: Seeded): Promise<string> {
   return human.id;
 }
 
+/**
+ * One message from the agent and one from the viewer, in that order. The agent's
+ * `author_id` is its own `users` row — the attribution #101 writes instead of the
+ * old NULL — so the feed reads a real author and its kind. Returns the two message
+ * ids so the test can flip the agent message's author and prove the register
+ * follows the identity, not the row. The message cascades with the workspace.
+ */
+async function seedTwoMessages(at: Seeded): Promise<{ agentMsgId: string; humanMsgId: string }> {
+  const [agentMsg] = await db
+    .insert(messages)
+    .values({
+      roomId: at.roomId,
+      authorId: at.agentId,
+      body: 'I read the last twelve messages and nothing was settled.',
+    })
+    .returning({ id: messages.id });
+  const [humanMsg] = await db
+    .insert(messages)
+    .values({
+      roomId: at.roomId,
+      authorId: at.viewerId,
+      body: 'Agreed — let us pick this up on Monday.',
+    })
+    .returning({ id: messages.id });
+  if (!agentMsg || !humanMsg) throw new Error('message seed returned nothing');
+  return { agentMsgId: agentMsg.id, humanMsgId: humanMsg.id };
+}
+
 async function teardown(at: Seeded, swappedHumanId: string | null): Promise<void> {
   // The workspace cascade takes the room, every membership and every
   // workspace_members row; the identities are deleted by hand.
@@ -230,6 +259,71 @@ test.describe('a provisioned agent member renders as an agent, and its kind is t
       await expect(rail.getByText(/·\s*agent/)).toHaveCount(0);
     } finally {
       await teardown(at, swappedHumanId);
+    }
+  });
+
+  test('an agent’s message renders attributed, in the agent voice register, and the register moves when the author’s kind does', async ({
+    page,
+  }) => {
+    /**
+     * The acceptance test for #101, the render half. #96 proved server-side that
+     * an agent posting via its session lands `author_id = <agent>` with a
+     * non-human ledger kind (`integration/server/agent-principal.test.ts`); this
+     * proves the read model turns that into a row a reader can tell from a
+     * person's — never the old NULL that rendered "author unavailable", never a
+     * person's typed words.
+     *
+     * Flip-the-input, on the exact same row: re-point the agent message's author
+     * at a human identity and reload. The words, the room and the message id do
+     * not move; the register does — because it reads `authorKind` and nothing
+     * else. If a renderer keyed the register off anything but the author's kind,
+     * this half fails.
+     */
+    const email = uniqueEmail('agent-voice');
+    await signUpAndVerify(page, { email, name: 'Voice viewer' });
+    const at = await seed(email);
+    const { agentMsgId, humanMsgId } = await seedTwoMessages(at);
+
+    try {
+      await page.goto(`/replay/${at.workspaceSlug}/${at.roomSlug}`);
+
+      const agentRow = page.locator(`[data-row="message"][data-message-id="${agentMsgId}"]`);
+      const humanRow = page.locator(`[data-row="message"][data-message-id="${humanMsgId}"]`);
+
+      // ---- the agent's message is attributed, kinded, in the machine register --
+      await expect(agentRow).toHaveCount(1);
+      // attributed to the agent — NOT "author unavailable" (the old NULL)
+      await expect(agentRow).toContainText('atrium');
+      await expect(agentRow).not.toContainText('author unavailable');
+      // the row itself says a machine authored it
+      await expect(agentRow).toHaveAttribute('data-author-kind', 'agent');
+      // the kind is stated in a word
+      await expect(agentRow.locator('[data-author-kind-word="agent"]')).toHaveCount(1);
+      // the words are painted in the machine voice register
+      await expect(agentRow.locator('[data-author-voice="agent"]')).toHaveCount(1);
+      // the actor cell names the identity by the roster's own attribute
+      await expect(agentRow.locator('[data-participant-kind="agent"]')).toHaveCount(1);
+
+      // ---- the human's message carries NONE of it: the two are never identical -
+      await expect(humanRow).toHaveCount(1);
+      await expect(humanRow).not.toHaveAttribute('data-author-kind', 'agent');
+      await expect(humanRow.locator('[data-author-voice]')).toHaveCount(0);
+      await expect(humanRow.locator('[data-author-kind-word]')).toHaveCount(0);
+
+      // ---- flip the input: the same message, authored by a person now ---------
+      await db.update(messages).set({ authorId: at.viewerId }).where(eq(messages.id, agentMsgId));
+      await page.reload();
+
+      const flipped = page.locator(`[data-row="message"][data-message-id="${agentMsgId}"]`);
+      await expect(flipped).toHaveCount(1);
+      // the register moved off the row: no machine markers remain
+      await expect(flipped).not.toHaveAttribute('data-author-kind', 'agent');
+      await expect(flipped.locator('[data-author-voice]')).toHaveCount(0);
+      await expect(flipped.locator('[data-author-kind-word]')).toHaveCount(0);
+      // and there is no agent voice anywhere in the feed now
+      await expect(page.locator('[data-author-kind="agent"]')).toHaveCount(0);
+    } finally {
+      await teardown(at, null);
     }
   });
 });

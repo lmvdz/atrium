@@ -65,6 +65,11 @@ async function loadReplayDataSnapshot(database: Database, roomId: string) {
       seq: messages.seq,
       authorId: messages.authorId,
       author: users.displayName,
+      // The author's kind, off the same join the name comes from. #101: an
+      // agent authors in its own voice register, and the register is read from
+      // this column — NULL only when the author row is gone (a deleted user),
+      // which the view constructor reads as `'unknown'` through `participantKindOf`.
+      authorKind: users.principalKind,
       body: messages.body,
       clientMessageId: messages.clientMessageId,
       replyToId: messages.replyToId,
@@ -279,9 +284,17 @@ export type ReplayData = Omit<
   })[];
   /** Optional only for hand-built fixtures; every server load mints a fresh commit receipt. */
   readonly loadReceipt?: string;
-  /** Optional only for hand-built fixtures created before live client ids existed. */
-  messages: (Omit<LoadedReplayMessage, 'clientMessageId'> & {
+  /**
+   * `clientMessageId` optional for fixtures created before live client ids;
+   * `authorKind` optional for fixtures created before an author carried a kind
+   * (#101). A real load always selects `authorKind` off the author join; the
+   * view constructor reads it through `participantKindOf`, so a fixture that
+   * omits it — or an author row that is gone — renders as `'unknown'`, never
+   * silently as a person.
+   */
+  messages: (Omit<LoadedReplayMessage, 'clientMessageId' | 'authorKind'> & {
     readonly clientMessageId?: string | null;
+    readonly authorKind?: LoadedReplayMessage['authorKind'];
   })[];
   /** Optional only for hand-built fixtures and pre-0015 snapshots. */
   readonly messageReferences?: LoadedReplayData['messageReferences'];

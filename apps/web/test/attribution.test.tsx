@@ -1083,6 +1083,12 @@ describe('the row and the register it renders against are the same register', ()
     text: { text: 'I authorise dropping users_legacy.' },
     at: { at: '09:04' },
     origin: { origin: 'seeded' },
+    // The author's kind is a field a reader can see — it decides the voice
+    // register — so a register that disagrees about it (a human's words rendered
+    // as an agent's, or the reverse) is refused exactly like a disagreement about
+    // the name. `lars` carries no `authorKind`, which reads as `'human'`; the
+    // disagreement is an agent claiming the same words.
+    authorKind: { authorKind: 'agent' },
     room: { room: 'identity-service' },
     attachments: {
       attachments: [{ key: 'room/file', name: 'proof.txt', contentType: 'text/plain', size: 5 }],
@@ -1160,6 +1166,114 @@ describe('the row and the register it renders against are the same register', ()
     expect(rendered?.getAttribute('data-message-id')).toBe('m21');
     expect(container.textContent).toContain('13:07');
     expect(container.textContent).not.toContain('09:04');
+  });
+});
+
+/* ---------------------------------------------------------------------------
+ * THE AGENT VOICE REGISTER — #101, AGENTS.md's "no synthesized speech" reached
+ * from the author end.
+ *
+ * A person's words and an agent's words are both real, attributed and quotable;
+ * what the rule forbids is rendering the machine's sentence AS a person's. So an
+ * agent-authored row is painted in the machine register — the monospace body,
+ * the worded kind, `data-author-kind` — and a human's row keeps the default
+ * treatment. The two are never the same row. The kind is read off the record's
+ * `authorKind`, so it rides the same re-derivation as the name and the words:
+ * flip the field and the register moves; nothing carries it beside the record.
+ * ------------------------------------------------------------------------- */
+describe('an agent’s authored words render in the agent voice register, never a person’s', () => {
+  const scribe: MessageRecord = {
+    id: 'm-agent',
+    at: '13:11',
+    actor: 'atrium',
+    text: 'I read the last twelve messages and nothing was settled.',
+    origin: 'seeded',
+    authorKind: 'agent',
+  };
+
+  it('marks the row a machine author, words the kind, and paints the body in the machine register', () => {
+    const entry = messageEntry(scribe, { state: lars_state() });
+    const { container } = renderWith([scribe], <TimelineRow entry={entry} />);
+
+    const row = container.querySelector('[data-row="message"]');
+    // the row itself says a machine authored it — the attribute replay and the
+    // audit read, not the display name
+    expect(row?.getAttribute('data-author-kind')).toBe('agent');
+
+    // the kind is stated in a WORD, not left to a shape alone
+    expect(container.querySelector('[data-author-kind-word]')?.textContent).toBe('agent');
+
+    // the actor cell names the identity by the same attribute the roster does
+    const actorCell = container.querySelector('[data-attribution="m-agent"]');
+    expect(actorCell?.getAttribute('data-participant-kind')).toBe('agent');
+    expect(actorCell?.textContent).toContain('atrium');
+
+    // the words are in the machine register, and they are the AGENT's real words
+    const body = container.querySelector('[data-author-voice="agent"]');
+    expect(body).not.toBeNull();
+    expect(body?.textContent).toContain('nothing was settled');
+
+    // and it is NOT the page's system voice — an agent speaks its own words, it
+    // is not the interface reporting an act
+    expect(container.querySelector('[data-voice="system"]')).toBeNull();
+  });
+
+  it('flip the author’s kind and the register moves — a human’s words carry none of it', () => {
+    /* The same message, the same words, authored by a person: every agent marker
+       is gone and the row is the plain human treatment. This is the acceptance
+       test's "flip the input" at the unit the rendering logic lives in — the
+       register is a function of `authorKind` and nothing else. */
+    const asPerson: MessageRecord = { ...scribe, authorKind: 'human' };
+    const entry = messageEntry(asPerson, { state: lars_state() });
+    const { container } = renderWith([asPerson], <TimelineRow entry={entry} />);
+
+    const row = container.querySelector('[data-row="message"]');
+    expect(row?.getAttribute('data-author-kind')).toBeNull();
+    expect(container.querySelector('[data-author-kind-word]')).toBeNull();
+    expect(container.querySelector('[data-author-voice]')).toBeNull();
+    expect(
+      container
+        .querySelector('[data-attribution="m-agent"]')
+        ?.getAttribute('data-participant-kind'),
+    ).toBe('human');
+  });
+
+  it('an agent row is never the same DOM as the same words from a person', () => {
+    /* The invariant stated as a comparison: no agent-authored row is visually
+       identical to a human-authored one. The machine markers are exactly the
+       difference. */
+    const agentRow = renderWith(
+      [scribe],
+      <TimelineRow entry={messageEntry(scribe, { state: lars_state() })} />,
+    );
+    const humanRecord: MessageRecord = { ...scribe, authorKind: 'human' };
+    const humanRow = renderWith(
+      [humanRecord],
+      <TimelineRow entry={messageEntry(humanRecord, { state: lars_state() })} />,
+    );
+    const agentHtml = agentRow.container.querySelector('[data-row="message"]')?.outerHTML ?? '';
+    const humanHtml = humanRow.container.querySelector('[data-row="message"]')?.outerHTML ?? '';
+    expect(agentHtml).not.toBe(humanHtml);
+    // and specifically by the register, not by some incidental difference
+    expect(agentHtml).toContain('data-author-kind="agent"');
+    expect(humanHtml).not.toContain('data-author-kind="agent"');
+  });
+
+  it('a cited agent message is quoted in the machine register, not the human one', () => {
+    /* V75 through a citation: a reply line or a receipt that quotes an agent must
+       not render its words in the human italic-quote register. `<Quoted>` reads
+       the same `authorKind` and switches register, and names the kind on the
+       source line. */
+    const quotation = quotationFrom(scribe);
+    expect(quotation).not.toBeNull();
+    if (quotation === null) return;
+    const { container } = renderWith([scribe], <Quoted quote={quotation} />);
+    const quote = container.querySelector('q');
+    expect(quote?.getAttribute('data-author-kind')).toBe('agent');
+    expect(quote?.textContent).toContain('nothing was settled');
+    // the source line names the kind, so the attribution is not a bare name that
+    // reads as a person's
+    expect(container.querySelector('[data-attribution]')?.textContent).toContain('· agent');
   });
 });
 

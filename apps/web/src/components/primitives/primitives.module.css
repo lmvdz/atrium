@@ -56,6 +56,19 @@
   color: var(--tx2);
 }
 
+/* A CITED MACHINE'S WORDS (#101). `.quote` is the human register — italic, the
+   proportional reading font — and an agent's words rendered in it would read as
+   a person's, the masquerade AGENTS.md's "no synthesized speech" rule forbids,
+   reached through a reply line or a receipt instead of the feed. So a quoted
+   agent takes the machine register: upright monospace, the same machine/human
+   typographic split the feed row uses, and its source line names the kind in a
+   word. Still a real quotation of real words with provenance — the register says
+   who wrote them, it does not weaken the citation. No new hue. */
+.quoteMachine {
+  font-family: 'JetBrains Mono Variable', ui-monospace, monospace;
+  font-style: normal;
+}
+
 /* SYSTEM VOICE. Mono, muted, no quotation marks, no first person. Visibly not
    speech — that difference is the whole point of the invariant. */
 .system {

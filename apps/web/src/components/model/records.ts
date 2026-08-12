@@ -87,58 +87,16 @@ export function owedSummary(items: readonly { readonly state: EpistemicState }[]
 export type Presence = 'here' | 'idle' | 'away';
 
 /**
- * What a participant IS, read from the identity, not from the copy around it.
- *
- * `'human'` and `'agent'` mirror `@atrium/auth`'s `PrincipalKind` — the same two
- * values the DB's `users.principal_kind` carries. The view model keeps its own
- * copy of the union rather than importing the server package, so the component
- * library stays free of a database dependency; the single translation from the
- * stored column happens in the two view constructors, where the row is read.
- *
- * `'unknown'` is the THIRD member, and it is the fail-closed one. It is not a
- * stored value — `users.principal_kind` is NOT NULL and carries only the first
- * two — it is what an UNREADABLE kind renders as: a renamed column, a library
- * upgrade that stops returning the field, an enum value added in a later
- * migration, a hand-built fixture that forgot to set one. The round-1 gauntlet
- * found that defaulting those to `'human'` was not a cosmetic miss confined to a
- * monogram: the same default fed the mention filter (`kind === 'human'`) and the
- * "N people" count, so an unreadable-kind MACHINE became a mention candidate and
- * a counted person — which AGENTS.md forbids. So the default is `'unknown'`,
- * which every surface renders as visibly-not-a-person (a neutral dashed marker
- * and the word `unknown`, never the round person monogram) and which the
- * human-only filters exclude by construction, because they allowlist `'human'`
- * rather than denylisting `'agent'`. A future enum value therefore shows up as
- * `unknown` on screen — prompting a fix — instead of silently as a person.
- *
- * This stays a **presented** discriminant, never an authority one: the
- * certification gates that must fail closed live server-side, in the reducer, on
- * the `Actor`, and on `getAtriumSession`. What changed is that this record fails
- * closed too, in its own register, rather than softening an unreadable machine
- * into a person.
+ * `ParticipantKind` and `participantKindOf` now live in `./kind`, a lower module
+ * that `quotation.ts` can also import without a cycle — a message needs its
+ * author's kind for the voice register (#101), and `records.ts` already imports
+ * `quotation.ts`. Re-exported here so every existing `from './records'` caller,
+ * and the barrel, keep resolving the same single definition.
  */
-export type ParticipantKind = 'human' | 'agent' | 'unknown';
+export type { ParticipantKind } from './kind';
+export { participantKindOf } from './kind';
 
-/** The two kinds an identity actually IS. `'unknown'` is never one of these — it
- *  is the fail-closed rendering of a value that is neither. */
-const PARTICIPANT_KINDS: readonly string[] = ['human', 'agent'];
-
-/**
- * Read a participant kind off a stored value, failing CLOSED to `'unknown'`.
- *
- * The browser-safe twin of `@atrium/auth`'s `parsePrincipalKind` — the view
- * layer is bundled for the client and may not import the auth package (it reaches
- * `node:fs` through Better Auth). An **allowlist**: anything that is not exactly
- * `'agent'` or `'human'` — a renamed column, a later enum value, an undefined
- * hand-built fixture — becomes `'unknown'`, NOT `'human'`. `parsePrincipalKind`
- * returns `null` for the same inputs and ends the session; this cannot end a
- * render, so it names the failure instead, and every renderer paints `'unknown'`
- * as neither a person nor an agent.
- */
-export function participantKindOf(value: unknown): ParticipantKind {
-  return typeof value === 'string' && PARTICIPANT_KINDS.includes(value)
-    ? (value as ParticipantKind)
-    : 'unknown';
-}
+import type { ParticipantKind } from './kind';
 
 /**
  * A participant in a room — a person or an agent. Formerly `HumanSummary`, which

@@ -254,6 +254,18 @@ function AuthoredRow({
   });
   if (diverged !== null) throw new Error(diverged);
   refuseElsewhere(attribution.room, here, attribution.messageId);
+  /* THE VOICE REGISTER (#101). An agent's words are its own — attributed, real,
+     quotable — but AGENTS.md's "no synthesized speech" rule reaches the author
+     end too: an agent's sentence may never render as a person's. So a non-human
+     author's row is painted in the machine's monospace (the same machine/human
+     typographic split CONVENTIONS states, `globals.css`) and names its kind in a
+     word, and the row carries `data-author-kind` so a reader, an audit and
+     replay can all tell a machine spoke. `'unknown'` — an author whose kind we
+     could not read — takes the same not-a-person register, failing closed. A
+     person's row is unchanged: the default treatment is the human one. */
+  const authorKind = attribution.authorKind;
+  const nonHuman = authorKind === 'agent' || authorKind === 'unknown';
+  const kindWord = authorKind === 'agent' ? 'agent' : authorKind === 'unknown' ? 'unknown' : null;
   const authoredLength = bodyText(entry.body).length;
   /* A typed reference is structure even when its authored surface is ordinary
      prose. Looking only for Markdown syntax routes `hello @Ada` through
@@ -264,7 +276,11 @@ function AuthoredRow({
     (entry.body.some((segment) => segment.kind === 'mention') &&
       !entry.body.some((segment) => segment.kind === 'code'));
   const authoredBody = (
-    <div data-row-body={attribution.messageId}>
+    <div
+      className={nonHuman ? styles.machineVoice : undefined}
+      data-row-body={attribution.messageId}
+      data-author-voice={nonHuman ? authorKind : undefined}
+    >
       {rich ? (
         <RichMessageBody body={entry.body} citation={entry.attribution} />
       ) : (
@@ -291,6 +307,11 @@ function AuthoredRow({
          source of truth for it. */
       data-message-id={attribution.messageId}
       data-origin={attribution.origin}
+      /* The author's kind, on the row itself, so replay/interpret and the audit
+         read a machine author from the same attribute the register is painted
+         from — not from the name. Absent for a person; a person's row is the
+         unchanged default. */
+      data-author-kind={nonHuman ? authorKind : undefined}
       data-row="message"
     >
       <div className={styles.time}>{attribution.at}</div>
@@ -298,15 +319,35 @@ function AuthoredRow({
           the epistemic state, so a screen reader has to hear it */}
       <Glyph className={styles.glyphCell} decorative={false} state={entry.state} />
       <div
-        className={[styles.actor, entry.fromViewer ? styles.actorMe : null]
+        className={[
+          styles.actor,
+          entry.fromViewer ? styles.actorMe : null,
+          nonHuman ? styles.actorMachine : null,
+        ]
           .filter(Boolean)
           .join(' ')}
         data-attribution={attribution.messageId}
+        /* Mirrors the roster's `data-participant-kind`: the feed's actor column
+           and the rail name the same identity by the same attribute, and #99's
+           squared-marker discipline extends here as a CSS accent (`.actorMachine`
+           paints a neutral square before the name — decorative, redundant with
+           the word in the body, no new hue). The word, not the shape, is the
+           carrier; the accent is the glance cue. */
+        data-participant-kind={attribution.authorKind}
         data-truncates={`element:[data-roster-name="${attribution.actor}"]`}
       >
         {attribution.actor}
       </div>
       <div className={styles.body}>
+        {/* The kind stated in a word, in the wide body column where it is not
+            clipped by the actor cell's ellipsis, and where a reader meets it
+            immediately before the machine's words. `atr-lbl` is the label idiom;
+            the row also carries `data-author-kind` for the audit and replay. */}
+        {kindWord === null ? null : (
+          <span className={`atr-lbl ${styles.authorKindWord}`} data-author-kind-word={authorKind}>
+            {kindWord}
+          </span>
+        )}
         {entry.replyTo === null ? null : <ReplyLine to={entry.replyTo} />}
         {/* The words, and nothing else in the body column — tagged with the
             message they must read as, so a browser can check the rendered row

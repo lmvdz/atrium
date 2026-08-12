@@ -54,6 +54,10 @@ export function liveRoomView(
     actor: base.viewer.name,
     text: pending.body,
     origin: 'typed',
+    // A pending row is the viewer's own optimistic send, so its author kind is
+    // the viewer's — an agent driving its session sees its own words in the
+    // agent register the instant it sends, before the server round-trips (#101).
+    authorKind: base.viewer.kind,
     room: base.room.name,
     // Upload capabilities authorize a retry but are not product metadata and
     // must never enter the rendered attribution register.
