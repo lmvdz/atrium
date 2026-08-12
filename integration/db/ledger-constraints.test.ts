@@ -229,6 +229,56 @@ function kindRow(
     case 'attention_resolved':
       payload = { ...base, roomId, attentionId: randomUUID(), status: 'resolved' };
       break;
+    // The six agent/plan/session lifecycle kinds (#116). All declare a top-level
+    // `roomId`, like message_posted — the CHECK treats them the same way, which is
+    // exactly what these fixtures let the exhaustive room-key sweep below prove.
+    // The non-room fields are arbitrary: no DB CHECK reads them (their zod shape
+    // is enforced at the app layer, not here).
+    case 'plan_opened':
+      payload = {
+        ...base,
+        roomId,
+        planId: randomUUID(),
+        agentUserId: randomUUID(),
+        title: 'a plan',
+        budgetLimitMicros: null,
+      };
+      break;
+    case 'plan_settled':
+      payload = { ...base, roomId, planId: randomUUID() };
+      break;
+    case 'session_opened':
+      payload = {
+        ...base,
+        roomId,
+        sessionId: randomUUID(),
+        planId: randomUUID(),
+        harness: 'claude',
+        model: 'opus',
+      };
+      break;
+    case 'session_settled':
+    case 'session_failed':
+      payload = {
+        ...base,
+        roomId,
+        sessionId: randomUUID(),
+        exitSummary: null,
+        spendMicros: null,
+        contextPct: null,
+      };
+      break;
+    case 'signal_raised':
+      payload = {
+        ...base,
+        roomId,
+        targetUserId: randomUUID(),
+        subjectKind: 'message',
+        subjectId: randomUUID(),
+        class: 'blocking_question',
+        reason: { kind: 'question_names_you', question: 'which cutover?' },
+      };
+      break;
     case 'proposal_rejected':
       payload = { ...base, proposalId, reason: null };
       break;
@@ -2626,6 +2676,15 @@ describe('core_events — the room key is the one this kind declares, and no oth
     proposal_rejected: null,
     proposal_superseded: null,
     object_corrected: null,
+    // The six lifecycle kinds (#116), all declaring a top-level `roomId`. Listed
+    // here so the deployed-enum completeness check below stays exhaustive and the
+    // room-key sweep proves the CHECK accepts them yet refuses a smuggled key.
+    plan_opened: 'roomId',
+    plan_settled: 'roomId',
+    session_opened: 'roomId',
+    session_settled: 'roomId',
+    session_failed: 'roomId',
+    signal_raised: 'roomId',
   };
 
   /** Write a room key into a payload at one of the four spellings. */
@@ -2681,9 +2740,10 @@ describe('core_events — the room key is the one this kind declares, and no oth
         }
       }
     }
-    // Non-vacuous, and the count is the product: 5 kinds × 3 foreign keys × 2
-    // values. A loop that silently stopped iterating would otherwise pass.
-    expect(refused).toBe(30);
+    // Non-vacuous, and the count is the product: 11 room-declaring kinds × 3
+    // foreign keys × 2 values. A loop that silently stopped iterating would
+    // otherwise pass. (Five original kinds plus the six #116 lifecycle kinds.)
+    expect(refused).toBe(66);
   });
 
   it('refuses a room key on the three kinds that declare none', async () => {
@@ -2728,7 +2788,7 @@ describe('core_events — the room key is the one this kind declares, and no oth
       await expect(append(row)).resolves.toBeDefined();
       landed += 1;
     }
-    expect(landed).toBe(8);
+    expect(landed).toBe(14);
   });
 
   /**
@@ -2799,8 +2859,8 @@ describe('core_events — the room key is the one this kind declares, and no oth
         landed += 1;
       }
     }
-    // 5 kinds × 3 foreign keys + 3 room-less kinds × 4 keys.
-    expect(landed).toBe(27);
+    // 11 room-declaring kinds × 3 foreign keys + 3 room-less kinds × 4 keys.
+    expect(landed).toBe(45);
     const filed = await handle.db
       .select({ roomId: coreEvents.roomId })
       .from(coreEvents)
@@ -3370,6 +3430,9 @@ describe('foreign keys — the audit is the catalog, not a paragraph', () => {
       'proposals_interpretation_id_interpretations_id_fk',
       'proposals_proposer_user_id_users_id_fk',
       'relations_created_by_users_id_fk',
+      // #116's. A room may be an agent's channel; deleting the agent leaves the
+      // room but nulls the back-reference — a display pointer, not authority.
+      'rooms_agent_user_id_fk',
       'rooms_created_by_users_id_fk',
     ]);
 
@@ -3378,6 +3441,10 @@ describe('foreign keys — the audit is the catalog, not a paragraph', () => {
     // provenance link tables the reducer never reads.
     expect(of('c')).toEqual([
       'accepted_objects_room_id_rooms_id_fk',
+      // #116's agent config: the sidecar and its channel edge are meaningless
+      // without the identity/room they configure, so both cascade.
+      'agents_channel_room_id_fk',
+      'agents_user_id_fk',
       'attachments_room_id_rooms_id_fk',
       'attention_items_message_same_room_fk',
       'attention_items_object_same_room_fk',
@@ -3404,6 +3471,10 @@ describe('foreign keys — the audit is the catalog, not a paragraph', () => {
       'object_sources_message_same_room_fk',
       'object_sources_object_same_room_fk',
       'object_sources_room_id_rooms_id_fk',
+      // #116's plans: a plan is projected into its room and owned by its agent;
+      // deleting either takes the plan (and, below, its sessions) with it.
+      'plans_agent_user_id_fk',
+      'plans_room_id_fk',
       'proposal_sources_message_same_room_fk',
       'proposal_sources_proposal_same_room_fk',
       'proposal_sources_room_id_rooms_id_fk',
@@ -3417,6 +3488,10 @@ describe('foreign keys — the audit is the catalog, not a paragraph', () => {
       // and deleting the workspace takes its rooms — and, through the cascades
       // above, everything filed under them.
       'rooms_workspace_id_workspaces_id_fk',
+      // #116's sessions: the composite parent edge and the room edge both cascade
+      // — a session is meaningless without the plan and room it runs under.
+      'sessions_plan_same_room_fk',
+      'sessions_room_id_fk',
       'workspace_invitations_inviter_id_users_id_fk',
       'workspace_invitations_organization_id_workspaces_id_fk',
       'workspace_members_organization_id_workspaces_id_fk',

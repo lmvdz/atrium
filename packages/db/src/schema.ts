@@ -106,6 +106,29 @@ export const attentionClass = pgEnum('attention_class', [
 export const attentionStatus = pgEnum('attention_status', ['pending', 'resolved', 'dismissed']);
 
 /**
+ * A plan's process-group lifecycle (#116, from #114's resolution). A plan is a
+ * board, not a process — it has no context window — so its states are only the
+ * two a folder of work moves through: `open` while it holds sessions, `settled`
+ * once its receipt is written. Projected from the ledger-only `plan_opened` /
+ * `plan_settled` events; NOT a covenant state, and nothing here flips a `~`.
+ */
+export const planStatus = pgEnum('plan_status', ['open', 'settled']);
+
+/**
+ * A session's process lifecycle (#116). A session is a process — it settles or
+ * fails, and it never spawns (the pstree invariant; see `sessions`). `settled`
+ * and `failed` are the two exit receipts §9.5 names, kept apart because a
+ * failure is owed attention until triaged and a settlement is not. Projected
+ * from `session_opened` / `session_settled` / `session_failed`.
+ *
+ * **This is process state, not epistemic state (#114 T3).** A session settling
+ * or failing is a receipt about the *process*; it writes `sessions.status` and
+ * touches no `accepted_objects` judgement column, so it can never move a `~` to
+ * a `✓`. The two receipts are deliberately separate.
+ */
+export const sessionStatus = pgEnum('session_status', ['open', 'settled', 'failed']);
+
+/**
  * Closed alphabet for durable authored references.
  *
  * `agent` (drizzle/0019) joins `human` as the second **participant** kind a
@@ -189,6 +212,24 @@ export const eventType = pgEnum('event_type', [
   'relation_added',
   'message_posted',
   'attention_resolved',
+  // ── the agent/plan/session lifecycle (#116) ──────────────────────────────
+  //
+  // Six ledger-only kinds, added to the enum but KEPT OUT of `coreEventTypes`
+  // below — the reducer folds none of them and `CoreState` has no concept of a
+  // plan or a session, exactly the standing `message_posted` and
+  // `attention_resolved` hold. They ride `core_events` for their `room_seq` and
+  // their append order; the `plans`/`sessions` tables and `attention_items` are
+  // their projections. `_CoreEventTypeCoverage` still holds because it is
+  // one-way (every core type is storable), and `event_type` is a strict
+  // superset by design. The RoomEvent zod schemas live in
+  // `apps/server/src/room-events.ts`, NOT in `@atrium/core`'s `events.ts`, so
+  // they never join `CoreEvent`.
+  'plan_opened',
+  'plan_settled',
+  'session_opened',
+  'session_settled',
+  'session_failed',
+  'signal_raised',
 ]);
 
 /**
@@ -329,6 +370,21 @@ export const rooms = pgTable(
     slug: text('slug').notNull(),
     name: text('name').notNull(),
     createdBy: uuid('created_by').references(() => users.id, { onDelete: 'set null' }),
+    /**
+     * The agent whose **channel** this room is (#116, from #114 T1). An agent
+     * has ONE channel — a room it OWNS — distinct from the many rooms it is a
+     * member of: plans and sessions pin in that channel, escalations climb to a
+     * group room's pin via attention. Nullable because almost every room is a
+     * group channel with no owning agent, and `unique` because a room is at most
+     * one agent's channel and an agent has at most one channel. `set null` on
+     * the agent's deletion rather than cascading the room away: the channel's
+     * history outlives the identity, the same way a person's messages do.
+     *
+     * `drizzle/0021` adds this as the reciprocal of `agents.channel_room_id`;
+     * the pstree room trigger keys on the latter, so this column is the readable
+     * back-reference rather than the enforced edge.
+     */
+    agentUserId: uuid('agent_user_id').references(() => users.id, { onDelete: 'set null' }),
     createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
     archivedAt: timestamp('archived_at', { withTimezone: true }),
   },
@@ -336,6 +392,8 @@ export const rooms = pgTable(
   (t) => [
     uniqueIndex('rooms_workspace_slug_key').on(t.workspaceId, t.slug),
     index('rooms_workspace_idx').on(t.workspaceId),
+    // At most one agent per channel and at most one channel per agent.
+    uniqueIndex('rooms_agent_user_id_key').on(t.agentUserId),
   ],
 );
 
@@ -1090,6 +1148,182 @@ export const interpretations = pgTable(
   ],
 );
 
+/* ── the agent / plan / session trunk (#116, from #114's resolution) ─────── */
+
+/**
+ * An agent's config sidecar. **An agent IS a `users` row** with
+ * `principal_kind = 'agent'` (#96, drizzle/0017); this 1:1 table (PK = the
+ * agent's `user_id`) carries the config that has no place on `users`, which
+ * Better Auth shares. Kept off `users` for that reason, and keyed by it so the
+ * two are one identity.
+ *
+ * ## The chain terminates at a human, BY SCHEMA (#114's init anchor)
+ *
+ * `owner_user_id` is NOT NULL and, by the `agents_owner_is_human` trigger
+ * (drizzle/0021, modelled on 0017's immutable-`principal_kind` reads), points
+ * at a `users` row whose `principal_kind` is `human`. `user_id` points, by the
+ * `agents_user_is_agent` trigger, at one whose kind is `agent`. So "the
+ * ownership chain ends at a person" is not a convention the app maintains — it
+ * is a pair of triggers, on the same axis 0017 uses, that refuse the row
+ * otherwise. Neither read takes a lock: `principal_kind` is immutable, so there
+ * is no update to race.
+ *
+ * The budget/host/harness/model columns are the §9.2 "who owns what number"
+ * placeholders — the budget ROOT lives here, a plan takes an rlimit slice, a
+ * session spends. Enforcement is #115; this only carries the numbers.
+ */
+export const agents = pgTable(
+  'agents',
+  {
+    /** The agent principal this configures — 1:1 with the `users` row. */
+    userId: uuid('user_id')
+      .primaryKey()
+      .references(() => users.id, { onDelete: 'cascade' }),
+    /**
+     * The human who owns this agent. NOT NULL — an agent always has an owner —
+     * and held to a `human` principal by `agents_owner_is_human`. `restrict`, so
+     * an owner cannot be deleted out from under the agent it is accountable for.
+     */
+    ownerUserId: uuid('owner_user_id')
+      .notNull()
+      .references(() => users.id, { onDelete: 'restrict' }),
+    /**
+     * The room that is this agent's channel — the one it OWNS (#114 T1),
+     * reciprocal to `rooms.agent_user_id`. NOT NULL: an agent has exactly one
+     * channel. This is the column the pstree room trigger keys on — a plan's
+     * room must equal its agent's `channel_room_id`.
+     */
+    channelRoomId: uuid('channel_room_id')
+      .notNull()
+      .references(() => rooms.id, { onDelete: 'cascade' }),
+    /** Where the agent's harness runs. Config placeholder (#115 owns semantics). */
+    host: text('host').notNull(),
+    /** The default harness a session under this agent runs (a session may override). */
+    harness: text('harness').notNull(),
+    /** The default model. */
+    model: text('model').notNull(),
+    /** The agent's budget root, in micro-dollars. Nullable = no cap set yet. */
+    budgetLimitMicros: bigint('budget_limit_micros', { mode: 'number' }),
+    createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [
+    index('agents_owner_idx').on(t.ownerUserId),
+    uniqueIndex('agents_channel_room_key').on(t.channelRoomId),
+  ],
+);
+
+/**
+ * A plan — a process group projected from the ledger-only `plan_opened` /
+ * `plan_settled` events. A board, not a process: progress, a spend rollup, a
+ * receipt index; no context window and no terminal (§4). Truth stays on the
+ * spine; this table is a projection of it.
+ *
+ * The `(room_id, id)` unique index is the **composite-FK target** a session's
+ * parent edge lands on: a session's `(room_id, plan_id)` points here, so a
+ * session and its plan are always in one room. `agent_user_id` ties the plan to
+ * its agent, and the `plans_room_matches_agent_channel` trigger (drizzle/0022)
+ * refuses any plan whose `room_id` is not that agent's `channel_room_id` — the
+ * third of the four ways the pstree invariant is a DB fact.
+ */
+export const plans = pgTable(
+  'plans',
+  {
+    id: uuid('id').primaryKey().defaultRandom(),
+    roomId: uuid('room_id')
+      .notNull()
+      .references(() => rooms.id, { onDelete: 'cascade' }),
+    /** The agent whose work this plan groups. */
+    agentUserId: uuid('agent_user_id')
+      .notNull()
+      .references(() => agents.userId, { onDelete: 'cascade' }),
+    title: text('title').notNull(),
+    status: planStatus('status').notNull().default('open'),
+    /** The rlimit slice this plan may spend, in micro-dollars. Nullable placeholder. */
+    budgetLimitMicros: bigint('budget_limit_micros', { mode: 'number' }),
+    /** Rollup of its sessions' spend, in micro-dollars. */
+    spentMicros: bigint('spent_micros', { mode: 'number' }).notNull().default(0),
+    /** The `core_events.id` of the `plan_opened` that projected this. */
+    openedByEventId: text('opened_by_event_id'),
+    /** The `core_events.id` of the `plan_settled`, once it has settled. */
+    settledByEventId: text('settled_by_event_id'),
+    createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
+    updatedAt: timestamp('updated_at', { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [
+    index('plans_room_status_idx').on(t.roomId, t.status),
+    index('plans_agent_idx').on(t.agentUserId),
+    /** The composite-FK target a session's parent edge lands on. */
+    uniqueIndex('plans_room_id_key').on(t.roomId, t.id),
+  ],
+);
+
+/**
+ * A session — a process projected from `session_opened` / `session_settled` /
+ * `session_failed`. Own context and spend, any harness; it settles or fails to
+ * a receipt and it **never spawns** (§4, §9).
+ *
+ * ## The pstree invariant, by construction (#114, four ways)
+ *
+ *  1. `plan_id` is NOT NULL and its `(room_id, plan_id)` composite FK lands on
+ *     `plans(room_id, id)` — so a session has **exactly one** parent, in the
+ *     **same room**. One parent, one room, enforced.
+ *  2. **There is no `parent_session_id` column here, or anywhere.** A session
+ *     cannot be another session's parent because there is no FK by which it
+ *     could be — you cannot violate a constraint that does not exist (#111's
+ *     strongest form). Depth is fixed at agent → plan → session because those
+ *     are the only parent FKs that exist.
+ *
+ * `sessions.status` / `exit_summary` / `spend_micros` are the session-EXIT
+ * receipt — process state, **non-epistemic (#114 T3)**. A `session_settled` or
+ * `session_failed` writes only these; it touches no `accepted_objects`
+ * judgement column and so can never flip a `~` to a `✓`.
+ */
+export const sessions = pgTable(
+  'sessions',
+  {
+    id: uuid('id').primaryKey().defaultRandom(),
+    roomId: uuid('room_id')
+      .notNull()
+      .references(() => rooms.id, { onDelete: 'cascade' }),
+    /** The plan that is this session's one parent. NOT NULL — see the table doc. */
+    planId: uuid('plan_id').notNull(),
+    /** This session's harness process. */
+    harness: text('harness').notNull(),
+    /** The model it runs. */
+    model: text('model').notNull(),
+    status: sessionStatus('status').notNull().default('open'),
+    /** Its own context-window fill, 0..1. Never aggregated (§9.2). Nullable. */
+    contextPct: real('context_pct'),
+    /** Its own spend, in micro-dollars. */
+    spendMicros: bigint('spend_micros', { mode: 'number' }).notNull().default(0),
+    /** The session's exit receipt prose, once it settles or fails. */
+    exitSummary: text('exit_summary'),
+    /** The `core_events.id` of the `session_opened` that projected this. */
+    openedByEventId: text('opened_by_event_id'),
+    /** The `core_events.id` of the settling/failing event, once it exits. */
+    settledByEventId: text('settled_by_event_id'),
+    createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
+    updatedAt: timestamp('updated_at', { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [
+    index('sessions_plan_idx').on(t.planId),
+    index('sessions_room_status_idx').on(t.roomId, t.status),
+    /** The composite-FK target for provenance edges (`accepted_objects`/`proposals`). */
+    uniqueIndex('sessions_room_id_key').on(t.roomId, t.id),
+    /**
+     * The one parent, in the same room. `plan_id` NOT NULL above makes it exactly
+     * one; this composite FK makes it the same room's plan. There is no second
+     * parent FK and no `parent_session_id`, so this is the whole of a session's
+     * upward edge — agent → plan → session, and nothing deeper.
+     */
+    foreignKey({
+      name: 'sessions_plan_same_room_fk',
+      columns: [t.roomId, t.planId],
+      foreignColumns: [plans.roomId, plans.id],
+    }).onDelete('cascade'),
+  ],
+);
+
 /* ── proposals (pre-acceptance staging) ─────────────────────────────────── */
 
 export const proposals = pgTable(
@@ -1140,6 +1374,14 @@ export const proposals = pgTable(
      */
     quote: text('quote'),
     status: proposalStatus('status').notNull().default('proposed'),
+    /**
+     * Which session staged this reading, when a session did (#116; the proposal
+     * half of #114 T3's session→drafted index). Nullable and null in practice
+     * until #117 gives `proposer_kind` an agent/session value — a session cannot
+     * DRAFT yet, and `draftToProposal` refuses an agent session outright. Kept
+     * composite `(room_id, session_id)` so the provenance cannot cross a room.
+     */
+    sessionId: uuid('session_id'),
     decidedBy: uuid('decided_by').references(() => users.id, { onDelete: 'set null' }),
     decidedAt: timestamp('decided_at', { withTimezone: true }),
     rejectedReason: text('rejected_reason'),
@@ -1147,6 +1389,11 @@ export const proposals = pgTable(
   },
   (t) => [
     index('proposals_room_status_idx').on(t.roomId, t.status),
+    foreignKey({
+      name: 'proposals_session_same_room_fk',
+      columns: [t.roomId, t.sessionId],
+      foreignColumns: [sessions.roomId, sessions.id],
+    }),
     /** Composite-FK target — an object may only be accepted from its own room's proposal. */
     uniqueIndex('proposals_room_id_key').on(t.roomId, t.id),
     check('proposals_confidence_range', sql`${t.confidence} >= 0 AND ${t.confidence} <= 1`),
@@ -1221,6 +1468,17 @@ export const acceptedObjects = pgTable(
     objectiveId: uuid('objective_id'),
     /** The proposal this was accepted from, when it came through interpretation. */
     proposalId: uuid('proposal_id'),
+    /**
+     * Which session drafted this, when a session did (#116, from #114 T3's
+     * roll-up: a session → drafted-objects index). Nullable and — for now —
+     * always null: a session cannot yet DRAFT, because `proposer_kind` has no
+     * agent/session value (that is #117, deliberately deferred). The column
+     * exists so the provenance edge is in the schema the day #117 lands, and it
+     * is composite `(room_id, session_id)` so a fact can never point at a session
+     * from another room. It is provenance only — it carries no judgement and
+     * flipping it moves no `~` to a `✓`.
+     */
+    sessionId: uuid('session_id'),
     /** Bumped by every correction; cheap optimistic-concurrency token. */
     revision: integer('revision').notNull().default(0),
     /** Set by a `retract` correction — the row is never deleted. */
@@ -1288,6 +1546,13 @@ export const acceptedObjects = pgTable(
       name: 'accepted_objects_proposal_same_room_fk',
       columns: [t.roomId, t.proposalId],
       foreignColumns: [proposals.roomId, proposals.id],
+    }),
+    /** Composite, like every other reference out of this row: a drafting session
+     * belongs to the same room as the object it drafted. */
+    foreignKey({
+      name: 'accepted_objects_session_same_room_fk',
+      columns: [t.roomId, t.sessionId],
+      foreignColumns: [sessions.roomId, sessions.id],
     }),
   ],
 );
@@ -1602,6 +1867,12 @@ export type AttentionItemRow = typeof attentionItems.$inferSelect;
 export type NewAttentionItemRow = typeof attentionItems.$inferInsert;
 export type CorrectionRow = typeof corrections.$inferSelect;
 export type NewCorrectionRow = typeof corrections.$inferInsert;
+export type AgentRow = typeof agents.$inferSelect;
+export type NewAgentRow = typeof agents.$inferInsert;
+export type PlanRow = typeof plans.$inferSelect;
+export type NewPlanRow = typeof plans.$inferInsert;
+export type SessionRow = typeof sessions.$inferSelect;
+export type NewSessionRow = typeof sessions.$inferInsert;
 
 /**
  * Compile-time proof that the Postgres enums and the @atrium/core zod enums

@@ -13,8 +13,10 @@ import {
   messages,
   objectRelations,
   objectSources,
+  plans,
   proposalSources,
   proposals,
+  sessions,
   attachments as storedAttachments,
 } from '@atrium/db/schema';
 import { and, eq } from 'drizzle-orm';
@@ -91,6 +93,18 @@ export async function projectRoomEvent(
       return projectRelationAdded(context, event);
     case 'attention_resolved':
       return projectAttentionResolved(context, event);
+    case 'plan_opened':
+      return projectPlanOpened(context, event);
+    case 'plan_settled':
+      return projectPlanSettled(context, event);
+    case 'session_opened':
+      return projectSessionOpened(context, event);
+    case 'session_settled':
+      return projectSessionSettled(context, event);
+    case 'session_failed':
+      return projectSessionFailed(context, event);
+    case 'signal_raised':
+      return projectSignalRaised(context, event);
     default: {
       const exhaustive: never = event;
       throw new Error(`no projection for event ${JSON.stringify(exhaustive)}`);
@@ -596,4 +610,136 @@ async function projectAttentionResolved(
       `no pending attention item "${event.attentionId}" for this actor in room "${roomId}"`,
     );
   }
+}
+
+/* ── the agent/plan/session lifecycle projections (#116) ─────────────────────
+ *
+ * These six mirror `projectMessagePosted`: a ledger-only event the reducer never
+ * folds, projected straight from its own payload into a read table. There is no
+ * `after`/`before` diff to consult, because `isCoreEvent` is false for all six
+ * and so `before === after` — nothing folded them. The `plans` and `sessions`
+ * tables ARE the state; the projection is the only writer of it.
+ *
+ * The pstree invariant is not re-checked here — it is the schema's job, four
+ * ways (composite FKs, the missing parent column, the room and kind triggers),
+ * and duplicating it in application code would be a second opinion that could
+ * drift. A projection that violates it aborts the transaction on the constraint,
+ * exactly as every other projection in this file does. And nothing here writes a
+ * judgement column: a session settling or failing touches only its `sessions`
+ * row, so the covenant's `~`→`✓` is out of reach by construction (#114 T3).
+ * ─────────────────────────────────────────────────────────────────────────── */
+
+async function projectPlanOpened(
+  { tx, roomId, event: { id } }: ProjectionContext<RoomEvent>,
+  event: EventOf<'plan_opened'>,
+): Promise<void> {
+  await tx.insert(plans).values({
+    id: event.planId,
+    roomId,
+    agentUserId: event.agentUserId,
+    title: event.title,
+    status: 'open',
+    budgetLimitMicros: event.budgetLimitMicros,
+    openedByEventId: id,
+    createdAt: new Date(event.at),
+    updatedAt: new Date(event.at),
+  });
+}
+
+async function projectPlanSettled(
+  { tx, roomId, event: { id } }: ProjectionContext<RoomEvent>,
+  event: EventOf<'plan_settled'>,
+): Promise<void> {
+  await tx
+    .update(plans)
+    .set({ status: 'settled', settledByEventId: id, updatedAt: new Date(event.at) })
+    .where(and(eq(plans.id, event.planId), eq(plans.roomId, roomId)));
+}
+
+async function projectSessionOpened(
+  { tx, roomId, event: { id } }: ProjectionContext<RoomEvent>,
+  event: EventOf<'session_opened'>,
+): Promise<void> {
+  // `planId` lands on the `sessions_plan_same_room_fk` composite FK: a parent
+  // in another room, or no such plan, aborts here. One parent, one room, by DDL.
+  await tx.insert(sessions).values({
+    id: event.sessionId,
+    roomId,
+    planId: event.planId,
+    harness: event.harness,
+    model: event.model,
+    status: 'open',
+    openedByEventId: id,
+    createdAt: new Date(event.at),
+    updatedAt: new Date(event.at),
+  });
+}
+
+/**
+ * The one writer of a session's exit receipt, for both spellings of it. Writes
+ * `sessions.status/exit_summary/spend_micros/context_pct` and NOTHING else —
+ * the non-epistemic half of #114's two receipts. There is no `accepted_objects`
+ * statement anywhere in this function, which is what makes "a session settling
+ * flips no `~`" true by construction rather than by a guard.
+ */
+async function projectSessionExit(
+  tx: Tx,
+  roomId: string,
+  eventId: string,
+  event: EventOf<'session_settled'> | EventOf<'session_failed'>,
+  status: 'settled' | 'failed',
+): Promise<void> {
+  await tx
+    .update(sessions)
+    .set({
+      status,
+      exitSummary: event.exitSummary,
+      spendMicros: event.spendMicros ?? 0,
+      contextPct: event.contextPct,
+      settledByEventId: eventId,
+      updatedAt: new Date(event.at),
+    })
+    .where(and(eq(sessions.id, event.sessionId), eq(sessions.roomId, roomId)));
+}
+
+async function projectSessionSettled(
+  { tx, roomId, event: { id } }: ProjectionContext<RoomEvent>,
+  event: EventOf<'session_settled'>,
+): Promise<void> {
+  await projectSessionExit(tx, roomId, id, event, 'settled');
+}
+
+async function projectSessionFailed(
+  { tx, roomId, event: { id } }: ProjectionContext<RoomEvent>,
+  event: EventOf<'session_failed'>,
+): Promise<void> {
+  await projectSessionExit(tx, roomId, id, event, 'failed');
+}
+
+/**
+ * A signal escalates to a participant's attention (#112 reuse). One
+ * `attention_items` row for the named target, pointing at the existing room
+ * subject the signal names — the same shape a mention lands, `onConflictDoNothing`
+ * against the `(user, subject, class)` key so a re-raised signal is idempotent.
+ * The row's composite subject FK refuses a subject from another room; the
+ * `reason` is core's own structured `RationaleReason`, so it renders through
+ * `renderRationale` unchanged.
+ */
+async function projectSignalRaised(
+  { tx, roomId, event: { at } }: ProjectionContext<RoomEvent>,
+  event: EventOf<'signal_raised'>,
+): Promise<void> {
+  await tx
+    .insert(attentionItems)
+    .values({
+      roomId,
+      userId: event.targetUserId,
+      subjectKind: event.subjectKind,
+      subjectId: event.subjectId,
+      class: event.class,
+      reason: event.reason,
+      status: 'pending',
+      createdAt: new Date(at),
+    })
+    .onConflictDoNothing();
 }

@@ -1,4 +1,4 @@
-import { type Database, users } from '@atrium/db';
+import { agents, type Database, users } from '@atrium/db';
 import { makeSignature } from 'better-auth/crypto';
 import { eq } from 'drizzle-orm';
 import type { AtriumAuth } from './auth.js';
@@ -148,6 +148,77 @@ export async function provisionAgentPrincipal(
     displayName: row.displayName,
     principalKind: 'agent',
   };
+}
+
+export interface ProvisionAgentConfigInput {
+  db: Database;
+  /** The agent principal being configured — a `users` row with kind `agent`. */
+  userId: string;
+  /**
+   * The human this agent belongs to. The `agents_owner_is_human` trigger
+   * (drizzle/0021) refuses a non-human here, so "the ownership chain terminates
+   * at a person" is enforced at this INSERT rather than trusted to this caller.
+   */
+  ownerUserId: string;
+  /** The room this agent owns as its channel. */
+  channelRoomId: string;
+  host: string;
+  harness: string;
+  model: string;
+  /** The agent's budget root, in micro-dollars. Omit or null for no cap. */
+  budgetLimitMicros?: number | null;
+}
+
+export interface AgentConfig {
+  userId: string;
+  ownerUserId: string;
+  channelRoomId: string;
+  host: string;
+  harness: string;
+  model: string;
+  budgetLimitMicros: number | null;
+}
+
+/**
+ * Write an agent's config sidecar (#116), alongside `provisionAgentPrincipal`.
+ *
+ * A separate function rather than a limb of `provisionAgentPrincipal` for the
+ * same reason membership is separate there: an identity, its ownership and its
+ * channel are different decisions, and one that provisions all three at once
+ * hides the moment each is made. The identity is minted first (the `users` row,
+ * kind `agent`); this attaches the config once the owner and the channel room
+ * exist.
+ *
+ * The two kind rules — owner is a human, subject is an agent — are NOT checked
+ * here. They are triggers on the table (drizzle/0021), read off the referenced
+ * rows' immutable `principal_kind`, so a caller cannot assert its way past them
+ * and there is no second copy of the rule in this file to drift from the first.
+ * This function's job is to state the config; the database's job is to refuse a
+ * config that would break the chain.
+ */
+export async function provisionAgentConfig(input: ProvisionAgentConfigInput): Promise<AgentConfig> {
+  const [row] = await input.db
+    .insert(agents)
+    .values({
+      userId: input.userId,
+      ownerUserId: input.ownerUserId,
+      channelRoomId: input.channelRoomId,
+      host: input.host,
+      harness: input.harness,
+      model: input.model,
+      budgetLimitMicros: input.budgetLimitMicros ?? null,
+    })
+    .returning({
+      userId: agents.userId,
+      ownerUserId: agents.ownerUserId,
+      channelRoomId: agents.channelRoomId,
+      host: agents.host,
+      harness: agents.harness,
+      model: agents.model,
+      budgetLimitMicros: agents.budgetLimitMicros,
+    });
+  if (!row) throw new Error('provisionAgentConfig: insert returned no row');
+  return row;
 }
 
 /** A real Better Auth session, plus the cookie header that presents it. */

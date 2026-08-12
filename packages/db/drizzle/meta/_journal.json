@@ -148,6 +148,27 @@
       "when": 1786358400005,
       "tag": "0020_mention_register",
       "breakpoints": true
+    },
+    {
+      "idx": 21,
+      "version": "7",
+      "when": 1786358400006,
+      "tag": "0021_agent_config_sidecar",
+      "breakpoints": true
+    },
+    {
+      "idx": 22,
+      "version": "7",
+      "when": 1786358400007,
+      "tag": "0022_plan_and_session_projections",
+      "breakpoints": true
+    },
+    {
+      "idx": 23,
+      "version": "7",
+      "when": 1786358400008,
+      "tag": "0023_lifecycle_ledger_events",
+      "breakpoints": true
     }
   ]
 }

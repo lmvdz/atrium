@@ -1,11 +1,13 @@
 import type { Actor, CoreEvent, CoreEventType, TrustedContext } from '@atrium/core';
 import {
+  AttentionClass,
   Id,
   ObjectAccepted,
   ObjectCorrected,
   ProposalRecorded,
   ProposalRejected,
   ProposalSuperseded,
+  RationaleReason,
   RelationAdded,
   Timestamp,
 } from '@atrium/core';
@@ -102,6 +104,122 @@ export const AttentionResolved = z.object({
 });
 export type AttentionResolved = z.infer<typeof AttentionResolved>;
 
+/* ─────────────────────────────────────────────────────────────────────────
+ * The agent/plan/session lifecycle — six more ledger-only kinds (#116)
+ *
+ * These live HERE, not in `@atrium/core`'s `events.ts`, and that placement is
+ * the load-bearing part: they must never join `CoreEvent`. The covenant reducer
+ * folds six kinds and grows no concept of a plan or a session; these ride the
+ * ledger for a `room_seq` and an append order, and `projections.ts` turns them
+ * into rows in `plans` / `sessions` / `attention_items`. `isCoreEvent` returns
+ * false for every one (they are not in `coreEventTypes`), so folding a room's
+ * core-typed subsequence is identical with them present or absent — which is the
+ * flip-the-input proof that the covenant is untouched.
+ *
+ * Every one carries a top-level `roomId`, the same shape `message_posted` has,
+ * so `core_events_payload_room_matches` (extended in drizzle/0023) accepts them
+ * and `declaredRoomId` reads their room straight off the payload.
+ * ───────────────────────────────────────────────────────────────────────── */
+
+const Micros = z.number().int().nonnegative().nullable().default(null);
+
+/** A plan opened — a board created for an agent's work in its channel. */
+export const PlanOpened = z.object({
+  ...eventBase,
+  type: z.literal('plan_opened'),
+  roomId: Id,
+  planId: Id,
+  /** The agent whose work this plan groups — a `users` id of an agent principal. */
+  agentUserId: Id,
+  title: z.string().min(1).max(200),
+  /** The plan's rlimit slice, in micro-dollars. Placeholder (#115 owns enforcement). */
+  budgetLimitMicros: Micros,
+});
+export type PlanOpened = z.infer<typeof PlanOpened>;
+
+/** A plan settled — its receipt is written; it indexes its sessions' receipts. */
+export const PlanSettled = z.object({
+  ...eventBase,
+  type: z.literal('plan_settled'),
+  roomId: Id,
+  planId: Id,
+});
+export type PlanSettled = z.infer<typeof PlanSettled>;
+
+/**
+ * A session opened under a plan. `planId` is the session's ONE parent — the
+ * pstree edge, enforced by the schema's composite FK. There is no
+ * `parentSessionId` field here, deliberately: a session never spawns, and the
+ * payload has no place to say it did.
+ */
+export const SessionOpened = z.object({
+  ...eventBase,
+  type: z.literal('session_opened'),
+  roomId: Id,
+  sessionId: Id,
+  planId: Id,
+  harness: z.string().min(1).max(120),
+  model: z.string().min(1).max(120),
+});
+export type SessionOpened = z.infer<typeof SessionOpened>;
+
+/** The two spellings of an exit receipt (§9.5). Both non-epistemic (#114 T3). */
+const sessionExit = {
+  roomId: Id,
+  sessionId: Id,
+  /** The exit receipt prose. */
+  exitSummary: z.string().max(4000).nullable().default(null),
+  /** Final spend, micro-dollars. */
+  spendMicros: Micros,
+  /** Final context fill, 0..1. */
+  contextPct: z.number().min(0).max(1).nullable().default(null),
+};
+
+/**
+ * A session settled — a clean exit. Writes the session's exit receipt
+ * (`sessions.status/exit_summary/spend`) and NOTHING on `accepted_objects`: a
+ * settle can never flip a `~` to a `✓` (#114 T3), and the projection proves it
+ * by touching only the `sessions` row.
+ */
+export const SessionSettled = z.object({
+  ...eventBase,
+  type: z.literal('session_settled'),
+  ...sessionExit,
+});
+export type SessionSettled = z.infer<typeof SessionSettled>;
+
+/** A session failed — an exit owed attention until triaged. Also non-epistemic. */
+export const SessionFailed = z.object({
+  ...eventBase,
+  type: z.literal('session_failed'),
+  ...sessionExit,
+});
+export type SessionFailed = z.infer<typeof SessionFailed>;
+
+/**
+ * A signal raised — escalation, which reuses attention (#112). It names an
+ * existing room subject (an object, a proposal or a message — the same closed
+ * vocabulary `attention_items` already carries) and a participant to escalate
+ * to, and `projectSignalRaised` writes one `attention_items` row for them. The
+ * `class` and `reason` are `@atrium/core`'s own attention types, validated here
+ * so the wire cannot invent an attention shape core would refuse to render —
+ * and imported as types only, so nothing in core changes. Full signal semantics
+ * beyond this escalation are #115 / the signal build.
+ */
+export const SignalRaised = z.object({
+  ...eventBase,
+  type: z.literal('signal_raised'),
+  roomId: Id,
+  /** The participant this escalates to — a `users` id (`attention_items.user_id`). */
+  targetUserId: Id,
+  /** Which table `subjectId` names — the existing attention subject vocabulary. */
+  subjectKind: z.enum(['object', 'proposal', 'message']),
+  subjectId: Id,
+  class: AttentionClass,
+  reason: RationaleReason,
+});
+export type SignalRaised = z.infer<typeof SignalRaised>;
+
 /** The payload union, before the no-actor guard. */
 const RoomEventVariants = z.discriminatedUnion('type', [
   ProposalRecorded,
@@ -112,6 +230,12 @@ const RoomEventVariants = z.discriminatedUnion('type', [
   RelationAdded,
   MessagePosted,
   AttentionResolved,
+  PlanOpened,
+  PlanSettled,
+  SessionOpened,
+  SessionSettled,
+  SessionFailed,
+  SignalRaised,
 ]);
 
 /**
@@ -183,7 +307,15 @@ export function needsMessageWindow(event: RoomEvent, actor: Actor): boolean {
 }
 
 /** Ledger-only kinds: real history, but nothing the reducer folds. */
-export type ServerEvent = MessagePosted | AttentionResolved;
+export type ServerEvent =
+  | MessagePosted
+  | AttentionResolved
+  | PlanOpened
+  | PlanSettled
+  | SessionOpened
+  | SessionSettled
+  | SessionFailed
+  | SignalRaised;
 
 /** True when @atrium/core's `reduce` consumes this event. */
 export function isCoreEvent(event: RoomEvent): event is CoreEvent {
@@ -216,6 +348,12 @@ export function declaredRoomId(event: RoomEvent): string | null {
       return event.relation.roomId;
     case 'message_posted':
     case 'attention_resolved':
+    case 'plan_opened':
+    case 'plan_settled':
+    case 'session_opened':
+    case 'session_settled':
+    case 'session_failed':
+    case 'signal_raised':
       return event.roomId;
     case 'proposal_rejected':
     case 'proposal_superseded':

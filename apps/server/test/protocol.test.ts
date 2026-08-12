@@ -89,6 +89,70 @@ describe('the ledger event union', () => {
     expect(forgedCore.success).toBe(false);
   });
 
+  /**
+   * The six agent/plan/session lifecycle kinds are ledger-only (#116). This is
+   * the unit half of "the covenant reducer is untouched": every one parses as a
+   * `RoomEvent`, every one is `isCoreEvent === false`, and NONE is in
+   * `coreEventTypes` — so folding a room's core-typed subsequence is byte-for-byte
+   * identical whether they are present or absent. `coreEventTypes` staying six is
+   * the whole claim; the `folds exactly six` test above pins the count, and this
+   * pins that the new kinds did not sneak into it.
+   *
+   * Catches: adding any of the six to `coreEventTypeSet`/`coreEventTypes`, which
+   * would make the reducer try to fold a plan and `CoreState` grow a concept of
+   * one — the exact thing #114's resolution forbids.
+   */
+  it('treats the six lifecycle kinds as ledger-only, out of the covenant fold', () => {
+    const samples: Array<[string, Record<string, unknown>]> = [
+      ['plan_opened', { planId: 'p1', agentUserId: 'a1', title: 'work' }],
+      ['plan_settled', { planId: 'p1' }],
+      ['session_opened', { sessionId: 's1', planId: 'p1', harness: 'claude', model: 'opus' }],
+      ['session_settled', { sessionId: 's1' }],
+      ['session_failed', { sessionId: 's1' }],
+      [
+        'signal_raised',
+        {
+          targetUserId: 'u1',
+          subjectKind: 'message',
+          subjectId: 'm1',
+          class: 'blocking_question',
+          reason: { kind: 'question_names_you', question: 'which cutover?' },
+        },
+      ],
+    ];
+    for (const [type, extra] of samples) {
+      const event = RoomEvent.parse({ id: `e-${type}`, at, type, roomId: 'r1', ...extra });
+      expect(isCoreEvent(event), type).toBe(false);
+      expect(declaredRoomId(event), type).toBe('r1');
+      expect((coreEventTypes as readonly string[]).includes(type), type).toBe(false);
+    }
+    // The count is unchanged: the covenant still folds exactly six.
+    expect(coreEventTypes).toHaveLength(6);
+  });
+
+  /**
+   * The ledger's no-actor guard covers the lifecycle kinds too (#116, #21's
+   * contract). They never reach `CoreEvent.parse`, so without `RoomEvent`'s own
+   * `superRefine` a `plan_opened` could smuggle an `actor` key into the payload —
+   * and the table's `core_events_payload_has_no_actor` check would then refuse it
+   * three inferences from the cause. Refused here, at the schema, instead.
+   */
+  it('refuses an actor in a lifecycle payload', () => {
+    const forged = RoomEvent.safeParse({
+      id: 'e1',
+      at,
+      actor: { kind: 'agent', userId: 'a1' },
+      type: 'session_opened',
+      roomId: 'r1',
+      sessionId: 's1',
+      planId: 'p1',
+      harness: 'claude',
+      model: 'opus',
+    });
+    expect(forged.success).toBe(false);
+    expect(forged.error?.issues.some((issue) => issue.path[0] === 'actor')).toBe(true);
+  });
+
   it('refuses presence — it is not a kind of event at all (#14)', () => {
     expect(
       RoomEvent.safeParse({ id: 'e1', at, type: 'presence_changed', roomId: 'r1' }).success,
@@ -152,6 +216,12 @@ describe('ClientFrame', () => {
       'reject_proposal',
       'set_typing',
       'advance_seen',
+      // The agent/plan/session lifecycle verbs (#116).
+      'open_plan',
+      'settle_plan',
+      'open_session',
+      'settle_session',
+      'raise_signal',
     ];
     const declared = Command.options.map((option) => option.shape.name.value);
     expect([...declared].sort()).toEqual([...names].sort());

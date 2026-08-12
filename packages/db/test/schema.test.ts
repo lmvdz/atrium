@@ -234,7 +234,7 @@ describe('the durable ledger (issue #22)', () => {
     expect(eventType.enumValues).not.toContain('typing');
   });
 
-  it('splits the enum into the reducer’s six and the ledger-only two', () => {
+  it('splits the enum into the reducer’s six and the ledger-only rest', () => {
     // Pinned by value on both sides, because the direction that bites is the
     // one a `satisfies` cannot express: a seventh core type added to
     // @atrium/core and forgotten here compiles, is classified as ledger-only,
@@ -249,8 +249,22 @@ describe('the durable ledger (issue #22)', () => {
       'object_corrected',
       'relation_added',
     ]);
+    // The ledger-only set is `message_posted`/`attention_resolved` plus the six
+    // agent/plan/session lifecycle kinds (#116). Every one is in the enum and
+    // NONE is a core type — which is the schema half of "the covenant reducer is
+    // untouched": adding any of the six to `coreEventTypeSet` would move it out
+    // of this list and into the fold, and this pins that it did not.
     const ledgerOnly = eventType.enumValues.filter((v) => !isCoreEventType(v));
-    expect(ledgerOnly).toEqual(['message_posted', 'attention_resolved']);
+    expect(ledgerOnly).toEqual([
+      'message_posted',
+      'attention_resolved',
+      'plan_opened',
+      'plan_settled',
+      'session_opened',
+      'session_settled',
+      'session_failed',
+      'signal_raised',
+    ]);
   });
 
   it('carries the trusted actor as two columns, and no actor in the payload', () => {

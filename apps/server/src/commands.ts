@@ -4,6 +4,7 @@ import {
   type AcceptedObject,
   AcceptedObjectType,
   type Actor,
+  AttentionClass,
   ClaimPayload,
   CommitmentPayload,
   CorrectionAction,
@@ -17,6 +18,7 @@ import {
   type Proposal,
   Provenance,
   parseSemanticCommand,
+  RationaleReason,
   type Relation,
 } from '@atrium/core';
 import type { Database } from '@atrium/db';
@@ -320,6 +322,52 @@ export const Command = z.discriminatedUnion('name', [
   z.object({ name: z.literal('set_presence'), roomId: Id, state: PresenceState }),
   z.object({ name: z.literal('set_typing'), roomId: Id, typing: z.boolean() }),
   z.object({ name: z.literal('advance_seen'), roomId: Id, roomSeq: z.number().int().min(0) }),
+
+  // ── the agent/plan/session lifecycle (#116) ───────────────────────────────
+  //
+  // Five verbs producing the six ledger-only lifecycle events. They are `open`
+  // in `certificationClassOf` — process operations, not covenant certifications:
+  // opening or settling a plan/session and raising a signal put no word on the
+  // room's record, and settling a session is explicitly non-epistemic (#114 T3).
+  // So they are refused to no member, agent or person. This is the trunk: a
+  // session cannot yet DRAFT (that is #117), so nothing here mints a `~`.
+  z.object({
+    name: z.literal('open_plan'),
+    roomId: Id,
+    /** The agent whose channel this room is — a `users` id of an agent principal. */
+    agentUserId: Id,
+    title: z.string().min(1).max(200),
+    budgetLimitMicros: z.number().int().nonnegative().nullable().default(null),
+  }),
+  z.object({ name: z.literal('settle_plan'), roomId: Id, planId: Id }),
+  z.object({
+    name: z.literal('open_session'),
+    roomId: Id,
+    /** The plan that is this session's ONE parent (the pstree edge). */
+    planId: Id,
+    harness: z.string().min(1).max(120),
+    model: z.string().min(1).max(120),
+  }),
+  z.object({
+    name: z.literal('settle_session'),
+    roomId: Id,
+    sessionId: Id,
+    /** Which exit this is — a clean settle or a failure owed triage (§9.5). */
+    outcome: z.enum(['settled', 'failed']),
+    exitSummary: z.string().max(4000).nullable().default(null),
+    spendMicros: z.number().int().nonnegative().nullable().default(null),
+    contextPct: z.number().min(0).max(1).nullable().default(null),
+  }),
+  z.object({
+    name: z.literal('raise_signal'),
+    roomId: Id,
+    /** Whom to escalate to — a participant `users` id. */
+    targetUserId: Id,
+    subjectKind: z.enum(['object', 'proposal', 'message']),
+    subjectId: Id,
+    class: AttentionClass,
+    reason: RationaleReason,
+  }),
 ]);
 export type Command = z.infer<typeof Command>;
 
@@ -418,6 +466,15 @@ export function certificationClassOf(name: CommandName): CertificationClass {
     case 'set_presence':
     case 'set_typing':
     case 'advance_seen':
+    // The lifecycle verbs (#116). Participation, not certification: none of them
+    // mints or moves a `✓`. A session settling is process state, non-epistemic
+    // by #114 T3 — the loudest reason this row is `open` and not `certifies`. An
+    // agent's loop performs these as itself, which a machine may do.
+    case 'open_plan':
+    case 'settle_plan':
+    case 'open_session':
+    case 'settle_session':
+    case 'raise_signal':
       return 'open';
     default: {
       // A verb nobody has classified is not a verb a machine may perform.
@@ -1327,6 +1384,74 @@ export function createCommandService({
           roomId: command.roomId,
           attentionId: command.attentionId,
           status: command.status,
+        }));
+
+      // ── the agent/plan/session lifecycle (#116) ────────────────────────────
+      //
+      // Each is a single ledger-only event through the same `appendAndProject`
+      // path `resolve_attention` uses. The entity ids for the two `open` verbs
+      // are minted server-side inside the build — like `send_message`'s
+      // `messageId` — and read back off the appended event; the settle/raise
+      // verbs name an existing entity the caller already holds.
+      case 'open_plan':
+        return appendAndProject(session, command.roomId, ({ id, at }) => ({
+          id,
+          at,
+          type: 'plan_opened',
+          roomId: command.roomId,
+          planId: randomUUID(),
+          agentUserId: command.agentUserId,
+          title: command.title,
+          budgetLimitMicros: command.budgetLimitMicros,
+        }));
+
+      case 'settle_plan':
+        return appendAndProject(session, command.roomId, ({ id, at }) => ({
+          id,
+          at,
+          type: 'plan_settled',
+          roomId: command.roomId,
+          planId: command.planId,
+        }));
+
+      case 'open_session':
+        return appendAndProject(session, command.roomId, ({ id, at }) => ({
+          id,
+          at,
+          type: 'session_opened',
+          roomId: command.roomId,
+          sessionId: randomUUID(),
+          planId: command.planId,
+          harness: command.harness,
+          model: command.model,
+        }));
+
+      case 'settle_session':
+        return appendAndProject(session, command.roomId, ({ id, at }) => ({
+          id,
+          at,
+          // One command, two exit spellings (§9.5): a clean settle or a failure
+          // owed triage. Both are non-epistemic — the projection writes only the
+          // `sessions` row and can flip no `~` to a `✓`.
+          type: command.outcome === 'failed' ? 'session_failed' : 'session_settled',
+          roomId: command.roomId,
+          sessionId: command.sessionId,
+          exitSummary: command.exitSummary,
+          spendMicros: command.spendMicros,
+          contextPct: command.contextPct,
+        }));
+
+      case 'raise_signal':
+        return appendAndProject(session, command.roomId, ({ id, at }) => ({
+          id,
+          at,
+          type: 'signal_raised',
+          roomId: command.roomId,
+          targetUserId: command.targetUserId,
+          subjectKind: command.subjectKind,
+          subjectId: command.subjectId,
+          class: command.class,
+          reason: command.reason,
         }));
 
       // ── ephemeral: broadcast, never appended (#14) ─────────────────────────

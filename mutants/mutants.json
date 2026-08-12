@@ -833,8 +833,8 @@
       "kind": "file",
       "why": "The drizzle event_type enum grows a value the database does not have. _CoreEventTypeCoverage asserts only that every core event type is in the enum, so this compiles. It pins that a comparison exists at all — and it is honest to say it does not discriminate r7 from r6, because r6 compared Object.keys(OWN_KEY) against eventType.enumValues and this trips that too. The direction r7 added is the database growing a kind TypeScript has not heard of, which cannot be a mutant at all: ALTER TYPE ... ADD VALUE is irreversible, so it would leak a ninth kind into every later file in the run. That half is verified by hand and the test says so.",
       "file": "packages/db/src/schema.ts",
-      "find": "  'message_posted',\n  'attention_resolved',\n]);",
-      "replace": "  'message_posted',\n  'attention_resolved',\n  'ninth_kind',\n]);",
+      "find": "  'signal_raised',\n]);",
+      "replace": "  'signal_raised',\n  'ninth_kind',\n]);",
       "catches": ["takes its list of kinds from the deployed enum, not from a TypeScript constant"]
     },
     {
@@ -1298,6 +1298,49 @@
       "find": "            if (!isHuman(actorOf(session))) {\n              const confirmed = epistemicStateOf(retired) === 'confirmed';",
       "replace": "            if (!isHuman(actorOf(session)) && epistemicStateOf(retired) !== 'confirmed') {\n              const confirmed = epistemicStateOf(retired) === 'confirmed';",
       "catches": ["refuses an agent’s supersession of a human-accepted claim, and the claim stands"]
+    },
+    {
+      "id": "agents_owner_is_human_trigger_dropped",
+      "suite": "integration",
+      "kind": "sql",
+      "why": "#116's init anchor removed. Dropping agents_owner_is_human lets an agents row name a non-human owner, so the ownership chain no longer terminates at a person by schema — the exact claim #114 makes and #116 builds. The trigger function is left in place; only the binding is dropped and re-created from 0021, so the restore re-deploys the shipped definition rather than a copied one.",
+      "apply": "DROP TRIGGER \"agents_owner_is_human\" ON public.agents",
+      "restoreFrom": ["CREATE TRIGGER \"agents_owner_is_human\""],
+      "restoreMigration": "0021_agent_config_sidecar.sql",
+      "catches": ["REFUSES an agents row whose owner is not a human"]
+    },
+    {
+      "id": "agents_user_is_agent_trigger_dropped",
+      "suite": "integration",
+      "kind": "sql",
+      "why": "The other half of #116's kind pair removed. Dropping agents_user_is_agent lets a person's uuid hold agent config, blurring the human/agent line the covenant's isHuman gates rest on (#90). Trigger binding dropped and re-created from 0021.",
+      "apply": "DROP TRIGGER \"agents_user_is_agent\" ON public.agents",
+      "restoreFrom": ["CREATE TRIGGER \"agents_user_is_agent\""],
+      "restoreMigration": "0021_agent_config_sidecar.sql",
+      "catches": ["REFUSES an agents row whose user is not an agent"]
+    },
+    {
+      "id": "plans_room_matches_agent_channel_trigger_dropped",
+      "suite": "integration",
+      "kind": "sql",
+      "why": "Way 3 of the pstree invariant removed (#116). Dropping plans_room_matches_agent_channel lets an agent open a plan in a room that is not its channel, so a plan is no longer agent-scoped in the channel the agent owns. Trigger binding dropped and re-created from 0022.",
+      "apply": "DROP TRIGGER \"plans_room_matches_agent_channel\" ON public.plans",
+      "restoreFrom": ["CREATE TRIGGER \"plans_room_matches_agent_channel\""],
+      "restoreMigration": "0022_plan_and_session_projections.sql",
+      "catches": ["REFUSES a plan whose room is not its agent's channel"]
+    },
+    {
+      "id": "sessions_plan_same_room_fk_dropped",
+      "suite": "integration",
+      "kind": "sql",
+      "why": "Way 1 of the pstree invariant removed (#116). Dropping the (room_id, plan_id) composite FK lets a session point at a plan that does not exist or lives in another room — the 'exactly one parent, same room' guarantee gone. The unique index it targeted (plans_room_id_key) is left in place; the constraint is dropped and re-added from 0022.",
+      "apply": "ALTER TABLE public.sessions DROP CONSTRAINT sessions_plan_same_room_fk",
+      "restoreFrom": ["ALTER TABLE \"sessions\" ADD CONSTRAINT \"sessions_plan_same_room_fk\""],
+      "restoreMigration": "0022_plan_and_session_projections.sql",
+      "catches": [
+        "REFUSES a session whose plan does not exist",
+        "REFUSES a session whose plan lives in another room"
+      ]
     }
   ]
 }
