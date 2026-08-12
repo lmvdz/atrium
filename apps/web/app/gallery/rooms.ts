@@ -60,10 +60,6 @@ import {
 } from '../../src/components/model';
 import * as f from './fixtures';
 
-/** Room-head member chips for a list of people — the gallery's rooms are human. */
-const people = (...names: readonly string[]): RoomHeadRecord['members'] =>
-  names.map((name) => ({ name, kind: 'human' as const }));
-
 const ACCEPTED = {
   kind: 'decision',
   verification: 'accepted',
@@ -179,7 +175,9 @@ export interface FeedOptions {
  */
 interface RoomView {
   readonly id: string;
-  readonly room: RoomHeadRecord;
+  /** name + topic only — the head's member chips derive from `participants` in
+   *  `RoomFrame`, so a room is never a second member register. */
+  readonly room: Omit<RoomHeadRecord, 'members'>;
   readonly objectives: readonly ObjectiveRecord[];
   readonly objects: readonly StateObject[];
   readonly attention: readonly AttentionItem[];
@@ -292,7 +290,6 @@ const VIEWS: Readonly<Record<string, RoomView>> = {
     room: {
       name: 'identity-service',
       topic: 'own the signing key and the session lifecycle for every service',
-      members: people('priya', 'dana', 'lars'),
     },
     objectives: [
       { id: 'io1', title: 'Rotate the signing key safely', status: 'active', open: true },
@@ -316,7 +313,6 @@ const VIEWS: Readonly<Record<string, RoomView>> = {
     room: {
       name: 'platform',
       topic: 'the substrate everything else runs on — clusters, images, build times',
-      members: people('mateo', 'justin', 'lars'),
     },
     objectives: [
       { id: 'po1', title: 'Keep the fleet on a supported version', status: 'active', open: true },
@@ -338,7 +334,6 @@ const VIEWS: Readonly<Record<string, RoomView>> = {
     room: {
       name: 'design',
       topic: 'the shared grammar — glyphs, density, and what a claim may look like',
-      members: people('lars', 'mateo'),
     },
     objectives: [
       { id: 'do1', title: 'Settle the epistemic glyph legend', status: 'active', open: true },
@@ -393,7 +388,9 @@ export const ROOM_IDS: readonly string[] = Object.keys(VIEWS);
 
 export interface SessionView {
   readonly id: string;
-  readonly room: RoomHeadRecord;
+  /** name + topic only — see `RoomView.room`; the head derives its members from
+   *  the participant source, not from a copy carried here. */
+  readonly room: Omit<RoomHeadRecord, 'members'>;
   readonly objectives: readonly ObjectiveRecord[];
   /** the lens's objects, with anything acted on no longer owed */
   readonly objects: readonly StateObject[];

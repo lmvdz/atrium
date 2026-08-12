@@ -101,10 +101,16 @@ export interface MemberSummary {
   /**
    * What the identity IS. An agent member has an `email` — `users.email` is NOT
    * NULL and it is keyed by one — but the address is a non-deliverable
-   * placeholder the deployment owns, so the People list reads the kind and shows
+   * placeholder the deployment owns, so the members list reads the kind and shows
    * the register instead of an address that looks like a way to reach a person.
+   *
+   * `'unknown'` is the fail-closed value: `users.principal_kind` is NOT NULL and
+   * carries only `human`/`agent`, so a row never stores it, but a value neither
+   * `parsePrincipalKind` recognises — a later enum member, a library upgrade that
+   * stops returning the column — becomes `'unknown'` rather than defaulting to
+   * `'human'`, so an unreadable-kind machine is never presented as a person here.
    */
-  principalKind: PrincipalKind;
+  principalKind: PrincipalKind | 'unknown';
   role: string;
 }
 
@@ -124,9 +130,11 @@ export async function listMembers(workspaceId: string): Promise<MemberSummary[]>
     .orderBy(asc(users.displayName));
   return rows.map((row) => ({
     ...row,
-    // An allowlist off the stored column, defaulting to human — a People row is
-    // display, and the gates that must fail closed are elsewhere.
-    principalKind: parsePrincipalKind(row.principalKind) ?? 'human',
+    // An allowlist off the stored column, failing CLOSED to `'unknown'` — not
+    // `'human'`. A members row is display, but "default an unreadable kind to a
+    // person" is the exact fail-open the round-1 gauntlet found one register
+    // over; the honest default here is a value that renders as neither.
+    principalKind: parsePrincipalKind(row.principalKind) ?? 'unknown',
   }));
 }
 

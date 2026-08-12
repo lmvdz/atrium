@@ -324,17 +324,17 @@ export const PARTICIPANTS: readonly ParticipantSummary[] = [
 /** Back-compat alias for callers still naming the roster `HUMANS`. */
 export const HUMANS = PARTICIPANTS;
 
-export const ROOM: RoomHeadRecord = {
+/**
+ * The room head's non-member facts. There is NO `members` array: the head's
+ * chips are derived from `PARTICIPANTS` by `RoomFrame`, so this room and its
+ * roster are one source. A hand-written member list here was the round-1
+ * gauntlet's finding 3 — a parallel copy that flipping a participant's kind did
+ * not move. `Omit<RoomHeadRecord, 'members'>` is what `RoomFrameProps.room`
+ * takes, and it makes the second copy unrepresentable rather than merely absent.
+ */
+export const ROOM: Omit<RoomHeadRecord, 'members'> = {
   name: 'users-migration',
   topic: 'cut auth over to the new users table without dropping a live session',
-  members: [
-    { name: 'lars', kind: 'human' },
-    { name: 'priya', kind: 'human' },
-    { name: 'dana', kind: 'human' },
-    { name: 'justin', kind: 'human' },
-    { name: 'mateo', kind: 'human' },
-    { name: 'atrium', kind: 'agent' },
-  ],
 };
 
 /** All three surfaces are on screen at once; only two of them carry a count. */

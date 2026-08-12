@@ -958,17 +958,23 @@ describe('composition slots', () => {
        `pnpm typecheck` fails if this line ever starts compiling. It renders
        nothing at runtime, which is the second half of the same statement — raw
        markup does not reach the DOM through this prop. */
+    /* `RoomHead` itself still takes a full `RoomHeadRecord` — it is the leaf that
+       paints the member chips. `f.ROOM` is the frame-level `Omit<…, 'members'>`
+       now (the head's members derive from the participant source in `RoomFrame`),
+       so this direct render supplies the members the component still needs. This
+       test is about the surfaces slot, not the roster, so an empty list serves. */
+    const head = { ...f.ROOM, members: [] };
     const raw = render(
       // @ts-expect-error — `surfaces` is a Slot: raw markup does not compile.
-      <RoomHead room={f.ROOM} surfaces={<b data-raw="true">raw</b>} />,
+      <RoomHead room={head} surfaces={<b data-raw="true">raw</b>} />,
     );
     expect(raw.container.querySelector('[data-raw]')).toBeNull();
     cleanup();
-    expect(() => render(<RoomHead room={f.ROOM} surfaces={slot(<q>invented words</q>)} />)).toThrow(
+    expect(() => render(<RoomHead room={head} surfaces={slot(<q>invented words</q>)} />)).toThrow(
       /<q> element/,
     );
     const { container } = render(
-      <RoomHead room={f.ROOM} surfaces={slot(<span data-surfaces="true">CONVERSATION</span>)} />,
+      <RoomHead room={head} surfaces={slot(<span data-surfaces="true">CONVERSATION</span>)} />,
     );
     expect(container.querySelector('[data-surfaces]')?.textContent).toBe('CONVERSATION');
   });

@@ -166,7 +166,11 @@ function data(): ReplayData {
       workspaceName: 'Atrium replay',
       workspaceSlug: 'replay',
     },
-    participants: [{ id: 'alice', name: 'alice', avatarUrl: null }],
+    // A real load selects `users.principal_kind` (NOT NULL), so the fixture
+    // carries one too; `participantKindOf` now fails CLOSED to `'unknown'` for an
+    // absent value rather than defaulting to a person, and this participant is a
+    // person on purpose.
+    participants: [{ id: 'alice', name: 'alice', avatarUrl: null, principalKind: 'human' }],
     messages: [
       {
         id: 'm1',
@@ -288,7 +292,12 @@ describe('persisted replay view', () => {
     expect(view.entries[2]?.type).toBe('message');
     if (view.entries[2]?.type !== 'message') throw new Error('third row is not a message');
     expect(view.entries[2].replyTo?.messageId).toBe('m1');
-    expect(view.room.members).toEqual([{ name: 'alice', kind: 'human' }]);
+    // The head's members are DERIVED from this single participant source now, not
+    // carried a second time on `view.room`; asserting the source is asserting
+    // what the head renders.
+    expect(view.participants.map((p) => ({ name: p.name, kind: p.kind }))).toEqual([
+      { name: 'alice', kind: 'human' },
+    ]);
   });
 
   /**
@@ -599,7 +608,10 @@ describe('persisted replay view', () => {
 
     const view = replayView(snapshot, 'alice');
     expect(view.records[0]?.actor).toBe('author unavailable');
-    expect(view.room.members).toEqual([{ name: 'alice', kind: 'human' }]);
+    // The room head's members derive from this participant source; assert it.
+    expect(view.participants.map((p) => ({ name: p.name, kind: p.kind }))).toEqual([
+      { name: 'alice', kind: 'human' },
+    ]);
   });
 
   /**

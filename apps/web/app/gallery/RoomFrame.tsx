@@ -168,7 +168,16 @@ export interface RoomFrameProps {
    * would be the exemption that undoes it.
    */
   readonly messages: readonly MessageRecord[];
-  readonly room: RoomHeadRecord;
+  /**
+   * The room head's NON-MEMBER facts — its name and topic. The member chips are
+   * NOT a prop: they are derived from `participants` below, so the head and the
+   * roster read one source. Before, `RoomFrame` took `participants[]` AND a
+   * `room.members[]` with a copied name+kind for each, and nothing made them
+   * agree — flip a participant's kind and the roster moved while the head's chip
+   * did not, the round-1 gauntlet's finding 3. `Omit` makes the parallel copy
+   * unrepresentable: a caller cannot hand this frame a second member register.
+   */
+  readonly room: Omit<RoomHeadRecord, 'members'>;
   readonly rooms: readonly RoomSummary[];
   readonly participants: readonly ParticipantSummary[];
   readonly viewer: ParticipantSummary;
@@ -417,13 +426,28 @@ function Frame(props: RoomFrameProps) {
         <WorkspaceYou
           initials={initials(props.viewer.name)}
           key="you"
+          /* The viewer's own kind rides the tile too, so an agent session's "you"
+             monogram matches every other surface instead of always reading as a
+             person. Flipping `viewer.kind` moves this. */
+          kind={props.viewer.kind}
           title={`${systemText(props.viewer.name, 'RoomFrame viewer')} — you`}
         />,
       ])}
       workspace={slot([
         <Fragment key="workspace">
           <RoomHead
-            room={props.room}
+            /* The head's member chips are DERIVED from the one participant source,
+               not handed in beside it. `{...props.room}` carries the name and the
+               topic; the members are mapped from `props.participants`, so the head
+               and the roster cannot disagree and flipping a participant's kind
+               moves the head's chip too. */
+            room={{
+              ...props.room,
+              members: props.participants.map((participant) => ({
+                name: participant.name,
+                kind: participant.kind,
+              })),
+            }}
             settled={
               props.objects.filter((object) =>
                 ['verified', 'accepted'].includes(object.state.verification),
@@ -692,21 +716,28 @@ function CallDock({
             {participants.map((participant, index) => {
               const participantName = systemText(participant.name, 'CallDock participant');
               const isAgent = participant.kind === 'agent';
+              const isUnknown = participant.kind === 'unknown';
+              const kindWord = isAgent ? 'agent' : isUnknown ? 'unknown' : null;
+              const avatarKindClass = isAgent
+                ? ` ${frame.callAvatarAgent}`
+                : isUnknown
+                  ? ` ${frame.callAvatarUnknown}`
+                  : '';
               return (
                 <span
                   aria-label={
-                    isAgent
-                      ? `${participantName} · agent · ${participant.presence}`
-                      : `${participantName} · ${participant.presence}`
+                    kindWord === null
+                      ? `${participantName} · ${participant.presence}`
+                      : `${participantName} · ${kindWord} · ${participant.presence}`
                   }
-                  className={`${frame.callAvatar}${isAgent ? ` ${frame.callAvatarAgent}` : ''} ${
+                  className={`${frame.callAvatar}${avatarKindClass} ${
                     live && index === 0 ? frame.speaking : ''
                   }`}
                   data-live-presence={participant.presence}
                   data-participant-kind={participant.kind}
                   key={participant.id}
                   role="img"
-                  title={isAgent ? `${participantName} — agent` : participantName}
+                  title={kindWord === null ? participantName : `${participantName} — ${kindWord}`}
                 >
                   {initials(participantName)}
                 </span>

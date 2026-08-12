@@ -174,17 +174,21 @@ function ParticipantRow({ participant }: { readonly participant: ParticipantSumm
       : systemText(participant.note ?? '', 'Rail participant note');
   const name = systemText(participant.name, 'Rail participant');
   const isAgent = participant.kind === 'agent';
+  const isUnknown = participant.kind === 'unknown';
   /* The presence word leads the meta line, and the free-text note follows it.
      Composed here rather than left to two adjacent elements, for the same reason
      every other name on this rail is: adjacent spans announce welded.
 
      An agent's line names the kind first — `agent · here` — so the register is
-     read, not inferred from a shape. The presence WORD (`here`/`idle`/`away`) is
-     still present, because an agent that holds a session is here or not the same
-     way a person is, and the audit that checks every row writes its state down
-     reads that word on this row too. */
+     read, not inferred from a shape. An unknown-kind member leads with `unknown`
+     for the same reason and the opposite one: the row must not read as a person,
+     and the word says so where the shape alone would not. The presence WORD
+     (`here`/`idle`/`away`) is still present, because a member that holds a
+     session is here or not the same way a person is, and the audit that checks
+     every row writes its state down reads that word on this row too. */
   const presenceLabel = PRESENCE_LABEL[participant.presence];
-  const kindPrefixed = isAgent ? `agent · ${presenceLabel}` : presenceLabel;
+  const kindWord = isAgent ? 'agent' : isUnknown ? 'unknown' : null;
+  const kindPrefixed = kindWord === null ? presenceLabel : `${kindWord} · ${presenceLabel}`;
   const meta = note === null ? kindPrefixed : `${kindPrefixed} · ${note}`;
   return (
     <div
@@ -199,11 +203,13 @@ function ParticipantRow({ participant }: { readonly participant: ParticipantSumm
           the registry needs a selector that is not a CSS-module hash.
           `presAgent` squares the marker: an agent is a machine holding a session,
           not a person present, and the shape says which without borrowing a hue
-          that already means something else in this grammar. */}
+          that already means something else in this grammar. `presUnknown` is the
+          fail-closed marker — a dashed hollow square, neither the person's dot
+          nor the agent's filled square — for a kind we could not read. */}
       <span
         aria-hidden="true"
         className={`${styles.pres} ${PRESENCE_CLASS[participant.presence]}${
-          isAgent ? ` ${styles.presAgent}` : ''
+          isAgent ? ` ${styles.presAgent}` : isUnknown ? ` ${styles.presUnknown}` : ''
         }`}
         data-presence={participant.presence}
       />

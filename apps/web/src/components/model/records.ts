@@ -95,32 +95,49 @@ export type Presence = 'here' | 'idle' | 'away';
  * library stays free of a database dependency; the single translation from the
  * stored column happens in the two view constructors, where the row is read.
  *
- * Every surface that names a participant reads this field. It is a **presented**
- * discriminant, never an authority one — an unreadable kind renders as a human
- * (the harmless default for a monogram) while the certification gates that must
- * fail closed live server-side, in the reducer, on the `Actor`. The two failures
- * are opposite on purpose: a chip that guesses "human" is a cosmetic miss; a gate
- * that guesses "human" is a machine certifying a person's judgement.
+ * `'unknown'` is the THIRD member, and it is the fail-closed one. It is not a
+ * stored value — `users.principal_kind` is NOT NULL and carries only the first
+ * two — it is what an UNREADABLE kind renders as: a renamed column, a library
+ * upgrade that stops returning the field, an enum value added in a later
+ * migration, a hand-built fixture that forgot to set one. The round-1 gauntlet
+ * found that defaulting those to `'human'` was not a cosmetic miss confined to a
+ * monogram: the same default fed the mention filter (`kind === 'human'`) and the
+ * "N people" count, so an unreadable-kind MACHINE became a mention candidate and
+ * a counted person — which AGENTS.md forbids. So the default is `'unknown'`,
+ * which every surface renders as visibly-not-a-person (a neutral dashed marker
+ * and the word `unknown`, never the round person monogram) and which the
+ * human-only filters exclude by construction, because they allowlist `'human'`
+ * rather than denylisting `'agent'`. A future enum value therefore shows up as
+ * `unknown` on screen — prompting a fix — instead of silently as a person.
+ *
+ * This stays a **presented** discriminant, never an authority one: the
+ * certification gates that must fail closed live server-side, in the reducer, on
+ * the `Actor`, and on `getAtriumSession`. What changed is that this record fails
+ * closed too, in its own register, rather than softening an unreadable machine
+ * into a person.
  */
-export type ParticipantKind = 'human' | 'agent';
+export type ParticipantKind = 'human' | 'agent' | 'unknown';
 
+/** The two kinds an identity actually IS. `'unknown'` is never one of these — it
+ *  is the fail-closed rendering of a value that is neither. */
 const PARTICIPANT_KINDS: readonly string[] = ['human', 'agent'];
 
 /**
- * Read a participant kind off a stored value, defaulting to `'human'`.
+ * Read a participant kind off a stored value, failing CLOSED to `'unknown'`.
  *
  * The browser-safe twin of `@atrium/auth`'s `parsePrincipalKind` — the view
  * layer is bundled for the client and may not import the auth package (it reaches
  * `node:fs` through Better Auth). An **allowlist**: anything that is not exactly
- * `'agent'` or `'human'` — a renamed column, an undefined hand-built fixture — is
- * a person, because this decides a monogram and a monogram that guesses a person
- * is a cosmetic miss. The gate that must fail CLOSED on an unreadable kind is
- * `getAtriumSession`, server-side, on the session — not this record.
+ * `'agent'` or `'human'` — a renamed column, a later enum value, an undefined
+ * hand-built fixture — becomes `'unknown'`, NOT `'human'`. `parsePrincipalKind`
+ * returns `null` for the same inputs and ends the session; this cannot end a
+ * render, so it names the failure instead, and every renderer paints `'unknown'`
+ * as neither a person nor an agent.
  */
 export function participantKindOf(value: unknown): ParticipantKind {
   return typeof value === 'string' && PARTICIPANT_KINDS.includes(value)
     ? (value as ParticipantKind)
-    : 'human';
+    : 'unknown';
 }
 
 /**
@@ -140,17 +157,28 @@ export interface ParticipantSummary {
 
 /**
  * The roster subtitle, counted by kind. Formerly `${n} humans`, a label that
- * called every member a person; it now names people and agents separately, so
- * the count itself moves when a member's kind flips — `5 people` becomes
- * `4 people · 1 agent` the moment one of them becomes an agent. All-human rooms
- * still read as a plain people count; an all-agent room reads as agents alone.
+ * called every member a person; it now names people, agents and unknown-kind
+ * members separately, so the count itself moves when a member's kind flips —
+ * `5 people` becomes `4 people · 1 agent` the moment one of them becomes an
+ * agent. All-human rooms still read as a plain people count.
+ *
+ * An unknown-kind member is counted as `unknown`, NEVER folded into `people`:
+ * that fold is the exact fail-open the round-1 gauntlet found, where an
+ * unreadable-kind machine was counted as a person. `people` is the count of
+ * members whose kind is exactly `'human'`, not "everything that is not an
+ * agent" — an allowlist, so a third kind lands in its own clause instead of the
+ * people one.
  */
 export function participantTally(participants: readonly ParticipantSummary[]): string {
+  const people = participants.filter((participant) => participant.kind === 'human').length;
   const agents = participants.filter((participant) => participant.kind === 'agent').length;
-  const people = participants.length - agents;
+  const unknown = participants.filter((participant) => participant.kind === 'unknown').length;
   const parts: string[] = [];
-  if (people > 0 || agents === 0) parts.push(`${people} ${people === 1 ? 'person' : 'people'}`);
+  if (people > 0 || (agents === 0 && unknown === 0)) {
+    parts.push(`${people} ${people === 1 ? 'person' : 'people'}`);
+  }
   if (agents > 0) parts.push(`${agents} ${agents === 1 ? 'agent' : 'agents'}`);
+  if (unknown > 0) parts.push(`${unknown} unknown`);
   return parts.join(' · ');
 }
 

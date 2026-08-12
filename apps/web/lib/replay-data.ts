@@ -260,9 +260,12 @@ export type ReplayData = Omit<
 > & {
   /**
    * Optional `principalKind` only for hand-built fixtures created before an
-   * identity carried a kind; a real load always selects it. The view
-   * constructor reads it through `parsePrincipalKind`, so an absent value
-   * renders as a person — the harmless default for a monogram, never for a gate.
+   * identity carried a kind; a real load always selects it (the column is NOT
+   * NULL). The view constructor reads it through `participantKindOf`, which fails
+   * CLOSED — an absent or unreadable value renders as `'unknown'` (a neutral
+   * marker, visibly not a person), never silently as a human. So a fixture that
+   * forgets to set a kind shows up as unknown on screen rather than joining the
+   * people count, which is the round-1 gauntlet's finding 1.
    */
   participants: (Omit<LoadedReplayParticipant, 'principalKind'> & {
     readonly principalKind?: LoadedReplayParticipant['principalKind'];

@@ -419,13 +419,15 @@ export function replayView(data: ReplayData, viewerId?: string) {
     note: null,
     isViewer: true,
   };
-  const room: RoomHeadRecord = {
+  /* Name and topic only. The head's member chips are derived from `participants`
+     by `RoomFrame` — one source, read once through `participantKindOf` above —
+     rather than mapped a second time here. Mapping the same rows twice was the
+     round-1 gauntlet's finding 3: two member registers that nothing kept in
+     step. `Omit<RoomHeadRecord, 'members'>` is what the frame's `room` prop
+     takes now, so the second map has nowhere to go. */
+  const room: Omit<RoomHeadRecord, 'members'> = {
     name: data.room.name,
     topic: data.room.workspaceName,
-    members: data.participants.map((person) => ({
-      name: person.name,
-      kind: participantKindOf(person.principalKind),
-    })),
   };
   const rooms: RoomSummary[] = [
     {

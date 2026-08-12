@@ -103,9 +103,13 @@ export default async function WorkspacePage({
         {rooms.length === 0 ? <p className={styles.empty}>No rooms you can see yet.</p> : null}
       </section>
 
-      <section className={styles.section} aria-labelledby="people">
-        <h2 className={styles.sectionTitle} id="people">
-          People
+      <section className={styles.section} aria-labelledby="members">
+        {/* "Members", not "People": a workspace holds people AND agents (and, if a
+            kind is ever unreadable, an unknown-kind member), so the collection
+            heading names the register neutrally rather than calling every row a
+            person while the rows themselves already read their kind. */}
+        <h2 className={styles.sectionTitle} id="members">
+          Members
         </h2>
         <ul className={styles.list} data-testid="member-list">
           {members.map((member) => (
@@ -119,9 +123,11 @@ export default async function WorkspacePage({
                 <span className={styles.rowName}>{member.displayName}</span>
                 {/* An agent's address is a non-deliverable placeholder, so the
                     row names the register instead of an email that reads as a
-                    way to contact a person. */}
+                    way to contact a person — and an unknown-kind member names its
+                    register too, for the same fail-closed reason: only a member
+                    we can read as a person shows a person's address. */}
                 <span className={styles.rowMeta}>
-                  {member.principalKind === 'agent' ? 'agent' : member.email}
+                  {member.principalKind === 'human' ? member.email : member.principalKind}
                 </span>
               </span>
               <span className={styles.roleTag}>{member.role}</span>

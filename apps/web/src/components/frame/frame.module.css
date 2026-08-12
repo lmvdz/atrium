@@ -180,6 +180,21 @@
   color: var(--stx);
 }
 
+/* THE VIEWER'S OWN MONOGRAM CARRIES ITS KIND. The "you" tile was the round
+   person circle for everyone, so an agent session saw itself as a human while
+   the roster, the room head and the count said agent. It reads the kind now, by
+   the same shape-and-tone grammar every other participant surface uses — an
+   agent is a squared tile, an unknown-kind viewer a dashed square, both in the
+   strip's own tokens, no new hue. Defined after `.wsYou` so the radius and
+   border win when a kind class is also applied. */
+.wsYouAgent {
+  border-radius: 5px;
+}
+.wsYouUnknown {
+  border-radius: 5px;
+  border-style: dashed;
+}
+
 .iconbtn {
   /* THE FIFTH, and this one is the theme control. v8 hid it, so the only
      in-product way to switch light and dark was gone while the button stayed in
@@ -382,6 +397,19 @@
   border-radius: 1px;
   background: var(--tx2);
   border: none;
+}
+
+/* THE FAIL-CLOSED MARKER, for a kind we could not read. Neither the person's
+   dot nor the agent's filled square: a dashed hollow square, so a glance reads
+   "not resolved" rather than defaulting to either. Same neutral --tx2 token, no
+   hue. It renders when `participantKindOf` could not match the stored value to
+   `human` or `agent` — a later enum member, a fixture that forgot a kind — and
+   the row's words say `unknown` beside it. Defined after the presence classes so
+   its shape wins when both are applied. */
+.presUnknown {
+  border-radius: 1px;
+  background: transparent;
+  border: 1.5px dashed var(--tx2);
 }
 
 /* A PERSON'S NAME IS NOT CLIPPED HERE ANY MORE. Round 7: its declared route was
@@ -688,6 +716,15 @@
   border-radius: 5px;
   color: var(--tx1);
 }
+/* THE FAIL-CLOSED AVATAR on the call strip. The agent's squared neutral tile
+   with a DASHED rule, so an unreadable kind reads as unresolved rather than
+   borrowing the person's round-and-blue treatment. Same tokens, no hue. */
+.callAvatarUnknown {
+  background: var(--bg6);
+  border: 1px dashed var(--line3);
+  border-radius: 5px;
+  color: var(--tx1);
+}
 .speaking {
   box-shadow: 0 0 0 1.5px var(--grn);
 }
@@ -881,6 +918,16 @@
    words, since a shape is not a name). */
 .faceAgent {
   border-radius: 4px;
+  border-color: var(--line3);
+}
+
+/* THE FAIL-CLOSED MONOGRAM in the room head. The agent's squared chip with a
+   DASHED rule — visibly not the round person chip and visibly not the solid
+   agent one — for a member whose kind we could not read. No hue; the `title`
+   names it `unknown`, since a shape is not a name. */
+.faceUnknown {
+  border-radius: 4px;
+  border-style: dashed;
   border-color: var(--line3);
 }
 

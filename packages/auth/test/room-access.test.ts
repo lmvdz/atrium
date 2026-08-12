@@ -235,16 +235,26 @@ describe('room membership is not reachable outside @atrium/auth', () => {
        * excused `apps/web/app/test/route.ts` — an App Router route — in the same
        * breath. A directory name is not a reason. These three are:
        *
-       *  - the two Playwright specs are the suite that *proves* the join against
-       *    real Postgres, so they seed and count `memberships` rows on purpose;
+       *  - the three Playwright specs are the suite that *proves* the join
+       *    against real Postgres, so they seed and count `memberships` rows on
+       *    purpose;
        *  - `ensure-database.mjs` migrates and truncates that database before the
        *    suite runs, and takes the whole module to do it.
        *
        * None of them is served to a user: Playwright specs are not in the Next
        * build, and the analysis reports an exemption that matches nothing, so
        * the list cannot rot into a licence for a file that has since moved.
+       *
+       * `agent-participant.spec.ts` joined this list in the kinded-participant
+       * work: it seeds a viewer and a provisioned agent into a room to prove the
+       * agent renders as an agent on every surface, which means it inserts and
+       * deletes `memberships` rows exactly the way `room-access.spec.ts` does.
+       * It shipped naming the table without an exemption, so this boundary suite
+       * had been red since — the same "a spec seeds the table it proves" case the
+       * other two already are.
        */
       exempt: [
+        'apps/web/e2e/agent-participant.spec.ts',
         'apps/web/e2e/role-sync.spec.ts',
         'apps/web/e2e/room-access.spec.ts',
         'apps/web/e2e/support/ensure-database.mjs',

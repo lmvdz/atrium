@@ -200,8 +200,21 @@ test.describe('a provisioned agent member renders as an agent, and its kind is t
       // the count reads by kind: one of each, named separately
       await expect(page.getByText('1 room · 1 person · 1 agent', { exact: true })).toBeVisible();
 
-      // the room-head monogram carries the kind too
+      // the room-head monogram carries the kind too — and it is DERIVED from the
+      // single participant source (there is no separate `room.members` register),
+      // so the flip below moving it is the proof that source is the only one.
       await expect(roomHead.locator('[data-participant-kind="agent"]')).toHaveCount(1);
+
+      // the viewer's OWN monogram is kind-aware now (round-2 finding 2): the
+      // strip's "you" tile reads `viewer.kind` rather than always painting a
+      // person. The signed-in viewer is a human, so it reads `human` — before
+      // this fix the tile carried no kind at all. `participant-kind.test.tsx`
+      // proves the tile moves to agent/unknown when the viewer's kind does; a
+      // real agent VIEWER needs an agent session, which is #96's surface, not
+      // this render test's.
+      await expect(
+        page.locator('aside[aria-label="Workspace"] [data-participant-kind]'),
+      ).toHaveAttribute('data-participant-kind', 'human');
 
       // ---- flip the input: the agent leaves, a person takes its slot ------
       swappedHumanId = await swapAgentForHuman(at);

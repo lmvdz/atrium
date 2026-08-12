@@ -40,15 +40,27 @@ export function RoomHead({ room, surfaces, working, settled }: RoomHeadProps) {
           {room.members.map((member) => {
             const memberName = systemText(member.name, 'RoomHead member');
             const isAgent = member.kind === 'agent';
+            const isUnknown = member.kind === 'unknown';
+            const faceClass = isAgent
+              ? ` ${styles.faceAgent}`
+              : isUnknown
+                ? ` ${styles.faceUnknown}`
+                : '';
             return (
               <span
-                className={`${styles.face}${isAgent ? ` ${styles.faceAgent}` : ''}`}
+                className={`${styles.face}${faceClass}`}
                 data-participant-kind={member.kind}
                 key={`${member.kind}:${member.name}`}
                 /* The chip's own accessible route to who it is. An agent's says
-                   so — the monogram alone is a shape distinction, and a shape is
-                   not a name. */
-                title={isAgent ? `${memberName} — agent` : memberName}
+                   so, and an unknown-kind chip says `unknown` — the monogram
+                   alone is a shape distinction, and a shape is not a name. */
+                title={
+                  isAgent
+                    ? `${memberName} — agent`
+                    : isUnknown
+                      ? `${memberName} — unknown`
+                      : memberName
+                }
               >
                 {initials(memberName)}
               </span>
