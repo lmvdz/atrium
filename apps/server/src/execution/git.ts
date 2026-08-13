@@ -57,14 +57,58 @@ const GIT_ENV = {
 } as const;
 
 /**
- * The `GIT_*` variables that RETARGET where git reads and writes (#120 F1). Left
- * inherited from `process.env`, ANY of these lets a hostile server env — or a
- * harness that exported them — point the adapter's own `git add`/`commit`/
- * `worktree` at a DIFFERENT repository than the scratch checkout: a harness
- * command like `git update-ref refs/heads/main HEAD` under an inherited
- * `GIT_DIR` moves a trunk the covenant says only a human may move. Every git the
- * adapter runs (and every harness, see `worktree-provider.ts`) is bound to its
- * `cwd` by SCRUBBING these, so git can only touch the directory it was pointed at.
+ * THE ONLY `process.env` KEYS THAT CROSS INTO A GIT PROCESS (#120 round-3 F1).
+ *
+ * The git env is built from `{}` and this list, never from `{ ...process.env }`
+ * minus a denylist. Round 2's blind gauntlet probed the denylist form from both
+ * foreign lineages and it fails OPEN: `GIT_DIR` and friends were removed, but the
+ * whole git CONFIG-INJECTION family was still inherited —
+ * `GIT_CONFIG_PARAMETERS`, `GIT_CONFIG_COUNT`/`GIT_CONFIG_KEY_n`/
+ * `GIT_CONFIG_VALUE_n`, `GIT_TEMPLATE_DIR` — and any one of them installs
+ * `core.hooksPath` (or a template `hooks/`) under EVERY git the adapter spawns,
+ * the durable bare repo's `receive-pack` included. The hook then ran with the
+ * server's entire environment: `DATABASE_URL`, `BETTER_AUTH_SECRET`, gateway and
+ * object-store keys, straight into an attacker-controlled script.
+ *
+ * This is the campaign's standing lesson — *allowlist the compliant form; a
+ * denylist's gaps fail open and silent* — and it is why the list is short and why
+ * each entry has to argue for itself:
+ *
+ *  - `PATH` — git must find its own `git-*` subcommands and `git-receive-pack`.
+ *    Unavoidable, and the one genuinely load-bearing inheritance here.
+ *  - `LANG` / `LC_ALL` / `LC_CTYPE` — so a pathname carrying non-ASCII bytes
+ *    round-trips through `add`/`status --porcelain` instead of being mangled by a
+ *    C-locale fallback. Encoding, not behaviour.
+ *  - `TZ` — so a commit's recorded local offset is the host's, matching every
+ *    other timestamp the server writes.
+ *
+ * Deliberately ABSENT, though a "reasonable" list might carry them: `TERM` (git
+ * only needs it to pick a pager, and nothing here is a tty), `USER`/`HOME` (the
+ * identity is pinned in `GIT_ENV` and `HOME` is overwritten with `cleanHome()`),
+ * `SSH_AUTH_SOCK` (nothing on this path talks to a network remote — the durable
+ * "remote" is a local directory, and lending an agent socket to a git the harness
+ * can influence is exactly the credential reach this seam exists to deny), and
+ * every `GIT_*` (each is either set explicitly below or has no business here).
+ *
+ * The mirror of `harnessEnv` in `worktree-provider.ts`, which held under the same
+ * probes for the same reason.
+ */
+export const GIT_ENV_ALLOWLIST = ['PATH', 'LANG', 'LC_ALL', 'LC_CTYPE', 'TZ'] as const;
+
+/**
+ * The `GIT_*` variables that RETARGET where git reads and writes (#120 F1).
+ *
+ * NOTE (round 3): this list is now BELT AND SUSPENDERS, not the boundary. The
+ * boundary is `GIT_ENV_ALLOWLIST` above — nothing reaches a git process unless it
+ * is on that list, so none of these can be inherited in the first place. It is
+ * kept, and still applied, because `harnessEnv` composes its own env and because
+ * a reader deserves the intent stated where the hazard is: left inherited, ANY of
+ * these points the adapter's own `git add`/`commit`/`worktree` at a DIFFERENT
+ * repository than the scratch checkout, and `git update-ref refs/heads/main HEAD`
+ * under an inherited `GIT_DIR` moves a trunk the covenant says only a human moves.
+ *
+ * Do not add to this list in response to a new escape. Adding to a denylist is
+ * how round 1 fixed the instances and left the class; the fix is the allowlist.
  */
 export const DANGEROUS_GIT_VARS = [
   'GIT_DIR',
@@ -88,18 +132,48 @@ export async function cleanHome(): Promise<string> {
 }
 
 /**
- * A `process.env` with every repo-retargeting `GIT_*` var removed and config
- * lookups pinned to nothing — the base every adapter git and every harness runs
- * under (#120 F1/F4). System and global gitconfig are disabled and HOME points
- * at an empty dir, so no `/etc/gitconfig`, `~/.gitconfig`, or inherited `GIT_DIR`
- * can redirect the operation off its `cwd`.
+ * The base environment EVERY adapter git runs under (#120 F1, round 3).
+ *
+ * Built from `{}` — not from `process.env` — plus `GIT_ENV_ALLOWLIST` and the
+ * hardening below. Two properties follow, and both are asserted by
+ * `test/execution/git-env.test.ts` with a real attacker hook:
+ *
+ *  1. **No config injection.** A var that is not on the allowlist cannot be
+ *     inherited, so `GIT_CONFIG_PARAMETERS`, `GIT_CONFIG_COUNT`/`KEY`/`VALUE`,
+ *     `GIT_TEMPLATE_DIR`, `GIT_EXEC_PATH`, `GIT_SSH*`, `GIT_PROXY_COMMAND`,
+ *     `GIT_EXTERNAL_DIFF`, `GIT_EDITOR`/`GIT_PAGER`/`GIT_SEQUENCE_EDITOR`,
+ *     `GIT_ATTR_SYSTEM` and every future sibling are gone by construction rather
+ *     than by enumeration. System, global AND `GIT_CONFIG_SYSTEM` are pinned to
+ *     nothing and `HOME` is an empty dir, so no `/etc/gitconfig`, `~/.gitconfig`
+ *     or template can reintroduce one.
+ *  2. **No secret reaches git.** `DATABASE_URL`, `BETTER_AUTH_SECRET`, gateway
+ *     and S3 keys are not on the allowlist, so they are absent from the git
+ *     process — and therefore absent from any hook that somehow still ran. Under
+ *     the old denylist they were all present, which is what made a hooksPath
+ *     injection an exfiltration primitive and not merely code execution.
+ *
+ * `PATH` is the one inheritance with real reach: a hostile `PATH` still selects
+ * which `git` binary runs. That is the process's own trust boundary — the server
+ * cannot execute git at all without it — and it is unchanged by this seam.
  */
 export async function scrubbedGitBaseEnv(): Promise<NodeJS.ProcessEnv> {
-  const env: NodeJS.ProcessEnv = { ...process.env };
-  for (const key of DANGEROUS_GIT_VARS) delete env[key];
+  const env: NodeJS.ProcessEnv = {};
+  for (const key of GIT_ENV_ALLOWLIST) {
+    const value = process.env[key];
+    if (value !== undefined) env[key] = value;
+  }
   env.GIT_CONFIG_NOSYSTEM = '1';
   env.GIT_CONFIG_GLOBAL = '/dev/null';
+  // `GIT_CONFIG_NOSYSTEM` already suppresses the system file; this pins the path
+  // too, so a git built with a different system-config default — or a future
+  // read that consults the path before the flag — still lands on nothing.
+  env.GIT_CONFIG_SYSTEM = '/dev/null';
+  env.GIT_TERMINAL_PROMPT = '0';
   env.HOME = await cleanHome();
+  // Belt and suspenders. Unreachable while the allowlist above holds — none of
+  // these is on it — and kept so that a future edit which reintroduces a spread
+  // of `process.env` fails the retargeting half loudly instead of silently.
+  for (const key of DANGEROUS_GIT_VARS) delete env[key];
   return env;
 }
 
@@ -301,6 +375,57 @@ export async function artifactBranchCommit(
 ): Promise<string | null> {
   return git(artifact.dir, ['rev-parse', '--verify', '-q', `refs/heads/${branch}`]).catch(
     () => null,
+  );
+}
+
+/**
+ * The IMMUTABLE pin a settled artifact gets in the durable repo (#120 r3 F4).
+ *
+ * Outside `refs/heads/*` on purpose: it is not a branch, nothing fetches it as
+ * one, and `git branch -D` cannot reach it. One per session, named by session id.
+ */
+export function settledArtifactRef(sessionId: string): string {
+  return `refs/atrium/settled/${sessionId}`;
+}
+
+/**
+ * PIN a settled commit so the receipt that indexes it never dangles (#120 r3 F4).
+ *
+ * A branch ref is MUTABLE. `pushArtifactBranch` is force-free, so the provider
+ * cannot move one, but nothing stops a later force-push, a `branch -D`, or a
+ * teardown pass from moving or deleting `atrium/session/<id>` in the durable
+ * repo — and then a `session_settled` event's `{branch,commit}` names an object
+ * that is unreachable and eligible for `git gc`. A receipt is supposed to be the
+ * durable half of this seam; a receipt pointing at a collectable object is not.
+ *
+ * So the settle path writes a second ref at the verified commit, under
+ * `refs/atrium/settled/`. Refs are GC roots, so the object stays reachable for
+ * as long as the pin exists regardless of what happens to the branch.
+ *
+ * `update-ref <ref> <sha>` fails if the object is not present, so a pin is also a
+ * second, independent existence check on the commit being certified.
+ */
+export async function pinSettledArtifact(
+  artifact: ArtifactRepo,
+  sessionId: string,
+  commit: string,
+): Promise<void> {
+  await git(artifact.dir, ['update-ref', settledArtifactRef(sessionId), commit]);
+}
+
+/**
+ * Does this commit still resolve in the durable repo, by object rather than by
+ * branch? The question a settled receipt actually asks — "is the thing I indexed
+ * still here?" — and the one a teardown/GC test must be able to answer after the
+ * branch is gone.
+ */
+export async function artifactCommitResolves(
+  artifact: ArtifactRepo,
+  commit: string,
+): Promise<boolean> {
+  return git(artifact.dir, ['cat-file', '-e', `${commit}^{commit}`]).then(
+    () => true,
+    () => false,
   );
 }
 

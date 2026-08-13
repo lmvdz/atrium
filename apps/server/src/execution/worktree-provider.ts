@@ -86,6 +86,10 @@ export async function harnessEnv(sessionId: string): Promise<NodeJS.ProcessEnv> 
     // repo — the same scrub the adapter's own git operations get.
     GIT_CONFIG_NOSYSTEM: '1',
     GIT_CONFIG_GLOBAL: '/dev/null',
+    // Round 3: parity with `scrubbedGitBaseEnv`. The harness allowlist already
+    // denied the config-injection vars by construction (they are not copied), but
+    // the system path was only suppressed by the flag, not pinned.
+    GIT_CONFIG_SYSTEM: '/dev/null',
     GIT_TERMINAL_PROMPT: '0',
     ATRIUM_SESSION_ID: sessionId,
   };
@@ -104,7 +108,43 @@ interface WorktreeWorkspace extends Workspace {
   readonly checkout: WorktreeCheckout;
 }
 
+/**
+ * Is the unsandboxed opt-in set, right now, in this process? Read at construction
+ * rather than closed over at import, so a test that sets and restores the flag
+ * around one call gets exactly the window it asked for.
+ *
+ * Same spelling `env.ts` accepts (`1`/`true`), read straight from `process.env`
+ * rather than from a parsed `Env` — the whole point of the round-3 gate is that it
+ * binds on EVERY entry path, including the ones that never build an `Env`.
+ */
+export function unsandboxedExecutionAllowed(): boolean {
+  const raw = process.env.EXECUTION_ALLOW_UNSANDBOXED;
+  return raw === '1' || raw === 'true';
+}
+
+export const UNSANDBOXED_REFUSAL =
+  'refusing to construct the UNSANDBOXED worktree execution provider without ' +
+  "EXECUTION_ALLOW_UNSANDBOXED=1 (#120 F1) — it runs an arbitrary harness on the server's own " +
+  'disk and is NOT a security boundary; real containment is the sandbox BUY seam. Use the ' +
+  'deterministic shim provider, or set the opt-in out loud if you mean it.';
+
+/**
+ * THE GATE IS HERE, NOT ONLY UPSTREAM (#120 round-3 F6).
+ *
+ * `env.ts` (`assertExecutionProviderSafe`) and `configure.ts` both refuse to
+ * SELECT this provider without `EXECUTION_ALLOW_UNSANDBOXED`. Neither of them is
+ * on the path a direct caller takes: the integration suite reached this factory
+ * without ever touching an `Env`, and so ran the unsandboxed adapter with no
+ * opt-in anywhere. That is the #89 adjacent-path-bypass class — a guard that is
+ * real on the paths somebody thought of and absent on the one they did not.
+ *
+ * So the constructor itself refuses. There is deliberately NO `allowUnsandboxed`
+ * option to pass: an option any caller can set is not a gate, it is a spelling.
+ * The only way through is the process-wide opt-in, which is the same thing the
+ * operator has to say out loud at boot.
+ */
 export function createWorktreeCommandProvider(options: WorktreeCommandOptions): ExecutionProvider {
+  if (!unsandboxedExecutionAllowed()) throw new Error(UNSANDBOXED_REFUSAL);
   const { repo, artifactRepo, command, timeoutMs = 10 * 60_000 } = options;
   if (command.length === 0) {
     throw new Error('worktree provider requires a non-empty command argv');
