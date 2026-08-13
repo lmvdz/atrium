@@ -622,3 +622,82 @@ describe('an agent proposal names an agent, at the table (F5)', () => {
     expect(row?.proposer_kind).toBe('human');
   });
 });
+
+/**
+ * A PLAN SETTLES ONLY AFTER ITS CHILDREN, AS A TABLE FACT (#119, drizzle/0031).
+ *
+ * The mirror of 0025's F-A: F-A froze a settled plan so a session cannot open
+ * under it; this refuses settling a plan while a child session is still `open`.
+ * The command path already enforces it (projectPlanSettled reads the children
+ * `FOR SHARE` and throws on an open child) — but that is one writer's predicate,
+ * not the table's. Raw SQL — `UPDATE plans SET status='settled'` with a live
+ * child — would slip through and leave a receipt that indexes a child receipt
+ * not yet written. This drives the trigger through raw SQL so a refusal surfaces
+ * the *named* trigger; drop it from 0031 and exactly the open-child settle below
+ * goes green (the plan closes over a running child), while the no-child and
+ * all-children-exited controls are untouched.
+ */
+describe('a plan settles only after its children exit, at the table (#119)', () => {
+  /** A plan with one child session in the given exit state (or left open). */
+  async function planWithChild(childStatus: 'open' | 'settled' | 'failed') {
+    const ch = await seedAgentChannel('fleet');
+    const planId = await insertPlan(ch.roomId, ch.agentId);
+    const sessionId = randomUUID();
+    await handle.db.execute(sql`
+      INSERT INTO sessions (id, room_id, plan_id, harness, model)
+      VALUES (${sessionId}, ${ch.roomId}, ${planId}, 'claude', 'opus')
+    `);
+    if (childStatus !== 'open') {
+      // OLD is `open`, so 0025's terminal freeze does not fire — the child takes
+      // its one legal exit, exactly as projectSessionExit's UPDATE would.
+      await handle.db.execute(
+        sql`UPDATE sessions SET status = ${childStatus}, exit_summary = 'done' WHERE id = ${sessionId}`,
+      );
+    }
+    return { roomId: ch.roomId, planId, sessionId };
+  }
+
+  it('REFUSES settling a plan while a child session is still open, and leaves it open', async () => {
+    const { planId } = await planWithChild('open');
+    await violatesConstraint('plans_settle_needs_children_exited', () =>
+      handle.db.execute(sql`UPDATE plans SET status = 'settled' WHERE id = ${planId}`),
+    );
+    // The settle was refused, not silently applied: the plan is still open.
+    const [row] = await handle.db.execute<{ status: string }>(
+      sql`SELECT status FROM plans WHERE id = ${planId}`,
+    );
+    expect(row?.status).toBe('open');
+  });
+
+  it('ALLOWS settling a plan with NO sessions — the EXISTS finds no open child', async () => {
+    const ch = await seedAgentChannel('fleet');
+    const planId = await insertPlan(ch.roomId, ch.agentId);
+    await handle.db.execute(sql`UPDATE plans SET status = 'settled' WHERE id = ${planId}`);
+    const [row] = await handle.db.execute<{ status: string }>(
+      sql`SELECT status FROM plans WHERE id = ${planId}`,
+    );
+    expect(row?.status).toBe('settled');
+  });
+
+  for (const childStatus of ['settled', 'failed'] as const) {
+    it(`ALLOWS settling a plan whose child is ${childStatus} — an exited child does not block`, async () => {
+      const { planId } = await planWithChild(childStatus);
+      await handle.db.execute(sql`UPDATE plans SET status = 'settled' WHERE id = ${planId}`);
+      const [row] = await handle.db.execute<{ status: string }>(
+        sql`SELECT status FROM plans WHERE id = ${planId}`,
+      );
+      expect(row?.status).toBe('settled');
+    });
+  }
+
+  it('ALLOWS an updated_at touch on a plan with an open child — the trigger fires only on the settle transition', async () => {
+    // The control that keeps the trigger narrow: it must refuse the open → settled
+    // transition, not every write to a plan that has a live child.
+    const { planId } = await planWithChild('open');
+    await handle.db.execute(sql`UPDATE plans SET updated_at = now() WHERE id = ${planId}`);
+    const [row] = await handle.db.execute<{ status: string }>(
+      sql`SELECT status FROM plans WHERE id = ${planId}`,
+    );
+    expect(row?.status).toBe('open');
+  });
+});

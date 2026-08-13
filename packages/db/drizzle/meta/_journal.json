@@ -218,6 +218,13 @@
       "when": 1786876800000,
       "tag": "0030_a_settled_plan_s_budget_is_frozen_too",
       "breakpoints": true
+    },
+    {
+      "idx": 31,
+      "version": "7",
+      "when": 1786963200000,
+      "tag": "0031_a_plan_settles_only_after_its_children",
+      "breakpoints": true
     }
   ]
 }

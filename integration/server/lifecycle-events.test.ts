@@ -640,6 +640,151 @@ describe('the agent/plan/session lifecycle appends, projects, and touches no cov
   });
 
   /**
+   * A PLAN MAY NOT SETTLE WHILE A CHILD SESSION IS STILL OPEN (#119, the mirror
+   * of #116 F-A). The map #113 destination is "the plan settles to a receipt
+   * INDEXING ITS SESSIONS' RECEIPTS" — a receipt cannot index a child receipt
+   * that does not exist yet. `projectPlanSettled` reads the children `FOR SHARE`
+   * under the append lock; an open child aborts the projection, so `settle_plan`
+   * nacks and leaves no `plan_settled` ledger row. After the child settles, the
+   * plan settles and its receipt genuinely indexes a settled child.
+   *
+   * RED without the app fix: revert the open-child read in `projectPlanSettled`
+   * and the first `settle_plan` below acks, a `plan_settled` rows up over the
+   * open child, and the nack assertion fails.
+   */
+  it('refuses settling a plan while a child session is open, then settles once it exits', async () => {
+    const hexi = await connect(agentId, 'agent');
+    await hexi.command({
+      name: 'open_plan',
+      roomId: room.roomId,
+      agentUserId: agentId,
+      title: 'a plan with a live child',
+      budgetLimitMicros: null,
+    });
+    const [{ id: planId } = { id: '' }] = await handle.db
+      .select({ id: plans.id })
+      .from(plans)
+      .where(eq(plans.roomId, room.roomId));
+    await fundPlan(planId);
+    await hexi.command({
+      name: 'open_session',
+      roomId: room.roomId,
+      planId,
+      harness: 'omp',
+      model: 'haiku',
+    });
+    const [{ id: sessionId } = { id: '' }] = await handle.db
+      .select({ id: sessions.id })
+      .from(sessions)
+      .where(eq(sessions.roomId, room.roomId));
+
+    // Settle the plan while the session is still open — refused, no ledger row.
+    const refused = await hexi.command({ name: 'settle_plan', roomId: room.roomId, planId });
+    expect(refused.type).toBe('nack');
+    let [{ n } = { n: 0 }] = await handle.db
+      .select({ n: sql<number>`count(*)::int` })
+      .from(coreEvents)
+      .where(and(eq(coreEvents.roomId, room.roomId), eq(coreEvents.type, 'plan_settled')));
+    expect(n).toBe(0);
+    const [stillOpen] = await handle.db.select().from(plans).where(eq(plans.id, planId));
+    expect(stillOpen?.status).toBe('open'); // the plan did not close
+
+    // Exit the child, then settle the plan — now it succeeds.
+    const settleSession = await hexi.command({
+      name: 'settle_session',
+      roomId: room.roomId,
+      sessionId,
+      outcome: 'settled',
+      exitSummary: 'child done',
+      spendMicros: null,
+      contextPct: null,
+    });
+    expect(settleSession.type).toBe('ack');
+    const settlePlan = await hexi.command({ name: 'settle_plan', roomId: room.roomId, planId });
+    expect(settlePlan.type).toBe('ack');
+
+    // The plan closed exactly once, and its receipt indexes the settled child:
+    // both the plan's and the child's settle events are on the spine.
+    const [settledPlan] = await handle.db.select().from(plans).where(eq(plans.id, planId));
+    expect(settledPlan?.status).toBe('settled');
+    expect(settledPlan?.settledByEventId).toBeTruthy();
+    [{ n } = { n: 0 }] = await handle.db
+      .select({ n: sql<number>`count(*)::int` })
+      .from(coreEvents)
+      .where(and(eq(coreEvents.roomId, room.roomId), eq(coreEvents.type, 'plan_settled')));
+    expect(n).toBe(1);
+    const [settledChild] = await handle.db
+      .select()
+      .from(sessions)
+      .where(eq(sessions.id, sessionId));
+    expect(settledChild?.status).toBe('settled');
+    expect(settledChild?.settledByEventId).toBeTruthy();
+  });
+
+  /**
+   * The no-child and all-children-exited cases still settle fine through the real
+   * boundary — the guard refuses only an OPEN child, nothing else.
+   */
+  it('settles a plan with no sessions, and one whose only child has failed', async () => {
+    const hexi = await connect(agentId, 'agent');
+    // (a) a plan with no sessions at all settles cleanly.
+    await hexi.command({
+      name: 'open_plan',
+      roomId: room.roomId,
+      agentUserId: agentId,
+      title: 'childless',
+      budgetLimitMicros: null,
+    });
+    const [{ id: childlessId } = { id: '' }] = await handle.db
+      .select({ id: plans.id })
+      .from(plans)
+      .where(eq(plans.roomId, room.roomId));
+    expect(
+      (await hexi.command({ name: 'settle_plan', roomId: room.roomId, planId: childlessId })).type,
+    ).toBe('ack');
+
+    // (b) a plan whose only child FAILED settles cleanly — an exited child, even a
+    // failed one, does not block the parent's exit.
+    await hexi.command({
+      name: 'open_plan',
+      roomId: room.roomId,
+      agentUserId: agentId,
+      title: 'all children exited',
+      budgetLimitMicros: null,
+    });
+    const [{ id: parentId } = { id: '' }] = await handle.db
+      .select({ id: plans.id })
+      .from(plans)
+      .where(and(eq(plans.roomId, room.roomId), eq(plans.status, 'open')));
+    await fundPlan(parentId);
+    await hexi.command({
+      name: 'open_session',
+      roomId: room.roomId,
+      planId: parentId,
+      harness: 'omp',
+      model: 'haiku',
+    });
+    const [{ id: childId } = { id: '' }] = await handle.db
+      .select({ id: sessions.id })
+      .from(sessions)
+      .where(and(eq(sessions.roomId, room.roomId), eq(sessions.status, 'open')));
+    await hexi.command({
+      name: 'settle_session',
+      roomId: room.roomId,
+      sessionId: childId,
+      outcome: 'failed',
+      exitSummary: 'child failed',
+      spendMicros: null,
+      contextPct: null,
+    });
+    expect(
+      (await hexi.command({ name: 'settle_plan', roomId: room.roomId, planId: parentId })).type,
+    ).toBe('ack');
+    const [settled] = await handle.db.select().from(plans).where(eq(plans.id, parentId));
+    expect(settled?.status).toBe('settled');
+  });
+
+  /**
    * A signal escalates to a participant's attention (#112 reuse). It names an
    * existing room subject and a target, and projects one `attention_items` row —
    * the escalation mechanism, without the full signal semantics (#115). Here the

@@ -660,6 +660,42 @@ async function projectPlanSettled(
   { tx, roomId, event: { id } }: ProjectionContext<RoomEvent>,
   event: EventOf<'plan_settled'>,
 ): Promise<void> {
+  // A plan may NOT settle while a child session is still `open` (#119) — the
+  // mirror of F-A (`projectSessionOpened` below refuses OPENING a session under
+  // an already-settled plan). The map #113 destination is "the plan settles to a
+  // receipt INDEXING ITS SESSIONS' RECEIPTS", and a receipt cannot index a child
+  // receipt that does not exist yet, so every child must have taken its exit
+  // before the plan takes its own. This reads the children under the append
+  // lock, the same guarded-read shape F-A uses (`.for('share')`): a zero-open
+  // result passes; any open child throws and aborts the append, so `settle_plan`
+  // `nack`s and writes NO ledger row while an open child exists.
+  //
+  // Concurrency (mirrors #118/F-A): a session opening AS the plan settles cannot
+  // slip through. Both this read and `projectSessionOpened`'s insert run inside
+  // the append transaction under the ONE global advisory lock
+  // (`pg_advisory_xact_lock`, ledger.ts), so they serialize: either the
+  // `session_opened` commits first — and this read sees the open child and
+  // refuses — or this settle commits first — and F-A's settled-parent check
+  // refuses the later `session_opened`. There is no interleaving in which both
+  // win.
+  const openChild = await tx
+    .select({ id: sessions.id })
+    .from(sessions)
+    .where(
+      and(
+        eq(sessions.planId, event.planId),
+        eq(sessions.roomId, roomId),
+        eq(sessions.status, 'open'),
+      ),
+    )
+    .for('share');
+  if (openChild.length > 0) {
+    throw new CommandError(
+      'invalid',
+      `plan "${event.planId}" has ${openChild.length} open child session(s) and may not settle — every session must settle or fail first, so the plan's receipt can index its children's receipts`,
+    );
+  }
+
   // One exit, once (#116 fix r2, mirroring `projectAttentionResolved`'s owner
   // scope). The UPDATE is scoped to an `open` plan IN THIS ROOM, `.returning()`s
   // what it touched, and a zero-row result throws — which aborts the append
