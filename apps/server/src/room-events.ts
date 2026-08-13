@@ -163,6 +163,23 @@ export const SessionOpened = z.object({
 });
 export type SessionOpened = z.infer<typeof SessionOpened>;
 
+/**
+ * The verified artifact a session's execution produced (#120): a branch and the
+ * commit it points at, in the scratch git remote the ExecutionProvider controls.
+ *
+ * It rides the exit event's payload — a `~` fact about the process, indexed by
+ * the ledger row, NOT a covenant `✓`. The branch is never `main` and is never
+ * merged: the land is a human `✓`, so a settled session references a branch
+ * waiting for one rather than one the adapter certified. Nullable, because a
+ * failing harness produces no verifiable object.
+ */
+export const ExecutionArtifact = z.object({
+  branch: z.string().min(1).max(200),
+  commit: z.string().min(1).max(64),
+  remote: z.string().min(1).max(1000),
+});
+export type ExecutionArtifact = z.infer<typeof ExecutionArtifact>;
+
 /** The two spellings of an exit receipt (§9.5). Both non-epistemic (#114 T3). */
 const sessionExit = {
   roomId: Id,
@@ -173,6 +190,13 @@ const sessionExit = {
   spendMicros: Micros,
   /** Final context fill, 0..1. */
   contextPct: z.number().min(0).max(1).nullable().default(null),
+  /**
+   * The verified artifact this exit produced (#120), or `null`. Carried in the
+   * ledger payload — the durable, receipt-indexed reference to the branch/commit
+   * the session's work became. The `sessions` projection does not read it; the
+   * ledger event IS the index (the ticket's "reuse the ledger").
+   */
+  artifact: ExecutionArtifact.nullable().default(null),
 };
 
 /**

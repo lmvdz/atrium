@@ -209,6 +209,34 @@ const RawEnvSchema = BaseEnvSchema.extend({
   /** Attempts before a pass is dead-lettered. */
   INTERPRET_RETRY_LIMIT: z.coerce.number().int().min(1).max(20).default(5),
 
+  /* ── the execution provider (#120) ────────────────────────────────────── */
+  /**
+   * Which ExecutionProvider drives a granted session, or unset to DISABLE
+   * execution entirely.
+   *
+   * There is deliberately no default. Unset means a session opens and settles
+   * only when something ELSE settles it — the adapter never runs, which is the
+   * safe state for a process that would otherwise spawn real work off inbound
+   * traffic. `index.ts` logs the disabled state loudly, exactly as it does for
+   * an unconfigured interpretation worker. `shim` is the deterministic tested
+   * default; `worktree` runs a real command; `sandbox` is the BUY seam and has
+   * no client wired, so selecting it is a loud runtime refusal, not a fallback.
+   */
+  EXECUTION_PROVIDER: z.enum(['shim', 'worktree', 'sandbox']).optional(),
+  /**
+   * Where the shim/worktree scratch git repo lives — the "remote" artifact
+   * branches land in. Required when `EXECUTION_PROVIDER` is `shim` or `worktree`
+   * (checked in `assertExecutionProviderSafe`); a temp dir under it is created
+   * per boot.
+   */
+  EXECUTION_SCRATCH_DIR: z.string().min(1).optional(),
+  /**
+   * The real worktree adapter's harness command, JSON argv
+   * (e.g. `["bash","-lc","npm test"]`). Required when
+   * `EXECUTION_PROVIDER=worktree`. Never a shell string — argv only.
+   */
+  EXECUTION_HARNESS_COMMAND: z.string().min(1).optional(),
+
   S3_ENDPOINT: z.string().min(1).default('http://localhost:9000'),
   /** Browser-reachable signing origin; defaults to the endpoint in local dev. */
   S3_PUBLIC_ENDPOINT: z.string().url().optional(),
@@ -404,7 +432,33 @@ export function loadEnv(source: NodeJS.ProcessEnv = process.env): Env {
   const effectiveSource = source === process.env ? process.env : source;
   assertProductionSafe(effectiveSource, env);
   assertInterpretationProviderSafe(effectiveSource, env);
+  assertExecutionProviderSafe(env);
   return env;
+}
+
+/**
+ * The execution provider's config must be complete for the provider it names
+ * (#120). A `shim`/`worktree` needs a scratch dir to hold its artifact branches;
+ * `worktree` additionally needs a harness command. Fail boot rather than start a
+ * server that would refuse the first session it was asked to run.
+ */
+function assertExecutionProviderSafe(env: Env): void {
+  if (env.EXECUTION_PROVIDER === undefined) return;
+  const problems: string[] = [];
+  if (
+    (env.EXECUTION_PROVIDER === 'shim' || env.EXECUTION_PROVIDER === 'worktree') &&
+    !env.EXECUTION_SCRATCH_DIR
+  ) {
+    problems.push(
+      `  EXECUTION_SCRATCH_DIR: required when EXECUTION_PROVIDER=${env.EXECUTION_PROVIDER} — the scratch git repo artifact branches land in`,
+    );
+  }
+  if (env.EXECUTION_PROVIDER === 'worktree' && !env.EXECUTION_HARNESS_COMMAND) {
+    problems.push(
+      '  EXECUTION_HARNESS_COMMAND: required when EXECUTION_PROVIDER=worktree — the harness argv (JSON array), never a shell string',
+    );
+  }
+  if (problems.length > 0) throw new Error(`invalid environment:\n${problems.join('\n')}`);
 }
 
 function assertInterpretationProviderSafe(source: NodeJS.ProcessEnv, env: Env): void {

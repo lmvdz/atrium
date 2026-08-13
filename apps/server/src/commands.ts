@@ -35,7 +35,12 @@ import { and, eq, inArray } from 'drizzle-orm';
 import { z } from 'zod';
 import { CommandError, type Ledger, type Tx } from './ledger.js';
 import { type ProjectionHooks, projectRoomEvent } from './projections.js';
-import { MessageAttachment, MessageReference, type RoomEvent } from './room-events.js';
+import {
+  ExecutionArtifact,
+  MessageAttachment,
+  MessageReference,
+  type RoomEvent,
+} from './room-events.js';
 import type { Authorizer, MembershipPair, Session } from './session.js';
 
 /**
@@ -361,6 +366,12 @@ export const Command = z.discriminatedUnion('name', [
     exitSummary: z.string().max(4000).nullable().default(null),
     spendMicros: z.number().int().nonnegative().nullable().default(null),
     contextPct: z.number().min(0).max(1).nullable().default(null),
+    /**
+     * The verified artifact the ExecutionProvider produced (#120), or `null`.
+     * A branch/commit reference, non-epistemic — it rides the exit event's
+     * payload and is the durable, receipt-indexed pointer to the session's work.
+     */
+    artifact: ExecutionArtifact.nullable().default(null),
   }),
   z.object({
     name: z.literal('raise_signal'),
@@ -1607,6 +1618,7 @@ export function createCommandService({
           exitSummary: command.exitSummary,
           spendMicros: command.spendMicros,
           contextPct: command.contextPct,
+          artifact: command.artifact,
         }));
 
       case 'raise_signal':

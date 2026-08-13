@@ -10,6 +10,7 @@ import { createAttachmentSigner } from './attachments.js';
 import { createCommandService } from './commands.js';
 import { loadEnv } from './env.js';
 import { createEventBus } from './event-bus.js';
+import { configureExecution } from './execution/configure.js';
 import { createAcceptanceProvider } from './jobs/acceptance-provider.js';
 import { createGatewayProvider } from './jobs/provider.js';
 import { createLedger } from './ledger.js';
@@ -167,7 +168,7 @@ async function main(): Promise<void> {
     secretAccessKey: env.S3_SECRET_ACCESS_KEY,
   });
 
-  const commands = createCommandService({
+  const baseCommands = createCommandService({
     db: database.db,
     ledger,
     authorizer: createMembershipAuthorizer(database.db),
@@ -178,6 +179,24 @@ async function main(): Promise<void> {
         }
       : {},
   });
+
+  /* ---------------------------------------------------------------------------
+   * THE EXECUTION PROVIDER (#120), AND WHY IT IS DISABLED BY DEFAULT.
+   *
+   * When `EXECUTION_PROVIDER` is set, a granted `session_opened` resolves an
+   * isolated workspace, runs a harness, and settles back to `session_settled` /
+   * `session_failed` with the artifact — driven directly (no channel loop yet).
+   * Unset, execution is DISABLED and this is the receipt: a session opens and
+   * settles only when something else settles it. A process that would spawn real
+   * work off inbound traffic must be opted into out loud, exactly as the
+   * interpretation worker is. A `draw_refused` never reaches the adapter — the
+   * wrapper fires only on `draw.outcome === 'granted'` (#118).
+   * ------------------------------------------------------------------------- */
+  const execution = await configureExecution({ env, commands: baseCommands, logger });
+  if (execution === null) {
+    logger.info('execution is DISABLED — set EXECUTION_PROVIDER to run granted sessions', {});
+  }
+  const commands = execution?.commands ?? baseCommands;
 
   let ready = false;
   const realtime = createRealtimeServer({
@@ -231,6 +250,7 @@ async function main(): Promise<void> {
     try {
       await realtime.close();
       await queue.stop();
+      if (execution) await execution.dispose();
       await database.close();
       logger.info('shutdown complete');
       process.exit(0);
