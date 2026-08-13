@@ -1301,11 +1301,13 @@ export const plans = pgTable(
     /**
      * THE ENFORCED CEILING (#118, #115's resolution decision 1). A human-set
      * ceiling on the number of *authorized draws* — spawns/continues — this plan
-     * may be granted. `NULL` means unfunded: no ceiling, the pre-#118 behaviour a
-     * machine-opened plan keeps. A finite value is a hard ceiling, and the ONLY
-     * writer of it is `projectPlanRlimitSet`, from the human-only `set_plan_rlimit`
-     * verb — no machine-authored path raises a slice (that path is refused before
-     * the append, like a machine trying to certify; `commands.ts`).
+     * may be granted. `NULL` means UNFUNDED: fail CLOSED, a ceiling of ZERO —
+     * every draw is refused until a human sets a finite slice (#118 fix r2, CS-1;
+     * `commands.ts`'s `open_session` reads a null slice as 0, not as "no limit").
+     * A finite value is a hard ceiling, and the ONLY writer of it is
+     * `projectPlanRlimitSet`, from the human-only `set_plan_rlimit` verb — no
+     * machine-authored path raises a slice (that path is refused before the
+     * append, like a machine trying to certify; `commands.ts`).
      *
      * Denominated in DRAWS, not micro-dollars, and that is the whole point: the
      * enforced quantity is the count of draws Atrium itself GRANTED, which it

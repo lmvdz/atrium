@@ -49,11 +49,13 @@ ALTER TYPE "public"."event_type" ADD VALUE IF NOT EXISTS 'draw_refused';--> stat
 -- ## 2. The slice and the committed authorized-draw accounting
 -- ─────────────────────────────────────────────────────────────────────────────
 --
--- `rlimit_slice` is nullable — NULL is an unfunded plan (no ceiling, the pre-#118
--- behaviour). `authorized_draws` counts up from zero as the spawn gate grants
--- draws. Both are STRUCTURALLY SEPARATE from `spent_micros`: the enforcement
--- layer (draws Atrium granted) and the reconciliation layer (dollars the adapter
--- reported) never share a column.
+-- `rlimit_slice` is nullable — NULL is an UNFUNDED plan: fail CLOSED, a ceiling
+-- of ZERO draws until a human sets a finite slice (#118 fix r2, CS-1; the
+-- authorization read at `commands.ts`'s `open_session` treats a null slice as 0,
+-- never as "no limit"). `authorized_draws` counts up from zero as the spawn gate
+-- grants draws. Both are STRUCTURALLY SEPARATE from `spent_micros`: the
+-- enforcement layer (draws Atrium granted) and the reconciliation layer (dollars
+-- the adapter reported) never share a column.
 ALTER TABLE "plans" ADD COLUMN "rlimit_slice" bigint;--> statement-breakpoint
 ALTER TABLE "plans" ADD COLUMN "authorized_draws" bigint DEFAULT 0 NOT NULL;--> statement-breakpoint
 
@@ -80,7 +82,7 @@ ALTER TABLE "plans" ADD CONSTRAINT "plans_authorized_draws_nonnegative"
   CHECK ("plans"."authorized_draws" >= 0);--> statement-breakpoint
 
 COMMENT ON COLUMN "plans"."rlimit_slice" IS
-  'The ENFORCED ceiling (#118): a human-set ceiling on the number of authorized draws (spawns/continues) this plan may be granted, denominated in DRAWS not micro-dollars. NULL = unfunded (no ceiling). The only writer is the projection of plan_rlimit_set (the human-only set_plan_rlimit verb); no machine-authored path raises a slice. Enforcement compares authorized_draws to this, never the adapter-reported spent_micros — so a session under-reporting spend cannot overspend by construction.';--> statement-breakpoint
+  'The ENFORCED ceiling (#118): a human-set ceiling on the number of authorized draws (spawns/continues) this plan may be granted, denominated in DRAWS not micro-dollars. NULL = unfunded = fail CLOSED: a ceiling of ZERO authorized draws until a human sets a finite slice (#118 fix r2, CS-1) — not "no ceiling". The only writer is the projection of plan_rlimit_set (the human-only set_plan_rlimit verb); no machine-authored path raises a slice. Enforcement compares authorized_draws to this, never the adapter-reported spent_micros — so a session under-reporting spend cannot overspend by construction.';--> statement-breakpoint
 
 COMMENT ON COLUMN "plans"."authorized_draws" IS
   'The committed authorized-draw accounting (#118): how many draws Atrium has granted under this plan. Incremented by one in the same append transaction as each session_opened it grants (projectSessionOpened), under the global ledger lock, so it equals count(sessions) for the plan by construction and cannot be forged. The quantity the spawn gate enforces the slice against.';--> statement-breakpoint

@@ -383,33 +383,57 @@ describe('the plan rlimit is enforced on authorized draws at the spawn boundary'
 });
 
 /**
- * HIGH-5 (#118 fix r2). The draw check runs in `authorize`, under the append
- * lock. WITHIN one server process the in-process `runExclusive` mutex already
- * serializes every append, so a test that draws sequentially through ONE server
- * never exercises the DB-level guard — the `pg_advisory_xact_lock` the append
- * takes is the ONLY thing standing between two SEPARATE processes both reading the
- * same `authorized_draws` and both granting the Nth draw (a classic TOCTOU).
- * Remove that advisory lock and a single-process test stays green while the real
- * multi-process race silently double-draws.
+ * HIGH-5 (#118 fix r2.1 — deterministic race, replacing a flaky r2 guard). The
+ * draw check runs in `authorize`, under the append lock. WITHIN one server
+ * process the in-process `runExclusive` mutex already serializes every
+ * append, so a test that draws sequentially through ONE server never
+ * exercises the DB-level guard — the `pg_advisory_xact_lock` the append
+ * takes (`ledger.ts:975`) is the ONLY thing standing between two SEPARATE
+ * processes both reading the same `authorized_draws` and both granting the
+ * Nth draw (a classic TOCTOU). Remove that advisory lock and a
+ * single-process test stays green while the real multi-process race
+ * silently double-draws.
  *
- * So this drives the race across two SEPARATE server instances — each with its
- * own connection pool and its own `runExclusive` mutex, so neither serializes the
- * other — and asserts the DB lock holds the boundary: exactly one grant, one
- * durable `draw_refused`, `authorized_draws` at the slice and not past it.
+ * A bare `Promise.all` on two `open_session`s is NOT a reliable guard for
+ * this: with no barrier, whichever racer's connection happens to finish its
+ * *entire* transaction (lock + read + insert + commit) before the other even
+ * issues its authorize-read wins "by luck" — the test can PASS even with the
+ * advisory lock deleted, because ordinary scheduling can serialize the two
+ * racers all on its own. That false-negative is what a gauntlet caught.
+ *
+ * So this test builds its OWN barrier, independent of the lock under test: a
+ * THIRD connection takes `SELECT ... FOR UPDATE` on the contested plan row
+ * before either racer's command is even sent. `authorize`'s own read
+ * (commands.ts, `open_session`) is a `SELECT ... FOR SHARE` on that same
+ * row, and FOR SHARE conflicts with FOR UPDATE — so both racers'
+ * authorize-reads are forced to queue behind the barrier NO MATTER what
+ * `ledger.ts` does with the advisory lock:
+ *
+ *  - WITH the advisory lock present: only one racer can even reach the FOR
+ *    SHARE read at a time (the other is still queued on the advisory lock,
+ *    which the first holds until its whole transaction commits). So when the
+ *    barrier releases, at most one racer is waiting on the row — it reads
+ *    authorized_draws=0 and commits; the second then acquires the advisory
+ *    lock, reads 1, and refuses. Deterministic grant/refuse split, every run.
+ *  - WITHOUT it (reverted): nothing serializes the two racers before the row
+ *    read, so BOTH pile up on the barrier at once. Releasing it lets Postgres
+ *    grant FOR SHARE to both simultaneously (share locks are mutually
+ *    compatible) — both read authorized_draws=0 and both grant. Two sessions
+ *    row up against a slice of one, every run.
  *
  * RED-ON-REVERT: delete the `pg_advisory_xact_lock` line in `ledger.ts`'s
- * `appendBatch` and the two `authorize` reads interleave — both see
- * `authorized_draws = 0`, both build a `session_opened`, and two sessions row up
- * under a slice of one. This test then sees two grants (or two sessions) and goes
- * red. (Timing-dependent by nature: the assertion the lock guarantees is the
- * INVARIANT — at-most-one grant at the boundary — which holds deterministically
- * with the lock and is violable without it.)
+ * `appendBatch` and this test reliably — not just occasionally — sees both
+ * racers granted (`outcomes` is `['granted','granted']`, not
+ * `['granted','refused']`), and goes red on every run, because the barrier
+ * forces the race window open regardless of what the app-level lock does.
+ * See the #118 fix-round-2.1 receipt for the repeated-run (5x with the lock,
+ * 5x without) evidence.
  */
 describe('the draw check serializes across processes on the DB advisory lock', () => {
-  it('grants exactly one of two concurrent draws racing the slice boundary on separate server instances', async () => {
+  it('grants exactly one of two draws forced to race the slice boundary on separate server instances', async () => {
     // Fund a slice of exactly 1 through the primary server, with zero prior draws:
     // the very next draw is the contested Nth (N=1). No draws have happened yet, so
-    // both racers read authorized_draws = 0 in their authorize step.
+    // both racers read authorized_draws = 0 in their authorize step once unblocked.
     const alice = await connect(humanId, 'human');
     const opener = await connect(agentId, 'agent');
     const plan = await openPlan(opener, 'a contested plan');
@@ -421,10 +445,32 @@ describe('the draw check serializes across processes on the DB advisory lock', (
     const b = await startSecondInstance();
     const clientA = await TestClient.connect(a.server.url, agentId, { principalKind: 'agent' });
     const clientB = await TestClient.connect(b.server.url, agentId, { principalKind: 'agent' });
+
+    // A third, independent connection holds an exclusive row lock on the
+    // contested plan — the barrier `authorize`'s own FOR SHARE read must queue
+    // behind, regardless of whether ledger.ts's advisory lock exists at all.
+    let releaseBarrier!: () => void;
+    const barrierReleased = new Promise<void>((resolve) => {
+      releaseBarrier = resolve;
+    });
+    let barrierAcquired!: () => void;
+    const barrierReady = new Promise<void>((resolve) => {
+      barrierAcquired = resolve;
+    });
+    const barrier = handle.db.transaction(async (tx) => {
+      await tx.select({ id: plans.id }).from(plans).where(eq(plans.id, plan)).for('update');
+      barrierAcquired();
+      await barrierReleased;
+    });
+
     try {
-      // Fire both draws WITHOUT awaiting the first — they race through two pools to
-      // two connections, and only the DB advisory lock decides who wins.
-      const [ackA, ackB] = await Promise.all([
+      await barrierReady;
+
+      // Fire both draws while the barrier is held. Neither racer's authorize-read
+      // can complete yet, no matter which lock is or isn't in play — with the
+      // advisory lock, the loser is stuck behind the winner instead of behind the
+      // barrier, but it is stuck all the same.
+      const racePromise = Promise.all([
         clientA.command({
           name: 'open_session',
           roomId: room.roomId,
@@ -441,8 +487,19 @@ describe('the draw check serializes across processes on the DB advisory lock', (
         }),
       ]);
 
+      // Let both commands reach Postgres and queue — on the barrier directly
+      // (no advisory lock), or behind whichever racer won the advisory lock (which
+      // is itself queued on the barrier). Either way both are provably blocked for
+      // as long as the barrier is held; this only needs to outlast the network +
+      // parse hop, not any actual work.
+      await new Promise((resolve) => setTimeout(resolve, 400));
+      releaseBarrier();
+      await barrier;
+
+      const [ackA, ackB] = await racePromise;
+
       // Both commands succeed (a refusal is a durable row, so it acks too), but the
-      // outcomes are complementary: exactly one granted, exactly one refused.
+      // outcomes must be complementary: exactly one granted, exactly one refused.
       expect(ackA.type).toBe('ack');
       expect(ackB.type).toBe('ack');
       const outcomes = [ackA, ackB]
@@ -456,6 +513,8 @@ describe('the draw check serializes across processes on the DB advisory lock', (
       expect(await refusals(plan)).toHaveLength(1);
       expect((await planRow(plan))?.authorizedDraws).toBe(1);
     } finally {
+      releaseBarrier();
+      await barrier.catch(() => {});
       await clientA.close();
       await clientB.close();
       await a.close();
