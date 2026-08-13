@@ -86,7 +86,7 @@ export const proposalStatus = pgEnum('proposal_status', [
   'superseded',
 ]);
 
-export const proposerKind = pgEnum('proposer_kind', ['model', 'human']);
+export const proposerKind = pgEnum('proposer_kind', ['model', 'human', 'agent']);
 
 export const relationKind = pgEnum('relation_kind', [
   'supersedes',
@@ -1418,10 +1418,16 @@ export const proposals = pgTable(
     status: proposalStatus('status').notNull().default('proposed'),
     /**
      * Which session staged this reading, when a session did (#116; the proposal
-     * half of #114 T3's session→drafted index). Nullable and null in practice
-     * until #117 gives `proposer_kind` an agent/session value — a session cannot
-     * DRAFT yet, and `draftToProposal` refuses an agent session outright. Kept
-     * composite `(room_id, session_id)` so the provenance cannot cross a room.
+     * half of #114 T3's session→drafted index). Nullable and still null in
+     * practice after #117: that ticket widened `proposer_kind` so an agent
+     * session may DRAFT — `draftToProposal` now admits an agent session and marks
+     * the reading `proposer_kind='agent'` with the agent's `proposer_user_id` —
+     * but the session *id* is not carried on the `proposal_recorded` event yet,
+     * so there is nothing for the projection to file here. The proposer is
+     * identified (by its `users` row); wiring the session-id provenance edge is
+     * the remaining half and needs the id threaded onto the event, which the
+     * proposer widening does not. Kept composite `(room_id, session_id)` so the
+     * provenance cannot cross a room the day it is populated.
      */
     sessionId: uuid('session_id'),
     decidedBy: uuid('decided_by').references(() => users.id, { onDelete: 'set null' }),
@@ -1442,7 +1448,8 @@ export const proposals = pgTable(
     check(
       'proposals_proposer_identified',
       sql`(${t.proposerKind} = 'model' AND ${t.proposerModel} IS NOT NULL)
-          OR (${t.proposerKind} = 'human' AND ${t.proposerUserId} IS NOT NULL)`,
+          OR (${t.proposerKind} = 'human' AND ${t.proposerUserId} IS NOT NULL)
+          OR (${t.proposerKind} = 'agent' AND ${t.proposerUserId} IS NOT NULL)`,
     ),
     /**
      * The same rule `core_events_actor_id_matches_kind` states, on the same
@@ -1512,13 +1519,14 @@ export const acceptedObjects = pgTable(
     proposalId: uuid('proposal_id'),
     /**
      * Which session drafted this, when a session did (#116, from #114 T3's
-     * roll-up: a session → drafted-objects index). Nullable and — for now —
-     * always null: a session cannot yet DRAFT, because `proposer_kind` has no
-     * agent/session value (that is #117, deliberately deferred). The column
-     * exists so the provenance edge is in the schema the day #117 lands, and it
-     * is composite `(room_id, session_id)` so a fact can never point at a session
-     * from another room. It is provenance only — it carries no judgement and
-     * flipping it moves no `~` to a `✓`.
+     * roll-up: a session → drafted-objects index). Nullable and still null in
+     * practice after #117: that ticket gave `proposer_kind` its agent value so a
+     * session may DRAFT a `~`, but the session id is not yet threaded from the
+     * command onto the `object_accepted` event, so the projection has nothing to
+     * file here. The column exists so the provenance edge is in the schema, and
+     * it is composite `(room_id, session_id)` so a fact can never point at a
+     * session from another room. It is provenance only — it carries no judgement
+     * and flipping it moves no `~` to a `✓`.
      */
     sessionId: uuid('session_id'),
     /** Bumped by every correction; cheap optimistic-concurrency token. */

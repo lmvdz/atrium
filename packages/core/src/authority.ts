@@ -389,18 +389,25 @@ export type ProposalBindingGate =
  * proposal it can own. It may still do everything a system actor could do
  * before — this closes a door that was never open.
  *
- * An **agent** actor never matches, for the same structural reason and with the
- * same consequence: `Proposer` has no agent variant either, so no proposal in
- * any room was ever staged by an agent and there is none for it to own. This is
- * not a policy choice about agents made here — it follows from `Proposer`, and
- * it stops following the day `Proposer` gains an agent variant, which is exactly
- * when somebody has to come back to this function and decide on purpose. Until
- * then `apps/server` refuses to stage an agent's proposal at all rather than
- * writing it down as a human's, so the two ends agree.
+ * An **agent** matches its own proposals, matched by user id — and this is the
+ * decision #117 came back to make, which `Proposer` gaining an agent variant is
+ * exactly the day for. The prior comment here said an agent owns nothing because
+ * `Proposer` had no agent variant; now it does, and the principled answer is the
+ * one that keeps a model and an agent on the identical footing this whole ticket
+ * rests on. An agent is a machine that stages as itself, so — like a model with
+ * its own reading — it may withdraw or supersede the reading it staged, and may
+ * accept it only as far as a machine acceptance reaches: to `~`, never to `✓`.
+ * The user id is the identity an agent actor carries (a model carries a model
+ * string), so it is the identity that binds. This opens NO self-certify path:
+ * the reducer's `isHuman` gates refuse a machine minting a `✓` whether or not it
+ * owns the reading, and `apps/server`'s covenant gate refuses every
+ * certification-class command from a non-human before the append. What this
+ * unlocks is only a machine managing its own `~`.
  */
 export function actorMatchesProposer(actor: Actor, proposer: Proposer): boolean {
   if (actor.kind === 'human') return true;
   if (actor.kind === 'model') return proposer.kind === 'model' && proposer.model === actor.model;
+  if (actor.kind === 'agent') return proposer.kind === 'agent' && proposer.userId === actor.userId;
   return false;
 }
 
@@ -918,7 +925,9 @@ export function acceptanceAttributionRefusal(input: {
 
 /** A short name for a proposer, for refusal texts. */
 function proposerName(proposer: Proposer): string {
-  return proposer.kind === 'model' ? `model "${proposer.model}"` : `user "${proposer.userId}"`;
+  if (proposer.kind === 'model') return `model "${proposer.model}"`;
+  if (proposer.kind === 'agent') return `agent "${proposer.userId}"`;
+  return `user "${proposer.userId}"`;
 }
 
 /** A short name for an actor, for refusal texts. */

@@ -75,14 +75,17 @@ import type { Authorizer, MembershipPair, Session } from './session.js';
  *
  * They are **not** the seam #21's pipeline will call. r8 said they were, and r9
  * found what that sentence cost: a participant socket that can describe its own
- * sentence as a machine's reading (see `draftBase`). A proposal staged here is a
- * human proposal by the session's own user, full stop; #21 will need a seam of
- * its own, and whatever it is, `stagedBy` will record which one was used.
+ * sentence as a machine's reading (see `draftBase`). A proposal staged here is
+ * staged by the session's own principal — a human proposal for a person, an
+ * agent proposal for an agent (#117) — never a proposer the caller chose; #21
+ * will need a seam of its own, and whatever it is, `stagedBy` will record which
+ * one was used.
  *
- * "Full stop" is now enforced rather than merely intended: a session belonging
- * to an agent principal is refused here instead of having its reading recorded
- * as a person's, because `Proposer` has no agent variant to record it as. See
- * `draftToProposal`.
+ * The proposer is derived from the session rather than taken from the wire: an
+ * agent session's reading is recorded as `proposer_kind='agent'` under its own
+ * user id, a machine reading held to the receipt gate exactly as a model's is.
+ * Staging is participation and open to an agent; certifying is not, and stays
+ * refused for every non-human by the covenant gate. See `draftToProposal`.
  */
 
 const AttachmentList = z
@@ -1608,29 +1611,27 @@ function describeCause(error: unknown): string {
  * is what makes that answerable. Neither half is sufficient alone; see the note
  * on that function.
  *
- * ## And why an agent session is refused here rather than attributed
+ * ## And how an agent session is attributed — #117
  *
- * `Proposer` is `human | model`. It has no agent variant, and widening it is not
- * a rename: `acceptance.ts` reads the proposer to decide whether the reading
- * needs a receipt window checked against the messages it cites (`:663`), whether
- * θ applies at all (`:828`), and whether a commitment naming somebody else waits
- * for that person. Those are acceptance-semantics questions about how much a
- * given sort of reading is trusted, and nothing about "an agent holds an
- * account" answers any of them.
+ * The two acceptance-semantics questions the old refusal named — does the
+ * reading need a receipt window checked against the messages it cites (`:663`),
+ * does θ apply (`:828`) — are answered by #117, and the answer is that an agent
+ * proposer is a MACHINE proposer. It takes the model path in `@atrium/core`:
+ * receipt window checked, θ applied, a commitment naming somebody else waits for
+ * that person. So an agent session's reading is recorded as its own — `proposer:
+ * {kind:'agent', userId}` — rather than either refused or laundered into a
+ * person's. Recording it as a human's was the r9 defect (a machine's reading
+ * stored as a person's, skipping the receipt gate a human acceptance skips);
+ * recording it as an agent's is the honest attribution, and the receipt gate is
+ * NOT skipped, because a machine acceptance runs it.
  *
- * So the two available moves were to record an agent's proposal as a human's, or
- * to refuse it. Recording it as a human's is precisely the r9 defect with a new
- * author: a reading that is not a person's, stored as a person's, skipping the
- * receipt gate a human acceptance skips. It is refused instead, by name, and the
- * refusal says what is missing rather than pretending the command was malformed.
- * When `Proposer` gains an agent variant with the two questions above answered,
- * this refusal is what a reviewer deletes, and `actorMatchesProposer` in
- * `@atrium/core` is the other end that has to move with it.
- *
- * Note what is NOT restricted: an agent may post messages, answer, resolve
- * attention, set presence and advance its seen cursor. Staging a `~` reading is
- * the one participant act whose meaning depends on a vocabulary that has not
- * been extended yet.
+ * What did NOT move is the certification boundary. `record_proposal` is
+ * participation (`certificationClassOf` → `open`), so an agent may stage a `~`;
+ * every certification-class command stays refused for a non-human one door up
+ * (the covenant gate in `execute`) and again in the reducer's `isHuman` gates.
+ * The machine drafts `~`; only a human certifies `✓`. `actorMatchesProposer` in
+ * `@atrium/core` is the other end that moved with this: an agent now matches the
+ * reading it staged, exactly as a model matches its own.
  */
 function draftToProposal(
   draft: ProposalDraft,
@@ -1638,19 +1639,22 @@ function draftToProposal(
   at: string,
   session: Session,
 ): Proposal {
-  if (session.principalKind !== 'human') {
-    throw new CommandError(
-      'invalid',
-      `a ${session.principalKind} principal may not stage a proposal over this socket — a proposal's proposer decides whether the reading is checked against the messages it cites and whether θ applies, and there is no proposer vocabulary for this kind yet; recording it as a person's would be an attribution nobody made`,
-    );
-  }
+  // Derived from the session's own principal kind, never from the payload —
+  // exactly as `actorOf` derives the trusted actor. A human session stages a
+  // human proposal; an agent session (#117) stages an agent proposal under its
+  // own user id. `PrincipalKind` is `'human' | 'agent'`, so these are the only
+  // two, and both carry the id off the session.
+  const proposer: Proposal['proposer'] =
+    session.principalKind === 'agent'
+      ? { kind: 'agent', userId: session.userId }
+      : { kind: 'human', userId: session.userId };
   return {
     id: randomUUID(),
     roomId,
     type: draft.type,
     payload: draft.payload,
     confidence: draft.confidence,
-    proposer: { kind: 'human', userId: session.userId },
+    proposer,
     provenance: draft.provenance,
     quote: draft.quote,
     interpretationId: draft.interpretationId,

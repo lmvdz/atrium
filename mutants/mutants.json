@@ -948,10 +948,10 @@
       "id": "the_socket_chooses_the_proposer",
       "suite": "integration",
       "kind": "file",
-      "why": "#22 r9 D1, the command-layer half. draftToProposal mints the proposer from the session; this makes it a passthrough of whatever the caller named, which is r8's model branch generalized to both spellings. ProposalDraft no longer carries the field, so the mutated code reads a key zod strips and the proposal reaches the ledger with no proposer at all — CoreEvent.parse refuses it, and the tests that assert a socket-staged proposal is filed under the session and accepted into an object stop passing. Recorded honestly: a faithful reintroduction of r8's behaviour needs the schema field back as well, which is a second site and is not expressible in one substitution. What this pins is that the derivation exists at all and is not read from the draft.",
+      "why": "#22 r9 D1, the command-layer half. draftToProposal mints the proposer from the session's own principal kind — human or, since #117, agent — never from the caller; this makes it a passthrough of whatever the caller named. ProposalDraft no longer carries the field, so the mutated code reads a key zod strips and the proposal reaches the ledger with no proposer at all — CoreEvent.parse refuses it, and the tests that assert a socket-staged proposal is filed under the session and accepted into an object stop passing. What this pins is that the derivation exists at all and is not read from the draft.",
       "file": "apps/server/src/commands.ts",
-      "find": "    proposer: { kind: 'human', userId: session.userId },\n",
-      "replace": "    proposer: (draft as unknown as { proposer: Proposal['proposer'] }).proposer,\n",
+      "find": "  const proposer: Proposal['proposer'] =\n    session.principalKind === 'agent'\n      ? { kind: 'agent', userId: session.userId }\n      : { kind: 'human', userId: session.userId };\n",
+      "replace": "  const proposer: Proposal['proposer'] =\n    (draft as unknown as { proposer: Proposal['proposer'] }).proposer;\n",
       "catches": [
         "files a human proposal under the session, not under the name the client sent",
         "records a proposal as `proposed` and accepts it into an object"

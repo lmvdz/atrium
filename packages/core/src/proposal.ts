@@ -16,11 +16,46 @@ import {
  * is the whole trust model (init.md §5).
  */
 
+/**
+ * Who a reading claims to have been staged by.
+ *
+ * Three kinds since #117, and the split that matters is not three-way but
+ * two-way: a `human` is the receipt for their own reading, and a **machine** —
+ * `model` or `agent` — is not. An `agent` is the identified non-human of #96:
+ * it holds a `users` row and stages as itself (`userId`), exactly as a `human`
+ * does, and it is a machine exactly as a `model` is. So every gate that was
+ * written `kind === 'model'` to mean "this is a machine reading, hold it to the
+ * receipt" is really the `proposerIsMachine` question, and #117 is the day that
+ * question stopped being answerable by the single label `model`.
+ *
+ * The widening is of WHO may STAGE a `~` and of nothing downstream of it: an
+ * agent takes the model acceptance path (receipt window, θ, third-party
+ * confirm), and it hits every `isHuman` certification gate exactly as a model
+ * does. A machine drafts `~`; only a human certifies `✓`.
+ */
 export const Proposer = z.discriminatedUnion('kind', [
   z.object({ kind: z.literal('model'), model: z.string().min(1) }),
   z.object({ kind: z.literal('human'), userId: Id }),
+  z.object({ kind: z.literal('agent'), userId: Id }),
 ]);
 export type Proposer = z.infer<typeof Proposer>;
+
+/**
+ * Whether a proposer is a machine — a `model` or an identified `agent`, i.e.
+ * not a `human`.
+ *
+ * A predicate rather than `kind === 'model' || kind === 'agent'` written at each
+ * call site, for the reason `actorUserId` in `common.ts` gives about its own
+ * union: the "is this a machine reading?" question is asked in acceptance, in
+ * provenance validation and in the proposal's own receipt refinement, and a list
+ * repeated at each is a list that disagrees with itself the next time the union
+ * grows. Deliberately keyed on the *absence* of `human` rather than on a
+ * membership list, so a proposer kind added later is a machine until someone
+ * decides otherwise — the safe default for a gate that guards the receipt.
+ */
+export function proposerIsMachine(proposer: Proposer): boolean {
+  return proposer.kind !== 'human';
+}
 
 export const ProposalStatus = z.enum(['proposed', 'accepted', 'rejected', 'superseded']);
 export type ProposalStatus = z.infer<typeof ProposalStatus>;
@@ -94,20 +129,24 @@ const ProposalShape = z.discriminatedUnion('type', [
  * is rather than by a `trim()` that only knows about spaces.
  */
 export const Proposal = ProposalShape.superRefine((proposal, ctx) => {
-  if (proposal.proposer.kind !== 'model') return;
+  // A machine reading — `model` or `agent` (#117) — carries a receipt; a person
+  // staging their own reading is the receipt and quotes nothing. The question is
+  // machine-vs-human, not model-vs-everything, so it is asked through
+  // `proposerIsMachine` rather than `kind === 'model'`.
+  if (!proposerIsMachine(proposal.proposer)) return;
   if (proposal.provenance.length === 0) {
     ctx.addIssue({
       code: 'custom',
       path: ['provenance'],
       message:
-        'a model proposal must cite at least one source message — a reading with no receipt cannot be checked, and an unbacked `~` is an assertion',
+        'a machine proposal must cite at least one source message — a reading with no receipt cannot be checked, and an unbacked `~` is an assertion',
     });
   }
   if (isBlank(proposal.quote)) {
     ctx.addIssue({
       code: 'custom',
       path: ['quote'],
-      message: `a model ${proposal.type} proposal must quote the message that carries it — a receipt names the sentence it rests on, and without the quote there is nothing to identify it`,
+      message: `a machine ${proposal.type} proposal must quote the message that carries it — a receipt names the sentence it rests on, and without the quote there is nothing to identify it`,
     });
   }
 });

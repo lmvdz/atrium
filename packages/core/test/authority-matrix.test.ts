@@ -281,15 +281,21 @@ const isHumanKind = (kind: ActorKind) => kind === 'human';
  * "A model may act only on its own proposals; a human on any; the system on
  * none — and an agent on none, because no proposal is staged by one."
  *
- * `Proposer` is `human | model`. There is no agent proposer to match, so an
- * agent owns nothing and every binding gate refuses it. This is a fact about the
- * proposal vocabulary rather than a policy about agents, and it is why the
- * command layer refuses to stage an agent's proposal at all instead of writing
- * one down as somebody else's.
+ * `Proposer` is `human | model | agent` (agent since #117). A machine owns the
+ * reading it staged and no other: a model matches by model id, an **agent
+ * matches by user id** — the identity each kind carries. So an agent owns an
+ * `agent` proposal staged under its own id (the `agent` actor here is `SCRIBE`,
+ * and the `agent` proposer is `SCRIBE`) and nothing else, exactly as a model
+ * owns only `model_a`. This is a fact about the proposal vocabulary rather than
+ * a policy about agents, and it is why the command layer records an agent's
+ * reading as its own rather than as somebody else's — while still refusing every
+ * *certification*, which ownership here does not grant (a machine owning its `~`
+ * may withdraw or supersede it; it may never certify it to `✓`).
  */
-function ownsProposal(kind: ActorKind, proposer: 'model_a' | 'human'): boolean {
+function ownsProposal(kind: ActorKind, proposer: 'model_a' | 'human' | 'agent'): boolean {
   if (kind === 'human') return true;
   if (kind === 'model_proposer') return proposer === 'model_a';
+  if (kind === 'agent') return proposer === 'agent';
   return false;
 }
 
@@ -635,7 +641,7 @@ const TEXT_KEY: Record<AcceptedObjectType, string> = {
 function proposalEvent(input: {
   id: string;
   type: AcceptedObjectType;
-  proposer: 'model_a' | 'human';
+  proposer: 'model_a' | 'human' | 'agent';
   confidence: number;
   verified?: boolean;
   /** A statement that is a strict reduction of the quote — the referral shape. */
@@ -663,7 +669,9 @@ function proposalEvent(input: {
         proposer:
           input.proposer === 'model_a'
             ? { kind: 'model', model: MODEL_A }
-            : { kind: 'human', userId: ALICE },
+            : input.proposer === 'agent'
+              ? { kind: 'agent', userId: SCRIBE }
+              : { kind: 'human', userId: ALICE },
         provenance: [input.quoting?.messageId ?? MSG_FOR[input.type]],
         quote: input.quoting?.text ?? TEXT[input.type],
         createdAt: at,
@@ -1041,7 +1049,7 @@ describe('authority matrix — proposal lifecycle, every recorder × actor × pr
    * the loop has to be able to see that, rather than assuming it.
    */
   for (const recordedBy of ACTOR_KINDS) {
-    for (const proposer of ['model_a', 'human'] as const) {
+    for (const proposer of ['model_a', 'human', 'agent'] as const) {
       it(`${recordedBy} records a ${proposer} proposal`, () => {
         // Recording a reading is not accepting it, so no actor is gated here —
         // that is the whole shape of the trust model and it must stay open.

@@ -975,7 +975,14 @@ export interface ProvenanceSubject {
   type: AcceptedObjectType;
   provenance: readonly string[];
   quote?: string | null;
-  proposer?: { kind: 'model' | 'human' };
+  /**
+   * What the reading claims to have been staged by — narrowed to its `kind`,
+   * the only part the receipt strictness reads. `agent` since #117: a machine
+   * kind exactly as `model` is, so `fromMachine` below scopes the same checks to
+   * it. Absent means "not stated", treated as human (lenient), as it was when
+   * this was `model | human`.
+   */
+  proposer?: { kind: 'model' | 'human' | 'agent' };
   /**
    * The person this payload names, from `payloadAttributions` — `claimant`,
    * `owner` or `decidedBy`, whichever the type carries. Never spelled out by a
@@ -1031,10 +1038,14 @@ export function validateProposalProvenance(
   // The strictness below is aimed at *machine* readings. A person staging their
   // own reading is the receipt (#4) and is not asked to quote themselves, so the
   // checks that would demand a quote of them are scoped rather than universal.
-  const fromModel = subject.proposer?.kind === 'model';
+  // Machine is `model` or `agent` (#117), i.e. not `human` — the same split
+  // `proposerIsMachine` makes, applied to the narrowed `kind` this subject
+  // carries; an absent proposer is treated as human here, as it was when this
+  // read `=== 'model'`.
+  const fromMachine = subject.proposer !== undefined && subject.proposer.kind !== 'human';
 
   if (subject.provenance.length === 0) {
-    if (fromModel) {
+    if (fromMachine) {
       problems.push({
         kind: 'no_provenance',
         severity: 'reject',
@@ -1102,7 +1113,7 @@ export function validateProposalProvenance(
   // and no quote meant no quote check ran. The receipt is not only about
   // attribution. It answers "which sentence, in which message" for every type,
   // and a type with no answer to that has no receipt at all.
-  if (fromModel && normalizedQuote.length === 0) {
+  if (fromMachine && normalizedQuote.length === 0) {
     problems.push({
       kind: 'missing_quote',
       severity: 'reject',
@@ -1182,7 +1193,7 @@ export function validateProposalProvenance(
     }
 
     // ── Long enough to be quoting something ───────────────────────────────
-    if (fromModel && normalizedQuote.length < policy.minQuoteLength) {
+    if (fromMachine && normalizedQuote.length < policy.minQuoteLength) {
       problems.push({
         kind: 'quote_too_short',
         severity: 'reject',
@@ -1200,7 +1211,7 @@ export function validateProposalProvenance(
     // `quoteSpansWholeSentences`. `refer` rather than `reject`: a fragment may be
     // a perfectly fair quotation, and nothing here can read the rest of the
     // sentence to find out, which is the definition of the third severity.
-    if (fromModel && bearing) {
+    if (fromMachine && bearing) {
       const ownText = stripReplyBlockquotes(bearing.body);
       // ── The cap is a refusal to look, not a finding, and it says so ────────
       //
@@ -1280,7 +1291,7 @@ export function validateProposalProvenance(
     // would be told a second time, in different words, that a check it could
     // never have run did not run. The function is honest on its own and the
     // caller does not ask a question it has already refused.
-    if (fromModel && cited.length > 0 && hasContent(subject.statement)) {
+    if (fromMachine && cited.length > 0 && hasContent(subject.statement)) {
       const revisited = laterRevision(
         subject.statement ?? '',
         subject.provenance,
@@ -1321,7 +1332,7 @@ export function validateProposalProvenance(
     // so a question mark is never forgiven by the comparison. Here the mark is
     // *read* rather than compared, which is the part the comparison cannot do.
     if (
-      fromModel &&
+      fromMachine &&
       subject.type !== 'open_question' &&
       !isAssertion(normalizeForReceipt(subject.statement ?? ''))
     ) {
@@ -1365,7 +1376,7 @@ export function validateProposalProvenance(
     // generous set refuses an assertion and the strict set certifies a question,
     // and a mark nobody can verify sits in the first and not the second.
     if (
-      fromModel &&
+      fromMachine &&
       subject.type === 'open_question' &&
       !readsAsQuestion(normalizeForReceipt(subject.statement ?? ''))
     ) {
@@ -1385,7 +1396,7 @@ export function validateProposalProvenance(
     // that works for me", quote it, mint "Bob will deploy on Friday" — and r3's
     // lexical-overlap answer to that passed something worse: a quote that says
     // the **opposite** of the payload. See `statementBearing`.
-    if (fromModel) {
+    if (fromMachine) {
       const statement = subject.statement ?? '';
       const bearingResult = statementBearing(quote, statement, policy);
       const where = bearing?.id ?? null;
@@ -1668,9 +1679,9 @@ export function validateProposalProvenance(
   // classification, in `attribution.ts`, and a payload that grows a name field
   // nobody classified does not compile.
   //
-  // It is declared HERE rather than beside `fromModel` above, where the realtime
+  // It is declared HERE rather than beside `fromMachine` above, where the realtime
   // lane put it, because it now has exactly one use. That lane's other use was
-  // the missing-quote gate — `fromModel && namesAPerson && normalizedQuote.length
+  // the missing-quote gate — `fromMachine && namesAPerson && normalizedQuote.length
   // === 0` — and the core lane widened that gate to EVERY type in the same
   // window this was being derived in: "the receipt is not only about
   // attribution; it answers which sentence, in which message, for every type".
@@ -1682,7 +1693,7 @@ export function validateProposalProvenance(
   if (attributed && cited.length > 0 && namesAPerson) {
     const supported = bearing
       ? bearing.authorId === attributed
-      : fromModel
+      : fromMachine
         ? false
         : cited.some((message) => message.authorId === attributed);
     if (!supported) {
@@ -1712,7 +1723,7 @@ export function validateProposalProvenance(
         ? `the message bearing it ("${bearing.id}") was written by "${bearing.authorId}"`
         : ambiguous
           ? 'more than one cited author carries the quote, so no message can be said to bear it'
-          : fromModel
+          : fromMachine
             ? 'no cited message bears the quote, so nothing identifies the message that named them'
             : `authored none of the cited messages (${cited.map((message) => `"${message.authorId}"`).join(', ')})`;
       problems.push({

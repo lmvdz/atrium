@@ -270,7 +270,13 @@ async function projectProposalRecorded(
     confidence: proposal.confidence,
     proposerKind: proposal.proposer.kind,
     proposerModel: proposal.proposer.kind === 'model' ? proposal.proposer.model : null,
-    proposerUserId: proposal.proposer.kind === 'human' ? proposal.proposer.userId : null,
+    // A human and an agent (#117) both stage as themselves and carry a user id;
+    // a model carries a model string instead. `proposals_proposer_identified`
+    // requires the id present for both identity kinds.
+    proposerUserId:
+      proposal.proposer.kind === 'human' || proposal.proposer.kind === 'agent'
+        ? proposal.proposer.userId
+        : null,
     // Read off the reducer's record, not off `context.actor`, for rule (2) at the
     // top of this file: the state is what the fold produced, and taking the actor
     // from the context here would be a second derivation of the same fact, free

@@ -183,6 +183,13 @@
       "when": 1786444800000,
       "tag": "0025_terminal_states_are_a_table_fact",
       "breakpoints": true
+    },
+    {
+      "idx": 26,
+      "version": "7",
+      "when": 1786531200000,
+      "tag": "0026_a_session_may_draft_a_reading",
+      "breakpoints": true
     }
   ]
 }

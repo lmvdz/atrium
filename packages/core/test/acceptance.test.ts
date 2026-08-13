@@ -1529,3 +1529,86 @@ describe('r7 — a claim whose words could be an undertaking is referred, not ac
     }
   });
 });
+
+/**
+ * #117 — an agent-staged reading takes the model's acceptance path, byte for
+ * byte.
+ *
+ * The covenant that widening `proposer_kind` must not weaken: acceptance is
+ * keyed on the object's TYPE and the citations' receipt, never on which sort of
+ * machine read them. A `model` proposal and an `agent` proposal that agree on
+ * everything but the proposer's kind must produce the **identical**
+ * `AcceptanceDecision` — same θ, same verdict, same receipt window treatment,
+ * same attribution — because the window is a property of the citations, not of
+ * the proposer. If any acceptance rule ever consulted `proposer.kind` beyond the
+ * one machine-vs-human split, one of these cells would diverge.
+ *
+ * The oracle is equality against the model run, not a hand-written expectation:
+ * the model path is already pinned cell-by-cell above, so "identical to it" is
+ * the whole claim and needs nothing restated. The final block proves the
+ * comparison is not vacuous — the *human* path differs, so "identical" is a
+ * property of the two machine kinds and not of every proposer.
+ */
+describe('#117 — model and agent readings take one acceptance path', () => {
+  const SCRIBE = 'user_scribe';
+  const agent = (userId = SCRIBE) => ({ kind: 'agent', userId }) as const;
+
+  // Every confidence band the matrix ranges over, so a divergence at any θ shows.
+  const CONFIDENCES = [0.05, 0.5, 0.65, 0.75, 0.9, 1] as const;
+  // Both windows: ALICE's makes an ALICE-claim self-stated; BOB's makes it a
+  // third party. Attribution is computed from the citations and the payload, so
+  // if the proposer's kind ever leaked into it, the third-party window is where
+  // it would show.
+  const WINDOWS: { label: string; messages: ProvenanceMessage[] }[] = [
+    { label: 'self-stated (window authored by the claimant)', messages: aliceMessages },
+    { label: 'third-party (window authored by somebody else)', messages: bobMessages },
+  ];
+
+  for (const type of OBJECT_TYPES) {
+    for (const { label, messages } of WINDOWS) {
+      for (const confidence of CONFIDENCES) {
+        it(`${type} @ ${confidence}, ${label}: agent decision === model decision`, () => {
+          const asModel = decideAcceptance(
+            proposal({ type, confidence, proposer: { kind: 'model', model: 'test-model' } }),
+            { messages },
+          );
+          const asAgent = decideAcceptance(proposal({ type, confidence, proposer: agent() }), {
+            messages,
+          });
+          expect(asAgent).toEqual(asModel);
+        });
+      }
+    }
+  }
+
+  it('holds a machine to the receipt window a human is exempt from — the split that stays', () => {
+    // The one place the proposer's kind is read: a machine reading with no
+    // window is discarded (the window is its receipt); a human's is not (a
+    // person staging their own reading IS the receipt). Agent sits on the
+    // machine side of that line with the model, and the human on the other.
+    const noWindow = { messages: undefined as unknown as ProvenanceMessage[] };
+    const asModel = decideAcceptance(
+      proposal({
+        type: 'claim',
+        confidence: 0.9,
+        proposer: { kind: 'model', model: 'test-model' },
+      }),
+      noWindow,
+    );
+    const asAgent = decideAcceptance(
+      proposal({ type: 'claim', confidence: 0.9, proposer: agent() }),
+      noWindow,
+    );
+    const asHuman = decideAcceptance(
+      proposal({ type: 'claim', confidence: 0.9, proposer: { kind: 'human', userId: ALICE } }),
+      noWindow,
+    );
+    expect(asAgent).toEqual(asModel);
+    expect(asAgent.verdict).toBe('discard');
+    expect(asAgent.rule).toBe('missing_message_context');
+    // The human is exempt — proof the equality above is a property of *machine*
+    // proposers, not of the function ignoring the proposer entirely.
+    expect(asHuman.verdict).not.toBe('discard');
+    expect(asHuman.rule).toBe('human_proposer');
+  });
+});
