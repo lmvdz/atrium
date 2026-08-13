@@ -406,6 +406,30 @@ export const Command = z.discriminatedUnion('name', [
 export type Command = z.infer<typeof Command>;
 
 /**
+ * THE EXIT-RECEIPT BOUNDS, RE-CHECKED AT THE DURABLE BOUNDARY (#120 round-5 F3).
+ *
+ * The wire parses every inbound frame with `Command.parse`, which already bounds
+ * these three fields. But `settle_session` also arrives from IN-PROCESS callers
+ * — the coordinator forwards a provider's `ExecutionReport` straight into
+ * `commands.execute(...)` as a constructed object, never re-parsed. `ExecutionReport`
+ * is a TS interface with NO runtime validation, so a misbehaving (or hostile)
+ * provider report — `contextPct: 2`, `spendMicros: -7`, a 5001-char summary —
+ * sailed past every check: `session_settled`/`session_failed` are LEDGER-ONLY
+ * events, so the append path never runs `RoomEvent.parse` on them, while every
+ * READ path does (`ledger.ts` folds rows through `RoomEvent.parse`). The result
+ * was a row that persists clean and then breaks replay the moment anyone reads
+ * it — a self-inflicted poison event. These bounds are the SAME ones the event
+ * schema enforces on read, applied on the write side so the two agree and no
+ * out-of-range receipt is ever made durable. Rejected, not clamped: a report
+ * this far out of spec is not a receipt to normalise, it is one to refuse.
+ */
+const SettleReceiptBounds = z.object({
+  exitSummary: z.string().max(4000).nullable(),
+  spendMicros: z.number().int().nonnegative().nullable(),
+  contextPct: z.number().min(0).max(1).nullable(),
+});
+
+/**
  * What a command does to the room's certified record, per command name.
  *
  * ## The hole this closes
@@ -1640,6 +1664,28 @@ export function createCommandService({
       }
 
       case 'settle_session': {
+        // ── THE PROVIDER REPORT IS BOUNDS-CHECKED BEFORE IT CAN PERSIST (#120 r5 F3) ──
+        //
+        // The coordinator forwards a provider's `ExecutionReport` here as a
+        // constructed object that never went through `Command.parse`, and the exit
+        // events it becomes are ledger-only (no `RoomEvent.parse` on append, but
+        // one on every read). Re-check the receipt bounds here so an out-of-range
+        // report is REFUSED at the durable boundary rather than persisted as a
+        // replay-breaking row. Revert this and a `contextPct:2` / `spendMicros:-7`
+        // / 5001-char-summary report lands durably and reds the next read.
+        const bounds = SettleReceiptBounds.safeParse({
+          exitSummary: command.exitSummary,
+          spendMicros: command.spendMicros,
+          contextPct: command.contextPct,
+        });
+        if (!bounds.success) {
+          throw new CommandError(
+            'invalid',
+            `settle_session receipt is out of bounds and would break replay: ${bounds.error.issues
+              .map((issue) => `${issue.path.join('.') || '(root)'}: ${issue.message}`)
+              .join('; ')}`,
+          );
+        }
         // Set in the guard, read in `build` — the `open_session` pattern, and for
         // the same reason: both must happen under the ONE append lock.
         let verifiedArtifact: z.infer<typeof ExecutionArtifact> | null = null;
@@ -1751,6 +1797,42 @@ export function createCommandService({
               (await verifyArtifact({ sessionId: command.sessionId, artifact: command.artifact }))
                 ? command.artifact
                 : null;
+
+            // ── A CLEAN SETTLE MUST CARRY PROVIDER EVIDENCE (#120 round-5 F2) ──
+            //
+            // `settled` is the covenant-visible spelling: a session that reached a
+            // clean terminal with a branch a human can land. The opener chose that
+            // spelling from a free enum, so a bystander-or-machine opener could
+            // append `{outcome:'settled', artifact:null}` on a session STILL
+            // RUNNING and win the one-exit race in `projectSessionExit` — a false
+            // green with no provider evidence, the real settle then throwing on a
+            // session that already exited. So a clean settle is refused unless a
+            // provider-VERIFIED artifact survived the check above.
+            //
+            // SCOPED TO WHEN A PROVIDER IS WIRED (`verifyArtifact` present). That is
+            // exactly the execution-enabled deployment, where the provider IS the
+            // source of a session's terminal and a clean exit with no artifact is a
+            // false green. When execution is DISABLED (no verifier), a session is
+            // settled by an EXTERNAL settler the covenant trusts to choose the
+            // terminal — the documented external-settle mode — and a clean settle
+            // with no artifact is legitimate there. The owner check (F3) still gates
+            // WHO may settle in both modes; this adds "and not a fabricated clean
+            // exit" only where a provider could have produced a real one. A `failed`
+            // exit always carries null (a killed run produced nothing to land).
+            // Revert this and a manual `settled`+null on a running session, on a
+            // server that runs execution, appends a fabricated clean exit.
+            if (
+              verifyArtifact !== undefined &&
+              command.outcome === 'settled' &&
+              verifiedArtifact === null
+            ) {
+              throw new CommandError(
+                'invalid',
+                `refusing a clean settle of session "${command.sessionId}" with no provider-verified ` +
+                  'artifact — a settled session must reference a real branch/commit the execution ' +
+                  'provider produced; a failure with no artifact settles as outcome:"failed"',
+              );
+            }
           },
         );
       }

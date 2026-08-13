@@ -9,7 +9,10 @@ import { acceptedObjects, coreEvents, plans, sessions } from '@atrium/db/schema'
 import { and, eq, sql } from 'drizzle-orm';
 import { afterAll, afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { type ArtifactVerifier, createCommandService } from '../../apps/server/src/commands.js';
-import { createArtifactVerifier } from '../../apps/server/src/execution/configure.js';
+import {
+  createArtifactVerifier,
+  createExecutionOwnership,
+} from '../../apps/server/src/execution/configure.js';
 import { createExecutionCoordinator } from '../../apps/server/src/execution/coordinator.js';
 import {
   type ArtifactRepo,
@@ -55,9 +58,14 @@ import { openDatabase, resetDatabase, type SeededRoom, seedRoom } from '../suppo
  *  - **F2 (artifact is provider-verified):** a `settle_session` carrying a
  *    FABRICATED artifact is stripped — the ledger indexes no forged pointer.
  *  - **F3 (artifact is durable):** the receipt resolves in the durable repo.
- *  - **F1/F4 (the harness is contained):** a HOSTILE harness that attempts to
- *    move a real repo's `main` via an inherited `GIT_DIR` cannot — the real
- *    repo's trunk is byte-unchanged and no session branch leaks into it.
+ *  - **F1/F4 (INHERITED-env retarget is closed):** a harness that exports
+ *    `GIT_DIR`/`GIT_WORK_TREE` into the process cannot retarget the adapter's own
+ *    git through the env — the allowlist copies neither into a git process. This
+ *    is NOT a claim that the worktree provider contains a hostile harness: it is
+ *    opt-in, dev-only, and NOT a security boundary (a same-UID harness can plant
+ *    hooks/filters, rewrite `.git`, redirect pushes, and reach any path this UID
+ *    can). The real boundary is the BUY sandbox seam. This asserts only the one
+ *    inherited-env vector the allowlist actually closes.
  */
 
 let handle: DatabaseHandle;
@@ -91,9 +99,16 @@ function commandService(verifyArtifact: ArtifactVerifier | undefined = makeVerif
   });
 }
 
-function coordinator(commands = commandService()) {
+/** This test process's execution instance id — stamped on leases the coordinator claims. */
+const TEST_INSTANCE_ID = 'test-instance';
+
+function ownership(instanceId = TEST_INSTANCE_ID) {
+  return createExecutionOwnership({ db: handle.db, instanceId, logger });
+}
+
+function coordinator(commands = commandService(), owns = ownership()) {
   const provider = createDeterministicShimProvider({ repo, artifactRepo });
-  return createExecutionCoordinator({ commands, provider, logger });
+  return createExecutionCoordinator({ commands, provider, logger, ownership: owns });
 }
 
 /** Open a plan as the agent and return its id. */
@@ -262,7 +277,7 @@ describe('a funded session runs the shim, produces an artifact, and settles inde
 });
 
 describe('the artifact is PROVIDER-VERIFIED, not a caller assertion (#120 F2, red-on-revert)', () => {
-  it('strips a fabricated artifact from a settle_session — the ledger indexes no forged pointer', async () => {
+  it('REFUSES a clean settle whose artifact the provider never produced', async () => {
     const planId = await openPlan();
     await fundPlan(planId);
 
@@ -287,29 +302,42 @@ describe('the artifact is PROVIDER-VERIFIED, not a caller assertion (#120 F2, re
       commit: 'deadbeefdeadbeefdeadbeefdeadbeefdeadbeef',
       remote: '/some/real/repo',
     };
-    const settle = await commands.execute(agentSession, {
-      name: 'settle_session',
-      roomId: room.roomId,
-      sessionId,
-      outcome: 'settled',
-      exitSummary: 'I claim a verified artifact',
-      spendMicros: null,
-      contextPct: null,
-      artifact: forged,
-    });
-    expect(settle.kind).toBe('appended');
+    // The forged artifact fails verification → drops to null → and a CLEAN settle
+    // with no provider-verified artifact is now REFUSED outright (#120 r5 F2),
+    // rather than appended-with-null. Either way the ledger indexes no forged
+    // pointer; refusing is the stronger shape — a bystander cannot fabricate a
+    // clean exit for a running session at all. Revert F2 and the forged
+    // `{branch:"main",…}` lands in the ledger as a "verified artifact" it never was.
+    await expect(
+      commands.execute(agentSession, {
+        name: 'settle_session',
+        roomId: room.roomId,
+        sessionId,
+        outcome: 'settled',
+        exitSummary: 'I claim a verified artifact',
+        spendMicros: null,
+        contextPct: null,
+        artifact: forged,
+      }),
+    ).rejects.toThrow(/provider-verified artifact/);
 
-    // The forged artifact was DROPPED — the exit event carries null, not the
-    // caller's fabrication. Revert F2 (persist `command.artifact` unverified) and
-    // this reds: the forged `{branch:"main",…,remote:"/some/real/repo"}` lands in
-    // the ledger as a "verified artifact" it never was.
-    expect(await exitArtifact(sessionId, 'session_settled')).toBeNull();
+    // No session_settled event exists for this session — nothing was appended.
+    expect(await settledEventCount(sessionId)).toBe(0);
 
     // And even a well-formed-but-unproduced artifact — right branch name, right
-    // remote, but a commit the provider never pushed — is refused.
+    // remote, but a commit the provider never pushed — is refused the same way.
     await resetSecondSession(planId);
   });
 });
+
+/** How many `session_settled` rows name this session — 0 when the clean settle was refused. */
+async function settledEventCount(sessionId: string): Promise<number> {
+  const rows = await handle.db
+    .select({ id: coreEvents.id })
+    .from(coreEvents)
+    .where(and(eq(coreEvents.type, 'session_settled'), sql`payload->>'sessionId' = ${sessionId}`));
+  return rows.length;
+}
 
 /** A second granted session whose settle claims a plausible-looking but unproduced commit. */
 async function resetSecondSession(planId: string): Promise<void> {
@@ -328,23 +356,21 @@ async function resetSecondSession(planId: string): Promise<void> {
     commit: 'cafebabecafebabecafebabecafebabecafebabe',
     remote: artifactRepo.dir,
   };
-  await commands.execute(agentSession, {
-    name: 'settle_session',
-    roomId: room.roomId,
-    sessionId,
-    outcome: 'settled',
-    exitSummary: 'plausible but unproduced',
-    spendMicros: null,
-    contextPct: null,
-    artifact: plausible,
-  });
-  const [row] = await handle.db
-    .select({ payload: coreEvents.payload })
-    .from(coreEvents)
-    .where(and(eq(coreEvents.type, 'session_settled'), sql`payload->>'sessionId' = ${sessionId}`));
-  const payload = row?.payload as { artifact?: ExecutionArtifact | null };
-  // The commit does not resolve in the durable repo → the artifact is stripped.
-  expect(payload?.artifact ?? null).toBeNull();
+  // The commit does not resolve in the durable repo → verification fails → the
+  // clean settle is refused (#120 r5 F2), so no session_settled row is written.
+  await expect(
+    commands.execute(agentSession, {
+      name: 'settle_session',
+      roomId: room.roomId,
+      sessionId,
+      outcome: 'settled',
+      exitSummary: 'plausible but unproduced',
+      spendMicros: null,
+      contextPct: null,
+      artifact: plausible,
+    }),
+  ).rejects.toThrow(/provider-verified artifact/);
+  expect(await settledEventCount(sessionId)).toBe(0);
 }
 
 describe('a refused draw NEVER starts the adapter (#118, red-on-revert)', () => {
@@ -392,8 +418,18 @@ describe('a refused draw NEVER starts the adapter (#118, red-on-revert)', () => 
   });
 });
 
-describe('a HOSTILE harness cannot move a real repo trunk (#120 F1/F4, red-on-revert)', () => {
-  it('leaves the real repo main byte-unchanged and its session branches empty', async () => {
+describe('the INHERITED-env retarget vector is closed (#120 F1/F4, red-on-revert)', () => {
+  // SCOPE, STATED HONESTLY (#120 round-5 F6): this proves ONLY that an inherited
+  // `GIT_DIR`/`GIT_WORK_TREE` does not retarget the adapter's or the harness's git
+  // — the vector the env allowlist closes. It does NOT prove the worktree provider
+  // "contains" a hostile harness. It cannot: the provider is opt-in, dev-only, and
+  // NOT a security boundary. A same-UID harness can plant hooks in the shared
+  // hooks dir, set `filter.clean`/`commit.gpgsign` to run code, redirect a push
+  // with `url.insteadOf`, or `cd` to any path this UID can reach. Those are the
+  // unsandboxed provider being unsandboxed, by design — the real boundary is the
+  // BUY sandbox. The assertion below is the inherited-env retarget, and nothing
+  // stronger.
+  it('an inherited GIT_DIR does not retarget the adapter, leaving the real repo untouched', async () => {
     const planId = await openPlan();
     await fundPlan(planId);
 
@@ -412,10 +448,12 @@ describe('a HOSTILE harness cannot move a real repo trunk (#120 F1/F4, red-on-re
 
     const censusBefore = await census();
     try {
-      // The harness tries to commit and move `main`. Under the scrub (F1/F4) its
-      // git is bound to its OWN worktree and never sees GIT_DIR, so this touches
-      // the sandbox, never the real repo. `-c user.*` gives it an identity so the
-      // attempt is genuine, not merely blocked by a missing committer.
+      // The harness tries to commit and move `main` via the inherited GIT_DIR.
+      // Under the allowlist its git does not receive GIT_DIR, so this touches its
+      // own worktree, never the real repo. `-c user.*` gives it an identity so the
+      // attempt is genuine, not merely blocked by a missing committer. (Only the
+      // inherited-env vector is exercised here — not the same-UID vectors the
+      // provider does not, and cannot, contain.)
       const hostile = [
         'bash',
         '-lc',
@@ -454,9 +492,11 @@ describe('a HOSTILE harness cannot move a real repo trunk (#120 F1/F4, red-on-re
       else process.env.GIT_WORK_TREE = savedWorkTree;
     }
 
-    // THE BOUNDARY. The real repo's trunk is byte-identical, and no session
-    // branch leaked into it — the adapter's own git (F1) and the harness's git
-    // (F4) both stayed inside the sandbox.
+    // THE INHERITED-ENV VECTOR, CLOSED. The real repo's trunk is byte-identical
+    // and no session branch leaked into it — neither the adapter's own git (F1)
+    // nor the harness's git (F4) followed the inherited GIT_DIR. This is NOT a
+    // containment proof (see the scope note above): it is exactly the assertion
+    // that an exported GIT_DIR/GIT_WORK_TREE is not honored, and no more.
     //
     //  • Revert F4 (harness env `{...process.env, …}`): the harness inherits
     //    GIT_DIR, its `git commit`/`update-ref` land in the real repo, and real
@@ -570,12 +610,15 @@ describe("a session's exit is its OPENER's to write (#120 r3 F3, red-on-revert)"
     expect(exits).toBe(0);
 
     // And the OWNER can still settle it — the gate narrows who may write the
-    // receipt, it does not make the session unsettleable.
+    // receipt, it does not make the session unsettleable. Settled as `failed`
+    // (artifact null): a clean `settled` now requires a provider-verified artifact
+    // (#120 r5 F2), which this hand-driven settle has none of, and the owner check
+    // is what is under test here.
     const settled = await commands.execute(agentSession, {
       name: 'settle_session',
       roomId: room.roomId,
       sessionId,
-      outcome: 'settled',
+      outcome: 'failed',
       exitSummary: 'the run finished',
       spendMicros: null,
       contextPct: null,
@@ -583,7 +626,7 @@ describe("a session's exit is its OPENER's to write (#120 r3 F3, red-on-revert)"
     });
     expect(settled.kind).toBe('appended');
     const [after] = await handle.db.select().from(sessions).where(eq(sessions.id, sessionId));
-    expect(after?.status).toBe('settled');
+    expect(after?.status).toBe('failed');
   });
 
   it("refuses a non-member's settle the same way it refuses any command", async () => {
@@ -747,74 +790,170 @@ describe('a SETTLED artifact survives teardown and GC (#120 r3 F4, red-on-revert
 
     // A plausible-looking but unproduced commit. The pin is the LAST step of the
     // verifier, so a refused artifact must leave no ref behind — otherwise the
-    // settle path would be a way to make arbitrary objects permanent.
-    await commands.execute(agentSession, {
-      name: 'settle_session',
-      roomId: room.roomId,
-      sessionId,
-      outcome: 'settled',
-      exitSummary: 'unproduced',
-      spendMicros: null,
-      contextPct: null,
-      artifact: {
-        branch: sessionBranch(sessionId),
-        commit: 'cafebabecafebabecafebabecafebabecafebabe',
-        remote: artifactRepo.dir,
-      },
-    });
-    expect(await exitArtifact(sessionId, 'session_settled')).toBeNull();
+    // settle path would be a way to make arbitrary objects permanent. Under #120
+    // r5 F2 a clean settle whose artifact fails verification is REFUSED, so the
+    // settle throws and nothing — no event, no pin — is written.
+    await expect(
+      commands.execute(agentSession, {
+        name: 'settle_session',
+        roomId: room.roomId,
+        sessionId,
+        outcome: 'settled',
+        exitSummary: 'unproduced',
+        spendMicros: null,
+        contextPct: null,
+        artifact: {
+          branch: sessionBranch(sessionId),
+          commit: 'cafebabecafebabecafebabecafebabecafebabe',
+          remote: artifactRepo.dir,
+        },
+      }),
+    ).rejects.toThrow(/provider-verified artifact/);
+    expect(await settledEventCount(sessionId)).toBe(0);
     expect(await refValue(artifactRepo.dir, settledArtifactRef(sessionId))).toBeNull();
   });
 });
 
-describe('startup reconciles a session left open with a spent draw (#120 r3 F5, red-on-revert)', () => {
-  it('drives open+spent+no-execution to session_failed', async () => {
+describe('a clean settle needs provider evidence (#120 r5 F2, red-on-revert)', () => {
+  it('REFUSES outcome:"settled" with a null artifact on a running session', async () => {
+    const planId = await openPlan();
+    await fundPlan(planId);
+    const sessionId = await openGrantedSession(planId, agentSession);
+    const commands = commandService();
+
+    // The opener itself (owner check passes) tries to declare a clean exit with NO
+    // provider artifact, mid-run. REVERT-REDS: remove the "settled needs a verified
+    // artifact" refusal and this appends a fabricated clean exit that wins the
+    // one-exit race with no provider evidence.
+    await expect(
+      commands.execute(agentSession, {
+        name: 'settle_session',
+        roomId: room.roomId,
+        sessionId,
+        outcome: 'settled',
+        exitSummary: 'done, trust me',
+        spendMicros: null,
+        contextPct: null,
+        artifact: null,
+      }),
+    ).rejects.toThrow(/provider-verified artifact/);
+
+    // Nothing was written; the session is still open.
+    expect(await settledEventCount(sessionId)).toBe(0);
+    const [row] = await handle.db.select().from(sessions).where(eq(sessions.id, sessionId));
+    expect(row?.status).toBe('open');
+  });
+});
+
+describe('an out-of-range provider report is rejected, not persisted (#120 r5 F3, red-on-revert)', () => {
+  // Each of these would parse on WRITE (the append path runs no RoomEvent.parse on
+  // a ledger-only exit event) and then THROW on every READ (which does), poisoning
+  // replay. The bounds check at the settle boundary refuses them instead.
+  const cases: Array<{ name: string; patch: Record<string, unknown> }> = [
+    { name: 'contextPct above 1', patch: { contextPct: 2 } },
+    { name: 'negative spendMicros', patch: { spendMicros: -7 } },
+    { name: 'an over-length exit summary', patch: { exitSummary: 'x'.repeat(5001) } },
+  ];
+  for (const { name, patch } of cases) {
+    it(`refuses ${name}, leaving the ledger replay-clean`, async () => {
+      const planId = await openPlan();
+      await fundPlan(planId);
+      const sessionId = await openGrantedSession(planId, agentSession);
+      const commands = commandService();
+
+      // REVERT-REDS: remove the `SettleReceiptBounds` check in `settle_session` and
+      // this out-of-range report appends a row that then breaks `RoomEvent.parse`
+      // on the next read.
+      await expect(
+        commands.execute(agentSession, {
+          name: 'settle_session',
+          roomId: room.roomId,
+          sessionId,
+          outcome: 'failed',
+          exitSummary: null,
+          spendMicros: null,
+          contextPct: null,
+          ...patch,
+        } as never),
+      ).rejects.toThrow(/out of bounds|would break replay/i);
+
+      // No exit event of either spelling was persisted, and the ledger still folds.
+      const [{ exits } = { exits: 0 }] = await handle.db
+        .select({ exits: sql<number>`count(*)::int` })
+        .from(coreEvents)
+        .where(
+          and(
+            sql`payload->>'sessionId' = ${sessionId}`,
+            sql`${coreEvents.type} IN ('session_settled','session_failed')`,
+          ),
+        );
+      expect(exits).toBe(0);
+      // A fresh hydrate folds the whole ledger through RoomEvent.parse — no throw.
+      const fresh = createLedger({ db: handle.db, logger });
+      await expect(fresh.hydrate()).resolves.toBeUndefined();
+    });
+  }
+});
+
+describe('reconciliation acts on a dead OWNER, told from the lease (#120 r5 F4, red-on-revert)', () => {
+  // A fixed clock so staleness is deterministic, never a wall-clock race.
+  const T0 = new Date('2026-01-01T00:00:00.000Z');
+  const STALE_MS = 30_000;
+
+  /** Stamp an ownership lease directly, as a running (or dead) owner would hold it. */
+  async function leaseSession(sessionId: string, owner: string, heartbeatAt: Date): Promise<void> {
+    // ISO string + explicit cast — a raw `Date` bound through `sql` bypasses the
+    // column mapper that `db.update().set()` would apply and postgres-js refuses it.
+    await handle.db.execute(
+      sql`UPDATE sessions SET execution_owner = ${owner},
+            execution_heartbeat_at = ${heartbeatAt.toISOString()}::timestamptz
+          WHERE id = ${sessionId} AND room_id = ${room.roomId}`,
+    );
+  }
+
+  function reconcile(now: Date) {
+    return reconcileWedgedSessions({
+      db: handle.db,
+      commands: commandService(),
+      logger,
+      staleAfterMs: STALE_MS,
+      now,
+    });
+  }
+
+  it('drives a STALE-leased wedge to session_failed, idempotently', async () => {
     const planId = await openPlan();
     await fundPlan(planId);
 
     // The wedge, built exactly as a SIGTERM mid-harness builds it: the draw is
-    // granted and committed, the session row is `open`, and the process that was
-    // going to settle it is gone.
+    // granted and committed, the session row is `open`, a LOCAL execution owned it
+    // (a lease is stamped), and the owning process is gone — so its heartbeat has
+    // frozen and gone stale.
     const sessionId = await openGrantedSession(planId, agentSession);
-    const [before] = await handle.db.select().from(sessions).where(eq(sessions.id, sessionId));
-    expect(before?.status).toBe('open');
+    await leaseSession(sessionId, 'dead-instance', T0);
     const [planBefore] = await handle.db.select().from(plans).where(eq(plans.id, planId));
-    // THE SPEND. It has already committed and it never decrements.
-    expect(planBefore?.authorizedDraws).toBe(1);
+    expect(planBefore?.authorizedDraws).toBe(1); // THE SPEND, already committed.
 
-    // What the next boot does, before accepting a single connection — a boot that
-    // OWNS execution (round-4 F3: reconciliation is gated on that).
-    const result = await reconcileWedgedSessions({
-      db: handle.db,
-      commands: commandService(),
-      logger,
-      executionEnabled: true,
-    });
+    // The next reconcile pass, at a clock a full stale-window past the last
+    // heartbeat. REVERT-REDS: restore the `executionEnabled` boot flag in place of
+    // the lease predicate and this either never fires (disabled) or fires on
+    // everything (enabled) — either way it stops being about THIS owner.
+    const result = await reconcile(new Date(T0.getTime() + STALE_MS + 1_000));
     expect(result).toEqual({ found: 1, failed: 1, unreconciled: 0 });
 
-    // REVERT-REDS: delete the `reconcileWedgedSessions` call from `index.ts` (or
-    // this function's body) and the session stays `open` forever, holding a draw
-    // the plan can never get back.
     const [after] = await handle.db.select().from(sessions).where(eq(sessions.id, sessionId));
     expect(after?.status).toBe('failed');
     expect(after?.settledByEventId).toBeTruthy();
     expect(after?.exitSummary).toContain('did not survive the previous process');
-
-    // An HONEST receipt: failed, no artifact. A killed run did not settle, and
-    // the reconciler does not invent a clean exit or a pointer to work nobody
-    // watched finish.
+    // An HONEST receipt: failed, no artifact.
     expect(await exitArtifact(sessionId, 'session_failed')).toBeNull();
 
-    // And it is IDEMPOTENT — a second boot finds nothing to do, rather than
-    // trying to re-exit a session that has already taken its one exit.
-    expect(
-      await reconcileWedgedSessions({
-        db: handle.db,
-        commands: commandService(),
-        logger,
-        executionEnabled: true,
-      }),
-    ).toEqual({ found: 0, failed: 0, unreconciled: 0 });
+    // IDEMPOTENT — the row is no longer `open`, so a second pass finds nothing.
+    expect(await reconcile(new Date(T0.getTime() + STALE_MS + 2_000))).toEqual({
+      found: 0,
+      failed: 0,
+      unreconciled: 0,
+    });
   });
 
   it('leaves an already-settled session alone', async () => {
@@ -827,42 +966,31 @@ describe('startup reconciles a session left open with a spent draw (#120 r3 F5, 
       model: 'haiku',
     });
     expect(outcome.kind).toBe('settled');
-    expect(
-      await reconcileWedgedSessions({
-        db: handle.db,
-        commands: commandService(),
-        logger,
-        executionEnabled: true,
-      }),
-    ).toEqual({ found: 0, failed: 0, unreconciled: 0 });
+    // Even far in the future — the session is settled, not open, so it is not a wedge.
+    expect(await reconcile(new Date(T0.getTime() + 10 * STALE_MS))).toEqual({
+      found: 0,
+      failed: 0,
+      unreconciled: 0,
+    });
   });
 
   /**
-   * ROUND 4 F3: reconciliation is OWNED-execution only. With execution DISABLED
-   * (`EXECUTION_PROVIDER` unset — the documented external-settle mode), an `open`
-   * session belongs to an outside settler and is LIVE, not dead. A boot that does
-   * not own execution must leave it alone, or it destroys a live external settle
-   * and fabricates a `session_failed`.
+   * THE disabled→enabled REGRESSION (#120 r5 F4). A session opened while execution
+   * was DISABLED holds NO lease — it is a live external-settle session. A later
+   * boot WITH a provider set must never touch it. Under round-4's boot flag it was
+   * force-failed; keyed on the lease it is invisible to reconciliation, at any
+   * clock. REVERT-REDS: reintroduce the boot-flag predicate and this open external
+   * session is force-failed the instant a boot owns execution.
    */
-  it('does NOT force-fail an open session when this boot does not own execution', async () => {
+  it('NEVER reconciles an UNLEASED external-settle session, however stale the clock', async () => {
     const planId = await openPlan();
     await fundPlan(planId);
     const sessionId = await openGrantedSession(planId, agentSession);
-    const [before] = await handle.db.select().from(sessions).where(eq(sessions.id, sessionId));
-    expect(before?.status).toBe('open');
+    // No lease is stamped — this is the external-settle mode.
 
-    // A boot with execution DISABLED. REVERT-REDS: gate off (run reconciliation
-    // unconditionally, as round-3 did) and this open session is force-failed —
-    // exactly the live external settle round-4 refuses to destroy.
-    const result = await reconcileWedgedSessions({
-      db: handle.db,
-      commands: commandService(),
-      logger,
-      executionEnabled: false,
-    });
+    const result = await reconcile(new Date(T0.getTime() + 100 * STALE_MS));
     expect(result).toEqual({ found: 0, failed: 0, unreconciled: 0 });
 
-    // The session is untouched — still open, no exit event, no fabricated receipt.
     const [after] = await handle.db.select().from(sessions).where(eq(sessions.id, sessionId));
     expect(after?.status).toBe('open');
     expect(after?.settledByEventId).toBeNull();
@@ -876,17 +1004,66 @@ describe('startup reconciles a session left open with a spent draw (#120 r3 F5, 
         ),
       );
     expect(exits).toBe(0);
+  });
 
-    // And an EXECUTION-OWNED boot still reconciles the very same wedge — the gate
-    // narrows WHO reconciles, it does not make the session unreconcilable.
-    const owned = await reconcileWedgedSessions({
-      db: handle.db,
-      commands: commandService(),
-      logger,
-      executionEnabled: true,
+  /**
+   * THE two-instance OVERLAP (#120 r5 F4). A session a LIVE peer instance is
+   * running holds a FRESH lease (the peer keeps heartbeating). This process must
+   * not force-fail it. Under round-4's boot flag each instance killed the other's
+   * running sessions; keyed on the lease, a fresh heartbeat is left alone.
+   * REVERT-REDS: drop the `heartbeat < staleBefore` predicate and this live peer's
+   * session is reconciled out from under it.
+   */
+  it("leaves a live PEER's FRESH-leased session running", async () => {
+    const planId = await openPlan();
+    await fundPlan(planId);
+    const sessionId = await openGrantedSession(planId, agentSession);
+    // A concurrent peer owns it and beat its heartbeat one second ago.
+    await leaseSession(sessionId, 'peer-instance', new Date(T0.getTime() - 1_000));
+
+    // This process reconciles at T0 — the peer's lease is 1s old, well inside the
+    // 30s window, so it is a LIVE owner and is left running.
+    const result = await reconcile(T0);
+    expect(result).toEqual({ found: 0, failed: 0, unreconciled: 0 });
+    const [after] = await handle.db.select().from(sessions).where(eq(sessions.id, sessionId));
+    expect(after?.status).toBe('open');
+  });
+});
+
+describe('the ownership lease is claimed atomically as the granted-draw guard (#120 r5 F1, red-on-revert)', () => {
+  it('runGranted refuses a fabricated (never-granted) session id — no workspace, no branch', async () => {
+    const before = await listSessionBranches(repo);
+    // A session id that no `open_session` ever granted. On the wire the wrapper
+    // would never call `runGranted` for it, but `runGranted` is directly reachable
+    // and must refuse it ITSELF. REVERT-REDS: remove the `ownership.claim` guard in
+    // `runGranted` and the provider resolves a workspace + branch for this id.
+    const outcome = await coordinator().runGranted(agentSession, {
+      sessionId: randomUUID(),
+      roomId: room.roomId,
+      planId: randomUUID(),
+      harness: 'omp',
+      model: 'haiku',
     });
-    expect(owned).toEqual({ found: 1, failed: 1, unreconciled: 0 });
-    const [reconciled] = await handle.db.select().from(sessions).where(eq(sessions.id, sessionId));
-    expect(reconciled?.status).toBe('failed');
+    expect(outcome.kind).toBe('failed');
+    if (outcome.kind === 'failed') expect(outcome.artifact).toBeNull();
+    // The provider was never reached — no session branch was created in the scratch repo.
+    expect(await listSessionBranches(repo)).toEqual(before);
+  });
+
+  it('a granted session claims its lease and settles, stamping this instance as owner', async () => {
+    const planId = await openPlan();
+    await fundPlan(planId);
+    const outcome = await coordinator().openAndRun(agentSession, {
+      roomId: room.roomId,
+      planId,
+      harness: 'omp',
+      model: 'haiku',
+    });
+    expect(outcome.kind).toBe('settled');
+    if (outcome.kind !== 'settled') return;
+    const [row] = await handle.db.select().from(sessions).where(eq(sessions.id, outcome.sessionId));
+    // The lease was stamped by this process as part of running the session.
+    expect(row?.executionOwner).toBe(TEST_INSTANCE_ID);
+    expect(row?.executionHeartbeatAt).not.toBeNull();
   });
 });

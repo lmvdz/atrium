@@ -1,3 +1,4 @@
+import { randomUUID } from 'node:crypto';
 import {
   createAtriumAuth,
   describeUnknown,
@@ -10,7 +11,11 @@ import { createAttachmentSigner } from './attachments.js';
 import { createCommandService } from './commands.js';
 import { loadEnv } from './env.js';
 import { createEventBus } from './event-bus.js';
-import { createExecutionProvider, wireExecutionCoordinator } from './execution/configure.js';
+import {
+  createExecutionOwnership,
+  createExecutionProvider,
+  wireExecutionCoordinator,
+} from './execution/configure.js';
 import { reconcileWedgedSessions } from './execution/reconcile.js';
 import { createAcceptanceProvider } from './jobs/acceptance-provider.js';
 import { createGatewayProvider } from './jobs/provider.js';
@@ -205,14 +210,37 @@ async function main(): Promise<void> {
       : {},
   });
 
+  // This process's execution instance id — the value stamped on every ownership
+  // lease it claims (#120 round-5 F4). Reused from the bus so logs correlate, or a
+  // fresh id when there is no bus; either way it is unique per boot, so a prior
+  // boot's leases carry a DIFFERENT id and its heartbeats stop, which is what lets
+  // reconciliation tell a dead owner's session from this process's live one.
+  const executionInstanceId = bus.instanceId ?? randomUUID();
+  const executionOwnership = executionRuntime
+    ? createExecutionOwnership({ db: database.db, instanceId: executionInstanceId, logger })
+    : null;
   const executionWiring = executionRuntime
     ? wireExecutionCoordinator({
         provider: executionRuntime.provider,
         commands: baseCommands,
         logger,
+        ownership: executionOwnership ?? undefined,
       })
     : null;
   const commands = executionWiring?.commands ?? baseCommands;
+
+  /**
+   * How often this process keeps its ownership leases warm and sweeps for a dead
+   * owner's wedge (#120 round-5 F4). Comfortably under the stale threshold so a
+   * live owner's lease never reads as stale between beats.
+   */
+  const EXECUTION_HEARTBEAT_MS = 5_000;
+  /**
+   * How long a lease may go without a heartbeat before its owner is presumed dead
+   * and its session reconciled. Six heartbeats of slack, so event-loop jitter on a
+   * live owner never trips it — but a crashed owner's wedge clears within seconds.
+   */
+  const EXECUTION_LEASE_STALE_MS = 30_000;
 
   /**
    * How long shutdown waits for in-flight executions (#120 round-3 F5). Well
@@ -236,17 +264,20 @@ async function main(): Promise<void> {
    * a reconciliation through the wrapper would be one more path to reason about
    * for no gain.
    *
-   * It fires ONLY when this process owns execution (#120 round-4 F3). With
-   * execution disabled, an `open` session belongs to an EXTERNAL settler — a live
-   * session, not a dead one — and force-failing it would destroy that settle and
-   * fabricate a `session_failed`. The over-aggressive prior behaviour (fail every
-   * open session unconditionally) is the regression this closes.
+   * It reconciles ONLY a session whose OWNERSHIP LEASE has gone stale (#120
+   * round-5 F4) — a dead owner's wedge. An external-settle session holds no lease
+   * and is never touched, whether this boot runs execution or not; a live peer's
+   * session has a fresh heartbeat and is left running. This replaces the round-4
+   * boot flag, which force-failed live external sessions on a disabled→enabled
+   * reboot and killed a concurrent instance's running sessions. It runs on EVERY
+   * boot (not gated on execution): a disabled boot can still safely clear a prior
+   * enabled boot's crash wedge, because "stale lease" is the whole predicate.
    * ------------------------------------------------------------------------- */
   const reconciled = await reconcileWedgedSessions({
     db: database.db,
     commands: baseCommands,
     logger,
-    executionEnabled: executionRuntime !== null,
+    staleAfterMs: EXECUTION_LEASE_STALE_MS,
   });
   if (reconciled.found > 0) {
     logger.warn('startup reconciled sessions left open by a previous process', {
@@ -254,6 +285,43 @@ async function main(): Promise<void> {
       failed: reconciled.failed,
       unreconciled: reconciled.unreconciled,
     });
+  }
+
+  /* ---------------------------------------------------------------------------
+   * THE OWNERSHIP HEARTBEAT + PERIODIC SWEEP (#120 round-5 F4).
+   *
+   * While execution is enabled, this process keeps its own leases warm and, in the
+   * same beat, reconciles any lease that has since gone stale — a crash-and-restart
+   * faster than the stale window, or a peer that died mid-run. Heartbeat FIRST so
+   * this process's live leases are fresh before the sweep reads them, then sweep.
+   * Both are best-effort: a failure is logged and the next beat retries, never
+   * takes the process down.
+   * ------------------------------------------------------------------------- */
+  let executionHeartbeatTimer: NodeJS.Timeout | undefined;
+  if (executionOwnership) {
+    executionHeartbeatTimer = setInterval(() => {
+      void (async () => {
+        try {
+          await executionOwnership.heartbeat();
+          const swept = await reconcileWedgedSessions({
+            db: database.db,
+            commands: baseCommands,
+            logger,
+            staleAfterMs: EXECUTION_LEASE_STALE_MS,
+          });
+          if (swept.found > 0) {
+            logger.warn('periodic sweep reconciled sessions with a dead execution owner', {
+              found: swept.found,
+              failed: swept.failed,
+              unreconciled: swept.unreconciled,
+            });
+          }
+        } catch (error) {
+          logSafely('execution heartbeat/sweep failed', () => ({ error: describeUnknown(error) }));
+        }
+      })();
+    }, EXECUTION_HEARTBEAT_MS);
+    executionHeartbeatTimer.unref();
   }
 
   let ready = false;
@@ -308,6 +376,7 @@ async function main(): Promise<void> {
     forced.unref();
 
     try {
+      if (executionHeartbeatTimer) clearInterval(executionHeartbeatTimer);
       await realtime.close();
       await queue.stop();
       // In-flight executions get a BOUNDED grace before anything they depend on

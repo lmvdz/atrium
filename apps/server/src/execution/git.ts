@@ -1,7 +1,8 @@
 import { execFile } from 'node:child_process';
-import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises';
+import { constants as fsConstants } from 'node:fs';
+import { access, mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { delimiter, isAbsolute, join } from 'node:path';
 import { promisify } from 'node:util';
 
 /**
@@ -32,6 +33,58 @@ import { promisify } from 'node:util';
 
 const run = promisify(execFile);
 
+/**
+ * THE ABSOLUTE GIT BINARY, RESOLVED ONCE FROM THE BOOT PATH (#120 round-5 F5a).
+ *
+ * Every git spawn used to be `run('git', …)`, which re-runs the child's own
+ * `PATH` lookup on EVERY call. A `PATH` whose earlier entry holds an attacker
+ * `git` then selects that binary — a PATH-hijack the seam did nothing to close.
+ * Round 4's grok probe planted exactly this. `PATH` is the process's own trust
+ * boundary (the server cannot run git at all without it), but the fix is to
+ * resolve `git` to an ABSOLUTE path ONCE, from the trusted boot environment,
+ * and invoke that path forever after — so a `PATH` mutated later in the process
+ * (or a `PATH` handed to the child that differs from boot) can never reselect
+ * which binary is `git`. Cached, because the resolution itself is the thing
+ * being protected: doing it per-call would reintroduce the very lookup.
+ *
+ * `EXECUTION_GIT_BINARY`, if set to an absolute path, pins it explicitly for a
+ * deployment that wants no PATH search at all.
+ */
+let gitBinaryCache: string | null = null;
+export async function resolveGitBinary(): Promise<string> {
+  if (gitBinaryCache !== null) return gitBinaryCache;
+  const override = process.env.EXECUTION_GIT_BINARY;
+  if (override !== undefined && override !== '') {
+    if (!isAbsolute(override)) {
+      throw new Error(`EXECUTION_GIT_BINARY must be an ABSOLUTE path, got: ${override}`);
+    }
+    await access(override, fsConstants.X_OK);
+    gitBinaryCache = override;
+    return override;
+  }
+  const pathValue = process.env.PATH ?? '';
+  for (const dir of pathValue.split(delimiter)) {
+    if (dir === '') continue;
+    const candidate = join(dir, 'git');
+    try {
+      await access(candidate, fsConstants.X_OK);
+      gitBinaryCache = candidate;
+      return candidate;
+    } catch {
+      // Not here — keep scanning the boot PATH.
+    }
+  }
+  throw new Error(
+    'could not resolve an absolute path to the git binary on PATH (#120 F5) — refusing to fall ' +
+      'back to a bare "git" that a later PATH mutation could hijack',
+  );
+}
+
+/** Reset the cached git binary — TEST-ONLY, so a suite can probe PATH resolution. */
+export function resetGitBinaryCacheForTest(): void {
+  gitBinaryCache = null;
+}
+
 /** A scratch git repo the provider controls — the "remote" the artifact lives in. */
 export interface ScratchRepo {
   /** Absolute path to the repo. Doubles as the `remote` on the artifact. */
@@ -45,6 +98,15 @@ export interface WorktreeCheckout {
   readonly dir: string;
   readonly branch: string;
   readonly repoDir: string;
+  /**
+   * The ABSOLUTE per-worktree git dir, captured at resolve time BEFORE any
+   * harness runs (#120 round-5 F5b). The adapter's own later commit/push pin
+   * `GIT_DIR`/`GIT_WORK_TREE` to this, so a harness that rewrites the worktree's
+   * `.git` FILE (retargeting it at a victim repo) cannot redirect the adapter's
+   * own git off this checkout. `undefined` only for checkouts built by an older
+   * path that predates the capture — those fall back to `.git`-file discovery.
+   */
+  readonly gitDir?: string;
 }
 
 const GIT_ENV = {
@@ -132,9 +194,18 @@ export async function cleanHome(): Promise<string> {
 }
 
 /**
- * A lazily-created EMPTY directory used as `core.hooksPath` on every adapter git
- * (#120 round-4). It holds no hooks, ever, so pointing git at it means git finds
- * nothing to run where it would otherwise consult a repo-local `.git/hooks/*`.
+ * A lazily-created directory used as `core.hooksPath` on every adapter git (#120
+ * round-4). It is created EMPTY, so pointing git at it means git finds no hook to
+ * run where it would otherwise consult a repo-local `.git/hooks/*`.
+ *
+ * NOT-A-SANDBOX HONESTY (#120 round-5 F6): "empty at creation" is the whole of the
+ * claim — this is NOT tamper-proof. The directory lives under the shared temp dir,
+ * one instance for the whole process, and a same-UID harness (the worktree
+ * provider is opt-in, dev-only, and NOT a security boundary) can WRITE a
+ * `pre-commit`/`post-commit` INTO it and have the adapter's own next git run it.
+ * That is the unsandboxed provider being unsandboxed, by design; the real boundary
+ * is the BUY sandbox seam. Redirecting hooksPath here defeats a hook planted in a
+ * worktree's OWN `.git/hooks`, not a same-UID writer who reaches this shared dir.
  */
 let emptyHooksDirCache: string | null = null;
 export async function emptyHooksDir(): Promise<string> {
@@ -157,10 +228,20 @@ export async function emptyHooksDir(): Promise<string> {
  *
  * `-c` is the highest-precedence config source and beats a repo's `.git/config`,
  * so pinning `core.hooksPath` to an empty directory and `core.fsmonitor=false`
- * here means no planted hook and no planted fsmonitor program ever runs under a
- * git this module spawns. (The DURABLE bare repo's `receive-pack` runs in a
- * SEPARATE process that reads the DEST repo config, not these flags, so its hooks
- * are neutered by a persisted `core.hooksPath` set in `createArtifactRepo`.)
+ * here defeats a hook planted in a worktree's OWN `.git/hooks` and an fsmonitor
+ * set in its config. (The DURABLE bare repo's `receive-pack` runs in a SEPARATE
+ * process that reads the DEST repo config, not these flags, so its hooks are
+ * neutered by a persisted `core.hooksPath` set in `createArtifactRepo`.)
+ *
+ * NOT-A-SANDBOX HONESTY (#120 round-5 F6): this is real hardening against a
+ * repo-local hook, not containment. It redirects hooksPath to a shared directory
+ * a same-UID harness can WRITE INTO (see `emptyHooksDir`), and it does nothing
+ * about `filter.clean`/`filter.smudge`, `commit.gpgsign`, `diff.external`, or a
+ * `url.insteadOf` push redirect the harness can set in its own worktree config —
+ * all code-exec or redirect primitives an unsandboxed same-UID harness keeps.
+ * The worktree provider is opt-in, dev-only, and NOT a security boundary; the
+ * real boundary is the BUY sandbox. These `-c` flags shrink the repo-local
+ * attack surface; they do not close it.
  */
 async function hookGuardArgs(): Promise<string[]> {
   return ['-c', `core.hooksPath=${await emptyHooksDir()}`, '-c', 'core.fsmonitor=false'];
@@ -212,13 +293,36 @@ export async function scrubbedGitBaseEnv(): Promise<NodeJS.ProcessEnv> {
   return env;
 }
 
-async function git(cwd: string, args: readonly string[]): Promise<string> {
+/**
+ * Explicitly bind the adapter's own git to a specific repo, overriding the
+ * `.git`-file discovery a harness could have rewritten (#120 round-5 F5b). Set
+ * on the adapter's own commit/push into a resolved worktree; absent for
+ * operations on a trusted directory (repo root, bare artifact repo).
+ */
+interface GitDirPin {
+  readonly gitDir: string;
+  readonly workTree: string;
+}
+
+async function git(cwd: string, args: readonly string[], pin?: GitDirPin): Promise<string> {
   const base = await scrubbedGitBaseEnv();
+  // `GIT_DIR`/`GIT_WORK_TREE` are on `DANGEROUS_GIT_VARS` and were deleted from
+  // `base` — that scrub keeps an INHERITED retarget out. Here the adapter sets
+  // them ITSELF, to the trusted per-worktree git dir captured before the harness
+  // ran, so git reads/writes THIS checkout regardless of what the harness did to
+  // the worktree's `.git` file. Applied AFTER the spread so it wins.
+  const env: NodeJS.ProcessEnv = { ...base, ...GIT_ENV };
+  if (pin) {
+    env.GIT_DIR = pin.gitDir;
+    env.GIT_WORK_TREE = pin.workTree;
+  }
   // Repo-local hook / fsmonitor hardening (#120 round-4 F2) prepended before the
   // subcommand — `-c` only takes effect ahead of the git command it configures.
-  const { stdout } = await run('git', [...(await hookGuardArgs()), ...args], {
+  // The binary is the ABSOLUTE path resolved once from the boot PATH (F5a), never
+  // a bare "git" a later PATH mutation could reselect.
+  const { stdout } = await run(await resolveGitBinary(), [...(await hookGuardArgs()), ...args], {
     cwd,
-    env: { ...base, ...GIT_ENV },
+    env,
     // A runaway harness must not hold the event loop; keep the plumbing bounded.
     timeout: 30_000,
     maxBuffer: 8 * 1024 * 1024,
@@ -284,7 +388,12 @@ export async function addWorktree(repo: ScratchRepo, sessionId: string): Promise
     await rm(dir, { recursive: true, force: true }).catch(() => {});
     throw error;
   }
-  return { dir, branch, repoDir: repo.dir };
+  // Capture the ABSOLUTE per-worktree git dir NOW, while the `.git` file is still
+  // the trusted one git just wrote and no harness has run (#120 round-5 F5b). The
+  // adapter's own later commit/push pin GIT_DIR to this, so a harness rewriting
+  // `<dir>/.git` to point at a victim repo cannot redirect the adapter's own git.
+  const gitDir = await git(dir, ['rev-parse', '--absolute-git-dir']);
+  return { dir, branch, repoDir: repo.dir, gitDir };
 }
 
 /**
@@ -297,15 +406,33 @@ export async function commitWorktree(
   checkout: WorktreeCheckout,
   message: string,
 ): Promise<string | null> {
-  await git(checkout.dir, ['add', '-A']);
-  const status = await git(checkout.dir, ['status', '--porcelain']);
+  // Pin GIT_DIR/GIT_WORK_TREE to the trusted per-worktree git dir captured at
+  // resolve time (#120 round-5 F5b). Without this, a harness that rewrote
+  // `<checkout>/.git` to `gitdir: <victim>/.git` would redirect the ADAPTER'S OWN
+  // add/commit/update-ref onto the victim repo — grok moved a victim `main` this
+  // way. With it, git ignores the rewritten `.git` file and operates on this
+  // checkout, or fails safely if the pin no longer resolves.
+  const pin = worktreePin(checkout);
+  await git(checkout.dir, ['add', '-A'], pin);
+  const status = await git(checkout.dir, ['status', '--porcelain'], pin);
   if (status === '') return null;
   // `--no-verify`: the harness owns this worktree and may have planted a
   // `.git/hooks/pre-commit` or `commit-msg`; the adapter's own commit must not run
   // it (#120 round-4 F2). Redundant with `hookGuardArgs`' hooksPath redirect, kept
   // as the explicit second lock the ticket asks for on the adapter's commit.
-  await git(checkout.dir, ['commit', '-q', '--no-verify', '-m', message]);
-  return git(checkout.dir, ['rev-parse', 'HEAD']);
+  await git(checkout.dir, ['commit', '-q', '--no-verify', '-m', message], pin);
+  return git(checkout.dir, ['rev-parse', 'HEAD'], pin);
+}
+
+/**
+ * The GIT_DIR/GIT_WORK_TREE pin for the adapter's own operations in a checkout,
+ * or `undefined` for a checkout captured before the round-5 gitDir capture (it
+ * falls back to `.git`-file discovery, the pre-F5b behaviour).
+ */
+function worktreePin(checkout: WorktreeCheckout): GitDirPin | undefined {
+  return checkout.gitDir === undefined
+    ? undefined
+    : { gitDir: checkout.gitDir, workTree: checkout.dir };
 }
 
 /** Reclaim the ephemeral checkout. The branch it produced is left intact. */
@@ -408,12 +535,14 @@ export async function pushArtifactBranch(
 ): Promise<string> {
   // Explicit refspec, force-free: a colliding ref in the durable repo (a re-run
   // of the same session id) must fail loudly, exactly as `addWorktree` refuses a
-  // colliding local branch.
-  await git(checkout.dir, [
-    'push',
-    artifact.dir,
-    `refs/heads/${checkout.branch}:refs/heads/${checkout.branch}`,
-  ]);
+  // colliding local branch. Pinned to the trusted per-worktree git dir (#120
+  // round-5 F5b) so a rewritten `.git` file cannot make this push read a
+  // different repo's objects.
+  await git(
+    checkout.dir,
+    ['push', artifact.dir, `refs/heads/${checkout.branch}:refs/heads/${checkout.branch}`],
+    worktreePin(checkout),
+  );
   return git(artifact.dir, ['rev-parse', '--verify', `refs/heads/${checkout.branch}`]);
 }
 

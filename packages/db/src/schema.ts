@@ -1392,12 +1392,33 @@ export const sessions = pgTable(
     openedByEventId: text('opened_by_event_id'),
     /** The `core_events.id` of the settling/failing event, once it exits. */
     settledByEventId: text('settled_by_event_id'),
+    /**
+     * EXECUTION-OWNERSHIP LEASE (#120 round-5 F4) — process-liveness bookkeeping,
+     * NOT covenant state and NOT written by the ledger projection. The instance id
+     * of the process whose ExecutionProvider is running this session, set when the
+     * coordinator claims the session and NULL for a session no local execution
+     * owns (the documented external-settle mode). Startup/periodic reconciliation
+     * reads it to tell a wedge THIS lineage must recover (leased, owner gone) from
+     * a live external-settle session (never leased) it must leave alone — replacing
+     * the round-4 boot-flag proxy that force-failed live external sessions on a
+     * disabled→enabled reboot and killed a peer instance's running sessions.
+     */
+    executionOwner: text('execution_owner'),
+    /**
+     * Last heartbeat from the owning process (#120 round-5 F4). Bumped on a timer
+     * while the owner runs; a lease whose heartbeat has gone stale is a dead
+     * owner's, and only THOSE are reconciled — a fresh heartbeat is a live owner,
+     * whether this process or a concurrent peer, and its session is left running.
+     */
+    executionHeartbeatAt: timestamp('execution_heartbeat_at', { withTimezone: true }),
     createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
     updatedAt: timestamp('updated_at', { withTimezone: true }).notNull().defaultNow(),
   },
   (t) => [
     index('sessions_plan_idx').on(t.planId),
     index('sessions_room_status_idx').on(t.roomId, t.status),
+    /** Reconciliation scans open, leased sessions by heartbeat (#120 round-5 F4). */
+    index('sessions_execution_owner_idx').on(t.status, t.executionOwner, t.executionHeartbeatAt),
     /** The composite-FK target for provenance edges (`accepted_objects`/`proposals`). */
     uniqueIndex('sessions_room_id_key').on(t.roomId, t.id),
     /**

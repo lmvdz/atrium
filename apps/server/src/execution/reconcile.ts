@@ -1,6 +1,6 @@
 import type { Database } from '@atrium/db';
 import { coreEvents, sessions, users } from '@atrium/db/schema';
-import { and, eq, isNotNull, sql } from 'drizzle-orm';
+import { and, eq, isNotNull, lt, sql } from 'drizzle-orm';
 import type { CommandService } from '../commands.js';
 import type { Logger } from '../logger.js';
 import type { Session } from '../session.js';
@@ -31,30 +31,43 @@ import type { Session } from '../session.js';
  * in `configure.ts`, awaited by the shutdown path) and, failing that, on the way
  * back in — here.
  *
- * ## Why "open at startup" is a safe predicate — ONLY when this process owns execution
+ * ## "Open at startup" is NOT enough — the lease is (#120 round-5 F4)
  *
- * An execution lives in the process that started it. Nothing survives a restart:
- * there is no execution to wait for, no handle to re-attach to, and the scratch
- * worktree the harness was running in was on a path the last process controlled.
- * So — WHEN THIS DEPLOYMENT RUNS EXECUTION — an `open` session at startup is by
- * definition one with no live execution. It gets the exit receipt it is owed
- * (`session_failed`, artifact `null`, an exit summary that says what happened)
- * rather than a fabricated clean one, because a run that was killed did not settle
- * and this seam does not pretend otherwise.
+ * Round 4 keyed this on a single boot flag: reconcile every `open` session iff
+ * `EXECUTION_PROVIDER` is set this boot. That flag is a process-global proxy for a
+ * PER-SESSION question — does a LIVE local execution own THIS session? — and the
+ * gauntlet broke it two ways the flag cannot see:
  *
- * ## When execution is DISABLED, "open at startup" means nothing of the sort (#120 round-4 F3)
+ *   * **disabled→enabled.** A session opened while execution was DISABLED (the
+ *     documented external-settle mode) is a LIVE session waiting on an outside
+ *     settler. Reboot with a provider set and the flag reads "reconcile every open
+ *     session", force-failing that live external settle and fabricating a receipt.
+ *   * **two concurrent instances.** Each boot's flag is true, so each force-fails
+ *     the OTHER instance's still-running sessions.
  *
- * `EXECUTION_PROVIDER` unset is a supported, documented mode: a session opens and
- * settles when something EXTERNAL settles it (`configure.ts`). In that mode this
- * process never started an execution and holds no evidence about any `open`
- * session — an `open` row is a LIVE session waiting on an outside settler, not a
- * dead one. Force-failing it would destroy a live external settle and fabricate a
- * `session_failed` for a run that is still going. So reconciliation only fires
- * when this process OWNS execution; with execution disabled it does nothing and
- * leaves every `open` session alone. The cross-boot wedge this leaves — a session
- * opened by an execution-enabled boot, then rebooted with execution disabled —
- * stays open until an execution-enabled boot reconciles it, which is the honest
- * cost of not being able to tell it apart from a live external session.
+ * So this no longer asks the flag. It asks the LEASE (`sessions.execution_owner` /
+ * `execution_heartbeat_at`, set by the coordinator when it claims a session):
+ *
+ *   * A session with NO owner (`execution_owner IS NULL`) is an external-settle
+ *     session no local execution ever ran. It is NEVER reconciled — no flag, no
+ *     boot, no exception. This closes disabled→enabled.
+ *   * A session whose owner's heartbeat is FRESH is a live run — this process's or
+ *     a concurrent peer's — and is left alone. This closes the two-instance
+ *     overlap: a peer that is up and heartbeating keeps its own leases warm.
+ *   * A session whose owner's heartbeat has gone STALE is a dead owner's wedge. It,
+ *     and only it, gets the exit receipt it is owed (`session_failed`, artifact
+ *     `null`, an exit summary that says what happened) rather than a fabricated
+ *     clean one.
+ *
+ * ## The residual, stated honestly
+ *
+ * Staleness needs a heartbeat to lapse, so a crash-and-restart FASTER than
+ * `staleAfterMs` leaves the dead owner's lease looking momentarily live; that
+ * wedge is recovered on the next reconcile pass once the lease ages out (the
+ * server runs reconciliation on a timer, not only at boot). The alternative —
+ * reconciling a young lease immediately — cannot distinguish a fast-restarted
+ * dead owner from a live peer, and killing a live peer's session is the worse
+ * error. So the lease is honored until it is provably stale.
  *
  * ## It settles AS THE OPENER, through the ordinary command path
  *
@@ -86,13 +99,14 @@ export interface ReconcileOptions {
   commands: CommandService;
   logger: Logger;
   /**
-   * Does THIS process own execution (#120 round-4 F3)? True only when an
-   * execution provider is configured this boot. When false, reconciliation is a
-   * no-op: an `open` session belongs to an external settler, not to a dead
-   * execution this process could speak for, and force-failing it would destroy a
-   * live settle. `index.ts` passes `executionRuntime !== null`.
+   * A lease whose heartbeat is older than this (ms) belongs to a DEAD owner and
+   * is reconciled; a fresher lease is a live owner (this process or a peer) and is
+   * left running (#120 round-5 F4). Must be comfortably larger than the heartbeat
+   * interval so a live owner's lease never reads as stale between beats.
    */
-  executionEnabled: boolean;
+  staleAfterMs: number;
+  /** Overridable clock, so a test can age a lease without waiting on wall time. */
+  now?: Date;
   /** Overridable so a test can assert the prose without pinning a date. */
   reason?: string;
 }
@@ -110,19 +124,21 @@ export async function reconcileWedgedSessions(
 ): Promise<ReconciliationResult> {
   const { db, commands, logger } = options;
   const reason = options.reason ?? DEFAULT_REASON;
+  const now = options.now ?? new Date();
+  const staleBefore = new Date(now.getTime() - options.staleAfterMs);
 
-  // Execution disabled ⇒ this process owns no execution and cannot honestly
-  // declare any `open` session dead (#120 round-4 F3). Do nothing — an external
-  // settler still owns those rows.
-  if (!options.executionEnabled) {
-    logger.info('skipping session reconciliation — execution is disabled this boot', {});
-    return { found: 0, failed: 0, unreconciled: 0 };
-  }
-
-  // Every open session, with the actor that opened it and that actor's principal
-  // kind. `openedByEventId` is NOT NULL in practice (the projection sets it) but
-  // is nullable in the schema, so the join is a left join and a row that cannot
-  // name its opener is reported rather than silently skipped.
+  // Every open session with a STALE lease, plus the actor that opened it and that
+  // actor's principal kind. The lease predicate is the whole of round-5 F4:
+  //
+  //   * `execution_owner IS NOT NULL` — a LOCAL execution owns it. An unleased
+  //     session is external-settle and is never a wedge this process may fail.
+  //   * `execution_heartbeat_at < staleBefore` — the owner has gone silent. A
+  //     fresh heartbeat is a live owner (this process or a concurrent peer), whose
+  //     session is left running.
+  //
+  // `openedByEventId` is NOT NULL in practice (the projection sets it) but is
+  // nullable in the schema, so the join is a left join and a row that cannot name
+  // its opener is reported rather than silently skipped.
   const wedged = await db
     .select({
       sessionId: sessions.id,
@@ -138,7 +154,14 @@ export async function reconcileWedgedSessions(
     // cast on the `uuid` side, not the text one: casting `actor_id` to uuid would
     // throw on the very rows this is supposed to skip.
     .leftJoin(users, sql`${users.id}::text = ${coreEvents.actorId}`)
-    .where(and(eq(sessions.status, 'open'), isNotNull(sessions.openedByEventId)));
+    .where(
+      and(
+        eq(sessions.status, 'open'),
+        isNotNull(sessions.openedByEventId),
+        isNotNull(sessions.executionOwner),
+        lt(sessions.executionHeartbeatAt, staleBefore),
+      ),
+    );
 
   if (wedged.length === 0) return { found: 0, failed: 0, unreconciled: 0 };
 

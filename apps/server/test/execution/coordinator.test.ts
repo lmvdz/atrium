@@ -403,3 +403,80 @@ describe('a settle fault still drives the session terminal (#120 r3 F2)', () => 
     expect(calls.filter((call) => call.name === 'settle_session')).toHaveLength(2);
   });
 });
+
+describe('runGranted refuses a session without a committed granted draw (#120 r5 F1)', () => {
+  it('does NOT resolve, run, or settle when ownership.claim returns false', async () => {
+    const sessionId = randomUUID();
+    const commands = fakeCommands({
+      kind: 'appended',
+      roomId: 'r',
+      seq: 1,
+      roomSeq: 1,
+      actor: { kind: 'agent', userId: agent.userId },
+      event: {} as never,
+      issues: [],
+    });
+    const provider = spyProvider(settledReport);
+    // The lease claim finds no granted+open session for this id — the "never-granted"
+    // case the round-4 gauntlet drove through `runGranted` (resolved=1, ran=1).
+    const claim = vi.fn(async () => false);
+    const coordinator = createExecutionCoordinator({
+      commands,
+      provider,
+      logger,
+      ownership: { claim },
+    });
+
+    const outcome = await coordinator.runGranted(agent, {
+      sessionId,
+      roomId: randomUUID(),
+      planId: randomUUID(),
+      harness: 'omp',
+      model: 'haiku',
+    });
+
+    // The guard fired BEFORE the provider: nothing resolved, nothing ran, and no
+    // settle was attempted for a session Atrium never authorized. Revert the
+    // `ownership.claim` guard in `runGranted` and this reds — the provider resolves
+    // and runs a fabricated session id.
+    expect(claim).toHaveBeenCalledWith({ sessionId, roomId: expect.any(String) });
+    expect(outcome).toEqual({ kind: 'failed', sessionId, artifact: null });
+    expect(provider.resolved).toBe(0);
+    expect(provider.ran).toBe(0);
+    expect(commands.calls.filter((c) => c.name === 'settle_session')).toHaveLength(0);
+  });
+
+  it('resolves, runs, and settles when ownership.claim returns true', async () => {
+    const sessionId = randomUUID();
+    const commands = fakeCommands({
+      kind: 'appended',
+      roomId: 'r',
+      seq: 1,
+      roomSeq: 1,
+      actor: { kind: 'agent', userId: agent.userId },
+      event: {} as never,
+      issues: [],
+    });
+    const provider = spyProvider(settledReport);
+    const claim = vi.fn(async () => true);
+    const coordinator = createExecutionCoordinator({
+      commands,
+      provider,
+      logger,
+      ownership: { claim },
+    });
+
+    const outcome = await coordinator.runGranted(agent, {
+      sessionId,
+      roomId: randomUUID(),
+      planId: randomUUID(),
+      harness: 'omp',
+      model: 'haiku',
+    });
+
+    expect(outcome.kind).toBe('settled');
+    expect(provider.resolved).toBe(1);
+    expect(provider.ran).toBe(1);
+    expect(commands.calls.filter((c) => c.name === 'settle_session')).toHaveLength(1);
+  });
+});

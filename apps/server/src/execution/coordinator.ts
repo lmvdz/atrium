@@ -28,10 +28,36 @@ export interface SessionCommandRunner {
   execute(session: Session, command: Command): Promise<CommandResult>;
 }
 
+/**
+ * THE EXECUTION-OWNERSHIP CLAIM (#120 round-5 F1 + F4).
+ *
+ * `claim` does two things atomically, in one guarded UPDATE:
+ *
+ *  1. **Proves the granted draw is committed (F1).** It matches a session only if
+ *     it exists, records an opener (`opened_by_event_id IS NOT NULL` — a
+ *     `session_opened` was projected, which only a GRANTED draw produces), and is
+ *     still `open`. A "never-granted" session id matches zero rows and `claim`
+ *     returns false, so the coordinator refuses to resolve a workspace or run a
+ *     harness for a draw Atrium never authorized — the exact adjacent-path bypass
+ *     the round-4 gauntlet drove through `runGranted`, which trusted its caller.
+ *  2. **Records the ownership lease (F4).** On a match it stamps this process's
+ *     instance id and a fresh heartbeat, so startup/periodic reconciliation can
+ *     later tell this session's execution apart from an external-settle session.
+ *
+ * Optional on the coordinator: the unit tests construct a coordinator with no DB,
+ * and there the claim is skipped (defense-in-depth is inert without a ledger to
+ * check against). EVERY wired path injects it — see `configure.ts`.
+ */
+export interface ExecutionOwnership {
+  claim(input: { sessionId: string; roomId: string }): Promise<boolean>;
+}
+
 export interface ExecutionCoordinatorOptions {
   commands: SessionCommandRunner;
   provider: ExecutionProvider;
   logger: Logger;
+  /** The granted-draw guard + ownership lease (#120 round-5). Wired in production. */
+  ownership?: ExecutionOwnership;
 }
 
 /** What the coordinator is asked to open and run. */
@@ -88,7 +114,7 @@ export interface ExecutionCoordinator {
 export function createExecutionCoordinator(
   options: ExecutionCoordinatorOptions,
 ): ExecutionCoordinator {
-  const { commands, provider, logger } = options;
+  const { commands, provider, logger, ownership } = options;
 
   /**
    * Append one `settle_session`, and THROW if it did not land. Both spellings of
@@ -127,6 +153,36 @@ export function createExecutionCoordinator(
   }
 
   async function runGranted(session: Session, granted: GrantedSession): Promise<ExecutionOutcome> {
+    // ── THE GRANTED-DRAW GUARD LIVES ON `runGranted` ITSELF (#120 round-5 F1) ──
+    //
+    // `runGranted` is wire-reachable — `wireExecutionCoordinator`'s command wrapper
+    // calls it directly on a granted `session_opened`. Its `GrantedSession`
+    // argument is just DATA; before round 5 it trusted that data and resolved a
+    // workspace for ANY session id, so a caller (or a wired path that forgot the
+    // upstream check) could run a "never-granted" session — `resolved=1, ran=1` on
+    // a session the budget never authorized. The budget guard on `openAndRun` did
+    // not cover this adjacent entry point. So the check is duplicated HERE, on the
+    // one call every path funnels through, and it refuses BEFORE touching the
+    // provider. Revert this and a fabricated session id resolves and runs.
+    if (ownership) {
+      const owned = await ownership.claim({
+        sessionId: granted.sessionId,
+        roomId: granted.roomId,
+      });
+      if (!owned) {
+        logger.error('refusing to run a session without a committed granted draw', {
+          sessionId: granted.sessionId,
+          roomId: granted.roomId,
+          provider: provider.kind,
+        });
+        // Nothing was resolved, run, or settled — there is no `open` granted
+        // session here to write a receipt for. Report failed so the caller sees
+        // the run did not happen, without fabricating an exit for a session that
+        // was never Atrium's to run.
+        return { kind: 'failed', sessionId: granted.sessionId, artifact: null };
+      }
+    }
+
     const ctx: SessionContext = {
       sessionId: granted.sessionId,
       roomId: granted.roomId,

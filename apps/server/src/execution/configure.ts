@@ -1,10 +1,18 @@
+import { randomUUID } from 'node:crypto';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import type { Database } from '@atrium/db';
+import { sessions } from '@atrium/db/schema';
+import { and, eq, isNotNull, isNull, or } from 'drizzle-orm';
 import type { ArtifactVerifier, CommandResult, CommandService } from '../commands.js';
 import type { Env } from '../env.js';
 import type { Logger } from '../logger.js';
 import type { Session } from '../session.js';
-import { createExecutionCoordinator, type ExecutionCoordinator } from './coordinator.js';
+import {
+  createExecutionCoordinator,
+  type ExecutionCoordinator,
+  type ExecutionOwnership,
+} from './coordinator.js';
 import {
   type ArtifactRepo,
   artifactBranchCommit,
@@ -207,10 +215,25 @@ export function createArtifactVerifier(
     // adds assurance rather than moving the same trust to a second unauthenticated
     // ref. It is left as occupancy, named here so the check is not read as
     // promising provenance it does not provide.
+    // ── RESOLVE ONCE, VERIFY, PIN THE SAME SHA (#120 round-5 F7) ──────────────
+    //
+    // Resolution and pinning used to read the branch twice — verify against
+    // `artifact.commit`, then pin `artifact.commit` — with a window in between in
+    // which a same-UID writer could force-move the ref. The fix pins the EXACT sha
+    // this call resolved (`resolved`), by OBJECT, not by re-reading the branch:
+    // once resolved and checked, the pin depends only on that immutable commit, so
+    // a branch that moves afterward cannot make the pin land on a different object.
+    // `pinSettledArtifact` is create-once and its `update-ref` fails if the object
+    // is gone, so a commit GC'd in the window makes the pin THROW (→ refuse), never
+    // dangle. This is the atomicity a local bare repo affords — a single object
+    // value carried from check to pin — not a cross-process ref lock, and it is
+    // still OCCUPANCY, not provenance (see above): it proves the object sits at
+    // this session's ref in a repo the provider controls, not that this provider
+    // pushed it.
     const resolved = await artifactBranchCommit(artifactRepo, artifact.branch);
     if (resolved === null || resolved !== artifact.commit) return false;
     try {
-      await pinSettledArtifact(artifactRepo, sessionId, artifact.commit);
+      await pinSettledArtifact(artifactRepo, sessionId, resolved);
     } catch (error) {
       logger.error('refusing a settle artifact that could not be pinned durably', {
         sessionId,
@@ -224,6 +247,69 @@ export function createArtifactVerifier(
 }
 
 /**
+ * THE EXECUTION-OWNERSHIP LEASE MANAGER (#120 round-5 F1 + F4).
+ *
+ * Owns the two lease columns on `sessions`. `claim` is the granted-draw guard AND
+ * the lease write in one guarded UPDATE (see `ExecutionOwnership`); `heartbeat`
+ * keeps this process's live leases warm so reconciliation does not read them as a
+ * dead owner's. Both are process-liveness bookkeeping — NOT the ledger projection,
+ * NOT covenant state — scoped to `status = 'open'` so they never present an UPDATE
+ * to a terminal row (which `sessions_terminal_immutable` would refuse).
+ */
+export interface ExecutionOwnershipManager extends ExecutionOwnership {
+  /** This process's execution instance id — the value stamped on a claimed lease. */
+  readonly instanceId: string;
+  /** Bump the heartbeat on every open session this process owns. Returns the count. */
+  heartbeat(): Promise<number>;
+}
+
+export function createExecutionOwnership(input: {
+  db: Database;
+  instanceId: string;
+  logger: Logger;
+}): ExecutionOwnershipManager {
+  const { db, instanceId, logger } = input;
+  return {
+    instanceId,
+    claim: async ({ sessionId, roomId }) => {
+      // Matches ONLY a session that exists, was GRANTED (a `session_opened` was
+      // projected — `opened_by_event_id IS NOT NULL`), is still `open`, and is not
+      // already owned by a DIFFERENT live instance. A "never-granted" id, an
+      // already-exited session, or one a peer owns matches zero rows → false, and
+      // the coordinator refuses to run it. On a match it stamps this instance and a
+      // fresh heartbeat in the SAME statement, so the guard and the lease are one
+      // atomic write with no window between them.
+      const claimed = await db
+        .update(sessions)
+        .set({ executionOwner: instanceId, executionHeartbeatAt: new Date() })
+        .where(
+          and(
+            eq(sessions.id, sessionId),
+            eq(sessions.roomId, roomId),
+            isNotNull(sessions.openedByEventId),
+            eq(sessions.status, 'open'),
+            // Not already owned by a DIFFERENT instance — free, or ours to re-claim.
+            or(isNull(sessions.executionOwner), eq(sessions.executionOwner, instanceId)),
+          ),
+        )
+        .returning({ id: sessions.id });
+      return claimed.length > 0;
+    },
+    heartbeat: async () => {
+      const bumped = await db
+        .update(sessions)
+        .set({ executionHeartbeatAt: new Date() })
+        .where(and(eq(sessions.executionOwner, instanceId), eq(sessions.status, 'open')))
+        .returning({ id: sessions.id });
+      if (bumped.length > 0) {
+        logger.debug?.('execution ownership heartbeat', { instanceId, count: bumped.length });
+      }
+      return bumped.length;
+    },
+  };
+}
+
+/**
  * PHASE 2 — wrap a command service so a granted `session_opened` fires the
  * coordinator, and return the coordinator + the wrapped service.
  */
@@ -231,6 +317,8 @@ export function wireExecutionCoordinator(input: {
   provider: ExecutionProvider;
   commands: CommandService;
   logger: Logger;
+  /** The granted-draw guard + ownership lease (#120 round-5). Injected in production. */
+  ownership?: ExecutionOwnership;
 }): {
   coordinator: ExecutionCoordinator;
   commands: CommandService;
@@ -243,8 +331,8 @@ export function wireExecutionCoordinator(input: {
   /** How many executions are running right now. For tests and the boot log. */
   inFlight(): number;
 } {
-  const { provider, commands, logger } = input;
-  const coordinator = createExecutionCoordinator({ commands, provider, logger });
+  const { provider, commands, logger, ownership } = input;
+  const coordinator = createExecutionCoordinator({ commands, provider, logger, ownership });
 
   // ── EXECUTIONS ARE TRACKED, NOT DETACHED (#120 round-3 F5) ─────────────────
   //
@@ -334,11 +422,28 @@ export async function configureExecution(input: {
   env: Env;
   commands: CommandService;
   logger: Logger;
+  /**
+   * The database and this process's execution instance id, for the ownership
+   * lease (#120 round-5). When provided, the coordinator enforces the granted-draw
+   * guard and stamps ownership leases; absent (the pure-unit fixtures that pass a
+   * fake command service and no DB), the guard is inert.
+   */
+  db?: Database;
+  instanceId?: string;
 }): Promise<ConfiguredExecution | null> {
-  const { env, commands, logger } = input;
+  const { env, commands, logger, db, instanceId } = input;
   const runtime = await createExecutionProvider({ env, logger });
   if (runtime === null) return null;
-  const wired = wireExecutionCoordinator({ provider: runtime.provider, commands, logger });
+  const ownership =
+    db !== undefined
+      ? createExecutionOwnership({ db, instanceId: instanceId ?? randomUUID(), logger })
+      : undefined;
+  const wired = wireExecutionCoordinator({
+    provider: runtime.provider,
+    commands,
+    logger,
+    ownership,
+  });
   return {
     provider: runtime.provider,
     coordinator: wired.coordinator,
