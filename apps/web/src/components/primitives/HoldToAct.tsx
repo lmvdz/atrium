@@ -26,7 +26,10 @@
  *     DOM through a ref rather than through state: one paint per frame, no
  *     React render per frame, and the value is observable in a test.
  *   - RELEASE BEFORE COMPLETE CANCELS. Pointer up, pointer cancel, leaving the
- *     button, blurring it, or lifting the key all abort with nothing fired.
+ *     button, blurring it, or lifting the key all abort with nothing fired to
+ *     `onAct`. A cancel fires `onCancel` (the mirror of `onBegin`), so a caller
+ *     that started something on begin — the certify's server arm — can undo it
+ *     when the hold is abandoned, rather than leave it live.
  *   - `onArm` and `onAct` are separate. Completing the hold produces an
  *     `Arming` record — the action, when it was armed, how long it was held —
  *     which goes to `onArm` first and then to `onAct`. A caller that must put
@@ -82,6 +85,18 @@ export interface HoldToActProps {
    * is: a pending arm that is never confirmed certifies nothing and expires.
    */
   readonly onBegin?: () => void;
+  /**
+   * Fired when a hold that had BEGUN is released before it completes — pointer up
+   * or cancel, leaving or blurring the button, lifting the key. It does NOT fire
+   * for a release after completion (the hold already armed) or when nothing was
+   * being held.
+   *
+   * The mirror of `onBegin`: a caller that started something on begin (the
+   * certify's server arm) can undo it on cancel (the server disarm), so a
+   * cancelled hold leaves no live intention behind. A cancel that reaches nothing
+   * must be harmless — this fires on every abort, including redundant ones.
+   */
+  readonly onCancel?: () => void;
   readonly onArm?: (arming: Arming) => void;
   readonly onAct?: (arming: Arming) => void;
   readonly className?: string;
@@ -96,6 +111,7 @@ export function HoldToAct({
   describe,
   holdMs = DEFAULT_HOLD_MS,
   onBegin,
+  onCancel,
   onArm,
   onAct,
   className,
@@ -129,11 +145,16 @@ export function HoldToAct({
   }, []);
 
   const cancel = useCallback(() => {
+    /* Only a hold that had actually begun can be cancelled. `startRef` is null
+       after a completed hold (`stop()` clears it) and before any press, so a
+       pointer-up following a successful arm — or a stray blur — reaches nothing,
+       and `onCancel` fires ONLY for a real release-before-complete. */
     if (startRef.current === null) return;
     stop();
     paint(0);
     setPhase('idle');
-  }, [paint, stop]);
+    onCancel?.();
+  }, [onCancel, paint, stop]);
 
   const complete = useCallback(() => {
     const started = startRef.current;

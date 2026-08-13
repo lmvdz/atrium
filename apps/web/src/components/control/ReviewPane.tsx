@@ -63,6 +63,8 @@ export interface ReviewPaneProps {
   /** fired when the hold BEGINS, so the server can stamp the start of it */
   readonly onArm: (sessionId: string) => void;
   readonly onCertify: (sessionId: string) => void;
+  /** fired when a hold is RELEASED before completing, so the server clears the arm */
+  readonly onDisarm: (sessionId: string) => void;
   readonly certifyError: string | null;
 }
 
@@ -74,6 +76,7 @@ export function ReviewPane({
   viewerKind,
   onArm,
   onCertify,
+  onDisarm,
   certifyError,
 }: ReviewPaneProps) {
   const [applying, setApplying] = useState(false);
@@ -142,14 +145,14 @@ export function ReviewPane({
           ) : (
             <span className={styles.v} data-tests="true">
               <span className={styles.pass} data-tests-passed={artifact?.testsPassed ?? 0}>
-                {artifact?.testsPassed ?? 0} passed
+                {systemText(String(artifact?.testsPassed ?? 0), 'ReviewPane tests passed')} passed
               </span>
               {' · '}
               <span
                 className={(artifact?.testsFailed ?? 0) > 0 ? styles.fail : styles.muted}
                 data-tests-failed={artifact?.testsFailed ?? 0}
               >
-                {artifact?.testsFailed ?? 0} failed
+                {systemText(String(artifact?.testsFailed ?? 0), 'ReviewPane tests failed')} failed
               </span>
             </span>
           )}
@@ -265,6 +268,13 @@ export function ReviewPane({
                local note that a confirm is in flight. */
             onArm={() => setApplying(true)}
             onBegin={() => onArm(session.id)}
+            /* Released before the meter filled: tell the server to clear the arm
+               it stamped on begin, so a cancelled hold leaves nothing a later
+               confirm could spend (CS-3). Also drops the local "recording" note. */
+            onCancel={() => {
+              setApplying(false);
+              onDisarm(session.id);
+            }}
           />
           {applying && certifyError === null ? (
             <span className={styles.certifyNote} data-certify-applying="true">

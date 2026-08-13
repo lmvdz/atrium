@@ -14,7 +14,7 @@
 import Link from 'next/link';
 import { useRouter } from 'next/navigation';
 import { useMemo, useState } from 'react';
-import type { ArmOutcome, CertifyOutcome } from '@/lib/certify-session';
+import type { ArmOutcome, CertifyOutcome, DisarmOutcome } from '@/lib/certify-session';
 import type { ControlPlaneData, ControlSessionRow } from '@/lib/control-plane-data';
 import type { ParticipantKind } from '../model/kind';
 import { systemText } from '../model/quotation';
@@ -40,8 +40,10 @@ export interface ControlPlaneProps {
   readonly roomSlug: string;
   /**
    * STEP ONE of the human-only certify, as a Server Action. Fired when the hold
-   * BEGINS, so the interval the server later measures is the one the person
-   * actually held. It carries no timing — that is the whole point (CS-2).
+   * BEGINS, so the server stamps the start of the interval it later measures. It
+   * carries no timing — that is the whole point (CS-2). The interval is a
+   * minimum-delay between two deliberate server calls, not a proof of a continuous
+   * physical hold (see certify-session.ts's honesty note).
    */
   readonly armAction: (input: {
     sessionId: string;
@@ -54,6 +56,16 @@ export interface ControlPlaneProps {
     workspaceSlug: string;
     roomSlug: string;
   }) => Promise<CertifyOutcome>;
+  /**
+   * CANCELLATION. Fired when the hold is released before it completes, so the
+   * server can clear the arm it stamped on begin. Without it a released hold left
+   * a live arm for its whole TTL, and a later direct confirm certified (CS-3).
+   */
+  readonly disarmAction: (input: {
+    sessionId: string;
+    workspaceSlug: string;
+    roomSlug: string;
+  }) => Promise<DisarmOutcome>;
 }
 
 /** A recent lifecycle event as one calm sentence. */
@@ -91,6 +103,8 @@ function certifyErrorText(reason: string): string {
       return 'a session is certified once it has settled';
     case 'already_certified':
       return 'this session has already been certified, and a certification is written once';
+    case 'no_artifact':
+      return 'this session produced no artifact to review — there is nothing to certify';
     case 'not_armed':
       return 'the server recorded no hold for this session — press and hold the control itself';
     case 'held_too_short':
@@ -110,6 +124,7 @@ export function ControlPlane({
   roomSlug,
   armAction,
   certifyAction,
+  disarmAction,
 }: ControlPlaneProps) {
   const router = useRouter();
   const [openSessionId, setOpenSessionId] = useState<string | undefined>(undefined);
@@ -157,9 +172,22 @@ export function ControlPlane({
   // The PIN: only what needs a human. Failed sessions and settled-awaiting-landing
   // sessions from the tree, plus the room's owed decisions. Order is derived in
   // ControlPin from the glyph, so the failed session floats to the top.
+  //
+  // GATED ON THE VIEWER BEING HUMAN. A failed session and an unlanded artifact are
+  // owed to a HUMAN — certifying is a human-only act — so an agent-principal viewer
+  // is owed NEITHER: the same answer `sessionState`'s `owedToViewer` already
+  // derives per glyph (state.ts), applied here to MEMBERSHIP so the pin row and the
+  // decisions line disappear for a non-human viewer, not merely lose their colour.
+  // Round 3 gated the glyph but left these two collections unconditional, so an
+  // agent still read the item under NEEDS YOU and in the decisions count. `viewerIsHuman`
+  // is the allowlist of the compliant form (`=== 'human'`); an agent or a
+  // fail-closed `'unknown'` kind is not owed the session work at all.
   const pinItems = useMemo<ControlPinItem[]>(() => {
     const items: ControlPinItem[] = [];
     for (const { session, planTitle } of allSessions) {
+      // A non-human viewer is owed no session certification; skip the room's
+      // failed and awaits-landing sessions entirely for them.
+      if (!viewerIsHuman) continue;
       if (session.status === 'failed') {
         items.push({
           id: session.id,
@@ -196,9 +224,13 @@ export function ControlPlane({
     return items;
   }, [allSessions, owedDecisions, viewerIsHuman]);
 
-  // The three surfaces.
+  // The three surfaces. The certify lines are the SAME session work the pin
+  // filters, and they are owed to a human too — so they are gated on the viewer
+  // being human, exactly as the pin membership is. An agent-principal viewer sees
+  // only the room's owed decisions here (already per-viewer filtered), and the
+  // count reads off the list it renders, so it cannot drift back to a room fact.
   const decisionsLines: SurfaceLine[] = [
-    ...allSessions
+    ...(viewerIsHuman ? allSessions : [])
       .filter((entry) => sessionAwaitsLanding(entry.session))
       .map((entry) => ({
         id: `certify:${entry.session.id}`,
@@ -275,6 +307,16 @@ export function ControlPlane({
     });
   };
 
+  /* DISARM on cancel. The control fires this when a hold is released before it
+     completes, so the server clears the arm it stamped on begin — a cancelled
+     hold must not leave a live arm a later confirm could spend (CS-3). Fire and
+     forget: a failed disarm is harmless (the arm's TTL and the confirm gate still
+     hold), and surfacing an error for a release the person already walked away
+     from would be noise. */
+  const onDisarm = (sessionId: string) => {
+    void disarmAction({ sessionId, workspaceSlug, roomSlug });
+  };
+
   return (
     <main className={styles.page} data-frame="control" data-room-id={data.room.id}>
       <header className={styles.head}>
@@ -313,6 +355,7 @@ export function ControlPlane({
               certifyError={certifyError}
               onArm={onArm}
               onCertify={onCertify}
+              onDisarm={onDisarm}
               planTitle={open?.planTitle ?? null}
               session={open?.session ?? null}
               viewerId={viewerId}

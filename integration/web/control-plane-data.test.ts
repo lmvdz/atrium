@@ -247,8 +247,21 @@ describe('a session row carries the certifier KIND, not only the name', () => {
         harness: 'claude-code',
         model: 'opus',
         status: 'settled',
+        /* An artifact to sign — a certification is bound to one now (0034), so a
+           null-artifact row can no longer be certified. */
+        artifact: { branch: 'feat/x', commit: 'abc123' },
       })
       .returning({ id: sessions.id });
+    /* A COMPLETE RECEIPT. This used to write only `{ certifiedBy, certifiedAt,
+       certifiedHeldMs }` and expect a valid certification — a `certified_by` with
+       no arm behind it, exactly the shape CS-2 mints a false `✓` from. The
+       receipt-complete backstop (drizzle/0035) now RAISES on that row, so the
+       fixture writes the whole hold: armed, then stamped. Arm first (it is frozen
+       once certified, 0033), then the signature over it. */
+    await handle.db
+      .update(sessions)
+      .set({ certifyArmedBy: ada, certifyArmedAt: new Date(Date.now() - 3_000) })
+      .where(eq(sessions.id, (row as { id: string }).id));
     await handle.db
       .update(sessions)
       .set({ certifiedBy: ada, certifiedAt: new Date(), certifiedHeldMs: 2400 })
@@ -258,5 +271,8 @@ describe('a session row carries the certifier KIND, not only the name', () => {
     const session = view.agents[0]?.plans[0]?.sessions[0];
     expect(session?.certifiedByName).toBe('ada');
     expect(session?.certifiedByKind).toBe('human');
+    /* The arm timestamp travels with the receipt now — the render fails closed
+       without it (CS-2), so the projection has to carry it. */
+    expect(session?.certifyArmedAt).not.toBeNull();
   });
 });

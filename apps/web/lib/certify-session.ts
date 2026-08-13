@@ -37,7 +37,27 @@ import { CERTIFY_ARM_TTL_MS, CERTIFY_REQUIRED_HOLD_MS } from './certify-hold';
  *      somebody else, anything armed longer ago than {@link CERTIFY_ARM_TTL_MS},
  *      and anything never armed at all. `certified_held_ms` is that measured
  *      interval; `certified_at` is `now()`. Neither function takes a timing
- *      argument, so there is no forged value for a guard to have to catch.
+ *      argument, so there is no forged value for a guard to have to catch. A
+ *      successful confirm sets `certified_by`, and every write here is scoped
+ *      `isNull(certified_by)` — so the arm is SINGLE-USE in the only sense that
+ *      matters: a second confirm on the same session finds it certified and is
+ *      refused, and drizzle/0033 freezes the arm columns underneath.
+ *   3. {@link disarmCertification} clears a pending arm the person released
+ *      without confirming. The browser's cancel is local; without a server disarm
+ *      the arm outlived the release for its whole TTL, and "arm, release, wait,
+ *      confirm" certified anyway (CS-3). Every cancellation path calls it.
+ *
+ * ## WHAT THE HOLD PROVES, STATED HONESTLY
+ *
+ * The arm→confirm gate is a MINIMUM-DELAY TWO-STEP CONFIRMATION measured on the
+ * server: it proves at least {@link CERTIFY_REQUIRED_HOLD_MS} of wall-clock passed
+ * between two deliberate calls by the same authenticated human, and that the
+ * timing was not supplied by the client. It does NOT prove a finger stayed on a
+ * control for that whole interval — against a scripted client, continuous physical
+ * holding is unprovable server-side without interaction attestation, which this
+ * does not have. The disarm-on-cancel narrows the window a released hold leaves
+ * open; it does not turn elapsed time into a proof of a continuous hold. The copy
+ * and the affordance describe the friction as exactly that and claim no more.
  *
  * ## The four conditions, and where each is enforced
  *
@@ -82,6 +102,12 @@ export type CertifyRefusal =
   | 'no_such_session'
   | 'not_settled'
   | 'already_certified'
+  /**
+   * The session carries no artifact to review, so there is nothing for a
+   * signature to be a signature OF. A `✓` must mean "this human signed THIS
+   * artifact" (CS-1); refused at both arm and confirm.
+   */
+  | 'no_artifact'
   /** No pending server arm for this viewer — nothing was held. */
   | 'not_armed'
   /** The server-measured interval between arm and confirm was under the gate. */
@@ -94,6 +120,10 @@ export type CertifyOutcome =
   | { readonly ok: false; readonly reason: CertifyRefusal };
 
 export type ArmOutcome =
+  | { readonly ok: true }
+  | { readonly ok: false; readonly reason: CertifyRefusal };
+
+export type DisarmOutcome =
   | { readonly ok: true }
   | { readonly ok: false; readonly reason: CertifyRefusal };
 
@@ -167,6 +197,7 @@ export async function armCertification(input: CertifyInput): Promise<ArmOutcome>
         roomId: sessions.roomId,
         status: sessions.status,
         certifiedBy: sessions.certifiedBy,
+        artifact: sessions.artifact,
       })
       .from(sessions)
       .where(eq(sessions.id, sessionId))
@@ -176,6 +207,11 @@ export async function armCertification(input: CertifyInput): Promise<ArmOutcome>
     if (session.roomId !== authorizedRoomId) return { ok: false, reason: 'not_in_room' };
     if (session.status !== 'settled') return { ok: false, reason: 'not_settled' };
     if (session.certifiedBy !== null) return { ok: false, reason: 'already_certified' };
+    /* NOTHING TO SIGN, NOTHING TO ARM. Arming a null-artifact session would let a
+       person hold a control over work that does not exist — and if the artifact
+       arrived after the arm, the hold would have been performed against nothing.
+       Refuse the arm outright; the DB backstop (drizzle/0034) refuses the write. */
+    if (session.artifact === null) return { ok: false, reason: 'no_artifact' };
 
     await tx
       .update(sessions)
@@ -218,6 +254,7 @@ export async function certifySession(input: CertifyInput): Promise<CertifyOutcom
         status: sessions.status,
         certifiedBy: sessions.certifiedBy,
         armedBy: sessions.certifyArmedBy,
+        artifact: sessions.artifact,
         /* The whole gate, in one expression the client cannot reach: milliseconds
            between the server's clock at the arm and the server's clock now. NULL
            when nothing is armed, which `heldMs === null` reads as "not armed"
@@ -235,6 +272,11 @@ export async function certifySession(input: CertifyInput): Promise<CertifyOutcom
     if (session.roomId !== authorizedRoomId) return { ok: false, reason: 'not_in_room' };
     if (session.status !== 'settled') return { ok: false, reason: 'not_settled' };
     if (session.certifiedBy !== null) return { ok: false, reason: 'already_certified' };
+    /* BOUND TO THE REVIEWED ARTIFACT. The signature is a signature OF something;
+       a session with no artifact has nothing to certify. Refused here and frozen
+       by drizzle/0034, so a `✓` means "this human signed THIS artifact" — it
+       cannot be minted over null work, nor left standing when the work changes. */
+    if (session.artifact === null) return { ok: false, reason: 'no_artifact' };
 
     /* THE ARM MUST BE THIS VIEWER'S. Otherwise one person's hold would arm a
        control a second person confirms, and the signature would name somebody who
@@ -268,6 +310,49 @@ export async function certifySession(input: CertifyInput): Promise<CertifyOutcom
       .returning({ id: sessions.id });
 
     if (landed.length === 0) return { ok: false, reason: 'already_certified' };
+    return { ok: true };
+  });
+}
+
+/**
+ * DISARM — clear a pending arm the person did not carry through to a confirm.
+ *
+ * CS-3, the half the client could not do for itself. Releasing the control early
+ * cancels the hold IN THE BROWSER, but the server arm it stamped on hold-begin
+ * lived on for its full TTL — so "arm, release immediately, wait past the gate,
+ * confirm directly" certified, because the release changed nothing the server
+ * could see. Every cancellation path in the control now calls this, so a
+ * cancelled hold leaves no live arm behind.
+ *
+ * Scoped to THIS viewer's own uncertified arm: it clears `certify_armed_at` /
+ * `certify_armed_by` only where the arm is this viewer's and the session is not
+ * yet certified. A certified session's arm is frozen (drizzle/0033) and part of
+ * the receipt, so it is deliberately out of reach here — disarming is for a hold
+ * that never completed, never for un-writing one that did.
+ *
+ * Best-effort by design: it takes no lock beyond the row it clears and returns
+ * `ok` even when there was nothing to clear (an already-cancelled or never-armed
+ * session). The confirm gate and the arm TTL remain the load-bearing backstops;
+ * this narrows the window a cancelled hold leaves open, it does not replace them.
+ */
+export async function disarmCertification(input: CertifyInput): Promise<DisarmOutcome> {
+  const { database, viewerId, sessionId, authorizedRoomId } = input;
+
+  return database.transaction(async (tx) => {
+    const refusal = await viewerMayCertify(tx, viewerId, authorizedRoomId);
+    if (refusal !== null) return { ok: false, reason: refusal };
+
+    await tx
+      .update(sessions)
+      .set({ certifyArmedAt: null, certifyArmedBy: null, updatedAt: sql`now()` })
+      .where(
+        and(
+          eq(sessions.id, sessionId),
+          eq(sessions.roomId, authorizedRoomId),
+          eq(sessions.certifyArmedBy, viewerId),
+          isNull(sessions.certifiedBy),
+        ),
+      );
     return { ok: true };
   });
 }

@@ -8,7 +8,11 @@ import { db } from '@/lib/db';
 import { requireSession } from '@/lib/session';
 import { loadRoom, loadWorkspace } from '@/lib/workspaces';
 import { ControlPlane } from '@/src/components/control/ControlPlane';
-import { armSessionCertificationAction, certifySessionAction } from './actions';
+import {
+  armSessionCertificationAction,
+  certifySessionAction,
+  disarmSessionCertificationAction,
+} from './actions';
 
 export const metadata: Metadata = { title: 'Control · Atrium' };
 export const dynamic = 'force-dynamic';
@@ -54,6 +58,7 @@ export default async function ControlPage({
     <ControlPlane
       armAction={armSessionCertificationAction}
       certifyAction={certifySessionAction}
+      disarmAction={disarmSessionCertificationAction}
       data={data}
       roomSlug={roomSlug}
       viewerId={session.userId}

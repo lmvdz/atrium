@@ -7,6 +7,8 @@ import {
   armCertification,
   type CertifyOutcome,
   certifySession,
+  type DisarmOutcome,
+  disarmCertification,
 } from '@/lib/certify-session';
 import { db } from '@/lib/db';
 import { requireSession } from '@/lib/session';
@@ -83,6 +85,24 @@ export async function armSessionCertificationAction(raw: unknown): Promise<ArmOu
   if (!resolved.ok) return { ok: false, reason: resolved.reason };
 
   return armCertification({
+    database: db(),
+    viewerId: resolved.at.userId,
+    sessionId: resolved.at.sessionId,
+    authorizedRoomId: resolved.at.roomId,
+  });
+}
+
+/**
+ * CANCELLATION. Fired when the hold is RELEASED before it completes; the server
+ * clears the arm it stamped on begin (CS-3). Without it a released hold left a
+ * live arm for its whole TTL, and a later direct confirm certified. No
+ * `revalidatePath`: disarming changes nothing a viewer is looking at.
+ */
+export async function disarmSessionCertificationAction(raw: unknown): Promise<DisarmOutcome> {
+  const resolved = await resolve(raw);
+  if (!resolved.ok) return { ok: false, reason: resolved.reason };
+
+  return disarmCertification({
     database: db(),
     viewerId: resolved.at.userId,
     sessionId: resolved.at.sessionId,

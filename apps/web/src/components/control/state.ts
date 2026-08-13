@@ -69,9 +69,30 @@ import { hardestState } from '../model/records';
  * A name with an unreadable or non-human kind is therefore NOT a certification.
  * Two DB triggers make such a row unwritable (0032, 0033) — this is what the
  * render does if one ever is.
+ *
+ * ## A `✓` REQUIRES A COMPLETE RECEIPT, NOT A NAME (CS-2)
+ *
+ * The human triggers (0032/0033) refuse a non-human name, but nothing stopped
+ * `UPDATE sessions SET certified_by = <a human uuid>` on its own — arm, held-ms
+ * and `certified_at` all left null. The humanity trigger accepts that row, and a
+ * render that read name + kind alone minted `✓` from it: a certification with no
+ * hold. So the render fails CLOSED on an incomplete receipt — every part of the
+ * hold must be present (armed, held, stamped, signed) or this is `~`, the same
+ * way an unreadable kind is. A DB backstop (drizzle/0035) refuses to WRITE the
+ * partial row; this is the render's own refusal to trust one if it ever appears.
  */
 export function sessionCertified(session: ControlSessionRow): boolean {
   if (session.certifiedByName === null || session.certifiedByKind === null) return false;
+  /* The whole receipt or nothing. A `certified_by` without the arm that produced
+     it, the duration it measured, or the moment it was stamped is not a hold — and
+     `✓` is the glyph for a held human signature, not for a name in a column. */
+  if (
+    session.certifyArmedAt === null ||
+    session.certifiedHeldMs === null ||
+    session.certifiedAt === null
+  ) {
+    return false;
+  }
   return epistemicStateFromAcceptance(session.certifiedByKind, null) === 'confirmed';
 }
 

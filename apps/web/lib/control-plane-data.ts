@@ -87,6 +87,15 @@ export interface ControlSessionRow {
   readonly certifiedByKind: PrincipalKind | null;
   readonly certifiedAt: string | null;
   readonly certifiedHeldMs: number | null;
+  /**
+   * When the hold that produced the certification was ARMED. Carried beside the
+   * rest of the receipt so the render can fail CLOSED on an incomplete one: a
+   * `certified_by` with no arm, no held duration, or no `certified_at` is not a
+   * hold, and `sessionCertified` refuses to mint `✓` from a partial row (CS-2).
+   * A DB backstop (drizzle/0035) refuses to WRITE such a row; this is what the
+   * render does if one is ever read.
+   */
+  readonly certifyArmedAt: string | null;
   readonly createdAt: string;
   readonly updatedAt: string;
 }
@@ -293,6 +302,7 @@ export async function loadControlPlane(
         session.certifiedBy === null ? null : (certifierKindById.get(session.certifiedBy) ?? null),
       certifiedAt: session.certifiedAt === null ? null : session.certifiedAt.toISOString(),
       certifiedHeldMs: session.certifiedHeldMs,
+      certifyArmedAt: session.certifyArmedAt === null ? null : session.certifyArmedAt.toISOString(),
       createdAt: session.createdAt.toISOString(),
       updatedAt: session.updatedAt.toISOString(),
     };

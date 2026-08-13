@@ -363,6 +363,30 @@ const NOT_FORWARDED: readonly {
     handler: 'onBegin',
     why: 'same as the open card — the compressed row renders the same control for the same in-room answers',
   },
+  /**
+   * `HoldToAct.onCancel` is the MIRROR of `onBegin`, added in #121 round 4 for
+   * CS-3: it fires when a hold is released before it completes, so a caller that
+   * started something on begin (the certify's server arm) can undo it on cancel
+   * (the server disarm). It exists for the same single caller and is exempted for
+   * the same reason — an in-room attention action starts no server clock on begin,
+   * so it has nothing to disarm on cancel. Threading a handler no attention caller
+   * implements up through `Pin` and the frame would add the same dead seams the
+   * `onBegin` exemption above weighs and declines.
+   *
+   * IF an attention action ever needs a server-measured hold, delete these two
+   * entries alongside the `onBegin` pair: the sweep goes red until both are
+   * threaded, which is the point.
+   */
+  {
+    edge: 'AttentionCard→HoldToAct',
+    handler: 'onCancel',
+    why: 'the mirror of onBegin — no attention action arms a server clock to disarm; #121 certify is the only caller, and it renders its own HoldToAct',
+  },
+  {
+    edge: 'AttentionCompact→HoldToAct',
+    handler: 'onCancel',
+    why: 'same as the open card — the compressed row renders the same control for the same in-room answers',
+  },
 ];
 
 const FRAME = FRAME_SOURCE;

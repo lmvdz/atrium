@@ -239,6 +239,20 @@
       "when": 1787136000000,
       "tag": "0033_a_certification_is_armed_by_the_server",
       "breakpoints": true
+    },
+    {
+      "idx": 34,
+      "version": "7",
+      "when": 1787222400000,
+      "tag": "0034_a_certification_is_bound_to_its_artifact",
+      "breakpoints": true
+    },
+    {
+      "idx": 35,
+      "version": "7",
+      "when": 1787308800000,
+      "tag": "0035_a_certification_carries_a_complete_hold_receipt",
+      "breakpoints": true
     }
   ]
 }

@@ -4,7 +4,11 @@ import { memberships, plans, sessions } from '@atrium/db';
 import { and, eq, sql } from 'drizzle-orm';
 import { afterAll, beforeEach, describe, expect, it } from 'vitest';
 import { CERTIFY_ARM_TTL_MS, CERTIFY_REQUIRED_HOLD_MS } from '../../apps/web/lib/certify-hold.js';
-import { armCertification, certifySession } from '../../apps/web/lib/certify-session.js';
+import {
+  armCertification,
+  certifySession,
+  disarmCertification,
+} from '../../apps/web/lib/certify-session.js';
 import { openDatabase, resetDatabase, seedRoom } from '../support/harness.js';
 
 /* ---------------------------------------------------------------------------
@@ -41,6 +45,7 @@ interface Fixture {
   ada: string;
   bob: string;
   hexi: string;
+  planId: string;
   sessionId: string;
   openSessionId: string;
 }
@@ -104,9 +109,26 @@ async function fixture(): Promise<Fixture> {
     ada,
     bob,
     hexi,
+    planId,
     sessionId: (settled as { id: string }).id,
     openSessionId: (running as { id: string }).id,
   };
+}
+
+/** A settled session with NO artifact — nothing for a signature to be a signature of. */
+async function settledNoArtifact(at: Fixture): Promise<string> {
+  const [row] = await handle.db
+    .insert(sessions)
+    .values({
+      roomId: at.roomId,
+      planId: at.planId,
+      harness: 'omp',
+      model: 'sonnet · audit',
+      status: 'settled',
+      exitSummary: 'read-only audit; nothing to land',
+    })
+    .returning({ id: sessions.id });
+  return (row as { id: string }).id;
 }
 
 function read(sessionId: string) {
@@ -595,16 +617,23 @@ describe('a certification is written once', () => {
   });
 
   /**
-   * THE FREEZE IS ON THE CERTIFICATION, NOT ON THE SESSION — stated because a
-   * trigger that froze the whole row would break the artifact write #120's
-   * ExecutionProvider does at settle, and would do it silently.
+   * THE ARTIFACT IS FROZEN ONCE CERTIFIED (#121 CS-1) — but not before.
    *
-   * (`exit_summary` is not the column to prove it with: 0025 already freezes the
-   * exit receipt on any terminal session, certified or not. `artifact` is
-   * deliberately outside both freezes.)
+   * The freeze is still on the CERTIFICATION, not on the whole session: an
+   * uncertified row's artifact stays mutable, which is when #120's
+   * ExecutionProvider writes it at settle. The change from the shipped build is
+   * that once a human has signed, the artifact they signed cannot move underneath
+   * the signature — the CS-1 hole that let a `✓` certified at artifact A stand
+   * over an artifact B nobody reviewed. This replaces the old test, which asserted
+   * the opposite ("a certified one still takes an artifact") and pinned the defect.
+   *
+   * RED ON REVERT: drop the `NEW.artifact IS DISTINCT FROM OLD.artifact` branch
+   * from `atrium_sessions_certification_immutable` (drizzle/0034). The post-cert
+   * UPDATE then succeeds and the `✓` floats free of what it signed.
    */
-  it('an UNCERTIFIED row is not frozen, and a certified one still takes an artifact', async () => {
+  it('an UNCERTIFIED row is not frozen; a certified one FREEZES its artifact (drizzle/0034)', async () => {
     const at = await fixture();
+    // Before certification: the artifact is fully mutable.
     await handle.db
       .update(sessions)
       .set({ artifact: { branch: 'feat/x', commit: 'beforecert' } })
@@ -612,10 +641,249 @@ describe('a certification is written once', () => {
 
     await certify(at);
 
+    // After certification: the artifact the human signed cannot change.
+    expect(
+      await refusal(
+        handle.db
+          .update(sessions)
+          .set({ artifact: { branch: 'feat/x', commit: 'aftercert' } })
+          .where(eq(sessions.id, at.sessionId)),
+      ),
+    ).toMatch(/signed THIS artifact|may not change/i);
+    const [row] = await read(at.sessionId);
+    expect(row?.certifiedBy).toBe(at.ada);
+    const artifactRows = await handle.db
+      .select({ artifact: sessions.artifact })
+      .from(sessions)
+      .where(eq(sessions.id, at.sessionId));
+    // The signed artifact still stands — the post-cert write did not land.
+    expect((artifactRows[0]?.artifact as { commit?: string } | null)?.commit).toBe('beforecert');
+  });
+});
+
+describe('a certification is bound to an artifact to sign (#121 CS-1)', () => {
+  /**
+   * NOTHING TO SIGN, NOTHING TO ARM. A settled session with no artifact has no
+   * reviewable work; arming a hold over it would let a person hold a control
+   * against nothing.
+   *
+   * RED ON REVERT: drop the `session.artifact === null` guard from
+   * `armCertification`. The arm then lands on a session with nothing to certify.
+   */
+  it('arming a NULL-ARTIFACT session is refused', async () => {
+    const at = await fixture();
+    const sid = await settledNoArtifact(at);
+    const outcome = await armCertification({
+      database: handle.db,
+      viewerId: at.ada,
+      sessionId: sid,
+      authorizedRoomId: at.roomId,
+    });
+    expect(outcome).toEqual({ ok: false, reason: 'no_artifact' });
+    expect((await read(sid))[0]?.armedBy).toBeNull();
+  });
+
+  /**
+   * And a confirm cannot slip past a missing artifact either — even if a raw arm
+   * were forced onto the row, the confirm re-checks.
+   *
+   * RED ON REVERT: drop the `session.artifact === null` guard from
+   * `certifySession`.
+   */
+  it('confirming a NULL-ARTIFACT session is refused, even with a forced arm', async () => {
+    const at = await fixture();
+    const sid = await settledNoArtifact(at);
+    // Force a valid-looking, aged arm straight onto the row (the arm guard is
+    // what we are bypassing, to prove the confirm guard stands on its own).
     await handle.db
       .update(sessions)
-      .set({ artifact: { branch: 'feat/x', commit: 'aftercert' } })
+      .set({
+        certifyArmedBy: at.ada,
+        certifyArmedAt: sql`now() - make_interval(secs => ${(CERTIFY_REQUIRED_HOLD_MS + 500) / 1000})`,
+      })
+      .where(eq(sessions.id, sid));
+    const outcome = await certifySession({
+      database: handle.db,
+      viewerId: at.ada,
+      sessionId: sid,
+      authorizedRoomId: at.roomId,
+    });
+    expect(outcome).toEqual({ ok: false, reason: 'no_artifact' });
+    expect((await read(sid))[0]?.certifiedBy).toBeNull();
+  });
+
+  /**
+   * THE TABLE, not the function: even with every application guard gone, a
+   * certifier cannot be named over a null artifact.
+   *
+   * RED ON REVERT: drop `atrium_sessions_certify_needs_artifact` (drizzle/0034).
+   */
+  it('the TABLE refuses a certifier over a null artifact (drizzle/0034)', async () => {
+    const at = await fixture();
+    const sid = await settledNoArtifact(at);
+    // A complete-looking receipt, but no artifact — the needs-artifact trigger is
+    // what must catch it (arm first so the receipt-complete trigger is satisfied).
+    await handle.db
+      .update(sessions)
+      .set({ certifyArmedBy: at.ada, certifyArmedAt: sql`now() - make_interval(secs => 3)` })
+      .where(eq(sessions.id, sid));
+    const why = await refusal(
+      handle.db
+        .update(sessions)
+        .set({ certifiedBy: at.ada, certifiedAt: sql`now()`, certifiedHeldMs: 2400 })
+        .where(eq(sessions.id, sid)),
+    );
+    expect(why).toMatch(/none to sign|null work|artifact/i);
+    expect((await read(sid))[0]?.certifiedBy).toBeNull();
+  });
+});
+
+describe('a `✓` requires a COMPLETE hold receipt at the table (#121 CS-2)', () => {
+  /**
+   * THE HOLE 0032/0033 LEFT. The humanity trigger accepts a human name; nothing
+   * stopped `SET certified_by = <human>` on its own, arm and held-ms and stamp all
+   * null. A render reading name + kind then mints `✓` from a certification with no
+   * hold. The integration suite's own control-plane-data test used to WRITE exactly
+   * this row and call it valid.
+   *
+   * RED ON REVERT: drop `atrium_sessions_certification_receipt_complete`
+   * (drizzle/0035). This UPDATE — a human name, nothing else — then succeeds, which
+   * is the exact false-`✓` shape the backstop closes.
+   */
+  it('the TABLE refuses a certified_by with no arm behind it (drizzle/0035)', async () => {
+    const at = await fixture();
+    const why = await refusal(
+      handle.db.update(sessions).set({ certifiedBy: at.ada }).where(eq(sessions.id, at.sessionId)),
+    );
+    expect(why).toMatch(/no hold behind it|certify_armed_at is null/i);
+    expect((await read(at.sessionId))[0]?.certifiedBy).toBeNull();
+  });
+
+  it('the TABLE refuses a certified_by whose held duration is under the gate', async () => {
+    const at = await fixture();
+    const why = await refusal(
+      handle.db
+        .update(sessions)
+        .set({
+          certifyArmedBy: at.ada,
+          certifyArmedAt: sql`now() - make_interval(secs => 3)`,
+          certifiedBy: at.ada,
+          certifiedAt: sql`now()`,
+          certifiedHeldMs: 10,
+        })
+        .where(eq(sessions.id, at.sessionId)),
+    );
+    expect(why).toMatch(/under the server hold gate|held/i);
+    expect((await read(at.sessionId))[0]?.certifiedBy).toBeNull();
+  });
+
+  /* The complete receipt the app path writes still passes the backstop — the
+     trigger refuses the incomplete row, not the honest one. */
+  it('a complete receipt is accepted by the backstop', async () => {
+    const at = await fixture();
+    await handle.db
+      .update(sessions)
+      .set({ certifyArmedBy: at.ada, certifyArmedAt: sql`now() - make_interval(secs => 3)` })
+      .where(eq(sessions.id, at.sessionId));
+    await handle.db
+      .update(sessions)
+      .set({ certifiedBy: at.ada, certifiedAt: sql`now()`, certifiedHeldMs: 2400 })
       .where(eq(sessions.id, at.sessionId));
     expect((await read(at.sessionId))[0]?.certifiedBy).toBe(at.ada);
+  });
+});
+
+describe('a cancelled hold leaves no live arm (#121 CS-3)', () => {
+  /**
+   * THE CS-3 CASE. Arm, release immediately (the browser cancel that used to be
+   * local-only now calls disarm), wait past the gate, confirm directly. The arm is
+   * gone, so the confirm has nothing to measure and is refused.
+   *
+   * RED ON REVERT: make `disarmCertification` a no-op (or stop the control from
+   * calling it). The arm then survives the release for its whole TTL, and this
+   * confirm — fired after the gate has elapsed — certifies, which is exactly the
+   * CS-3 finding.
+   */
+  it('arm → disarm → (wait) → confirm is refused: the arm was consumed by the cancel', async () => {
+    const at = await fixture();
+    expect(
+      await armCertification({
+        database: handle.db,
+        viewerId: at.ada,
+        sessionId: at.sessionId,
+        authorizedRoomId: at.roomId,
+      }),
+    ).toEqual({ ok: true });
+    expect((await read(at.sessionId))[0]?.armedAt).not.toBeNull();
+
+    // The release, now a server disarm rather than a local-only cancel.
+    expect(
+      await disarmCertification({
+        database: handle.db,
+        viewerId: at.ada,
+        sessionId: at.sessionId,
+        authorizedRoomId: at.roomId,
+      }),
+    ).toEqual({ ok: true });
+    expect((await read(at.sessionId))[0]?.armedAt).toBeNull();
+    expect((await read(at.sessionId))[0]?.armedBy).toBeNull();
+
+    // Even after the gate would have elapsed, a direct confirm finds no arm.
+    const outcome = await certifySession({
+      database: handle.db,
+      viewerId: at.ada,
+      sessionId: at.sessionId,
+      authorizedRoomId: at.roomId,
+    });
+    expect(outcome).toEqual({ ok: false, reason: 'not_armed' });
+    expect((await read(at.sessionId))[0]?.certifiedBy).toBeNull();
+  });
+
+  /**
+   * SINGLE-USE. A completed certification consumes the arm — `certified_by` is set
+   * and every write is scoped `isNull(certified_by)` — so a second confirm on the
+   * same session is refused rather than spending the arm twice.
+   */
+  it('a second confirm on a consumed arm is refused (already certified)', async () => {
+    const at = await fixture();
+    await armCertification({
+      database: handle.db,
+      viewerId: at.ada,
+      sessionId: at.sessionId,
+      authorizedRoomId: at.roomId,
+    });
+    await backdateArm(at.sessionId, CERTIFY_REQUIRED_HOLD_MS + 500);
+    expect(
+      await certifySession({
+        database: handle.db,
+        viewerId: at.ada,
+        sessionId: at.sessionId,
+        authorizedRoomId: at.roomId,
+      }),
+    ).toEqual({ ok: true });
+
+    // The same arm, spent, cannot land a second signature.
+    const second = await certifySession({
+      database: handle.db,
+      viewerId: at.ada,
+      sessionId: at.sessionId,
+      authorizedRoomId: at.roomId,
+    });
+    expect(second).toEqual({ ok: false, reason: 'already_certified' });
+  });
+
+  /* A non-member cannot disarm somebody's arm — the same membership gate the arm
+     and confirm take. Disarm is not a back door around it. */
+  it('disarm refuses a viewer who is not in the room', async () => {
+    const at = await fixture();
+    const elsewhere = await seedRoom(handle, ['stranger']);
+    const stranger = elsewhere.people.stranger as string;
+    const outcome = await disarmCertification({
+      database: handle.db,
+      viewerId: stranger,
+      sessionId: at.sessionId,
+      authorizedRoomId: at.roomId,
+    });
+    expect(outcome).toEqual({ ok: false, reason: 'not_in_room' });
   });
 });

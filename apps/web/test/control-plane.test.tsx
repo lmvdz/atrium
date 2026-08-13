@@ -32,9 +32,11 @@
  * ------------------------------------------------------------------------- */
 
 import { cleanup, render, screen } from '@testing-library/react';
-import { afterEach, describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import type {
+  ControlAgentRow,
   ControlDecisionRow,
+  ControlPlaneData,
   ControlPlanRow,
   ControlSessionRow,
 } from '../lib/control-plane-data';
@@ -43,7 +45,19 @@ import {
   type ControlPinItem,
   pinHardestFirst,
 } from '../src/components/control/ControlPin';
+import { ControlPlane } from '../src/components/control/ControlPlane';
 import { ProcessTree } from '../src/components/control/ProcessTree';
+
+/* ControlPlane is a client component that reaches for the app router and Link.
+   Neither is under test here — the render is about the pin and decisions gating —
+   so both are stubbed to their inert shapes. */
+vi.mock('next/navigation', () => ({
+  useRouter: () => ({ refresh: () => {}, push: () => {} }),
+}));
+vi.mock('next/link', () => ({
+  default: (props: Record<string, unknown>) => <a {...props} />,
+}));
+
 import {
   agentState,
   decisionState,
@@ -75,13 +89,18 @@ function session(overrides: Partial<ControlSessionRow>): ControlSessionRow {
     certifiedByKind: null,
     certifiedAt: null,
     certifiedHeldMs: null,
+    certifyArmedAt: null,
     createdAt: '2026-08-13T00:00:00.000Z',
     updatedAt: '2026-08-13T00:00:00.000Z',
     ...overrides,
   };
 }
 
-/** A session a HUMAN certified — the only shape that earns the tick. */
+/**
+ * A session a HUMAN certified — the only shape that earns the tick. It carries a
+ * COMPLETE receipt (armed, held, stamped, signed); `sessionCertified` fails closed
+ * on any missing part (CS-2), so a fixture short of one is uncertified.
+ */
 function certifiedSession(overrides: Partial<ControlSessionRow> = {}): ControlSessionRow {
   return session({
     status: 'settled',
@@ -89,6 +108,7 @@ function certifiedSession(overrides: Partial<ControlSessionRow> = {}): ControlSe
     certifiedByKind: 'human',
     certifiedAt: '2026-08-13T01:00:00.000Z',
     certifiedHeldMs: 2400,
+    certifyArmedAt: '2026-08-13T00:59:57.600Z',
     ...overrides,
   });
 }
@@ -441,5 +461,120 @@ describe('the pin is ordered by glyph hardness, and it renders only what needs a
   it('an empty pin says so — a result, not an absence', () => {
     render(<ControlPin items={[]} />);
     expect(screen.getByText(/NOTHING NEEDS YOU IN THIS ROOM/i)).toBeTruthy();
+  });
+});
+
+/**
+ * THE PIN AND THE DECISIONS COUNT ARE OWED TO A HUMAN TOO (#121 round 4, fix 1).
+ *
+ * Round 3 gated the GLYPH on the viewer being human (`sessionState`'s
+ * `owedToViewer`), but `ControlPlane` still put every failed and awaits-landing
+ * session into the PIN and the DECISIONS count UNCONDITIONALLY — so an
+ * agent-principal viewer read the glyph as `~` yet still saw the row under NEEDS
+ * YOU and counted in the surface. The membership of both collections is now gated
+ * on the same `viewerIsHuman` the glyph is, so a non-human viewer sees neither.
+ *
+ * These flip the WHOLE component across the viewer kind (the unit tests above only
+ * flip `ProcessTree`; the e2e only ever uses a human), asserting the pin and the
+ * decisions surface are empty for an agent and populated for a human — from the
+ * same data.
+ *
+ * MUTATION THAT MUST TURN THIS RED: drop the `viewerIsHuman` gate from either the
+ * `pinItems` loop or the `decisionsLines` spread in `ControlPlane` — the agent
+ * then reads the failed/awaiting sessions under NEEDS YOU and in the count again.
+ */
+describe('the pin and the decisions count are gated on the viewer being human', () => {
+  const awaiting = (): ControlSessionRow =>
+    session({ id: 's-await', status: 'settled', artifact: { branch: 'feat/x', commit: 'abc' } });
+  const failed = (): ControlSessionRow => session({ id: 's-fail', status: 'failed' });
+
+  const agentRow: ControlAgentRow = {
+    userId: 'agent-1',
+    name: 'hexi',
+    host: null,
+    harness: null,
+    model: null,
+    budgetLimitMicros: null,
+    plans: [plan({ id: 'p1', sessions: [failed(), awaiting()] })],
+  };
+
+  const data = (viewerId: string): ControlPlaneData => ({
+    room: { id: 'room-1', name: 'fleet' },
+    viewerId,
+    agents: [agentRow],
+    // No owed decisions on purpose: the only things that could reach the pin and
+    // the count here are the session-derived items, which is what the gate covers.
+    decisions: [],
+    unseen: [],
+    updatedAt: '2026-08-13T00:00:00.000Z',
+  });
+
+  const noop = async () => ({ ok: true }) as const;
+
+  function renderPlane(viewerKind: 'human' | 'agent') {
+    return render(
+      <ControlPlane
+        armAction={noop}
+        certifyAction={noop}
+        data={data('viewer-1')}
+        disarmAction={noop}
+        roomSlug="fleet"
+        viewerId="viewer-1"
+        viewerKind={viewerKind}
+        workspaceSlug="acme"
+      />,
+    );
+  }
+
+  it('a HUMAN viewer sees the failed and awaiting sessions in the pin, and the decisions count', () => {
+    renderPlane('human');
+    expect(document.querySelector('[data-pin-item="s-fail"]')).not.toBeNull();
+    expect(document.querySelector('[data-pin-item="s-await"]')).not.toBeNull();
+    // one awaits-landing session → one certify line in the decisions surface
+    expect(
+      document
+        .querySelector('[data-surface="decisions"] [data-surface-count]')
+        ?.getAttribute('data-surface-count'),
+    ).toBe('1');
+  });
+
+  it('an AGENT viewer sees NEITHER — the pin is empty and the decisions count is 0', () => {
+    renderPlane('agent');
+    expect(document.querySelector('[data-pin-item="s-fail"]')).toBeNull();
+    expect(document.querySelector('[data-pin-item="s-await"]')).toBeNull();
+    expect(screen.getByText(/NOTHING NEEDS YOU IN THIS ROOM/i)).toBeTruthy();
+    expect(
+      document
+        .querySelector('[data-surface="decisions"] [data-surface-count]')
+        ?.getAttribute('data-surface-count'),
+    ).toBe('0');
+  });
+});
+
+/**
+ * A `✓` REQUIRES A COMPLETE RECEIPT AT THE RENDER TOO (#121 round 4, fix 3b).
+ *
+ * The humanity triggers refuse a non-human name, but a `certified_by` set alone —
+ * no arm, no held duration, no stamp — is a shape a raw write could once produce,
+ * and `sessionCertified` read name + kind and minted `✓` from it. It now fails
+ * CLOSED on any missing part of the hold, the same way it does on an unreadable
+ * kind. A DB backstop (drizzle/0035) refuses the write; this is the render's own
+ * refusal to trust one if it appears.
+ *
+ * MUTATION THAT MUST TURN THIS RED: drop the armed/held/stamped completeness check
+ * from `sessionCertified` — an incomplete row then reads `✓`.
+ */
+describe('the render fails closed on an incomplete certification receipt', () => {
+  it('a certified_by with no arm / held / stamp is ~, not ✓', () => {
+    const noArm = certifiedSession({ certifyArmedAt: null });
+    const noHeld = certifiedSession({ certifiedHeldMs: null });
+    const noStamp = certifiedSession({ certifiedAt: null });
+    for (const incomplete of [noArm, noHeld, noStamp]) {
+      expect(sessionCertified(incomplete)).toBe(false);
+      expect(glyphFor(sessionState(incomplete, true))).toBe('~');
+    }
+    // the complete receipt still mints the tick, so the check is closed, not broken
+    expect(sessionCertified(certifiedSession())).toBe(true);
+    expect(glyphFor(sessionState(certifiedSession(), true))).toBe('✓');
   });
 });
