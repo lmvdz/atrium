@@ -234,14 +234,19 @@ async function main(): Promise<void> {
    * It runs on the BASE command service on purpose. The wrapper only fires the
    * coordinator on a granted `open_session`, which this never issues, and running
    * a reconciliation through the wrapper would be one more path to reason about
-   * for no gain. It runs whether or not execution is enabled this boot: a wedged
-   * session from a boot that HAD execution enabled must still be reconcilable by
-   * one that does not.
+   * for no gain.
+   *
+   * It fires ONLY when this process owns execution (#120 round-4 F3). With
+   * execution disabled, an `open` session belongs to an EXTERNAL settler — a live
+   * session, not a dead one — and force-failing it would destroy that settle and
+   * fabricate a `session_failed`. The over-aggressive prior behaviour (fail every
+   * open session unconditionally) is the regression this closes.
    * ------------------------------------------------------------------------- */
   const reconciled = await reconcileWedgedSessions({
     db: database.db,
     commands: baseCommands,
     logger,
+    executionEnabled: executionRuntime !== null,
   });
   if (reconciled.found > 0) {
     logger.warn('startup reconciled sessions left open by a previous process', {

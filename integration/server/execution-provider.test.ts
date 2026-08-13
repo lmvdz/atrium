@@ -1,6 +1,6 @@
 import { execFile } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
-import { mkdtemp, rm } from 'node:fs/promises';
+import { mkdtemp, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { promisify } from 'node:util';
@@ -645,6 +645,100 @@ describe('a SETTLED artifact survives teardown and GC (#120 r3 F4, red-on-revert
     expect(await refValue(artifactRepo.dir, settledArtifactRef(sessionId))).toBe(artifact.commit);
   });
 
+  /**
+   * ROUND 4 F1: the settled pin is CREATE-ONCE — it never moves, even on a second
+   * verify (grok's round-3 re-gauntlet probe, reproduced exactly).
+   *
+   * Grok EXECUTED this against the round-3 durability fix: pin session S at commit
+   * C, force-update the durable session branch to a NEW commit D, verify again —
+   * the round-3 `update-ref` had no old-value guard, so the pin FOLLOWED to D —
+   * then delete the branch and `gc --prune=now`, and the commit C the already-
+   * written receipt still names is COLLECTED. "A settled artifact is durable" was
+   * falsified.
+   */
+  it('does not move the pin on a second verify, so C survives branch-delete + gc (grok probe)', async () => {
+    const planId = await openPlan();
+    await fundPlan(planId);
+    const outcome = await coordinator().openAndRun(agentSession, {
+      roomId: room.roomId,
+      planId,
+      harness: 'omp',
+      model: 'haiku',
+    });
+    expect(outcome.kind).toBe('settled');
+    if (outcome.kind !== 'settled') return;
+    const sessionId = outcome.sessionId;
+    const branch = sessionBranch(sessionId);
+    const artifact = await exitArtifact(sessionId, 'session_settled');
+    expect(artifact).not.toBeNull();
+    if (!artifact) return;
+    const C = artifact.commit;
+    expect(await refValue(artifactRepo.dir, settledArtifactRef(sessionId))).toBe(C);
+
+    // ── Force the durable session branch to a NEW commit D (the force-push). ──
+    const work = await mkdtemp(join(tmpdir(), 'atrium-attacker-'));
+    await gitIn(work, ['clone', '-q', artifactRepo.dir, '.']);
+    await gitIn(work, ['checkout', '-q', branch]);
+    await writeFile(join(work, 'evil.txt'), 'a commit the session never produced\n');
+    await gitIn(work, ['add', '-A']);
+    await gitIn(work, ['-c', 'user.name=evil', '-c', 'user.email=e@e', 'commit', '-q', '-m', 'D']);
+    const D = await gitIn(work, ['rev-parse', 'HEAD']);
+    expect(D).not.toBe(C);
+    await gitIn(work, ['push', '-f', 'origin', `${branch}:${branch}`]);
+    expect(await artifactBranchCommit(artifactRepo, branch)).toBe(D);
+
+    // ── The SECOND verify, at D. The production verifier calls the pin. ──
+    // REVERT-REDS: restore `pinSettledArtifact` to a bare `update-ref <ref> <sha>`
+    // and this verify MOVES the pin to D and returns true. Create-once refuses to
+    // move it: the pin cannot be re-written, so the artifact is REFUSED.
+    const moved = await makeVerifier(artifactRepo)({
+      sessionId,
+      artifact: { branch, commit: D, remote: artifactRepo.dir },
+    });
+    expect(moved).toBe(false);
+    // The pin never budged from C.
+    expect(await refValue(artifactRepo.dir, settledArtifactRef(sessionId))).toBe(C);
+
+    // ── Delete the branch and aggressively prune — grok's collection step. ──
+    await gitIn(artifactRepo.dir, ['branch', '-D', branch]);
+    await gitIn(artifactRepo.dir, ['reflog', 'expire', '--expire=now', '--all']);
+    await gitIn(artifactRepo.dir, ['gc', '--prune=now', '--quiet']);
+
+    // The branch is gone, D is unreachable and collected — but C, the commit the
+    // RECEIPT names, is still pinned and still resolves. Under round 3 the pin had
+    // followed to D, so C was unreachable and gc collected it → this reds.
+    expect(await artifactBranchCommit(artifactRepo, branch)).toBeNull();
+    expect(await artifactCommitResolves(artifactRepo, C)).toBe(true);
+    expect(await refValue(artifactRepo.dir, settledArtifactRef(sessionId))).toBe(C);
+
+    await rm(work, { recursive: true, force: true });
+  });
+
+  /**
+   * ROUND 4 F1 corollary: re-pinning the SAME commit is idempotent — a second
+   * verify of the unchanged artifact must not be refused just because a pin exists.
+   */
+  it('accepts a second verify of the SAME commit (idempotent re-pin)', async () => {
+    const planId = await openPlan();
+    await fundPlan(planId);
+    const outcome = await coordinator().openAndRun(agentSession, {
+      roomId: room.roomId,
+      planId,
+      harness: 'omp',
+      model: 'haiku',
+    });
+    expect(outcome.kind).toBe('settled');
+    if (outcome.kind !== 'settled') return;
+    const sessionId = outcome.sessionId;
+    const artifact = await exitArtifact(sessionId, 'session_settled');
+    if (!artifact) return;
+    // Same tuple, verified again: the pin already guarantees exactly this, so it
+    // is accepted rather than refused, and the pin is unchanged.
+    const again = await makeVerifier(artifactRepo)({ sessionId, artifact });
+    expect(again).toBe(true);
+    expect(await refValue(artifactRepo.dir, settledArtifactRef(sessionId))).toBe(artifact.commit);
+  });
+
   it('pins nothing for an artifact it refuses', async () => {
     const planId = await openPlan();
     await fundPlan(planId);
@@ -688,11 +782,13 @@ describe('startup reconciles a session left open with a spent draw (#120 r3 F5, 
     // THE SPEND. It has already committed and it never decrements.
     expect(planBefore?.authorizedDraws).toBe(1);
 
-    // What the next boot does, before accepting a single connection.
+    // What the next boot does, before accepting a single connection — a boot that
+    // OWNS execution (round-4 F3: reconciliation is gated on that).
     const result = await reconcileWedgedSessions({
       db: handle.db,
       commands: commandService(),
       logger,
+      executionEnabled: true,
     });
     expect(result).toEqual({ found: 1, failed: 1, unreconciled: 0 });
 
@@ -712,7 +808,12 @@ describe('startup reconciles a session left open with a spent draw (#120 r3 F5, 
     // And it is IDEMPOTENT — a second boot finds nothing to do, rather than
     // trying to re-exit a session that has already taken its one exit.
     expect(
-      await reconcileWedgedSessions({ db: handle.db, commands: commandService(), logger }),
+      await reconcileWedgedSessions({
+        db: handle.db,
+        commands: commandService(),
+        logger,
+        executionEnabled: true,
+      }),
     ).toEqual({ found: 0, failed: 0, unreconciled: 0 });
   });
 
@@ -727,7 +828,65 @@ describe('startup reconciles a session left open with a spent draw (#120 r3 F5, 
     });
     expect(outcome.kind).toBe('settled');
     expect(
-      await reconcileWedgedSessions({ db: handle.db, commands: commandService(), logger }),
+      await reconcileWedgedSessions({
+        db: handle.db,
+        commands: commandService(),
+        logger,
+        executionEnabled: true,
+      }),
     ).toEqual({ found: 0, failed: 0, unreconciled: 0 });
+  });
+
+  /**
+   * ROUND 4 F3: reconciliation is OWNED-execution only. With execution DISABLED
+   * (`EXECUTION_PROVIDER` unset — the documented external-settle mode), an `open`
+   * session belongs to an outside settler and is LIVE, not dead. A boot that does
+   * not own execution must leave it alone, or it destroys a live external settle
+   * and fabricates a `session_failed`.
+   */
+  it('does NOT force-fail an open session when this boot does not own execution', async () => {
+    const planId = await openPlan();
+    await fundPlan(planId);
+    const sessionId = await openGrantedSession(planId, agentSession);
+    const [before] = await handle.db.select().from(sessions).where(eq(sessions.id, sessionId));
+    expect(before?.status).toBe('open');
+
+    // A boot with execution DISABLED. REVERT-REDS: gate off (run reconciliation
+    // unconditionally, as round-3 did) and this open session is force-failed —
+    // exactly the live external settle round-4 refuses to destroy.
+    const result = await reconcileWedgedSessions({
+      db: handle.db,
+      commands: commandService(),
+      logger,
+      executionEnabled: false,
+    });
+    expect(result).toEqual({ found: 0, failed: 0, unreconciled: 0 });
+
+    // The session is untouched — still open, no exit event, no fabricated receipt.
+    const [after] = await handle.db.select().from(sessions).where(eq(sessions.id, sessionId));
+    expect(after?.status).toBe('open');
+    expect(after?.settledByEventId).toBeNull();
+    const [{ exits } = { exits: 0 }] = await handle.db
+      .select({ exits: sql<number>`count(*)::int` })
+      .from(coreEvents)
+      .where(
+        and(
+          eq(coreEvents.roomId, room.roomId),
+          sql`${coreEvents.type} IN ('session_settled','session_failed')`,
+        ),
+      );
+    expect(exits).toBe(0);
+
+    // And an EXECUTION-OWNED boot still reconciles the very same wedge — the gate
+    // narrows WHO reconciles, it does not make the session unreconcilable.
+    const owned = await reconcileWedgedSessions({
+      db: handle.db,
+      commands: commandService(),
+      logger,
+      executionEnabled: true,
+    });
+    expect(owned).toEqual({ found: 1, failed: 1, unreconciled: 0 });
+    const [reconciled] = await handle.db.select().from(sessions).where(eq(sessions.id, sessionId));
+    expect(reconciled?.status).toBe('failed');
   });
 });

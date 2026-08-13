@@ -132,6 +132,41 @@ export async function cleanHome(): Promise<string> {
 }
 
 /**
+ * A lazily-created EMPTY directory used as `core.hooksPath` on every adapter git
+ * (#120 round-4). It holds no hooks, ever, so pointing git at it means git finds
+ * nothing to run where it would otherwise consult a repo-local `.git/hooks/*`.
+ */
+let emptyHooksDirCache: string | null = null;
+export async function emptyHooksDir(): Promise<string> {
+  if (emptyHooksDirCache === null) {
+    emptyHooksDirCache = await mkdtemp(join(tmpdir(), 'atrium-git-nohooks-'));
+  }
+  return emptyHooksDirCache;
+}
+
+/**
+ * The `-c` overrides prepended to EVERY adapter git spawn (#120 round-4 F2).
+ *
+ * Round-3 F1 closed the INHERITED-env hook vector (`GIT_CONFIG_*`,
+ * `GIT_TEMPLATE_DIR`) by construction. It did NOT close the REPO-LOCAL vector: a
+ * harness with write access to a worktree can plant `.git/hooks/pre-commit`,
+ * `commit-msg`, `post-commit`, or set `core.fsmonitor=<script>` in the repo
+ * config, and those fire — as the adapter identity — on the adapter's own later
+ * `commitWorktree`/`status`/`add`. The env scrub does not contain a writer that is
+ * already inside the tree.
+ *
+ * `-c` is the highest-precedence config source and beats a repo's `.git/config`,
+ * so pinning `core.hooksPath` to an empty directory and `core.fsmonitor=false`
+ * here means no planted hook and no planted fsmonitor program ever runs under a
+ * git this module spawns. (The DURABLE bare repo's `receive-pack` runs in a
+ * SEPARATE process that reads the DEST repo config, not these flags, so its hooks
+ * are neutered by a persisted `core.hooksPath` set in `createArtifactRepo`.)
+ */
+async function hookGuardArgs(): Promise<string[]> {
+  return ['-c', `core.hooksPath=${await emptyHooksDir()}`, '-c', 'core.fsmonitor=false'];
+}
+
+/**
  * The base environment EVERY adapter git runs under (#120 F1, round 3).
  *
  * Built from `{}` — not from `process.env` — plus `GIT_ENV_ALLOWLIST` and the
@@ -179,7 +214,9 @@ export async function scrubbedGitBaseEnv(): Promise<NodeJS.ProcessEnv> {
 
 async function git(cwd: string, args: readonly string[]): Promise<string> {
   const base = await scrubbedGitBaseEnv();
-  const { stdout } = await run('git', args, {
+  // Repo-local hook / fsmonitor hardening (#120 round-4 F2) prepended before the
+  // subcommand — `-c` only takes effect ahead of the git command it configures.
+  const { stdout } = await run('git', [...(await hookGuardArgs()), ...args], {
     cwd,
     env: { ...base, ...GIT_ENV },
     // A runaway harness must not hold the event loop; keep the plumbing bounded.
@@ -217,7 +254,10 @@ export async function createScratchRepo(baseDir?: string): Promise<ScratchRepo> 
     'Atrium execution scratch repo — session work lands on atrium/session/* branches.\n',
   );
   await git(dir, ['add', '-A']);
-  await git(dir, ['commit', '-q', '-m', 'seed: atrium execution scratch']);
+  // `--no-verify` so no planted commit-msg/pre-commit hook runs on the adapter's
+  // own commits (#120 round-4 F2); `hookGuardArgs` already redirects hooksPath,
+  // this is the belt to that suspenders and states the intent at the commit.
+  await git(dir, ['commit', '-q', '--no-verify', '-m', 'seed: atrium execution scratch']);
   const seedCommit = await git(dir, ['rev-parse', 'HEAD']);
   return { dir, seedCommit };
 }
@@ -260,7 +300,11 @@ export async function commitWorktree(
   await git(checkout.dir, ['add', '-A']);
   const status = await git(checkout.dir, ['status', '--porcelain']);
   if (status === '') return null;
-  await git(checkout.dir, ['commit', '-q', '-m', message]);
+  // `--no-verify`: the harness owns this worktree and may have planted a
+  // `.git/hooks/pre-commit` or `commit-msg`; the adapter's own commit must not run
+  // it (#120 round-4 F2). Redundant with `hookGuardArgs`' hooksPath redirect, kept
+  // as the explicit second lock the ticket asks for on the adapter's commit.
+  await git(checkout.dir, ['commit', '-q', '--no-verify', '-m', message]);
   return git(checkout.dir, ['rev-parse', 'HEAD']);
 }
 
@@ -339,6 +383,16 @@ export async function createArtifactRepo(dir: string): Promise<ArtifactRepo> {
   // touching refs, so reusing the same durable path across boots is safe. `-b
   // main` fixes the default branch name; nothing ever checks out here.
   await git(dir, ['init', '--bare', '-q', '-b', 'main']);
+  // NEUTER RECEIVE HOOKS ON THIS DURABLE REPO (#120 round-4 F2). A push into a
+  // local bare repo spawns `git-receive-pack` in a SEPARATE process that reads
+  // THIS repo's config, not the pusher's `-c` flags — so a `hooks/pre-receive`
+  // (or `update`/`post-receive`) planted here fires on every later shim push. The
+  // hooks dir ships empty with `init`, but a harness that can reach this path
+  // could plant one; pinning `core.hooksPath` to an empty dir (highest precedence
+  // over any `.git/hooks` lookup) means receive-pack finds no hook to run. Set on
+  // every open, so a repo created by an older boot is upgraded in place.
+  await git(dir, ['config', 'core.hooksPath', await emptyHooksDir()]);
+  await git(dir, ['config', 'core.fsmonitor', 'false']);
   return { dir };
 }
 
@@ -404,13 +458,44 @@ export function settledArtifactRef(sessionId: string): string {
  *
  * `update-ref <ref> <sha>` fails if the object is not present, so a pin is also a
  * second, independent existence check on the commit being certified.
+ *
+ * ## CREATE-ONCE — a pin never moves (#120 round-4 F1)
+ *
+ * The bare `update-ref <ref> <sha>` this used to run has NO old-value guard, so a
+ * SECOND verify at a different commit MOVED the pin. Round 3's gauntlet executed
+ * exactly that: pin session S at commit C, force-update the branch to D, verify
+ * again → the pin followed to D, then `branch -D` + `gc --prune=now` collected C —
+ * the very commit the already-written receipt still names. "A settled artifact is
+ * durable" was falsified: the receipt dangled.
+ *
+ * So the write is COMPARE-AND-SWAP create-only: `update-ref <ref> <new> ""` — the
+ * empty old-value form fails if the ref already exists (verified: git 2.43 emits
+ * "reference already exists"). Once pinned, the object a receipt indexes is frozen
+ * regardless of any later verify, force-push, or branch delete. Re-pinning the
+ * SAME commit is idempotent (the pin already guarantees exactly what a re-pin
+ * would); re-pinning a DIFFERENT commit is the attack and is REFUSED — a session's
+ * certified artifact is settled once and does not get a second, different value.
  */
 export async function pinSettledArtifact(
   artifact: ArtifactRepo,
   sessionId: string,
   commit: string,
 ): Promise<void> {
-  await git(artifact.dir, ['update-ref', settledArtifactRef(sessionId), commit]);
+  const ref = settledArtifactRef(sessionId);
+  const existing = await git(artifact.dir, ['rev-parse', '--verify', '-q', ref]).catch(() => null);
+  if (existing !== null) {
+    // Already pinned. Idempotent for the same commit; a request to move it to a
+    // different commit is refused — the pin is create-once by contract.
+    if (existing === commit) return;
+    throw new Error(
+      `refusing to move an already-pinned settled artifact for session ${sessionId}: ` +
+        `pinned at ${existing}, asked to move to ${commit} — a settled artifact is immutable`,
+    );
+  }
+  // Empty old-value ⇒ create-only. This ALSO closes the check-then-create race: if
+  // another writer pinned between the read above and here, the create fails rather
+  // than clobbering.
+  await git(artifact.dir, ['update-ref', ref, commit, '']);
 }
 
 /**

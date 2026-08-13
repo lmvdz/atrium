@@ -1,7 +1,9 @@
+import { execFile } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
 import { chmod, mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { promisify } from 'node:util';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import {
   addWorktree,
@@ -13,6 +15,8 @@ import {
   removeWorktree,
   scrubbedGitBaseEnv,
 } from '../../src/execution/git.js';
+
+const rawGit = promisify(execFile);
 
 /**
  * THE GIT ENV IS AN ALLOWLIST, NOT A DENYLIST (#120 round-3 F1).
@@ -168,5 +172,89 @@ describe('the adapter git env is an allowlist (#120 r3 F1)', () => {
     await runFullGitPath(scratchBase);
     const log = await firedLog(bait);
     expect(log, `attacker hook FIRED:\n${log ?? ''}`).toBeNull();
+  });
+});
+
+/**
+ * THE ADAPTER GIT IGNORES REPO-LOCAL HOOKS AND FSMONITOR (#120 round-4 F2).
+ *
+ * Round-3 F1 closed the INHERITED-ENV hook vector (`GIT_CONFIG_*`,
+ * `GIT_TEMPLATE_DIR`). It did NOT close the REPO-LOCAL one: a harness owns its
+ * worktree and can plant `.git/hooks/pre-commit`/`commit-msg`/`post-commit`, set
+ * `core.fsmonitor=<script>` in the repo config, or drop a `hooks/pre-receive` into
+ * the DURABLE bare repo — none of which the env scrub touches, because the writer
+ * is already inside the tree. Those then fire, as the ADAPTER identity, on the
+ * adapter's own later `commitWorktree`/`status`/`add` and on shim `pushArtifactBranch`.
+ *
+ * The fix: `hookGuardArgs` pins `core.hooksPath` to an empty dir and
+ * `core.fsmonitor=false` on every adapter git via `-c` (highest precedence, beats
+ * `.git/config`); `commitWorktree` adds `--no-verify`; `createArtifactRepo`
+ * persists an empty `core.hooksPath` in the bare repo so its receive-pack finds no
+ * hook to run.
+ *
+ * RED ON REVERT: drop `hookGuardArgs` from `git()` (and/or `--no-verify` and the
+ * bare-repo hooksPath config) and each planted hook fires — the log appears.
+ */
+describe('the adapter git ignores repo-local hooks and fsmonitor (#120 r4 F2)', () => {
+  let base: string;
+  let firedPath: string;
+
+  async function planted(): Promise<string> {
+    return readFile(firedPath, 'utf8').catch(() => '');
+  }
+
+  beforeEach(async () => {
+    base = await mkdtemp(join(tmpdir(), 'atrium-r4hooks-'));
+    firedPath = join(base, 'fired.log');
+  });
+
+  afterEach(async () => {
+    await rm(base, { recursive: true, force: true }).catch(() => {});
+  });
+
+  /** Write an executable hook that appends its own name to the shared fired log. */
+  async function plantHook(dir: string, name: string): Promise<void> {
+    await mkdir(dir, { recursive: true });
+    const path = join(dir, name);
+    await writeFile(path, `#!/bin/sh\necho "FIRED ${name}" >> ${JSON.stringify(firedPath)}\n`);
+    await chmod(path, 0o755);
+  }
+
+  it('does not run a planted .git/hooks post-commit / core.fsmonitor, nor a durable pre-receive', async () => {
+    // A REAL scratch repo and worktree, then plant the repo-local vectors a harness
+    // controls — after the repos exist, exactly as a running harness would.
+    const repo = await createScratchRepo(base);
+    const checkout = await addWorktree(repo, randomUUID());
+
+    // (1) Commit-side hooks in the scratch repo's common .git/hooks — a linked
+    // worktree resolves its hooks to the common dir, so these catch commitWorktree.
+    for (const hook of ['pre-commit', 'commit-msg', 'post-commit']) {
+      await plantHook(join(repo.dir, '.git', 'hooks'), hook);
+    }
+    // (2) A core.fsmonitor program in the scratch repo config — fires on add/status.
+    const fsmonitor = join(base, 'fsmonitor.sh');
+    await writeFile(
+      fsmonitor,
+      `#!/bin/sh\necho "FIRED fsmonitor" >> ${JSON.stringify(firedPath)}\n`,
+    );
+    await chmod(fsmonitor, 0o755);
+    await rawGit('git', ['-C', repo.dir, 'config', 'core.fsmonitor', fsmonitor]);
+
+    // (3) A receive hook in the DURABLE bare repo — persists and fires on shim push.
+    const artifact = await createArtifactRepo(join(base, 'durable'));
+    for (const hook of ['pre-receive', 'update', 'post-receive']) {
+      await plantHook(join(artifact.dir, 'hooks'), hook);
+    }
+
+    // The adapter's own git path: stage → commit → push to the durable repo.
+    await writeFile(join(checkout.dir, 'work.txt'), 'session work\n');
+    const commit = await commitWorktree(checkout, 'session work');
+    expect(commit).not.toBeNull();
+    await pushArtifactBranch(checkout, artifact);
+    await removeWorktree(checkout);
+    await disposeScratchRepo(repo);
+
+    // NOT ONE of the planted hooks or the fsmonitor program ran.
+    expect(await planted(), 'a repo-local hook or fsmonitor FIRED under the adapter git').toBe('');
   });
 });

@@ -186,6 +186,27 @@ export function createArtifactVerifier(
   return async ({ sessionId, artifact }) => {
     if (artifact.branch !== sessionBranch(sessionId)) return false;
     if (artifact.remote !== artifactRepo.dir) return false;
+    // ── OCCUPANCY, NOT PROVENANCE — a documented boundary (#120 round-4 F-note) ──
+    //
+    // This resolves the claimed commit against the durable repo's branch TIP: it
+    // proves the object OCCUPIES this session's ref in a repo the provider
+    // controls. It does NOT prove THIS provider is what pushed it — there is no
+    // per-push signature recorded and compared. The two coincide as long as the
+    // provider is the ONLY writer of the durable repo, which is the shipped
+    // configuration: the bare repo is created by `createExecutionProvider`, its
+    // path is never handed to the harness, and no other process is wired to push
+    // into it. So in a shim-only (or single-writer worktree) deployment the gap is
+    // UNREACHABLE — an attacker would need write access to a repo whose path they
+    // are not given.
+    //
+    // It becomes reachable only if some OTHER writer can push
+    // `refs/heads/<sessionBranch>` here. Closing that would need a real provenance
+    // record the caller cannot forge (a signed push token, or a provider-private
+    // ref an outside writer also cannot set) — and a local bare repo has no
+    // per-ref auth to hang that on, so there is no cheap tightening that actually
+    // adds assurance rather than moving the same trust to a second unauthenticated
+    // ref. It is left as occupancy, named here so the check is not read as
+    // promising provenance it does not provide.
     const resolved = await artifactBranchCommit(artifactRepo, artifact.branch);
     if (resolved === null || resolved !== artifact.commit) return false;
     try {
