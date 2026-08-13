@@ -111,6 +111,8 @@ function certifyErrorText(reason: string): string {
       return 'the hold was shorter than the server requires — press and hold until the meter fills';
     case 'arm_expired':
       return 'that hold went stale — press and hold again';
+    case 'artifact_changed':
+      return 'the artifact changed while you were reviewing it — press and hold again to certify the current one';
     default:
       return 'the certification could not be recorded';
   }

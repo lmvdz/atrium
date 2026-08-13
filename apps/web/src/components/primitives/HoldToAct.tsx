@@ -57,7 +57,12 @@ export interface Arming {
   readonly actor: string;
   /** wall clock, ISO — the "when" the convention requires be recorded */
   readonly armedAt: string;
-  /** measured, not assumed: how long the control was actually held */
+  /**
+   * The client-side elapsed time of the press. This is the UI affordance's own
+   * number, NOT evidence: the server measures its own arm→confirm interval and
+   * records that (`certified_held_ms`). Kept as a local receipt of the gesture,
+   * never sent as the duration the covenant gates on (#121 CS-2).
+   */
   readonly heldMs: number;
 }
 
@@ -193,7 +198,32 @@ export function HoldToAct({
     frameRef.current = requestAnimationFrame(tick);
   }, [onBegin, paint, tick]);
 
-  useEffect(() => stop, [stop]);
+  /* DISARM ON UNMOUNT — the mirror of release, for the navigation that never
+     released. A hold in progress when the control unmounts (the person left the
+     page mid-press) used to run only `stop()`, which cancels the animation frame
+     and nothing else: the server arm stamped on begin then outlived the page for
+     its whole TTL, and a later direct confirm could spend it (CS-3). This fires
+     `onCancel` — the server disarm — whenever a hold had actually begun, exactly
+     as a pointer-up does, so a navigated-away hold leaves no live arm behind. A
+     completed hold has already cleared `startRef`, so its in-flight confirm is not
+     disarmed. No `setPhase`/`paint` here: the component is leaving the tree.
+
+     Held in a ref so the empty-deps unmount effect always calls the latest
+     `onCancel` without re-subscribing (and thus re-running its cleanup) on every
+     render — a cleanup that ran on each `onCancel` identity change would disarm a
+     live hold mid-press. */
+  const disarmOnUnmount = useCallback(() => {
+    if (frameRef.current !== null) {
+      cancelAnimationFrame(frameRef.current);
+      frameRef.current = null;
+    }
+    if (startRef.current === null) return;
+    startRef.current = null;
+    onCancel?.();
+  }, [onCancel]);
+  const unmountRef = useRef(disarmOnUnmount);
+  unmountRef.current = disarmOnUnmount;
+  useEffect(() => () => unmountRef.current(), []);
 
   /* THE ACCESSIBLE NAME IS THE LABEL, NOT THE LABEL WITH A NUMBER GLUED TO IT.
      The progress indicator used to be a `role="progressbar"` DESCENDANT of the
@@ -234,7 +264,14 @@ export function HoldToAct({
      interface's first-person ban. Quotation marks are still refused — that is
      the one thing that makes offered copy read as an utterance. */
   const spoken = offeredText(label, 'HoldToAct label');
-  const contract = `${offeredText(describe, 'HoldToAct describe')} — press and hold for ${(holdMs / 1000).toFixed(0)} seconds; the hold is the confirmation, and releasing early cancels it`;
+  /* HONEST ABOUT WHAT THE HOLD IS. It used to say "the hold is the confirmation",
+     which reads as a claim that the continuous press itself is the attested act.
+     Against a scripted client, a continuous physical hold is unprovable server-side
+     without interaction attestation this does not have — what the server actually
+     enforces is a MINIMUM DELAY between two deliberate calls (certify-session.ts's
+     arm→confirm). So the copy describes the press as the affordance for meeting that
+     delay, and claims no more than is enforced (#121 round-5 finding 6). */
+  const contract = `${offeredText(describe, 'HoldToAct describe')} — press and hold for at least ${(holdMs / 1000).toFixed(0)} seconds; the server requires a minimum delay before it will confirm, and releasing early cancels it`;
 
   return (
     <>

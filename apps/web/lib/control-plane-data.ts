@@ -96,6 +96,18 @@ export interface ControlSessionRow {
    * render does if one is ever read.
    */
   readonly certifyArmedAt: string | null;
+  /**
+   * WHO ARMED the hold, resolved to a display name and a principal kind — the arm
+   * is half of the human-only certify, so its identity travels with the receipt.
+   *
+   * `sessionCertified` fails CLOSED without a present, human armer (#121 round 5):
+   * a signature whose arm was performed by nobody, or by a name whose kind is
+   * unreadable or non-human, is not a held human certification. Two triggers
+   * (0033/0036) make a non-human or non-certifier armer unwritable; this is what
+   * the render reads if such a row is ever projected.
+   */
+  readonly certifyArmedByName: string | null;
+  readonly certifyArmedByKind: PrincipalKind | null;
   readonly createdAt: string;
   readonly updatedAt: string;
 }
@@ -246,7 +258,7 @@ export async function loadControlPlane(
      `plans_room_matches_agent_channel` trigger, #116), so this is the room's
      agent set. Read the config sidecar for each, and the display names. */
   const agentIds = [...new Set(planRows.map((plan) => plan.agentUserId))];
-  const [agentConfigRows, nameRows, certifierNameRows] = await Promise.all([
+  const [agentConfigRows, nameRows, principalRows] = await Promise.all([
     agentIds.length === 0
       ? Promise.resolve([])
       : database.select().from(agents).where(inArray(agents.userId, agentIds)),
@@ -257,14 +269,17 @@ export async function loadControlPlane(
           .from(users)
           .where(inArray(users.id, agentIds)),
     (() => {
-      const certifierIds = [
+      /* Both HALVES of the human-only act — the certifier and the armer — resolved
+         in one read. The render fails closed on either (#121 round 5), so both
+         names and kinds have to travel with the receipt. */
+      const principalIds = [
         ...new Set(
           sessionRows
-            .map((session) => session.certifiedBy)
+            .flatMap((session) => [session.certifiedBy, session.certifyArmedBy])
             .filter((id): id is string => id !== null),
         ),
       ];
-      return certifierIds.length === 0
+      return principalIds.length === 0
         ? Promise.resolve([])
         : database
             /* The KIND travels with the name. A display name says nothing about
@@ -273,14 +288,14 @@ export async function loadControlPlane(
                derivation stop assuming. */
             .select({ id: users.id, name: users.displayName, kind: users.principalKind })
             .from(users)
-            .where(inArray(users.id, certifierIds));
+            .where(inArray(users.id, principalIds));
     })(),
   ]);
 
   const nameById = new Map(nameRows.map((row) => [row.id, row.name]));
-  const certifierNameById = new Map(certifierNameRows.map((row) => [row.id, row.name]));
-  const certifierKindById = new Map(
-    certifierNameRows.map((row) => [row.id, parsePrincipalKind(row.kind)]),
+  const principalNameById = new Map(principalRows.map((row) => [row.id, row.name]));
+  const principalKindById = new Map(
+    principalRows.map((row) => [row.id, parsePrincipalKind(row.kind)]),
   );
   const configByAgent = new Map(agentConfigRows.map((row) => [row.userId, row]));
 
@@ -297,12 +312,20 @@ export async function loadControlPlane(
       exitSummary: session.exitSummary,
       artifact: session.artifact ?? null,
       certifiedByName:
-        session.certifiedBy === null ? null : (certifierNameById.get(session.certifiedBy) ?? null),
+        session.certifiedBy === null ? null : (principalNameById.get(session.certifiedBy) ?? null),
       certifiedByKind:
-        session.certifiedBy === null ? null : (certifierKindById.get(session.certifiedBy) ?? null),
+        session.certifiedBy === null ? null : (principalKindById.get(session.certifiedBy) ?? null),
       certifiedAt: session.certifiedAt === null ? null : session.certifiedAt.toISOString(),
       certifiedHeldMs: session.certifiedHeldMs,
       certifyArmedAt: session.certifyArmedAt === null ? null : session.certifyArmedAt.toISOString(),
+      certifyArmedByName:
+        session.certifyArmedBy === null
+          ? null
+          : (principalNameById.get(session.certifyArmedBy) ?? null),
+      certifyArmedByKind:
+        session.certifyArmedBy === null
+          ? null
+          : (principalKindById.get(session.certifyArmedBy) ?? null),
       createdAt: session.createdAt.toISOString(),
       updatedAt: session.updatedAt.toISOString(),
     };

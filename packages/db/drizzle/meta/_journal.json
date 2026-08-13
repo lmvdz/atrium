@@ -253,6 +253,20 @@
       "when": 1787308800000,
       "tag": "0035_a_certification_carries_a_complete_hold_receipt",
       "breakpoints": true
+    },
+    {
+      "idx": 36,
+      "version": "7",
+      "when": 1787395200000,
+      "tag": "0036_a_certification_s_receipt_is_internally_consistent",
+      "breakpoints": true
+    },
+    {
+      "idx": 37,
+      "version": "7",
+      "when": 1787481600000,
+      "tag": "0037_the_arm_carries_a_nonce_and_the_reviewed_digest",
+      "breakpoints": true
     }
   ]
 }

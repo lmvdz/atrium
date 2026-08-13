@@ -35,13 +35,18 @@ import { CERTIFY_ARM_TTL_MS, CERTIFY_REQUIRED_HOLD_MS } from './certify-hold';
  *   2. {@link certifySession} computes `now() - certify_armed_at` IN SQL and
  *      refuses anything under {@link CERTIFY_REQUIRED_HOLD_MS}, anything armed by
  *      somebody else, anything armed longer ago than {@link CERTIFY_ARM_TTL_MS},
- *      and anything never armed at all. `certified_held_ms` is that measured
- *      interval; `certified_at` is `now()`. Neither function takes a timing
- *      argument, so there is no forged value for a guard to have to catch. A
- *      successful confirm sets `certified_by`, and every write here is scoped
- *      `isNull(certified_by)` — so the arm is SINGLE-USE in the only sense that
- *      matters: a second confirm on the same session finds it certified and is
- *      refused, and drizzle/0033 freezes the arm columns underneath.
+ *      anything whose ARTIFACT changed since the arm (the digest no longer
+ *      matches — the person is confirming a revision they did not review, CS-1),
+ *      and anything never armed or no longer carrying a live attempt nonce.
+ *      `certified_held_ms` is that measured interval; `certified_at` is `now()`.
+ *      Neither function takes a timing argument, so there is no forged value for a
+ *      guard to have to catch. A successful confirm sets `certified_by` AND
+ *      consumes the arm's nonce and digest in the same statement, and every write
+ *      here is scoped `isNull(certified_by)` — so the arm is SINGLE-USE twice over:
+ *      the nonce it required is spent, and a second confirm finds the session
+ *      certified and is refused. The arm is a specific attempt, not a standing
+ *      120s window a later direct confirm can walk into; drizzle/0033 freezes the
+ *      arm columns underneath.
  *   3. {@link disarmCertification} clears a pending arm the person released
  *      without confirming. The browser's cancel is local; without a server disarm
  *      the arm outlived the release for its whole TTL, and "arm, release, wait,
@@ -113,7 +118,14 @@ export type CertifyRefusal =
   /** The server-measured interval between arm and confirm was under the gate. */
   | 'held_too_short'
   /** The arm is older than its TTL; a stale intention is not a held control. */
-  | 'arm_expired';
+  | 'arm_expired'
+  /**
+   * The artifact changed between the arm and the confirm, so the hold was
+   * performed over a revision the person is no longer confirming. A `✓` must bind
+   * to the artifact that was REVIEWED (CS-1); refused rather than certify B under a
+   * hold armed over A.
+   */
+  | 'artifact_changed';
 
 export type CertifyOutcome =
   | { readonly ok: true }
@@ -221,6 +233,18 @@ export async function armCertification(input: CertifyInput): Promise<ArmOutcome>
            interval will later be measured against, so the two clock reads are the
            same clock — and nothing about the arm's timing ever crossed a wire. */
         certifyArmedAt: sql`now()`,
+        /* A FRESH SINGLE-USE ATTEMPT ID. The arm is a specific attempt, not a
+           120s standing permission a later direct confirm can walk into (CS-3).
+           Minted here — the one path that mints one — and consumed by the confirm
+           that spends it, so an arm is confirmable at most once and only if it
+           carries a live nonce. */
+        certifyArmNonce: sql`gen_random_uuid()`,
+        /* THE ARTIFACT THE HOLD IS ARMED OVER, digested. The confirm compares this
+           to the artifact then present and refuses if it moved, so the signature
+           binds to the reviewed revision and not to whatever the artifact became
+           between arm and confirm (CS-1). `md5` of jsonb's canonical text is
+           stable for equal jsonb; `artifact` is non-null here (guarded above). */
+        certifyArmedArtifactDigest: sql`md5(${sessions.artifact}::text)`,
         updatedAt: sql`now()`,
       })
       .where(
@@ -255,6 +279,16 @@ export async function certifySession(input: CertifyInput): Promise<CertifyOutcom
         certifiedBy: sessions.certifiedBy,
         armedBy: sessions.certifyArmedBy,
         artifact: sessions.artifact,
+        /* The live attempt id. A confirm honours only an arm that still carries
+           one (CS-3): null means no pending attempt — a disarmed, spent, or forged
+           arm — and is refused as `not_armed` however valid the rest looks. */
+        armNonce: sessions.certifyArmNonce,
+        /* Whether the artifact under the hold still matches the one the arm was
+           taken over. `true` when the current `md5(artifact::text)` differs from
+           the digest stamped at arm — the artifact moved between review and
+           confirm (CS-1). `IS DISTINCT FROM` so a null armed digest (a forged arm
+           with no digest) also reads as changed rather than as a match. */
+        artifactChanged: sql<boolean>`(${sessions.certifyArmedArtifactDigest} IS DISTINCT FROM md5(${sessions.artifact}::text))`,
         /* The whole gate, in one expression the client cannot reach: milliseconds
            between the server's clock at the arm and the server's clock now. NULL
            when nothing is armed, which `heldMs === null` reads as "not armed"
@@ -278,16 +312,28 @@ export async function certifySession(input: CertifyInput): Promise<CertifyOutcom
        cannot be minted over null work, nor left standing when the work changes. */
     if (session.artifact === null) return { ok: false, reason: 'no_artifact' };
 
-    /* THE ARM MUST BE THIS VIEWER'S. Otherwise one person's hold would arm a
-       control a second person confirms, and the signature would name somebody who
-       never held anything. */
-    if (session.armedBy === null || session.armedBy !== viewerId || session.heldMs === null) {
+    /* THE ARM MUST BE THIS VIEWER'S, AND A LIVE ATTEMPT. Otherwise one person's
+       hold would arm a control a second person confirms, and the signature would
+       name somebody who never held anything. The nonce is the single-use half:
+       null means no pending attempt — a disarmed, already-spent, or hand-forged
+       arm — and is not confirmable however valid the timing looks (CS-3). */
+    if (
+      session.armedBy === null ||
+      session.armedBy !== viewerId ||
+      session.armNonce === null ||
+      session.heldMs === null
+    ) {
       return { ok: false, reason: 'not_armed' };
     }
     const heldMs = Number(session.heldMs);
     if (!Number.isFinite(heldMs)) return { ok: false, reason: 'not_armed' };
     if (heldMs > CERTIFY_ARM_TTL_MS) return { ok: false, reason: 'arm_expired' };
     if (heldMs < CERTIFY_REQUIRED_HOLD_MS) return { ok: false, reason: 'held_too_short' };
+    /* BOUND TO THE REVIEWED REVISION. The hold was armed over a specific artifact;
+       if it changed underneath the hold the person is confirming work they did not
+       review (CS-1). Refuse rather than certify the new revision — and 0034 would
+       otherwise freeze that unreviewed revision under the signature. */
+    if (session.artifactChanged) return { ok: false, reason: 'artifact_changed' };
 
     // The write, scoped so a concurrent certify or a status change loses the race
     // rather than double-landing: settled, and still uncertified. Both triggers
@@ -298,6 +344,12 @@ export async function certifySession(input: CertifyInput): Promise<CertifyOutcom
         certifiedBy: viewerId,
         certifiedAt: sql`now()`,
         certifiedHeldMs: Math.round(heldMs),
+        /* CONSUME THE ATTEMPT. The nonce and the armed digest were the pending
+           hold's, not the receipt's — spent here in the same statement that lands
+           the signature, so this arm cannot be confirmed a second time (CS-3) and
+           nothing stale is left on the certified row. */
+        certifyArmNonce: null,
+        certifyArmedArtifactDigest: null,
         updatedAt: sql`now()`,
       })
       .where(
@@ -344,7 +396,15 @@ export async function disarmCertification(input: CertifyInput): Promise<DisarmOu
 
     await tx
       .update(sessions)
-      .set({ certifyArmedAt: null, certifyArmedBy: null, updatedAt: sql`now()` })
+      .set({
+        certifyArmedAt: null,
+        certifyArmedBy: null,
+        /* The whole pending arm goes, nonce and digest included — a cancelled hold
+           leaves no live attempt a later confirm could spend (CS-3). */
+        certifyArmNonce: null,
+        certifyArmedArtifactDigest: null,
+        updatedAt: sql`now()`,
+      })
       .where(
         and(
           eq(sessions.id, sessionId),

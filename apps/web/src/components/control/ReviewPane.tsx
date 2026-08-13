@@ -252,7 +252,7 @@ export function ReviewPane({
           <span className={`${styles.certifyHead} atr-lbl`}>CERTIFY THIS SESSION</span>
           <span className={styles.certifyNote}>
             {systemText(
-              `Certifying records a human signature on this session — who certified it, when, and how long the control was held, all measured by the server. It moves no code: the work already sits on ${artifact?.branch ?? 'its branch'}, and nothing here merges, pushes or deploys it. A certification is written once and cannot be taken back.`,
+              `Certifying records a human signature on this session — who certified it, when, and the minimum delay the server measured before it would confirm. Press and hold is the affordance for meeting that delay; the server times its own arm→confirm interval, so nothing here trusts the browser's clock. It moves no code: the work already sits on ${artifact?.branch ?? 'its branch'}, and nothing here merges, pushes or deploys it. A certification is written once and cannot be taken back.`,
               'ReviewPane certify note',
             )}
           </span>

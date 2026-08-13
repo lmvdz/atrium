@@ -41,6 +41,7 @@
  * ------------------------------------------------------------------------- */
 
 import { epistemicStateFromAcceptance } from '@atrium/core';
+import { CERTIFY_REQUIRED_HOLD_MS } from '@/lib/certify-hold';
 import type {
   ControlAgentRow,
   ControlDecisionRow,
@@ -70,30 +71,54 @@ import { hardestState } from '../model/records';
  * Two DB triggers make such a row unwritable (0032, 0033) — this is what the
  * render does if one ever is.
  *
- * ## A `✓` REQUIRES A COMPLETE RECEIPT, NOT A NAME (CS-2)
+ * ## A `✓` RENDERS FAIL-CLOSED ON THE WHOLE RECEIPT, NOT A NAME (CS-2, round 5)
  *
- * The human triggers (0032/0033) refuse a non-human name, but nothing stopped
- * `UPDATE sessions SET certified_by = <a human uuid>` on its own — arm, held-ms
- * and `certified_at` all left null. The humanity trigger accepts that row, and a
- * render that read name + kind alone minted `✓` from it: a certification with no
- * hold. So the render fails CLOSED on an incomplete receipt — every part of the
- * hold must be present (armed, held, stamped, signed) or this is `~`, the same
- * way an unreadable kind is. A DB backstop (drizzle/0035) refuses to WRITE the
- * partial row; this is the render's own refusal to trust one if it ever appears.
+ * The DB triggers (0032–0037) refuse to WRITE an incomplete, non-human, un-held,
+ * inconsistent or artifact-less certification. This is the render's OWN refusal to
+ * mint `✓` from anything short of a whole one — belt and braces, the same way an
+ * unreadable kind is refused in both places. It reads a covenant `✓` ONLY from a
+ * row that is, in every part:
+ *
+ *   * SETTLED — a running or failed process has no landing to certify;
+ *   * ARTIFACT-BEARING — a `✓` is a signature OF something (CS-1), so a null
+ *     artifact is `~` however the other columns read;
+ *   * HELD PAST THE GATE — `certified_held_ms` present AND at least
+ *     {@link CERTIFY_REQUIRED_HOLD_MS}; the round-4 render minted `✓` off a
+ *     0/10ms hold because it only checked the column was non-null;
+ *   * ARMED, STAMPED, SIGNED — the arm timestamp, the certified-at stamp, and a
+ *     certifier NAME are all present;
+ *   * HUMAN ON BOTH HALVES — the certifier's principal kind is `human` through the
+ *     one predicate, AND the ARMER is a present human too (the arm is half of the
+ *     human-only act; a row whose armer is null or non-human is not a held human
+ *     signature). The DB (0033/0036) binds armer-is-human and armer-is-certifier;
+ *     the render fails closed on the armer identity it is handed.
+ *
+ * Any missing or invalid part renders `~` — the machine's own account — never the
+ * privileged glyph. This is the exact fail-open the round-4 gauntlet found: the
+ * write path refused these shapes, the render did not.
  */
 export function sessionCertified(session: ControlSessionRow): boolean {
+  /* A signature is only for a settled landing that produced reviewable work. */
+  if (session.status !== 'settled' || session.artifact === null) return false;
+
+  /* The certifier: a present name, and a human kind through the one predicate. */
   if (session.certifiedByName === null || session.certifiedByKind === null) return false;
-  /* The whole receipt or nothing. A `certified_by` without the arm that produced
-     it, the duration it measured, or the moment it was stamped is not a hold — and
-     `✓` is the glyph for a held human signature, not for a name in a column. */
-  if (
-    session.certifyArmedAt === null ||
-    session.certifiedHeldMs === null ||
-    session.certifiedAt === null
-  ) {
+  if (epistemicStateFromAcceptance(session.certifiedByKind, null) !== 'confirmed') return false;
+
+  /* The whole hold receipt, present and past the gate. A `certified_by` without
+     the arm that produced it, a duration that meets the covenant's friction, or
+     the moment it was stamped is not a held signature — and `✓` is the glyph for
+     one, not for a name in a column. */
+  if (session.certifyArmedAt === null || session.certifiedAt === null) return false;
+  if (session.certifiedHeldMs === null || session.certifiedHeldMs < CERTIFY_REQUIRED_HOLD_MS) {
     return false;
   }
-  return epistemicStateFromAcceptance(session.certifiedByKind, null) === 'confirmed';
+
+  /* The ARMER is a present human too. The arm is half of the human-only act, so a
+     signature whose arm was performed by nobody (or by an unreadable/non-human
+     kind that fails closed) is not a held human certification. */
+  if (session.certifyArmedByName === null || session.certifyArmedByKind === null) return false;
+  return epistemicStateFromAcceptance(session.certifyArmedByKind, null) === 'confirmed';
 }
 
 /** A settled session carries an artifact no human has certified yet. */

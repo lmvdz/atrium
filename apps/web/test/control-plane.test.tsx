@@ -31,8 +31,9 @@
  * block flips the viewer to an agent and proves the room-wide "owed" drops.
  * ------------------------------------------------------------------------- */
 
-import { cleanup, render, screen } from '@testing-library/react';
+import { cleanup, fireEvent, render, screen } from '@testing-library/react';
 import { afterEach, describe, expect, it, vi } from 'vitest';
+import { CERTIFY_REQUIRED_HOLD_MS } from '../lib/certify-hold';
 import type {
   ControlAgentRow,
   ControlDecisionRow,
@@ -47,6 +48,7 @@ import {
 } from '../src/components/control/ControlPin';
 import { ControlPlane } from '../src/components/control/ControlPlane';
 import { ProcessTree } from '../src/components/control/ProcessTree';
+import { HoldToAct } from '../src/components/primitives/HoldToAct';
 
 /* ControlPlane is a client component that reaches for the app router and Link.
    Neither is under test here — the render is about the pin and decisions gating —
@@ -90,6 +92,8 @@ function session(overrides: Partial<ControlSessionRow>): ControlSessionRow {
     certifiedAt: null,
     certifiedHeldMs: null,
     certifyArmedAt: null,
+    certifyArmedByName: null,
+    certifyArmedByKind: null,
     createdAt: '2026-08-13T00:00:00.000Z',
     updatedAt: '2026-08-13T00:00:00.000Z',
     ...overrides,
@@ -98,17 +102,23 @@ function session(overrides: Partial<ControlSessionRow>): ControlSessionRow {
 
 /**
  * A session a HUMAN certified — the only shape that earns the tick. It carries a
- * COMPLETE receipt (armed, held, stamped, signed); `sessionCertified` fails closed
- * on any missing part (CS-2), so a fixture short of one is uncertified.
+ * COMPLETE receipt: SETTLED, an ARTIFACT to sign, a HELD duration past the gate,
+ * a STAMP, a human SIGNATURE, and a human ARMER. `sessionCertified` fails closed
+ * on any missing part (#121 round 5), so a fixture short of one is uncertified —
+ * which is why the round-4 fixture (defaulting `artifact: null`, no armer) was
+ * proving the very defect the render now refuses.
  */
 function certifiedSession(overrides: Partial<ControlSessionRow> = {}): ControlSessionRow {
   return session({
     status: 'settled',
+    artifact: { branch: 'feat/x', commit: 'abc123' },
     certifiedByName: 'Ada',
     certifiedByKind: 'human',
     certifiedAt: '2026-08-13T01:00:00.000Z',
     certifiedHeldMs: 2400,
     certifyArmedAt: '2026-08-13T00:59:57.600Z',
+    certifyArmedByName: 'Ada',
+    certifyArmedByKind: 'human',
     ...overrides,
   });
 }
@@ -165,13 +175,17 @@ describe('the tick comes from a human signature and from nothing else', () => {
   it('a NON-HUMAN certifier does not mint a tick, whatever name is attached', () => {
     const machineSigned = certifiedSession({ certifiedByName: 'hexi', certifiedByKind: 'agent' });
     expect(sessionCertified(machineSigned)).toBe(false);
-    expect(glyphFor(sessionState(machineSigned, true))).toBe('~');
+    // Not the tick. The row is settled with an artifact, so it still owes a human
+    // (■) — the machine's name in the column buys it nothing.
+    expect(glyphFor(sessionState(machineSigned, true))).not.toBe('✓');
+    expect(glyphFor(sessionState(machineSigned, true))).toBe('■');
   });
 
-  it('an unreadable certifier kind fails CLOSED — ~, never the privileged glyph', () => {
+  it('an unreadable certifier kind fails CLOSED — never the privileged glyph', () => {
     const unreadable = certifiedSession({ certifiedByKind: null });
     expect(sessionCertified(unreadable)).toBe(false);
-    expect(glyphFor(sessionState(unreadable, true))).toBe('~');
+    expect(glyphFor(sessionState(unreadable, true))).not.toBe('✓');
+    expect(glyphFor(sessionState(unreadable, true))).toBe('■');
   });
 
   it('a settled session with an uncertified artifact needs you, and certifying is not undoable (■)', () => {
@@ -223,11 +237,14 @@ describe('the tree badge and the tree glyph read the SAME predicate', () => {
     expect(document.querySelector('[data-session-certified]')?.textContent).toBe('certified');
   });
 
-  it('a machine-named session wears neither — the badge moves with the glyph', () => {
+  it('a machine-named session wears no certified badge — the badge moves with the glyph', () => {
     const row = certifiedSession({ id: 's1', certifiedByKind: 'agent' });
     render(<ProcessTree agents={[agent([row])]} onOpenSession={() => {}} viewerIsHuman={true} />);
     const node = document.querySelector('[data-tree-session="s1"]');
-    expect(node?.querySelector('[data-glyph]')?.getAttribute('data-glyph')).toBe('~');
+    // The machine's name does not mint the tick; the artifact-bearing settled row
+    // is still owed to a human (■), and it wears NO certified badge.
+    expect(node?.querySelector('[data-glyph]')?.getAttribute('data-glyph')).not.toBe('✓');
+    expect(node?.querySelector('[data-glyph]')?.getAttribute('data-glyph')).toBe('■');
     expect(document.querySelector('[data-session-certified]')).toBeNull();
   });
 });
@@ -552,29 +569,134 @@ describe('the pin and the decisions count are gated on the viewer being human', 
 });
 
 /**
- * A `✓` REQUIRES A COMPLETE RECEIPT AT THE RENDER TOO (#121 round 4, fix 3b).
+ * A `✓` RENDERS FAIL-CLOSED ON THE WHOLE RECEIPT (#121 round 5, finding 1).
  *
- * The humanity triggers refuse a non-human name, but a `certified_by` set alone —
- * no arm, no held duration, no stamp — is a shape a raw write could once produce,
- * and `sessionCertified` read name + kind and minted `✓` from it. It now fails
- * CLOSED on any missing part of the hold, the same way it does on an unreadable
- * kind. A DB backstop (drizzle/0035) refuses the write; this is the render's own
- * refusal to trust one if it appears.
+ * The round-4 render minted `✓` from read-model rows the DB triggers refuse: it
+ * checked the certifier's name + kind and that the arm/held/stamp columns were
+ * merely NON-NULL — so `certifiedHeldMs` 0/10 still ticked, a null `artifact`
+ * still ticked, and a non-settled status still ticked. The write path and
+ * 0034/0035/0036/0037 refuse those shapes; the render now refuses them too. It
+ * reads `✓` ONLY from a row that is settled, artifact-bearing, held past the gate,
+ * armed/stamped/signed, and human on BOTH the signature and the arm.
  *
- * MUTATION THAT MUST TURN THIS RED: drop the armed/held/stamped completeness check
- * from `sessionCertified` — an incomplete row then reads `✓`.
+ * MUTATION THAT MUST TURN THIS RED: weaken any clause of `sessionCertified` — drop
+ * the `status === 'settled'` check, the `artifact !== null` check, the
+ * `certifiedHeldMs >= CERTIFY_REQUIRED_HOLD_MS` gate, or the armer-identity check.
+ * The corresponding incomplete row below then reads `✓`.
  */
 describe('the render fails closed on an incomplete certification receipt', () => {
-  it('a certified_by with no arm / held / stamp is ~, not ✓', () => {
+  /* The invariant every case here proves: `sessionCertified` is false and the
+     glyph is NOT `✓`. An artifact-bearing settled session short of a valid
+     signature is not `~` — it is `■`, still owed to a human (the certification the
+     row lied about having is exactly what it still needs). The point is that the
+     render never mints the covenant tick from an incomplete receipt. */
+  it('a certified_by with no arm / held / stamp is not ✓ — it still needs a human (■)', () => {
     const noArm = certifiedSession({ certifyArmedAt: null });
     const noHeld = certifiedSession({ certifiedHeldMs: null });
     const noStamp = certifiedSession({ certifiedAt: null });
     for (const incomplete of [noArm, noHeld, noStamp]) {
       expect(sessionCertified(incomplete)).toBe(false);
-      expect(glyphFor(sessionState(incomplete, true))).toBe('~');
+      expect(glyphFor(sessionState(incomplete, true))).toBe('■');
     }
     // the complete receipt still mints the tick, so the check is closed, not broken
     expect(sessionCertified(certifiedSession())).toBe(true);
     expect(glyphFor(sessionState(certifiedSession(), true))).toBe('✓');
+  });
+
+  /* THE TWO THE ROUND-4 RENDER LET THROUGH MOST STARKLY. Each is a complete-LOOKING
+     receipt the DB triggers refuse; neither may read `✓`. */
+  it('a null artifact is not ✓ — a signature over nothing to sign is ~', () => {
+    const noArtifact = certifiedSession({ artifact: null });
+    expect(sessionCertified(noArtifact)).toBe(false);
+    // No artifact ⇒ nothing to certify ⇒ the machine's own account, ~ (not ■, not ✓).
+    expect(glyphFor(sessionState(noArtifact, true))).toBe('~');
+  });
+
+  it('a held duration UNDER the gate is not ✓, however non-null — 0/10ms is not a hold', () => {
+    for (const heldMs of [0, 10, CERTIFY_REQUIRED_HOLD_MS - 1]) {
+      const tooShort = certifiedSession({ certifiedHeldMs: heldMs });
+      expect(sessionCertified(tooShort)).toBe(false);
+      expect(glyphFor(sessionState(tooShort, true))).not.toBe('✓');
+    }
+    // exactly the gate is enough; a whisker under is not — the boundary is closed
+    expect(sessionCertified(certifiedSession({ certifiedHeldMs: CERTIFY_REQUIRED_HOLD_MS }))).toBe(
+      true,
+    );
+  });
+
+  it('a certification whose status is not settled is not ✓ — no landing to certify', () => {
+    const notSettled = certifiedSession({ status: 'open' });
+    expect(sessionCertified(notSettled)).toBe(false);
+    // An open session is routine, ·; the certify columns do not privilege it.
+    expect(glyphFor(sessionState(notSettled, true))).toBe('·');
+  });
+
+  it('a signature with no armer, or a non-human armer, is not ✓ — the arm is half the act', () => {
+    const noArmer = certifiedSession({ certifyArmedByName: null, certifyArmedByKind: null });
+    const machineArmer = certifiedSession({ certifyArmedByKind: 'agent' });
+    for (const incomplete of [noArmer, machineArmer]) {
+      expect(sessionCertified(incomplete)).toBe(false);
+      expect(glyphFor(sessionState(incomplete, true))).not.toBe('✓');
+    }
+  });
+});
+
+/**
+ * A HOLD ABANDONED BY NAVIGATION DISARMS ITSELF (#121 round 5, finding 5).
+ *
+ * The certify's server arm is stamped on hold-BEGIN (`onBegin`) and cleared on the
+ * release that cancels it (`onCancel` → the server disarm). The gauntlet found the
+ * one release the control never fired: UNMOUNT. A person who began a hold and then
+ * navigated away left `HoldToAct`'s cleanup running only `stop()` — the arm it
+ * stamped on begin survived its whole TTL, and a later direct confirm could spend
+ * it. The cleanup now fires `onCancel` whenever a hold was in progress, so an
+ * abandoned hold disarms exactly as a released one does.
+ *
+ * MUTATION THAT MUST TURN THIS RED: restore `useEffect(() => stop, [stop])` as the
+ * only unmount effect. The mid-hold unmount below then fires no `onCancel`, and the
+ * server arm is never told to clear.
+ */
+describe('an abandoned hold disarms on unmount', () => {
+  it('unmounting mid-hold fires onCancel (the disarm), exactly as a release does', () => {
+    const onBegin = vi.fn();
+    const onCancel = vi.fn();
+    const onAct = vi.fn();
+    const { unmount } = render(
+      <HoldToAct
+        actionId="certify-x"
+        actor="viewer-1"
+        describe="put a human signature on this session's receipt"
+        holdMs={2000}
+        label="Certify this session"
+        onAct={onAct}
+        onBegin={onBegin}
+        onCancel={onCancel}
+      />,
+    );
+    // Begin the hold — the server arm goes out here.
+    fireEvent.pointerDown(document.querySelector('[data-hold-action="certify-x"]') as Element);
+    expect(onBegin).toHaveBeenCalledTimes(1);
+    expect(onCancel).not.toHaveBeenCalled();
+
+    // Navigate away mid-hold: the component unmounts before the meter fills.
+    unmount();
+    expect(onCancel).toHaveBeenCalledTimes(1); // the disarm fired
+    expect(onAct).not.toHaveBeenCalled(); // and nothing was certified
+  });
+
+  it('unmounting with no hold in progress disarms nothing', () => {
+    const onCancel = vi.fn();
+    const { unmount } = render(
+      <HoldToAct
+        actionId="certify-y"
+        actor="viewer-1"
+        describe="put a human signature on this session's receipt"
+        label="Certify this session"
+        onCancel={onCancel}
+      />,
+    );
+    // No press ever began, so there is no arm to clear.
+    unmount();
+    expect(onCancel).not.toHaveBeenCalled();
   });
 });

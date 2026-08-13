@@ -1469,6 +1469,32 @@ export const sessions = pgTable(
     certifyArmedBy: uuid('certify_armed_by').references(() => users.id, { onDelete: 'set null' }),
     /** The SERVER's clock at the arm — `now()`, never a value a request sent. */
     certifyArmedAt: timestamp('certify_armed_at', { withTimezone: true }),
+    /**
+     * THE ARM'S SINGLE-USE ATTEMPT ID — a `now()`-armed hold is a specific
+     * attempt, not a 120s standing permission.
+     *
+     * #121 fix round, CS-3 finished. The gauntlet found that a server arm survived
+     * its whole TTL and "a later direct confirm spends it": the arm was a window,
+     * not a token. `certify_arm_nonce` is stamped with a fresh `gen_random_uuid()`
+     * at arm and CONSUMED (set null) by the confirm that spends it, so the confirm
+     * honours only an arm minted by `armCertification` (the one path that stamps a
+     * nonce) and only once. A hand-forged or leaked arm without a live nonce is not
+     * a confirmable attempt. NULL whenever no hold is pending. Cleared on disarm.
+     */
+    certifyArmNonce: uuid('certify_arm_nonce'),
+    /**
+     * A DIGEST OF THE ARTIFACT THE HOLD WAS ARMED OVER — so the signature binds to
+     * the artifact the person REVIEWED, not merely to "an" artifact.
+     *
+     * #121 fix round, CS-1 finished. 0034 freezes the artifact once certified, but
+     * between arm and confirm the artifact is still mutable: render A, change it to
+     * B, confirm → 0034 froze B under a `✓` for work nobody reviewed. The arm now
+     * records `md5(artifact::text)` of what was on screen; the confirm recomputes
+     * it and REFUSES if the artifact changed underneath the hold. `md5` of jsonb's
+     * canonical text is stable for equal jsonb. NULL when no hold is pending;
+     * consumed (set null) by the confirm and cleared on disarm.
+     */
+    certifyArmedArtifactDigest: text('certify_armed_artifact_digest'),
     /** The `core_events.id` of the `session_opened` that projected this. */
     openedByEventId: text('opened_by_event_id'),
     /** The `core_events.id` of the settling/failing event, once it exits. */

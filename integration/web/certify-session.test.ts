@@ -886,4 +886,239 @@ describe('a cancelled hold leaves no live arm (#121 CS-3)', () => {
     });
     expect(outcome).toEqual({ ok: false, reason: 'not_in_room' });
   });
+
+  /**
+   * THE CONSUMED NONCE. A successful confirm spends the arm's single-use attempt
+   * id — it is cleared in the same statement that lands the signature, so the arm
+   * is not only "already certified" but carries no live nonce a replay could reuse.
+   */
+  it('a successful confirm consumes the arm nonce (it is null on the certified row)', async () => {
+    const at = await fixture();
+    await armCertification({
+      database: handle.db,
+      viewerId: at.ada,
+      sessionId: at.sessionId,
+      authorizedRoomId: at.roomId,
+    });
+    // The arm minted a nonce.
+    const [armed] = await handle.db
+      .select({ nonce: sessions.certifyArmNonce })
+      .from(sessions)
+      .where(eq(sessions.id, at.sessionId));
+    expect(armed?.nonce).not.toBeNull();
+
+    await backdateArm(at.sessionId, CERTIFY_REQUIRED_HOLD_MS + 500);
+    expect(
+      await certifySession({
+        database: handle.db,
+        viewerId: at.ada,
+        sessionId: at.sessionId,
+        authorizedRoomId: at.roomId,
+      }),
+    ).toEqual({ ok: true });
+
+    const [after] = await handle.db
+      .select({ nonce: sessions.certifyArmNonce })
+      .from(sessions)
+      .where(eq(sessions.id, at.sessionId));
+    expect(after?.nonce).toBeNull();
+  });
+
+  /**
+   * A LEAKED OR FORGED ARM WITHOUT A LIVE NONCE IS NOT CONFIRMABLE (finding 5).
+   *
+   * Only `armCertification` mints a nonce. This forces a valid-LOOKING arm straight
+   * onto the row — the right armer, an aged stamp past the gate, and even a matching
+   * artifact digest so nothing else stands in the way — but no nonce, the shape a
+   * disarmed/spent/forged arm has. The confirm honours only a live attempt.
+   *
+   * RED ON REVERT: drop `session.armNonce === null` from the arm check in
+   * `certifySession`. With a matching digest and an aged stamp, this forged arm
+   * then reaches the write and certifies — a confirm spending an arm no hold minted.
+   */
+  it('a forced arm carrying no nonce is refused, even aged and digest-matched', async () => {
+    const at = await fixture();
+    await handle.db
+      .update(sessions)
+      .set({
+        certifyArmedBy: at.ada,
+        certifyArmedAt: sql`now() - make_interval(secs => ${(CERTIFY_REQUIRED_HOLD_MS + 500) / 1000})`,
+        // The digest of the artifact actually on the row, so the bind check passes
+        // and only the missing nonce is left to stop the confirm.
+        certifyArmedArtifactDigest: sql`md5(${sessions.artifact}::text)`,
+        // certify_arm_nonce deliberately left NULL — this arm was not minted by the
+        // one path that mints one.
+      })
+      .where(eq(sessions.id, at.sessionId));
+
+    const outcome = await certifySession({
+      database: handle.db,
+      viewerId: at.ada,
+      sessionId: at.sessionId,
+      authorizedRoomId: at.roomId,
+    });
+    expect(outcome).toEqual({ ok: false, reason: 'not_armed' });
+    expect((await read(at.sessionId))[0]?.certifiedBy).toBeNull();
+  });
+});
+
+describe('a certification binds to the artifact reviewed (#121 round-5 finding 3)', () => {
+  /**
+   * RENDER A, CONFIRM B. The hold is armed over the artifact on screen; if it
+   * changes before the confirm, the person is signing a revision they did not
+   * review — and 0034 would then FREEZE that unreviewed revision under the `✓`.
+   * The arm records a digest of what it was taken over; the confirm refuses if the
+   * artifact moved underneath it.
+   *
+   * RED ON REVERT: drop the `session.artifactChanged` branch from `certifySession`
+   * (and/or stop stamping `certify_armed_artifact_digest` at arm). The confirm then
+   * certifies artifact B under a hold armed over artifact A.
+   */
+  it('mutating the artifact between arm and confirm refuses the confirm', async () => {
+    const at = await fixture();
+    await armCertification({
+      database: handle.db,
+      viewerId: at.ada,
+      sessionId: at.sessionId,
+      authorizedRoomId: at.roomId,
+    });
+    await backdateArm(at.sessionId, CERTIFY_REQUIRED_HOLD_MS + 500);
+
+    // The artifact changes AFTER the hold was armed over the original — the
+    // ExecutionProvider re-wrote it, a concurrent settle, a swap. The row is
+    // uncertified, so 0034 does not yet freeze it; the digest bind is what catches
+    // the change.
+    await handle.db
+      .update(sessions)
+      .set({ artifact: { branch: 'feat/x', commit: 'switched-under-the-hold' } })
+      .where(eq(sessions.id, at.sessionId));
+
+    const outcome = await certifySession({
+      database: handle.db,
+      viewerId: at.ada,
+      sessionId: at.sessionId,
+      authorizedRoomId: at.roomId,
+    });
+    expect(outcome).toEqual({ ok: false, reason: 'artifact_changed' });
+    expect((await read(at.sessionId))[0]?.certifiedBy).toBeNull();
+  });
+
+  /* THE CONTROL: an UNCHANGED artifact still certifies, so the bind refuses the
+     mutation, not the honest confirm. */
+  it('an unchanged artifact certifies through the bind', async () => {
+    const at = await fixture();
+    await armCertification({
+      database: handle.db,
+      viewerId: at.ada,
+      sessionId: at.sessionId,
+      authorizedRoomId: at.roomId,
+    });
+    await backdateArm(at.sessionId, CERTIFY_REQUIRED_HOLD_MS + 500);
+    expect(
+      await certifySession({
+        database: handle.db,
+        viewerId: at.ada,
+        sessionId: at.sessionId,
+        authorizedRoomId: at.roomId,
+      }),
+    ).toEqual({ ok: true });
+    expect((await read(at.sessionId))[0]?.certifiedBy).toBe(at.ada);
+  });
+});
+
+describe('the table refuses an internally inconsistent receipt (#121 round-5 finding 4, drizzle/0036)', () => {
+  /**
+   * THE FABRICATED COMPLETE RECEIPT. 0035 accepted a row that satisfied each of its
+   * clauses individually — arm stamp present, certified_at present, held_ms ≥ gate —
+   * while describing a hold that never happened: no armer, and a held_ms of 2000
+   * across a ZERO interval between the arm and the signature.
+   *
+   * RED ON REVERT: drop the `sessions_certify_receipt_consistent` trigger
+   * (drizzle/0036). Each of these raw writes then succeeds, which is the exact
+   * fabricated `✓` the backstop closes.
+   */
+  it('refuses a certifier with no armer — the armer must be the certifier', async () => {
+    const at = await fixture();
+    const why = await refusal(
+      handle.db
+        .update(sessions)
+        .set({
+          // certify_armed_by left null: nobody armed it.
+          certifyArmedAt: sql`now() - make_interval(secs => 3)`,
+          certifiedBy: at.ada,
+          certifiedAt: sql`now()`,
+          certifiedHeldMs: 2400,
+        })
+        .where(eq(sessions.id, at.sessionId)),
+    );
+    expect(why).toMatch(/must be the same|nobody performed|armed the hold/i);
+    expect((await read(at.sessionId))[0]?.certifiedBy).toBeNull();
+  });
+
+  it('refuses a held duration that does not match the arm→signature interval', async () => {
+    const at = await fixture();
+    // armer = certifier, but armed_at == certified_at (zero interval) while
+    // held_ms claims 2000ms of hold.
+    const why = await refusal(
+      handle.db
+        .update(sessions)
+        .set({
+          certifyArmedBy: at.ada,
+          certifyArmedAt: sql`now()`,
+          certifiedBy: at.ada,
+          certifiedAt: sql`now()`,
+          certifiedHeldMs: 2000,
+        })
+        .where(eq(sessions.id, at.sessionId)),
+    );
+    expect(why).toMatch(/interval|does not match|under the .*gate/i);
+    expect((await read(at.sessionId))[0]?.certifiedBy).toBeNull();
+  });
+
+  it('refuses a certifier over a non-settled session (with an artifact to pass 0034)', async () => {
+    const at = await fixture();
+    // An OPEN session that nonetheless carries an artifact, so 0034's needs-artifact
+    // trigger passes and the not-settled clause is what must fire.
+    const [openRow] = await handle.db
+      .insert(sessions)
+      .values({
+        roomId: at.roomId,
+        planId: at.planId,
+        harness: 'claude-code',
+        model: 'opus',
+        status: 'open',
+        artifact: { branch: 'feat/x', commit: 'not-yet-settled' },
+      })
+      .returning({ id: sessions.id });
+    const openId = (openRow as { id: string }).id;
+    const why = await refusal(
+      handle.db
+        .update(sessions)
+        .set({
+          certifyArmedBy: at.ada,
+          certifyArmedAt: sql`now() - make_interval(secs => 3)`,
+          certifiedBy: at.ada,
+          certifiedAt: sql`now()`,
+          certifiedHeldMs: 2400,
+        })
+        .where(eq(sessions.id, openId)),
+    );
+    expect(why).toMatch(/status is open|only a settled|no landing/i);
+    expect((await read(openId))[0]?.certifiedBy).toBeNull();
+  });
+
+  /* The honest receipt the app path writes — armer = certifier, settled, held_ms
+     consistent with a real interval — still passes the backstop. */
+  it('accepts a coherent receipt', async () => {
+    const at = await fixture();
+    await handle.db
+      .update(sessions)
+      .set({ certifyArmedBy: at.ada, certifyArmedAt: sql`now() - make_interval(secs => 3)` })
+      .where(eq(sessions.id, at.sessionId));
+    await handle.db
+      .update(sessions)
+      .set({ certifiedBy: at.ada, certifiedAt: sql`now()`, certifiedHeldMs: 2900 })
+      .where(eq(sessions.id, at.sessionId));
+    expect((await read(at.sessionId))[0]?.certifiedBy).toBe(at.ada);
+  });
 });
