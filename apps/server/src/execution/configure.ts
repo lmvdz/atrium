@@ -11,6 +11,7 @@ import {
   createArtifactRepo,
   createScratchRepo,
   disposeScratchRepo,
+  pinSettledArtifact,
   type ScratchRepo,
   sessionBranch,
 } from './git.js';
@@ -51,6 +52,8 @@ export interface ConfiguredExecution {
   commands: CommandService;
   /** Verifies a settle artifact against the provider's durable remote (#120 F2). */
   verifyArtifact: ArtifactVerifier;
+  /** Wait for in-flight executions before teardown (#120 r3 F5). */
+  drainExecutions(graceMs: number): Promise<number>;
   /** Tear down the SCRATCH working repo. The durable artifact repo is left intact. */
   dispose(): Promise<void>;
 }
@@ -137,16 +140,7 @@ export async function createExecutionProvider(input: {
 
   logger.info('execution provider enabled', { provider: provider.kind, artifactRepo: artifactDir });
 
-  // THE ARTIFACT VERIFIER (#120 F2). Closed over the provider's OWN durable
-  // remote, so a caller cannot point it at a repo they control. An artifact is
-  // trusted only when its branch is exactly this session's branch, its remote is
-  // exactly the durable repo, and the commit resolves to that ref there.
-  const verifyArtifact: ArtifactVerifier = async ({ sessionId, artifact }) => {
-    if (artifact.branch !== sessionBranch(sessionId)) return false;
-    if (artifact.remote !== artifactRepo.dir) return false;
-    const resolved = await artifactBranchCommit(artifactRepo, artifact.branch);
-    return resolved !== null && resolved === artifact.commit;
-  };
+  const verifyArtifact = createArtifactVerifier(artifactRepo, logger);
 
   return {
     provider,
@@ -161,6 +155,54 @@ export async function createExecutionProvider(input: {
 }
 
 /**
+ * THE ARTIFACT VERIFIER (#120 F2, extended by round-3 F4).
+ *
+ * Closed over the provider's OWN durable remote, so a caller cannot point it at a
+ * repo they control. An artifact is trusted only when its branch is exactly this
+ * session's branch, its remote is exactly the durable repo, and the commit
+ * resolves to that ref there.
+ *
+ * ROUND 3 adds the PIN. `commands.ts` now calls this inside the append's critical
+ * section, so the tuple that was verified is the tuple that gets written — but
+ * the branch it verified stays mutable forever after, and a `session_settled`
+ * whose commit was later force-pushed away or `branch -D`'d would index an
+ * object that is unreachable and eligible for `git gc`. Writing
+ * `refs/atrium/settled/<sessionId>` at the verified commit makes that object a GC
+ * root in its own right: the branch may move, the receipt still resolves.
+ *
+ * The pin is the LAST step, so an artifact that fails any check is never pinned
+ * and this cannot be used to make arbitrary objects permanent. If the pin itself
+ * fails, the artifact is REFUSED — a commit this seam cannot promise will still
+ * resolve is one it should not be certifying a receipt against.
+ *
+ * Exported so the integration suite verifies the REAL closure rather than a
+ * lookalike. A test that reimplements the thing it is testing proves only that
+ * two copies agree.
+ */
+export function createArtifactVerifier(
+  artifactRepo: ArtifactRepo,
+  logger: Logger,
+): ArtifactVerifier {
+  return async ({ sessionId, artifact }) => {
+    if (artifact.branch !== sessionBranch(sessionId)) return false;
+    if (artifact.remote !== artifactRepo.dir) return false;
+    const resolved = await artifactBranchCommit(artifactRepo, artifact.branch);
+    if (resolved === null || resolved !== artifact.commit) return false;
+    try {
+      await pinSettledArtifact(artifactRepo, sessionId, artifact.commit);
+    } catch (error) {
+      logger.error('refusing a settle artifact that could not be pinned durably', {
+        sessionId,
+        commit: artifact.commit,
+        error: error instanceof Error ? error.message : String(error),
+      });
+      return false;
+    }
+    return true;
+  };
+}
+
+/**
  * PHASE 2 — wrap a command service so a granted `session_opened` fires the
  * coordinator, and return the coordinator + the wrapped service.
  */
@@ -168,9 +210,32 @@ export function wireExecutionCoordinator(input: {
   provider: ExecutionProvider;
   commands: CommandService;
   logger: Logger;
-}): { coordinator: ExecutionCoordinator; commands: CommandService } {
+}): {
+  coordinator: ExecutionCoordinator;
+  commands: CommandService;
+  /**
+   * Wait for in-flight executions, up to `graceMs` (#120 round-3 F5). Resolves
+   * with how many were still running when the grace expired — zero means every
+   * granted draw got its receipt before the process went away.
+   */
+  drainExecutions(graceMs: number): Promise<number>;
+  /** How many executions are running right now. For tests and the boot log. */
+  inFlight(): number;
+} {
   const { provider, commands, logger } = input;
   const coordinator = createExecutionCoordinator({ commands, provider, logger });
+
+  // ── EXECUTIONS ARE TRACKED, NOT DETACHED (#120 round-3 F5) ─────────────────
+  //
+  // The run is still fire-and-forget with respect to the OPENER's request — the
+  // session is durably open before it starts, so a harness must not be able to
+  // fail somebody's `open_session` ack. It is no longer fire-and-forget with
+  // respect to the PROCESS. Round 2 found that a `SIGTERM` mid-harness closed the
+  // database and deleted the scratch repo underneath a run nobody was holding a
+  // handle to, and the session it had already been billed for stayed `open`
+  // forever. A promise nobody keeps is a promise the shutdown path cannot wait
+  // for, so we keep it.
+  const running = new Set<Promise<unknown>>();
 
   const wrapped: CommandService = {
     ...commands,
@@ -185,7 +250,7 @@ export function wireExecutionCoordinator(input: {
         // whether the adapter runs is not the opener's transaction to fail. A
         // refused draw never reaches this branch (the budget guard).
         const { sessionId } = result.draw;
-        void coordinator
+        const run = coordinator
           .runGranted(session, {
             sessionId,
             roomId: command.roomId,
@@ -198,13 +263,45 @@ export function wireExecutionCoordinator(input: {
               sessionId,
               error: error instanceof Error ? error.message : String(error),
             });
+          })
+          .finally(() => {
+            running.delete(run);
           });
+        running.add(run);
       }
       return result;
     },
   };
 
-  return { coordinator, commands: wrapped };
+  return {
+    coordinator,
+    commands: wrapped,
+    inFlight: () => running.size,
+    drainExecutions: async (graceMs: number): Promise<number> => {
+      if (running.size === 0) return 0;
+      logger.info('waiting for in-flight executions before shutdown', {
+        count: running.size,
+        graceMs,
+      });
+      // BOUNDED. A harness may legitimately run for ten minutes and shutdown
+      // cannot; what the grace buys is that the common case — a run seconds from
+      // its settle — gets its receipt instead of being severed. Whatever is still
+      // going when the grace expires is left to startup reconciliation, which is
+      // why that backstop is not optional.
+      let timer: NodeJS.Timeout | undefined;
+      const grace = new Promise<void>((resolve) => {
+        timer = setTimeout(resolve, graceMs);
+      });
+      await Promise.race([Promise.allSettled([...running]).then(() => undefined), grace]);
+      if (timer) clearTimeout(timer);
+      if (running.size > 0) {
+        logger.warn('executions still running at end of shutdown grace — left for reconciliation', {
+          count: running.size,
+        });
+      }
+      return running.size;
+    },
+  };
 }
 
 /**
@@ -226,6 +323,7 @@ export async function configureExecution(input: {
     coordinator: wired.coordinator,
     commands: wired.commands,
     verifyArtifact: runtime.verifyArtifact,
+    drainExecutions: wired.drainExecutions,
     dispose: runtime.dispose,
   };
 }

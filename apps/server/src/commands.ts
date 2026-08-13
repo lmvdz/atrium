@@ -24,11 +24,13 @@ import {
 import type { Database } from '@atrium/db';
 import {
   acceptedObjects,
+  coreEvents,
   messages,
   objectSources,
   plans,
   proposalSources,
   proposals,
+  sessions,
   users,
 } from '@atrium/db/schema';
 import { and, eq, inArray } from 'drizzle-orm';
@@ -550,6 +552,16 @@ export function nonHumanCertificationRefusal(name: CommandName, kind: string): s
  */
 export function nonHumanSpendAuthorizationRefusal(name: CommandName, kind: string): string {
   return `"${name}" authorizes spend — it sets a plan's rlimit slice — and this session is a ${kind} principal; a plan's budget is set by a person (human = init), and no machine may raise its own or any plan's ceiling. Nothing was appended. Ask a person in the room to fund the plan`;
+}
+
+/**
+ * What a member is told when they try to settle somebody else's session (#120
+ * round-3 F3). Names the act, why it is not theirs, and the route that stays
+ * open — the party that opened it settles it, and a wedged one is reconciled at
+ * startup rather than fabricated by a bystander.
+ */
+export function sessionSettleRefusal(sessionId: string): string {
+  return `"settle_session" writes session "${sessionId}"'s exit receipt, and only the party that OPENED that session may write it — a session's exit is a fact about a process you are not running, and a member fabricating one would stand in the ledger as that process's receipt. Nothing was appended. If the session is wedged, it is reconciled at startup, not settled from the outside`;
 }
 
 /**
@@ -1628,34 +1640,119 @@ export function createCommandService({
       }
 
       case 'settle_session': {
-        // THE ARTIFACT IS PROVIDER-VERIFIED, NOT A CALLER ASSERTION (#120 F2).
-        // The caller-supplied `{branch,commit,remote}` is trusted ONLY if the
-        // verifier — closed over the execution provider's own durable remote —
-        // confirms it names a git object the provider actually produced. Absent a
-        // verifier (execution disabled: no artifact has a legitimate source) or
-        // on a failed check (a fabricated ref), it is dropped to `null`. A
-        // settled session's artifact always corresponds to a real provider
-        // object; a member can no longer plant `{branch:"main",…}` in the ledger.
-        const verifiedArtifact =
-          command.artifact !== null &&
-          verifyArtifact !== undefined &&
-          (await verifyArtifact({ sessionId: command.sessionId, artifact: command.artifact }))
-            ? command.artifact
-            : null;
-        return appendAndProject(session, command.roomId, ({ id, at }) => ({
-          id,
-          at,
-          // One command, two exit spellings (§9.5): a clean settle or a failure
-          // owed triage. Both are non-epistemic — the projection writes only the
-          // `sessions` row and can flip no `~` to a `✓`.
-          type: command.outcome === 'failed' ? 'session_failed' : 'session_settled',
-          roomId: command.roomId,
-          sessionId: command.sessionId,
-          exitSummary: command.exitSummary,
-          spendMicros: command.spendMicros,
-          contextPct: command.contextPct,
-          artifact: verifiedArtifact,
-        }));
+        // Set in the guard, read in `build` — the `open_session` pattern, and for
+        // the same reason: both must happen under the ONE append lock.
+        let verifiedArtifact: z.infer<typeof ExecutionArtifact> | null = null;
+        return appendAndProject(
+          session,
+          command.roomId,
+          ({ id, at }) => ({
+            id,
+            at,
+            // One command, two exit spellings (§9.5): a clean settle or a failure
+            // owed triage. Both are non-epistemic — the projection writes only the
+            // `sessions` row and can flip no `~` to a `✓`.
+            type: command.outcome === 'failed' ? 'session_failed' : 'session_settled',
+            roomId: command.roomId,
+            sessionId: command.sessionId,
+            exitSummary: command.exitSummary,
+            spendMicros: command.spendMicros,
+            contextPct: command.contextPct,
+            artifact: verifiedArtifact,
+          }),
+          async (tx) => {
+            // ── A SESSION'S EXIT IS ITS OWNER'S TO WRITE (#120 round-3 F3) ────
+            //
+            // `settle_session` is `open`-class, which decides whether a MACHINE
+            // may perform it (#114 T3: it is non-epistemic, so yes). It never
+            // decided WHICH member may perform it, and the answer was "any of
+            // them". So while a granted harness was still running, any bystander
+            // in the room could append `settle_session {outcome:'settled',
+            // artifact:null}`; the one-exit predicate in `projectSessionExit`
+            // would honour the fabricated clean exit, the provider's real settle
+            // would then find no `open` session and throw, and the ledger would
+            // index a caller-chosen outcome with the real artifact unindexed. A
+            // false green on the covenant surface: a machine's — or a
+            // bystander's — assertion standing as a session's receipt.
+            //
+            // The mechanism is an OWNER check against the row the open already
+            // wrote, deliberately in preference to the two alternatives:
+            //
+            //  • A coordinator-only command would mean the exit could only ever
+            //    be written by this process. A session whose coordinator died
+            //    could then never be settled by anything, which is the wedge F2
+            //    and F5 exist to prevent.
+            //  • An opener TOKEN (minted at open, presented at settle) is
+            //    strictly stronger and needs a column to hold its hash plus a
+            //    channel to carry it. It buys protection against a compromised
+            //    opener, which is not the threat here — the opener is the party
+            //    the covenant already trusts with this session.
+            //
+            // So: the settler must be the actor that opened it. That fact is
+            // already durable and needs no migration — `sessions.opened_by_event_id`
+            // names the `session_opened` row, and `core_events.actor_id` is the
+            // trusted actor it was appended under (never a client-supplied
+            // field). Read under the append lock, `for('share')` on the session
+            // row so it cannot exit underneath the check.
+            const [owned] = await tx
+              .select({
+                status: sessions.status,
+                openerId: coreEvents.actorId,
+                openedByEventId: sessions.openedByEventId,
+              })
+              .from(sessions)
+              .leftJoin(coreEvents, eq(coreEvents.id, sessions.openedByEventId))
+              .where(and(eq(sessions.id, command.sessionId), eq(sessions.roomId, command.roomId)))
+              .for('share', { of: sessions });
+            if (!owned) {
+              // Same shape `projectSessionExit` would produce, said earlier. A
+              // settle of a session that is not here writes nothing either way.
+              throw new CommandError(
+                'invalid',
+                `no session "${command.sessionId}" to settle in room "${command.roomId}" — it does not exist here`,
+              );
+            }
+            if (owned.openedByEventId === null || owned.openerId === null) {
+              // A session with no recorded opener has no party authorized to
+              // settle it. Fail CLOSED: the alternative is that the one row that
+              // cannot name its owner is settleable by anybody.
+              throw new CommandError('invalid', sessionSettleRefusal(command.sessionId));
+            }
+            if (owned.openerId !== session.userId) {
+              throw new CommandError('invalid', sessionSettleRefusal(command.sessionId));
+            }
+
+            // ── THE VERIFIED TUPLE IS THE APPENDED TUPLE (#120 round-3 F4) ────
+            //
+            // The verification used to run BEFORE `appendAndProject`, outside the
+            // lock. A durable branch ref is mutable: between `verifyArtifact`
+            // resolving the branch to commit C and the event being written, the
+            // ref could be swapped to D or deleted, and the ledger would persist
+            // a `{branch,commit}` tuple that no longer resolves — a receipt
+            // pointing at nothing, indefinitely. Running it here closes that
+            // window: the check and the append are the same critical section, so
+            // what was verified is what is written.
+            //
+            // The verifier ALSO pins the commit behind an immutable
+            // `refs/atrium/settled/<sessionId>` ref in the durable repo (see
+            // `configure.ts`), which is the other half of F4: a later force-push
+            // or branch delete can move the branch, but the object a receipt
+            // indexes stays reachable and un-GC-able.
+            //
+            // Everything the previous round guaranteed still holds: the
+            // caller-supplied `{branch,commit,remote}` is trusted ONLY if the
+            // verifier — closed over the provider's own durable remote — confirms
+            // it names an object the provider produced. Absent a verifier
+            // (execution disabled: no artifact has a legitimate source) or on a
+            // failed check, it is dropped to `null`.
+            verifiedArtifact =
+              command.artifact !== null &&
+              verifyArtifact !== undefined &&
+              (await verifyArtifact({ sessionId: command.sessionId, artifact: command.artifact }))
+                ? command.artifact
+                : null;
+          },
+        );
       }
 
       case 'raise_signal':
