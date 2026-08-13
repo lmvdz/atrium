@@ -90,6 +90,42 @@ export function createExecutionCoordinator(
 ): ExecutionCoordinator {
   const { commands, provider, logger } = options;
 
+  /**
+   * Append one `settle_session`, and THROW if it did not land. Both spellings of
+   * "no receipt was written" — a thrown `CommandError` and an append that came
+   * back as something other than `appended` — become the same thrown failure, so
+   * the caller's terminal-state guarantee cannot be satisfied by a result nobody
+   * checked. (Before round 3 the non-`appended` case was logged and then reported
+   * as the session's outcome anyway.)
+   */
+  async function settleOrThrow(
+    session: Session,
+    granted: GrantedSession,
+    outcome: 'settled' | 'failed',
+    receipt: {
+      exitSummary: string | null;
+      spendMicros: number | null;
+      contextPct: number | null;
+      artifact: ExecutionArtifact | null;
+    },
+  ): Promise<void> {
+    const settle = await commands.execute(session, {
+      name: 'settle_session',
+      roomId: granted.roomId,
+      sessionId: granted.sessionId,
+      outcome,
+      exitSummary: receipt.exitSummary,
+      spendMicros: receipt.spendMicros,
+      contextPct: receipt.contextPct,
+      artifact: receipt.artifact,
+    });
+    if (settle.kind !== 'appended') {
+      throw new Error(
+        `settling session ${granted.sessionId} as ${outcome} did not append (${settle.kind})`,
+      );
+    }
+  }
+
   async function runGranted(session: Session, granted: GrantedSession): Promise<ExecutionOutcome> {
     const ctx: SessionContext = {
       sessionId: granted.sessionId,
@@ -149,24 +185,72 @@ export function createExecutionCoordinator(
     // the event either way. `settle_session` is `open`-class and non-epistemic —
     // it writes the session's exit receipt and touches no `accepted_objects`.
     const outcome = report.terminal.ok ? 'settled' : 'failed';
-    const settle = await commands.execute(session, {
-      name: 'settle_session',
-      roomId: granted.roomId,
-      sessionId: granted.sessionId,
-      outcome,
-      exitSummary: report.receipt.exitSummary,
-      spendMicros: report.receipt.spendMicros,
-      contextPct: report.receipt.contextPct,
-      artifact: report.receipt.artifact,
-    });
-    if (settle.kind !== 'appended') {
-      logger.error('settling an executed session did not append', {
+
+    // ── THE SETTLE IS INSIDE THE FAILURE BOUNDARY (#120 round-3 F2) ───────────
+    //
+    // It used to be outside it, and that was the whole defect. `resolve`/`run`
+    // were wrapped so a provider throw became `session_failed`; the settle that
+    // WRITES that receipt was not. So any settle fault — lost membership, a
+    // projection refusing an already-exited session, a ledger fault — threw out
+    // of `runGranted`, into the fire-and-forget `.catch` in
+    // `wireExecutionCoordinator`, which only logs. The `authorized_draws`
+    // increment had already committed at `open_session`. Net: a SPENT draw, a
+    // session stuck `open` forever, and no receipt anywhere — the exact
+    // wedged-and-billed state F5 was written to make impossible, reachable
+    // through the one call F5 did not cover.
+    //
+    // A session that was granted a draw reaches a TERMINAL state. That is the
+    // invariant, and it does not care which call failed. So: try the settle the
+    // run earned; if that throws, fall back to settling FAILED with no artifact
+    // and a receipt naming the settle fault. Only if the fallback ALSO throws is
+    // the session left for startup reconciliation (`index.ts`), which is the
+    // backstop for the case where the database itself is unreachable — there is
+    // no in-process move left that could write a receipt then.
+    //
+    // Revert this — hoist the settle back out of the try — and
+    // `coordinator.test.ts`'s "a settle fault still drives the session terminal"
+    // reds immediately.
+    let terminal: 'settled' | 'failed' = outcome;
+    try {
+      await settleOrThrow(session, granted, outcome, report.receipt);
+    } catch (error) {
+      logger.error('settling an executed session threw — retrying as failed', {
         sessionId: granted.sessionId,
-        result: settle.kind,
+        outcome,
+        error: error instanceof Error ? error.message : String(error),
       });
+      terminal = 'failed';
+      try {
+        await settleOrThrow(session, granted, 'failed', {
+          exitSummary:
+            `execution completed (${outcome}) but the settle failed: ` +
+            (error instanceof Error ? error.message : String(error)).slice(0, 500),
+          spendMicros: report.receipt.spendMicros,
+          contextPct: report.receipt.contextPct,
+          // No artifact on a fallback settle. The run's artifact may well be
+          // real, but the settle that would have carried it did not land, and a
+          // receipt asserting a tuple whose write path just faulted is a claim
+          // this seam has not earned. The branch is still in the durable repo.
+          artifact: null,
+        });
+      } catch (fallbackError) {
+        // Nothing in-process can write a receipt now. Say so loudly and leave it
+        // to startup reconciliation rather than returning as if it settled.
+        logger.error(
+          'session could not be driven to a terminal state — left for startup reconciliation',
+          {
+            sessionId: granted.sessionId,
+            error: fallbackError instanceof Error ? fallbackError.message : String(fallbackError),
+          },
+        );
+      }
     }
 
-    return { kind: outcome, sessionId: granted.sessionId, artifact: report.receipt.artifact };
+    return {
+      kind: terminal,
+      sessionId: granted.sessionId,
+      artifact: terminal === outcome ? report.receipt.artifact : null,
+    };
   }
 
   async function openAndRun(session: Session, input: OpenSessionInput): Promise<ExecutionOutcome> {

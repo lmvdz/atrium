@@ -11,6 +11,7 @@ import { createCommandService } from './commands.js';
 import { loadEnv } from './env.js';
 import { createEventBus } from './event-bus.js';
 import { createExecutionProvider, wireExecutionCoordinator } from './execution/configure.js';
+import { reconcileWedgedSessions } from './execution/reconcile.js';
 import { createAcceptanceProvider } from './jobs/acceptance-provider.js';
 import { createGatewayProvider } from './jobs/provider.js';
 import { createLedger } from './ledger.js';
@@ -213,6 +214,43 @@ async function main(): Promise<void> {
     : null;
   const commands = executionWiring?.commands ?? baseCommands;
 
+  /**
+   * How long shutdown waits for in-flight executions (#120 round-3 F5). Well
+   * under the 30s force-exit watchdog, and deliberately NOT long enough for a
+   * ten-minute harness — the grace is for the run that is seconds from its
+   * settle, and anything longer is startup reconciliation's job.
+   */
+  const EXECUTION_DRAIN_GRACE_MS = 10_000;
+
+  /* ---------------------------------------------------------------------------
+   * STARTUP RECONCILIATION (#120 round-3 F5).
+   *
+   * Before a single socket is accepted: any session the LAST process left `open`
+   * has a draw already spent against its plan's human-set slice and no execution
+   * alive to produce its receipt. It gets `session_failed` — an honest exit for a
+   * run that was killed, not a fabricated clean one — so a crash costs a receipt
+   * that says so rather than a permanent wedge nobody can clear.
+   *
+   * It runs on the BASE command service on purpose. The wrapper only fires the
+   * coordinator on a granted `open_session`, which this never issues, and running
+   * a reconciliation through the wrapper would be one more path to reason about
+   * for no gain. It runs whether or not execution is enabled this boot: a wedged
+   * session from a boot that HAD execution enabled must still be reconcilable by
+   * one that does not.
+   * ------------------------------------------------------------------------- */
+  const reconciled = await reconcileWedgedSessions({
+    db: database.db,
+    commands: baseCommands,
+    logger,
+  });
+  if (reconciled.found > 0) {
+    logger.warn('startup reconciled sessions left open by a previous process', {
+      found: reconciled.found,
+      failed: reconciled.failed,
+      unreconciled: reconciled.unreconciled,
+    });
+  }
+
   let ready = false;
   const realtime = createRealtimeServer({
     host: env.SERVER_HOST,
@@ -256,15 +294,30 @@ async function main(): Promise<void> {
     logger.info('shutting down', { signal });
 
     // Force-exit if anything hangs; a stuck shutdown is worse than a hard one.
+    // Comfortably longer than the execution drain grace below, so the drain gets
+    // its full window instead of being pre-empted by its own watchdog.
     const forced = setTimeout(() => {
       logger.error('graceful shutdown timed out, forcing exit');
       process.exit(1);
-    }, 15_000);
+    }, 30_000);
     forced.unref();
 
     try {
       await realtime.close();
       await queue.stop();
+      // In-flight executions get a BOUNDED grace before anything they depend on
+      // is torn down (#120 round-3 F5). The order is the point: the socket server
+      // is already closed (no new `open_session` can be granted), so this drains a
+      // set that can only shrink, and it happens BEFORE the scratch repo is
+      // deleted and the database is closed — the two things a settling run needs.
+      // Reverting the order severs a run mid-settle and hands it to startup
+      // reconciliation, which is the backstop, not the plan.
+      if (executionWiring) {
+        const stranded = await executionWiring.drainExecutions(EXECUTION_DRAIN_GRACE_MS);
+        if (stranded > 0) {
+          logger.warn('shutting down with executions still running', { count: stranded });
+        }
+      }
       // Tears down the SCRATCH working repo only; the DURABLE artifact repo is
       // left intact so settled receipts still resolve after shutdown (#120 F3).
       if (executionRuntime) await executionRuntime.dispose();

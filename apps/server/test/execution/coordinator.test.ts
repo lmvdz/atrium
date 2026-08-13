@@ -254,3 +254,152 @@ describe('the coordinator enforces the budget guard (#118)', () => {
     }
   });
 });
+
+/**
+ * ROUND 3, F2 — the settle is inside the failure boundary too.
+ *
+ * `resolve`/`run` were wrapped; the `settle_session` that WRITES the receipt was
+ * not. The `authorized_draws` increment has already committed by then, so a
+ * settle fault — a lost membership, a projection refusing a session that is no
+ * longer open, a ledger fault — threw out of `runGranted` into the
+ * fire-and-forget `.catch` in `wireExecutionCoordinator`, which only logs. The
+ * session stayed `open` forever with a SPENT draw and no receipt: billed and
+ * wedged, which is precisely the state F5 was written to make unreachable.
+ */
+describe('a settle fault still drives the session terminal (#120 r3 F2)', () => {
+  /** A runner whose first `settle_session` throws and whose second succeeds. */
+  function settleThrowsOnce(sessionId: string) {
+    const calls: Command[] = [];
+    let settles = 0;
+    return {
+      calls,
+      settleAttempts: () => settles,
+      execute: vi.fn(async (_session: Session, command: Command): Promise<CommandResult> => {
+        calls.push(command);
+        if (command.name === 'open_session') {
+          return {
+            kind: 'appended',
+            roomId: command.roomId,
+            seq: 1,
+            roomSeq: 1,
+            actor: { kind: 'agent', userId: agent.userId },
+            event: {} as never,
+            issues: [],
+            draw: { outcome: 'granted', sessionId },
+          };
+        }
+        settles++;
+        if (settles === 1) throw new Error('projection fault: session is no longer open');
+        return {
+          kind: 'appended',
+          roomId: command.roomId,
+          seq: 2,
+          roomSeq: 2,
+          actor: { kind: 'agent', userId: agent.userId },
+          event: {} as never,
+          issues: [],
+        };
+      }),
+    };
+  }
+
+  it('does not let a settle throw escape runGranted', async () => {
+    const sessionId = randomUUID();
+    const commands = settleThrowsOnce(sessionId);
+    const coordinator = createExecutionCoordinator({
+      commands,
+      provider: spyProvider(settledReport),
+      logger,
+    });
+
+    // REVERT-REDS: hoist the settle back out of the try in coordinator.ts and
+    // this REJECTS instead of resolving — the exact escape that leaves a granted
+    // session open with a spent draw.
+    const outcome = await coordinator.runGranted(agent, {
+      sessionId,
+      roomId: randomUUID(),
+      planId: randomUUID(),
+      harness: 'omp',
+      model: 'haiku',
+    });
+
+    // A TERMINAL state, reported as failed — never `open`, and never the clean
+    // `settled` the run alone would have earned.
+    expect(outcome.kind).toBe('failed');
+    if (outcome.kind === 'failed') expect(outcome.artifact).toBeNull();
+
+    // And a SECOND settle was actually attempted, spelled `failed` with no
+    // artifact — the receipt the session is owed, not merely a swallowed error.
+    expect(commands.settleAttempts()).toBe(2);
+    // `runGranted` is entered directly, so the calls are the two settles.
+    const retry = commands.calls[1];
+    expect(retry?.name).toBe('settle_session');
+    if (retry?.name === 'settle_session') {
+      expect(retry.outcome).toBe('failed');
+      expect(retry.artifact).toBeNull();
+      expect(retry.exitSummary).toContain('the settle failed');
+    }
+  });
+
+  it('reports failed — never the run outcome — when BOTH settles throw', async () => {
+    const sessionId = randomUUID();
+    const calls: Command[] = [];
+    const commands = {
+      calls,
+      execute: vi.fn(async (_session: Session, command: Command): Promise<CommandResult> => {
+        calls.push(command);
+        throw new Error('ledger unreachable');
+      }),
+    };
+    const coordinator = createExecutionCoordinator({
+      commands,
+      provider: spyProvider(settledReport),
+      logger,
+    });
+
+    // Nothing in-process can write a receipt when the ledger itself is gone. The
+    // contract is that `runGranted` still RESOLVES (so the fire-and-forget catch
+    // is not left holding the bag) and reports `failed`, leaving the session to
+    // startup reconciliation rather than claiming it settled.
+    const outcome = await coordinator.runGranted(agent, {
+      sessionId,
+      roomId: randomUUID(),
+      planId: randomUUID(),
+      harness: 'omp',
+      model: 'haiku',
+    });
+    expect(outcome.kind).toBe('failed');
+    expect(calls.filter((call) => call.name === 'settle_session')).toHaveLength(2);
+  });
+
+  it('treats a non-appended settle as a fault, not as a receipt', async () => {
+    const sessionId = randomUUID();
+    const calls: Command[] = [];
+    const commands = {
+      calls,
+      // A settle that comes back as something other than `appended` wrote no
+      // event. Round 2 logged that and returned the run's own outcome anyway,
+      // reporting a session settled on the strength of an append that did not
+      // happen.
+      execute: vi.fn(async (_session: Session, command: Command): Promise<CommandResult> => {
+        calls.push(command);
+        return { kind: 'seen', roomId: command.roomId, userId: agent.userId, seenSeq: 0 };
+      }),
+    };
+    const coordinator = createExecutionCoordinator({
+      commands,
+      provider: spyProvider(settledReport),
+      logger,
+    });
+
+    const outcome = await coordinator.runGranted(agent, {
+      sessionId,
+      roomId: randomUUID(),
+      planId: randomUUID(),
+      harness: 'omp',
+      model: 'haiku',
+    });
+    expect(outcome.kind).toBe('failed');
+    expect(calls.filter((call) => call.name === 'settle_session')).toHaveLength(2);
+  });
+});
