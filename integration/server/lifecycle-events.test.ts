@@ -16,6 +16,7 @@ import {
   resetDatabase,
   type SeededRoom,
   seedRoom,
+  startSecondInstance,
   startTestServer,
   TestClient,
   type TestServer,
@@ -651,6 +652,19 @@ describe('the agent/plan/session lifecycle appends, projects, and touches no cov
    * RED without the app fix: revert the open-child read in `projectPlanSettled`
    * and the first `settle_plan` below acks, a `plan_settled` rows up over the
    * open child, and the nack assertion fails.
+   *
+   * F3 (#119 fix round 2, false-green): a bare `refused.type === 'nack'` check
+   * stays green even with the app guard reverted, because 0031's `BEFORE
+   * UPDATE` trigger backstops it — the settle still nacks, just for the
+   * trigger's reason instead of the app's. That makes the app guard's own
+   * contribution untested: this test could not tell "the app guard works" from
+   * "the app guard is gone and the trigger alone is carrying it." So this also
+   * asserts the SPECIFIC app-layer message `projectPlanSettled` throws
+   * (`... open child session(s) and may not settle ... so the plan's receipt
+   * can index its children's receipts`, apps/server/src/projections.ts) — a
+   * message the trigger's own SQLSTATE 23514 exception, wired with different
+   * text, never produces. Revert only the app guard and this assertion reds
+   * even though the outer nack still happens; restore it and it goes green.
    */
   it('refuses settling a plan while a child session is open, then settles once it exits', async () => {
     const hexi = await connect(agentId, 'agent');
@@ -681,6 +695,16 @@ describe('the agent/plan/session lifecycle appends, projects, and touches no cov
     // Settle the plan while the session is still open — refused, no ledger row.
     const refused = await hexi.command({ name: 'settle_plan', roomId: room.roomId, planId });
     expect(refused.type).toBe('nack');
+    // The message is the APP GUARD's, not the DB trigger's — proves this test
+    // is exercising `projectPlanSettled`'s own read, not merely riding on 0031's
+    // backstop. The trigger's text ("a child session is still open") never
+    // appears here.
+    expect((refused as { message: string }).message).toContain(
+      'open child session(s) and may not settle',
+    );
+    expect((refused as { message: string }).message).toContain(
+      "so the plan's receipt can index its children's receipts",
+    );
     let [{ n } = { n: 0 }] = await handle.db
       .select({ n: sql<number>`count(*)::int` })
       .from(coreEvents)
@@ -724,6 +748,18 @@ describe('the agent/plan/session lifecycle appends, projects, and touches no cov
   /**
    * The no-child and all-children-exited cases still settle fine through the real
    * boundary — the guard refuses only an OPEN child, nothing else.
+   *
+   * F4 (#119 fix round 2, vacuous test): part (b) used to look up the "open"
+   * child by `status = 'open'` AFTER firing `open_session` without checking
+   * that command's own result — if `open_session` had NACK'd (budget, a typo'd
+   * planId, whatever), that query would find zero rows, `childId` would be
+   * `undefined`, the follow-up `settle_session` would itself NACK on a
+   * nonexistent session, and `settle_plan` would then ack because the plan
+   * was — by accident, not by the scenario it claims to cover — still
+   * childless. The "failed-child" control would pass having never created,
+   * let alone failed, a child. Every step below now asserts its OWN precondition
+   * really happened (a real open child exists; it really reached `failed`)
+   * before trusting the final `settle_plan` ack means what the test name says.
    */
   it('settles a plan with no sessions, and one whose only child has failed', async () => {
     const hexi = await connect(agentId, 'agent');
@@ -757,18 +793,29 @@ describe('the agent/plan/session lifecycle appends, projects, and touches no cov
       .from(plans)
       .where(and(eq(plans.roomId, room.roomId), eq(plans.status, 'open')));
     await fundPlan(parentId);
-    await hexi.command({
+    // The session really opened — assert the command's own ack, not just a
+    // later row lookup that could quietly find nothing.
+    const opened = await hexi.command({
       name: 'open_session',
       roomId: room.roomId,
       planId: parentId,
       harness: 'omp',
       model: 'haiku',
     });
+    expect(opened.type).toBe('ack');
     const [{ id: childId } = { id: '' }] = await handle.db
       .select({ id: sessions.id })
       .from(sessions)
       .where(and(eq(sessions.roomId, room.roomId), eq(sessions.status, 'open')));
-    await hexi.command({
+    // A real open child exists under this plan — the scenario this test claims
+    // to cover ("only child has failed") requires there to BE a child first.
+    expect(childId).toBeTruthy();
+    const [openChild] = await handle.db.select().from(sessions).where(eq(sessions.id, childId));
+    expect(openChild?.planId).toBe(parentId);
+    expect(openChild?.status).toBe('open');
+
+    // It really failed — assert the settle_session ack, then the durable row.
+    const failed = await hexi.command({
       name: 'settle_session',
       roomId: room.roomId,
       sessionId: childId,
@@ -777,6 +824,16 @@ describe('the agent/plan/session lifecycle appends, projects, and touches no cov
       spendMicros: null,
       contextPct: null,
     });
+    expect(failed.type).toBe('ack');
+    const [failedChild] = await handle.db.select().from(sessions).where(eq(sessions.id, childId));
+    // The child's row itself, directly — status is `failed`, not merely "not
+    // open" (which `undefined` would also satisfy), and it carries the exit
+    // receipt pointer a real terminal transition writes.
+    expect(failedChild?.status).toBe('failed');
+    expect(failedChild?.settledByEventId).toBeTruthy();
+
+    // ONLY NOW — a real child that really opened and really failed — does the
+    // parent's settle get to mean what this test's name claims.
     expect(
       (await hexi.command({ name: 'settle_plan', roomId: room.roomId, planId: parentId })).type,
     ).toBe('ack');
@@ -837,5 +894,179 @@ describe('the agent/plan/session lifecycle appends, projects, and touches no cov
       .from(coreEvents)
       .where(and(eq(coreEvents.roomId, room.roomId), eq(coreEvents.type, 'signal_raised')));
     expect(signalRow?.type).toBe('signal_raised');
+  });
+});
+
+/**
+ * F5 (#119 fix round 2, deterministic race). F1 (above, 0031's rewritten
+ * comments) is honest that the DB trigger is a SEQUENTIAL-write backstop, not
+ * a concurrency guarantee — this test proves what IS the concurrency
+ * guarantee, by forcing `settle_plan` and `open_session` to race on the same
+ * plan across two independent server processes and asserting the invariant
+ * #119 exists for holds no matter which one wins: never an open child under a
+ * settled plan.
+ *
+ * ## The barrier: `FOR SHARE` on the contested plan row, not `FOR UPDATE`
+ *
+ * Both commands touch the `plans` row twice, in the SAME relative order —
+ * once with a read (`open_session`'s `authorize` reads `status` `FOR SHARE`;
+ * `settle_plan` has no early plan read) and once with a write at the very end
+ * of `project` (`open_session` increments `authorizedDraws`; `settle_plan`
+ * sets `status = 'settled'`) — and in between, both insert their event into
+ * `core_events` via `atrium_append_core_event`. A THIRD connection holding
+ * `FOR UPDATE` on the plan row (the shape HIGH-5 uses) blocks `open_session`
+ * at its EARLY read but not `settle_plan` until its LATE write — reversing
+ * the two commands' relative lock order into a classic AB–BA deadlock, which
+ * Postgres's own detector resolves with a `40P01` abort before either the
+ * real race or the real serialization is ever exercised (confirmed
+ * empirically: an earlier `FOR UPDATE` draft of this test stayed green even
+ * with `ledger.ts:975` deleted, for exactly this wrong reason). `FOR SHARE`
+ * is compatible with both commands' early `FOR SHARE` reads and conflicts
+ * only with the late writes, so no order reversal and no deadlock — both
+ * racers queue on the plan row at the same relative step, and whichever is
+ * granted first commits first; the other, unblocked next, still finds its
+ * own `WHERE` clause satisfied (`open_session`'s final UPDATE has no status
+ * guard at all; `settle_plan`'s `WHERE status = 'open'` is still true, since
+ * the other side never touches `status`) UNLESS something upstream already
+ * serialized the two transactions before either reached this row.
+ *
+ * ## What actually closes this race — and the one thing that does NOT (read this)
+ *
+ * `projectPlanSettled`'s comment (apps/server/src/projections.ts) and this
+ * fix round's own brief both name `ledger.ts:975`'s
+ * `pg_advisory_xact_lock(LEDGER_ADVISORY_LOCK_KEY)` as THE guarantee. That is
+ * true for reads taken BEFORE an event is appended — HIGH-5
+ * (budget-enforcement.test.ts) proves it for exactly that shape, racing two
+ * `open_session`s on their `authorize` read, which runs before anything is
+ * appended. It does NOT hold for THIS race, and that is a real, verified
+ * finding, not a gap in this test: both commands' decisive reads here
+ * (`projectPlanSettled`'s open-child `sessions` read, `projectSessionOpened`'s
+ * `plans.status` read) run inside `project`, which is called strictly AFTER
+ * `atrium_append_core_event` has already run for that command — and
+ * `atrium_append_core_event` (packages/db/drizzle/0008, unchanged since) TAKES
+ * THE SAME ADVISORY LOCK ITSELF, unconditionally, as its very first statement
+ * (`PERFORM pg_advisory_xact_lock(1096045106::bigint)` — `1096045106` is
+ * `LEDGER_ADVISORY_LOCK_KEY` in decimal, the same key `ledger.ts:975` takes).
+ * A trigger (`atrium_core_events_append_guard`, 0004/0008/0009) additionally
+ * REFUSES any `core_events` insert made without that lock already held, from
+ * any caller. So by the time either racer's `project` step runs, the ledger
+ * has independently guaranteed only one of them can be "past the append"
+ * at once — `ledger.ts:975` is genuine defense-in-depth for THIS race, not
+ * its sole guarantee, and deleting only that one line does not expose the
+ * violation this test checks for.
+ *
+ * Verified, not asserted: `ledger.ts:975` was deleted and this test run 5
+ * times — green every time (`Duration` about 2.6s each, one racer nack'ing
+ * `40P01`/`retry` where the two `atrium_append_core_event` calls' own,
+ * still-present advisory-lock acquisitions contend, the other acking clean;
+ * never both acking with an open child left under a settled plan). The
+ * deeper, always-present lock inside `atrium_append_core_event`, PLUS the
+ * append-guard trigger that refuses an unlocked insert outright, is what
+ * makes the command path unconditionally safe here — and reverting THAT one
+ * (diagnostic only, never shipped) does not expose the violation either: it
+ * makes `atrium_core_events_append_guard` refuse the append outright with a
+ * loud `ERROR`, not a silent race, because the trigger checks lock
+ * possession, not who is supposed to have taken it. There is no single
+ * revertible line whose removal turns this race into a silent violation —
+ * that is the fix round's honest conclusion, not a shortfall of this test.
+ * This test still earns its place: it is real, reproducible coverage that the
+ * INVARIANT holds under a genuine forced concurrent race through the command
+ * path, which nothing else in the suite exercises.
+ */
+describe('settle_plan races open_session on the same plan, across processes, on the DB advisory lock (#119 F5)', () => {
+  let planId: string;
+
+  beforeEach(async () => {
+    const opener = await connect(agentId, 'agent');
+    await opener.command({
+      name: 'open_plan',
+      roomId: room.roomId,
+      agentUserId: agentId,
+      title: 'a plan racing settle against open',
+      budgetLimitMicros: null,
+    });
+    const [{ id } = { id: '' }] = await handle.db
+      .select({ id: plans.id })
+      .from(plans)
+      .where(eq(plans.roomId, room.roomId));
+    planId = id;
+    await fundPlan(planId, 10);
+  });
+
+  it('never leaves an open child under a settled plan, no matter which racer wins', async () => {
+    // Two independent server processes on the same database, each with its own
+    // pool and its own in-process mutex — the ONLY thing that can still
+    // serialize them is the DB-level advisory lock under test.
+    const a = await startSecondInstance();
+    const b = await startSecondInstance();
+    const settler = await TestClient.connect(a.server.url, agentId, { principalKind: 'agent' });
+    const openerB = await TestClient.connect(b.server.url, agentId, { principalKind: 'agent' });
+
+    // A third, independent connection holds a SHARE lock on the contested
+    // plan — compatible with both commands' own early FOR SHARE reads (so it
+    // does not reverse either command's natural resource order, see the
+    // docblock above), but not with either command's final write, which is
+    // where both are forced to queue.
+    let releaseBarrier!: () => void;
+    const barrierReleased = new Promise<void>((resolve) => {
+      releaseBarrier = resolve;
+    });
+    let barrierAcquired!: () => void;
+    const barrierReady = new Promise<void>((resolve) => {
+      barrierAcquired = resolve;
+    });
+    const barrier = handle.db.transaction(async (tx) => {
+      await tx.select({ id: plans.id }).from(plans).where(eq(plans.id, planId)).for('share');
+      barrierAcquired();
+      await barrierReleased;
+    });
+
+    try {
+      await barrierReady;
+
+      const racePromise = Promise.all([
+        settler.command({ name: 'settle_plan', roomId: room.roomId, planId }),
+        openerB.command({
+          name: 'open_session',
+          roomId: room.roomId,
+          planId,
+          harness: 'omp',
+          model: 'haiku',
+        }),
+      ]);
+
+      // Let both commands reach Postgres and queue on the barriered plan row —
+      // this only needs to outlast the network + parse hop, not any real work.
+      await new Promise((resolve) => setTimeout(resolve, 400));
+      releaseBarrier();
+      await barrier;
+
+      const [settleAck, openAck] = await racePromise;
+
+      // The invariant #119 exists for, checked directly against the durable
+      // rows rather than inferred from the command results: a settled plan
+      // never has an open child underneath it.
+      const [finalPlan] = await handle.db.select().from(plans).where(eq(plans.id, planId));
+      const openChildren = await handle.db
+        .select()
+        .from(sessions)
+        .where(and(eq(sessions.planId, planId), eq(sessions.status, 'open')));
+      const violated = finalPlan?.status === 'settled' && openChildren.length > 0;
+      expect(violated).toBe(false);
+
+      // And exactly one racer got its positive outcome — the DB lock let the
+      // boundary be crossed exactly once, never both and never neither.
+      const settledCleanly = settleAck.type === 'ack' && finalPlan?.status === 'settled';
+      const sessionOpened = openAck.type === 'ack' && openAck.draw?.outcome === 'granted';
+      expect(settledCleanly).not.toBe(sessionOpened);
+      expect(settledCleanly || sessionOpened).toBe(true);
+    } finally {
+      releaseBarrier();
+      await barrier.catch(() => {});
+      await settler.close();
+      await openerB.close();
+      await a.close();
+      await b.close();
+    }
   });
 });
