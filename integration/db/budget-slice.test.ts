@@ -55,6 +55,27 @@ async function insertPlan(
   return planId;
 }
 
+/** Row a session directly under a plan — bypassing the projection, for backfill. */
+async function insertSession(roomId: string, planId: string): Promise<string> {
+  const sessionId = randomUUID();
+  await handle.db.execute(sql`
+    INSERT INTO sessions (id, room_id, plan_id, harness, model)
+    VALUES (${sessionId}, ${roomId}, ${planId}, 'omp', 'haiku')
+  `);
+  return sessionId;
+}
+
+async function planColumns(planId: string) {
+  const [row] = await handle.db.execute<{
+    status: string;
+    rlimit_slice: string | null;
+    authorized_draws: string;
+    spent_micros: string;
+  }>(sql`SELECT status, rlimit_slice, authorized_draws, spent_micros
+         FROM plans WHERE id = ${planId}`);
+  return row;
+}
+
 describe('the plan slice and authorized-draw accounting are DB facts', () => {
   it('defaults a fresh plan to an unfunded slice (NULL) and zero authorized draws', async () => {
     const ch = await seedAgentChannel('fleet');
@@ -166,5 +187,108 @@ describe('the payload-room CHECK enumerates the two new budget kinds', () => {
         model: 'haiku',
       }),
     );
+  });
+});
+
+/**
+ * CS-2 (#118 fix r2). The 0028 migration backfills `authorized_draws` from
+ * reality — `count(sessions)` over the composite parent key `(plan_id, room_id)`
+ * — because sessions already exist (since 0022) and `ADD COLUMN … DEFAULT 0`
+ * would otherwise stamp every plan with existing sessions to 0 and undercount, so
+ * a plan that already drew N sessions would re-authorize draws it already took.
+ *
+ * The fresh-volume gate cannot exercise the backfill (no sessions predate 0028
+ * there), so this asserts the STATEMENT's logic directly: the correlated count is
+ * keyed on `(plan_id, room_id)`, so sessions under one plan never bleed into a
+ * sibling plan's count in the same room. A backfill keyed on room alone would
+ * merge them; this catches that.
+ */
+describe('the authorized-draw backfill counts sessions per (plan, room)', () => {
+  // The exact expression 0028 runs, applied here to the constructed rows below.
+  async function runBackfill() {
+    await handle.db.execute(sql`
+      UPDATE "plans" SET "authorized_draws" = (
+        SELECT count(*) FROM "sessions" s
+        WHERE s."plan_id" = "plans"."id" AND s."room_id" = "plans"."room_id"
+      )
+    `);
+  }
+
+  it('backfills each plan to its own session count, not the room-wide total', async () => {
+    const ch = await seedAgentChannel('fleet');
+    // Two sibling plans in ONE room, migrated with the wrong 0 the ADD COLUMN
+    // default would leave them.
+    const planA = await insertPlan(ch.roomId, ch.agentId, { slice: 5, draws: 0 });
+    const planB = await insertPlan(ch.roomId, ch.agentId, { slice: 5, draws: 0 });
+    await insertSession(ch.roomId, planA);
+    await insertSession(ch.roomId, planA);
+    await insertSession(ch.roomId, planA);
+    await insertSession(ch.roomId, planB);
+
+    await runBackfill();
+
+    // planA gets 3 and planB gets 1 — each its own count. Keyed on room alone,
+    // both would read 4.
+    expect(Number((await planColumns(planA))?.authorized_draws)).toBe(3);
+    expect(Number((await planColumns(planB))?.authorized_draws)).toBe(1);
+  });
+
+  it('leaves a plan with no sessions at zero', async () => {
+    const ch = await seedAgentChannel('fleet');
+    const planId = await insertPlan(ch.roomId, ch.agentId, { slice: 2, draws: 0 });
+    await runBackfill();
+    expect(Number((await planColumns(planId))?.authorized_draws)).toBe(0);
+  });
+});
+
+/**
+ * MED-7 (#118 fix r2). 0030 extends the 0025 terminal-immutability trigger so a
+ * SETTLED plan's budget receipt — `rlimit_slice` and `authorized_draws` — is
+ * frozen with the rest of its closed contract. `spent_micros` (the reconciliation
+ * layer) stays mutable, and an OPEN plan's budget is untouched.
+ *
+ * RED-ON-REVERT: drop the new `rlimit_slice`/`authorized_draws` arm from
+ * `atrium_plans_terminal_immutable` (revert 0030) and the two raw UPDATEs below
+ * succeed instead of raising `plans_terminal_immutable` — these go red.
+ */
+describe('a settled plan freezes its budget receipt', () => {
+  async function settle(planId: string) {
+    await handle.db.execute(sql`UPDATE plans SET status = 'settled' WHERE id = ${planId}`);
+  }
+
+  it('REFUSES raising the slice on a settled plan', async () => {
+    const ch = await seedAgentChannel('fleet');
+    const planId = await insertPlan(ch.roomId, ch.agentId, { slice: 3, draws: 2 });
+    await settle(planId);
+    await violatesConstraint('plans_terminal_immutable', () =>
+      handle.db.execute(sql`UPDATE plans SET rlimit_slice = 999 WHERE id = ${planId}`),
+    );
+  });
+
+  it('REFUSES moving authorized_draws on a settled plan', async () => {
+    const ch = await seedAgentChannel('fleet');
+    const planId = await insertPlan(ch.roomId, ch.agentId, { slice: 3, draws: 2 });
+    await settle(planId);
+    await violatesConstraint('plans_terminal_immutable', () =>
+      handle.db.execute(sql`UPDATE plans SET authorized_draws = 0 WHERE id = ${planId}`),
+    );
+  });
+
+  it('still lets a settled plan roll up spend, and leaves an open plan budget mutable', async () => {
+    const ch = await seedAgentChannel('fleet');
+    const settled = await insertPlan(ch.roomId, ch.agentId, { slice: 3, draws: 2 });
+    await settle(settled);
+    // The reconciliation layer is not frozen — the freeze is on the receipt.
+    await handle.db.execute(sql`UPDATE plans SET spent_micros = 500 WHERE id = ${settled}`);
+    expect(Number((await planColumns(settled))?.spent_micros)).toBe(500);
+
+    // An OPEN plan's budget is fully mutable — the freeze is terminal-only.
+    const openPlan = await insertPlan(ch.roomId, ch.agentId, { slice: 1, draws: 0 });
+    await handle.db.execute(
+      sql`UPDATE plans SET rlimit_slice = 9, authorized_draws = 4 WHERE id = ${openPlan}`,
+    );
+    const row = await planColumns(openPlan);
+    expect(Number(row?.rlimit_slice)).toBe(9);
+    expect(Number(row?.authorized_draws)).toBe(4);
   });
 });

@@ -850,6 +850,10 @@ async function projectPlanRlimitSet(
   { tx, roomId, event: { at } }: ProjectionContext<RoomEvent>,
   event: EventOf<'plan_rlimit_set'>,
 ): Promise<void> {
+  // MED-6 (#118 fix r2): a human setting `slice < authorized_draws` is legitimate
+  // clawback, not an error — further draws refuse (`authorized_draws + 1 > slice`)
+  // while the sessions already granted stay open. So no floor is enforced here; the
+  // human may lower the ceiling below the count already drawn on purpose.
   const set = await tx
     .update(plans)
     .set({ rlimitSlice: event.slice, updatedAt: new Date(at) })

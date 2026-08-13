@@ -74,6 +74,18 @@ afterAll(async () => {
   await handle?.close();
 });
 
+/**
+ * Fund a plan so its sessions authorize. Since #118 fix r2 (CS-1) an unfunded
+ * plan (NULL slice) authorizes ZERO draws — every `open_session` under it is
+ * refused. These lifecycle tests are not about the budget gate (that is
+ * budget-enforcement.test.ts), so they set the slice DIRECTLY rather than through
+ * a human `set_plan_rlimit` — a raw UPDATE adds no `plan_rlimit_set` ledger event
+ * and so leaves the exact event-sequence assertions below undisturbed.
+ */
+async function fundPlan(planId: string, slice = 1_000): Promise<void> {
+  await handle.db.execute(sql`UPDATE plans SET rlimit_slice = ${slice} WHERE id = ${planId}`);
+}
+
 /** Seed a machine reading directly into the read model: a `~`, no human touch. */
 async function seedMachineReading(): Promise<string> {
   const id = randomUUID();
@@ -102,6 +114,7 @@ describe('the agent/plan/session lifecycle appends, projects, and touches no cov
     const [plan] = await handle.db.select().from(plans).where(eq(plans.roomId, room.roomId));
     expect(plan).toMatchObject({ status: 'open', agentUserId: agentId, title: 'users migration' });
     expect(plan?.openedByEventId).toBeTruthy();
+    await fundPlan(plan?.id as string);
 
     const openSession = await hexi.command({
       name: 'open_session',
@@ -163,6 +176,7 @@ describe('the agent/plan/session lifecycle appends, projects, and touches no cov
       .select({ id: plans.id })
       .from(plans)
       .where(eq(plans.roomId, room.roomId));
+    await fundPlan(planId);
     await hexi.command({
       name: 'open_session',
       roomId: room.roomId,
@@ -276,6 +290,10 @@ describe('the agent/plan/session lifecycle appends, projects, and touches no cov
       .select({ id: plans.id })
       .from(plans)
       .where(eq(plans.roomId, room.roomId));
+
+    // The plan must be funded before it can draw (#118 CS-1). Raw, so no
+    // plan_rlimit_set joins the six lifecycle kinds this test enumerates below.
+    await fundPlan(planId);
 
     // (2) session_opened, (3) session_settled
     await hexi.command({
@@ -436,6 +454,7 @@ describe('the agent/plan/session lifecycle appends, projects, and touches no cov
       .select({ id: plans.id })
       .from(plans)
       .where(eq(plans.roomId, room.roomId));
+    await fundPlan(planId);
     await hexi.command({
       name: 'open_session',
       roomId: room.roomId,

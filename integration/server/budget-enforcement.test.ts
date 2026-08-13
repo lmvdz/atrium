@@ -7,6 +7,7 @@ import {
   resetDatabase,
   type SeededRoom,
   seedRoom,
+  startSecondInstance,
   startTestServer,
   TestClient,
   type TestServer,
@@ -281,20 +282,184 @@ describe('the plan rlimit is enforced on authorized draws at the spawn boundary'
   });
 
   /**
-   * An UNFUNDED plan (NULL slice) draws freely — the pre-#118 behaviour a
-   * machine-opened plan keeps. Enforcement is opt-in per plan via a human act; a
-   * plan nobody funded has no ceiling to exceed. (The machine still cannot GIVE
-   * itself a ceiling to raise — that is acceptance 3.)
+   * ACCEPTANCE 4 (#118 fix r2, CS-1). An UNFUNDED plan (NULL slice) authorizes
+   * ZERO draws — fail CLOSED. The covenant is that only a HUMAN may authorize
+   * spend; a machine drawing against a budget no person set is the
+   * campaign-stopping default this closes. `open_plan` is `open`-class, so hexi
+   * (an agent) can open a plan — but it cannot fund it, and every draw against it
+   * is REFUSED with the same durable `reason=budget` receipt an over-slice draw
+   * takes, until a HUMAN sets a finite slice via `set_plan_rlimit`. Then draws
+   * authorize up to that slice.
+   *
+   * RED-ON-REVERT: restore the `plan.slice !== null` guard (so a NULL slice skips
+   * enforcement and draws freely) and the first draw acks as a `session_opened`,
+   * a session rows up, and `refusals(plan)` is empty — this test goes red.
    */
-  it('lets an unfunded plan draw without a ceiling', async () => {
+  it('REFUSES every draw under an unfunded plan (NULL slice = zero draws), then authorizes up to a human-set slice', async () => {
+    const alice = await connect(humanId, 'human');
     const hexi = await connect(agentId, 'agent');
     const plan = await openPlan(hexi, 'an unfunded plan');
     expect((await planRow(plan))?.rlimitSlice).toBeNull();
-    for (let i = 1; i <= 4; i += 1) {
-      expect((await draw(hexi, plan)).type).toBe('ack');
+
+    // Unfunded: every draw is refused, and NO session rows up. The machine cannot
+    // spend against a budget no human set.
+    for (let i = 1; i <= 3; i += 1) {
+      const refusedDraw = await draw(hexi, plan);
+      expect(refusedDraw.type).toBe('ack'); // the refusal is a durable row, so it acks
+      if (refusedDraw.type === 'ack') {
+        expect(refusedDraw.draw).toEqual({
+          outcome: 'refused',
+          reason: 'budget',
+          slice: 0,
+          authorizedDraws: 0,
+        });
+      }
     }
-    expect(await sessionCount(plan)).toBe(4);
-    expect(await refusals(plan)).toHaveLength(0);
-    expect((await planRow(plan))?.authorizedDraws).toBe(4);
+    expect(await sessionCount(plan)).toBe(0);
+    expect(await refusals(plan)).toHaveLength(3);
+    expect((await planRow(plan))?.authorizedDraws).toBe(0);
+    // The unfunded refusal is receipted with an effective ceiling of zero.
+    expect((await refusals(plan))[0]?.payload).toMatchObject({
+      type: 'draw_refused',
+      reason: 'budget',
+      slice: 0,
+      authorizedDraws: 0,
+    });
+
+    // A HUMAN funds the plan. Now draws authorize up to the slice, and the (N+1)th
+    // is refused — the ordinary funded behaviour.
+    expect((await fundPlan(alice, plan, 2)).type).toBe('ack');
+    expect((await draw(hexi, plan)).type).toBe('ack'); // draw 1
+    expect((await draw(hexi, plan)).type).toBe('ack'); // draw 2
+    await draw(hexi, plan); // draw 3 — refused at the funded ceiling
+    expect(await sessionCount(plan)).toBe(2);
+    expect((await planRow(plan))?.authorizedDraws).toBe(2);
+    expect(await refusals(plan)).toHaveLength(4); // 3 unfunded + 1 over-slice
+  });
+
+  /**
+   * HIGH-3 (#118 fix r2). A refused draw must be distinguishable from a grant IN
+   * THE COMMAND RESULT — not only by reading back the ledger. Both a
+   * `session_opened` and a `draw_refused` APPEND and so both ack with empty
+   * `issues`; an adapter that only watched the ack shape could proceed as if a
+   * refused session opened. The ack carries a `draw` outcome so it cannot.
+   *
+   * RED-ON-REVERT: stop populating `draw` in `open_session`'s result (or drop it
+   * from the ack frame) and the `granted` / `refused` assertions below go
+   * undefined — this test goes red.
+   */
+  it('carries the draw outcome in the ack so a caller tells a granted session from a refused draw', async () => {
+    const alice = await connect(humanId, 'human');
+    const hexi = await connect(agentId, 'agent');
+    const plan = await openPlan(hexi, 'a plan whose result speaks');
+    await fundPlan(alice, plan, 1);
+
+    // The granted draw names the session it opened.
+    const granted = await draw(hexi, plan);
+    expect(granted.type).toBe('ack');
+    if (granted.type === 'ack') {
+      expect(granted.draw?.outcome).toBe('granted');
+      if (granted.draw?.outcome === 'granted') {
+        const [row] = await handle.db
+          .select({ id: sessions.id })
+          .from(sessions)
+          .where(eq(sessions.planId, plan));
+        expect(granted.draw.sessionId).toBe(row?.id);
+      }
+    }
+
+    // The refused draw names the budget it was checked against — and NO session id.
+    const refused = await draw(hexi, plan);
+    expect(refused.type).toBe('ack');
+    if (refused.type === 'ack') {
+      expect(refused.draw).toEqual({
+        outcome: 'refused',
+        reason: 'budget',
+        slice: 1,
+        authorizedDraws: 1,
+      });
+    }
+  });
+});
+
+/**
+ * HIGH-5 (#118 fix r2). The draw check runs in `authorize`, under the append
+ * lock. WITHIN one server process the in-process `runExclusive` mutex already
+ * serializes every append, so a test that draws sequentially through ONE server
+ * never exercises the DB-level guard — the `pg_advisory_xact_lock` the append
+ * takes is the ONLY thing standing between two SEPARATE processes both reading the
+ * same `authorized_draws` and both granting the Nth draw (a classic TOCTOU).
+ * Remove that advisory lock and a single-process test stays green while the real
+ * multi-process race silently double-draws.
+ *
+ * So this drives the race across two SEPARATE server instances — each with its
+ * own connection pool and its own `runExclusive` mutex, so neither serializes the
+ * other — and asserts the DB lock holds the boundary: exactly one grant, one
+ * durable `draw_refused`, `authorized_draws` at the slice and not past it.
+ *
+ * RED-ON-REVERT: delete the `pg_advisory_xact_lock` line in `ledger.ts`'s
+ * `appendBatch` and the two `authorize` reads interleave — both see
+ * `authorized_draws = 0`, both build a `session_opened`, and two sessions row up
+ * under a slice of one. This test then sees two grants (or two sessions) and goes
+ * red. (Timing-dependent by nature: the assertion the lock guarantees is the
+ * INVARIANT — at-most-one grant at the boundary — which holds deterministically
+ * with the lock and is violable without it.)
+ */
+describe('the draw check serializes across processes on the DB advisory lock', () => {
+  it('grants exactly one of two concurrent draws racing the slice boundary on separate server instances', async () => {
+    // Fund a slice of exactly 1 through the primary server, with zero prior draws:
+    // the very next draw is the contested Nth (N=1). No draws have happened yet, so
+    // both racers read authorized_draws = 0 in their authorize step.
+    const alice = await connect(humanId, 'human');
+    const opener = await connect(agentId, 'agent');
+    const plan = await openPlan(opener, 'a contested plan');
+    expect((await fundPlan(alice, plan, 1)).type).toBe('ack');
+
+    // Two independent server processes on the same database. Each is a real handle
+    // with its own pool and its own in-process mutex.
+    const a = await startSecondInstance();
+    const b = await startSecondInstance();
+    const clientA = await TestClient.connect(a.server.url, agentId, { principalKind: 'agent' });
+    const clientB = await TestClient.connect(b.server.url, agentId, { principalKind: 'agent' });
+    try {
+      // Fire both draws WITHOUT awaiting the first — they race through two pools to
+      // two connections, and only the DB advisory lock decides who wins.
+      const [ackA, ackB] = await Promise.all([
+        clientA.command({
+          name: 'open_session',
+          roomId: room.roomId,
+          planId: plan,
+          harness: 'omp',
+          model: 'haiku',
+        }),
+        clientB.command({
+          name: 'open_session',
+          roomId: room.roomId,
+          planId: plan,
+          harness: 'omp',
+          model: 'haiku',
+        }),
+      ]);
+
+      // Both commands succeed (a refusal is a durable row, so it acks too), but the
+      // outcomes are complementary: exactly one granted, exactly one refused.
+      expect(ackA.type).toBe('ack');
+      expect(ackB.type).toBe('ack');
+      const outcomes = [ackA, ackB]
+        .map((ack) => (ack.type === 'ack' ? ack.draw?.outcome : undefined))
+        .sort();
+      expect(outcomes).toEqual(['granted', 'refused']);
+
+      // And the durable state agrees: one session, one draw_refused, the committed
+      // count exactly at the slice — the DB lock let the boundary be crossed once.
+      expect(await sessionCount(plan)).toBe(1);
+      expect(await refusals(plan)).toHaveLength(1);
+      expect((await planRow(plan))?.authorizedDraws).toBe(1);
+    } finally {
+      await clientA.close();
+      await clientB.close();
+      await a.close();
+      await b.close();
+    }
   });
 });

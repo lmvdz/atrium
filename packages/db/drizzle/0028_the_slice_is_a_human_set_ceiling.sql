@@ -57,6 +57,22 @@ ALTER TYPE "public"."event_type" ADD VALUE IF NOT EXISTS 'draw_refused';--> stat
 ALTER TABLE "plans" ADD COLUMN "rlimit_slice" bigint;--> statement-breakpoint
 ALTER TABLE "plans" ADD COLUMN "authorized_draws" bigint DEFAULT 0 NOT NULL;--> statement-breakpoint
 
+-- BACKFILL the committed accounting from reality (#118 fix r2, CS-2). `ADD COLUMN
+-- … DEFAULT 0` stamps EVERY existing row 0, but sessions already exist (since
+-- #116's 0022), so a plan that has already drawn N sessions would migrate to
+-- `authorized_draws = 0` and undercount — the enforced quantity would read as
+-- unspent and re-authorize draws the plan already took. The count Atrium granted
+-- IS `count(sessions)` for the plan by construction (projectSessionOpened writes
+-- one session and one increment in the same transaction), so on upgrade we set the
+-- column to that count over the composite parent key `(plan_id, room_id)` — the
+-- same key `sessions_plan_same_room_fk` lands on. On a fresh volume no sessions
+-- exist and this is a no-op; on an upgrade it makes the accounting reflect reality
+-- before the first constraint or draw reads it.
+UPDATE "plans" SET "authorized_draws" = (
+  SELECT count(*) FROM "sessions" s
+  WHERE s."plan_id" = "plans"."id" AND s."room_id" = "plans"."room_id"
+);--> statement-breakpoint
+
 ALTER TABLE "plans" ADD CONSTRAINT "plans_rlimit_slice_nonnegative"
   CHECK ("plans"."rlimit_slice" IS NULL OR "plans"."rlimit_slice" >= 0);--> statement-breakpoint
 

@@ -683,6 +683,18 @@ export type CommandResult =
       event: RoomEvent;
       /** Business problems the reducer recorded. The event still happened. */
       issues: string[];
+      /**
+       * `open_session` only: the authorized-draw outcome (#118 fix r2, HIGH-3). A
+       * draw either GRANTED a session (`session_opened`, carrying the id) or was
+       * REFUSED against the plan's budget (`draw_refused`, `reason=budget`, with the
+       * slice and committed count). Both append and both ack with empty `issues`, so
+       * the append shape alone cannot tell them apart — this field is what lets a
+       * caller/adapter know whether it actually got a session. Absent on every other
+       * command.
+       */
+      draw?:
+        | { outcome: 'granted'; sessionId: string }
+        | { outcome: 'refused'; reason: 'budget'; slice: number; authorizedDraws: number };
     }
   | {
       kind: 'appended_many';
@@ -1487,10 +1499,10 @@ export function createCommandService({
       case 'open_session': {
         const roomId = command.roomId;
         const sessionId = randomUUID();
-        // Set in `authorize`, read in `build`. Non-null only when the plan is
-        // present, open, and FUNDED (a finite slice) — an unfunded plan (NULL
-        // slice) draws freely, the pre-#118 behaviour, and an absent/settled plan
-        // is left to `projectSessionOpened`'s existing guard to nack.
+        // Set in `authorize`, read in `build`. Non-null whenever the draw is
+        // REFUSED — carrying the slice and committed count it was checked against.
+        // An absent/settled plan is left to `projectSessionOpened`'s existing
+        // guard to nack.
         let refusal: { slice: number; authorizedDraws: number } | null = null;
         const appended = await ledger.append({
           roomId,
@@ -1506,12 +1518,22 @@ export function createCommandService({
               .from(plans)
               .where(and(eq(plans.id, command.planId), eq(plans.roomId, roomId)))
               .for('share');
-            // Enforce only against a FINITE slice on an open plan. `authorized_draws
-            // + this one > slice` is the whole rule: a 4th draw against a slice that
-            // funds 3 is refused regardless of what the session claims to have spent.
-            if (plan && plan.status === 'open' && plan.slice !== null) {
-              if (plan.authorizedDraws + 1 > plan.slice) {
-                refusal = { slice: plan.slice, authorizedDraws: plan.authorizedDraws };
+            // An UNFUNDED plan (NULL slice) authorizes ZERO draws — fail CLOSED
+            // (#118 fix r2, CS-1). The covenant is that only a HUMAN may authorize
+            // spend; a machine drawing against a budget no person set — or none at
+            // all — is the campaign-stopping default this closes. So a NULL slice is
+            // read as a ceiling of zero: every draw is refused (a `draw_refused`,
+            // `reason=budget` — the same durable receipt an over-slice draw takes)
+            // until a human sets a finite slice via `set_plan_rlimit`. `open_plan`
+            // is `open`-class, so an agent can open a plan; it cannot fund it. The
+            // rule is one line — `authorized_draws + this one > slice` — and it is
+            // checked against the count Atrium granted, never the session's reported
+            // spend, so a 4th draw against a slice that funds 3 (or a 1st against an
+            // unfunded plan) is refused regardless of what the session claims spent.
+            if (plan && plan.status === 'open') {
+              const slice = plan.slice ?? 0;
+              if (plan.authorizedDraws + 1 > slice) {
+                refusal = { slice, authorizedDraws: plan.authorizedDraws };
               }
             }
           },
@@ -1552,6 +1574,23 @@ export function createCommandService({
             appended.outcome?.outcome === 'applied_with_issue'
               ? appended.outcome.issues.map((issue) => issue.reason)
               : [],
+          // The draw's outcome, carried in the RESULT so a caller/adapter can tell
+          // a GRANTED session from a REFUSED draw (#118 fix r2, HIGH-3). Both append
+          // and both ack with empty issues — a `session_opened` vs a durable
+          // `draw_refused` — so the append shape alone cannot distinguish them, and
+          // an adapter must never proceed as if a refused session opened. The
+          // durable `draw_refused` row is still the receipt; this is the synchronous
+          // signal to its caller. Derived from the event actually built (never the
+          // `refusal` closure variable, which TS narrows to null after the append).
+          draw:
+            appended.event.type === 'draw_refused'
+              ? {
+                  outcome: 'refused',
+                  reason: 'budget',
+                  slice: appended.event.slice,
+                  authorizedDraws: appended.event.authorizedDraws,
+                }
+              : { outcome: 'granted', sessionId },
         };
       }
 
