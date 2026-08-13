@@ -587,24 +587,38 @@ describe('the certify boundary, against a session-borne non-human', () => {
     expect(await handle.db.select().from(acceptedObjects)).toEqual([]);
   });
 
-  it('stages a claim and an open_question as ~, a person certifies one to ✓, and the session may certify neither (#117)', async () => {
+  it('stages a claim, an open_question and a decision as ~, a person certifies one to ✓ (confirmed), and the session may certify none (#117)', async () => {
     // The ticket, driven end to end. #117 widened `proposer_kind` so a SESSION
     // may DRAFT a `~`: `record_proposal` is participation (open to an agent), and
     // `draftToProposal` derives the proposer from the session, so an agent's
     // reading lands under `proposer_kind='agent'` with its own id — a machine
     // reading held to the receipt gate, NOT a person's. What did not widen is
-    // certification: the agent may certify neither the reading it staged nor the
+    // certification: the agent may certify none of the readings it staged, nor the
     // one a person did.
     //
-    // The three covenant assertions, each with the guard reverting it goes red:
+    // The covenant assertions, each with the guard reverting it goes red:
     //  - staging lands as `~` under the agent (guard: `draftToProposal`'s agent
     //    arm — revert to refuse and the stage nacks);
-    //  - a person moves one to `✓` (guard: `actorMatchesProposer` human→true and
-    //    the human accept path — unchanged, the far end that must still hold);
-    //  - the agent moves neither (guard: the covenant gate refusing every
-    //    certification-class command from a non-human — revert and the agent's
-    //    `accept_proposal` reaches the reducer and auto-accepts its own `~`,
-    //    minting an object this asserts absent).
+    //  - a decision is staged the same way but is doubly barred from `✓`: never
+    //    machine-mintable (decision_acceptance), and the agent may not certify it
+    //    anyway — it stays `proposed`, a `~` no machine can raise;
+    //  - a person moves the claim to `✓`, and the projection reads it CONFIRMED —
+    //    `accepted_by_kind='human'`, `human_touched_at` set — which is what a `✓`
+    //    IS (guard: `actorMatchesProposer` human→true and the human accept path,
+    //    the far end that must still hold);
+    //  - the agent moves none — claim, open_question, or decision (guard: the
+    //    covenant gate refusing every certification-class command from a non-human;
+    //    revert it and the agent's `accept_proposal` reaches the reducer and
+    //    auto-accepts its own `~` into an unconfirmed object this asserts absent).
+    //
+    // The reducer-level halves of the fold — an agent accepting its OWN reading
+    // mints a `~` not a `✓` (`actorMatchesProposer`'s agent arm; the receipt's
+    // machine/human split in `escalation.ts`; the self-staged gate for `agent`) —
+    // are unreachable from a socket, because the covenant gate refuses an agent's
+    // certification before the reducer runs. Those are pinned where they live:
+    // `packages/core/test/authority-matrix.test.ts` (the widened `agent` citation
+    // and the agent-accepted-`~` epistemic reading) and
+    // `packages/core/test/acceptance.test.ts` (the receipt machine/human split).
     const agent = await agentInTheRoom();
     const person = await personInTheRoom();
     const scribe = await connectWithCookie(agent.userId, agent.session.cookie);
@@ -665,7 +679,37 @@ describe('the certify boundary, against a session-borne non-human', () => {
       ),
     ).toEqual([]);
 
-    // Both landed as `~`, under the agent's OWN identity — not a person's, and
+    // …and a DECISION, the type no machine may ever certify. Staging it is still
+    // participation (a `~`), so it lands; what it can never do is become a `✓`.
+    const decisionBody = 'Keep the flag on after launch.';
+    expect(
+      issuesOf(
+        await scribe.command({ name: 'send_message', roomId: room.roomId, body: decisionBody }),
+      ),
+    ).toEqual([]);
+    const decisionMsg = await handle.db
+      .select({ id: messages.id })
+      .from(messages)
+      .where(and(eq(messages.roomId, room.roomId), eq(messages.body, decisionBody)));
+    const decisionMsgId = (decisionMsg[0] as { id: string }).id;
+    expect(
+      issuesOf(
+        await scribe.command({
+          name: 'record_proposal',
+          roomId: room.roomId,
+          proposal: {
+            type: 'decision',
+            payload: { statement: decisionBody, decidedBy: agent.userId },
+            confidence: 1,
+            provenance: [decisionMsgId],
+            quote: decisionBody,
+            interpretationId: null,
+          },
+        } as unknown as CommandInput),
+      ),
+    ).toEqual([]);
+
+    // All three landed as `~`, under the agent's OWN identity — not a person's, and
     // not a model's. Read from the projection the product writes, not the ack.
     const staged = await handle.db
       .select({
@@ -678,7 +722,7 @@ describe('the certify boundary, against a session-borne non-human', () => {
       })
       .from(proposals)
       .where(eq(proposals.roomId, room.roomId));
-    expect(staged).toHaveLength(2);
+    expect(staged).toHaveLength(3);
     for (const p of staged) {
       expect(p.proposerKind, `${p.type} proposer kind`).toBe('agent');
       expect(p.proposerUserId, `${p.type} proposer id`).toBe(agent.userId);
@@ -688,6 +732,7 @@ describe('the certify boundary, against a session-borne non-human', () => {
     }
     const claimId = (staged.find((p) => p.type === 'claim') as { id: string }).id;
     const questionId = (staged.find((p) => p.type === 'open_question') as { id: string }).id;
+    const decisionId = (staged.find((p) => p.type === 'decision') as { id: string }).id;
 
     // A person in the room certifies ONE — the claim — to `✓`.
     const human = await connectWithCookie(person.userId, person.session.cookie);
@@ -702,20 +747,37 @@ describe('the certify boundary, against a session-borne non-human', () => {
       ),
     ).toEqual([]);
     const certified = await handle.db
-      .select({ proposalId: acceptedObjects.proposalId, acceptedBy: acceptedObjects.acceptedBy })
+      .select({
+        proposalId: acceptedObjects.proposalId,
+        acceptedBy: acceptedObjects.acceptedBy,
+        acceptedByKind: acceptedObjects.acceptedByKind,
+        humanTouchedAt: acceptedObjects.humanTouchedAt,
+      })
       .from(acceptedObjects)
       .where(eq(acceptedObjects.roomId, room.roomId));
     expect(certified).toHaveLength(1);
     // `✓` BECAUSE a person accepted it — the agent staged the reading, the person
-    // certified it, and `acceptedBy` is who the room answers to.
-    expect((certified[0] as { proposalId: string }).proposalId).toBe(claimId);
-    expect((certified[0] as { acceptedBy: string | null }).acceptedBy).toBe(person.userId);
+    // certified it, and `acceptedBy` is who the room answers to. The projection
+    // reads CONFIRMED, which is what a `✓` IS: `epistemicStateOf` is
+    // `isHuman(acceptedBy) || humanTouchedAt !== null`, and both halves say so
+    // here — the accepter's kind is `human` and the human-touch instant is set.
+    const object = certified[0] as {
+      proposalId: string;
+      acceptedBy: string | null;
+      acceptedByKind: string;
+      humanTouchedAt: Date | null;
+    };
+    expect(object.proposalId).toBe(claimId);
+    expect(object.acceptedBy).toBe(person.userId);
+    expect(object.acceptedByKind).toBe('human');
+    expect(object.humanTouchedAt).not.toBeNull();
 
-    // The session may certify NEITHER — not the open_question it also staged, and
-    // not its own claim (already `✓`). Both refused for being a certification, by
-    // what the session IS, before anything is appended.
+    // The session may certify NONE — not the open_question it staged, not the
+    // decision it staged, and not its own claim (already `✓`). Each refused for
+    // being a certification, by what the session IS, before anything is appended.
     for (const [label, proposalId] of [
       ['the open_question it staged', questionId],
+      ['the decision it staged', decisionId],
       ['its own claim', claimId],
     ] as const) {
       const attempt = await scribe.command({
@@ -729,14 +791,16 @@ describe('the certify boundary, against a session-borne non-human', () => {
       expect(said, label).toContain('may draft a reading');
     }
 
-    // Nothing new was certified: still exactly the one the person accepted, and
-    // the open_question the agent staged is still a `~`.
+    // Nothing new was certified: still exactly the one the person accepted. The
+    // open_question and the decision the agent staged are both still `~`
+    // (`proposed`) — a machine raised neither to a `✓`.
     expect(await handle.db.select().from(acceptedObjects)).toHaveLength(1);
-    const [q] = await handle.db
-      .select({ status: proposals.status })
+    const stillProposed = await handle.db
+      .select({ id: proposals.id, status: proposals.status })
       .from(proposals)
-      .where(eq(proposals.id, questionId));
-    expect((q as { status: string }).status).toBe('proposed');
+      .where(and(eq(proposals.roomId, room.roomId), eq(proposals.status, 'proposed')));
+    const proposedIds = stillProposed.map((p) => (p as { id: string }).id).sort();
+    expect(proposedIds).toEqual([questionId, decisionId].sort());
   });
 
   it('lets an agent do everything a member does that is not certification', async () => {

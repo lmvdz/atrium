@@ -506,3 +506,119 @@ describe('terminal plan/session states are frozen at the table (F-B)', () => {
     expect(row?.exit_summary).toBe('done');
   });
 });
+
+/**
+ * AN AGENT PROPOSER NAMES AN AGENT, AS A TABLE FACT (#117 fix r2, F5, drizzle/0027).
+ *
+ * 0026 widened `proposer_kind` with `'agent'` and grew `proposals_proposer_
+ * identified` one arm — `proposer_kind='agent' AND proposer_user_id IS NOT NULL`
+ * — whose COMMENT claims the id names the agent's "own agent-kind users row". A
+ * CHECK cannot cross to `users.principal_kind`, so it proves only NOT NULL: an
+ * INSERT with a HUMAN uuid satisfied it and read as an agent that staged the
+ * reading. The blind dual-lineage gauntlet flagged that the constraint did not
+ * do what it said. 0027 adds the `proposals_agent_proposer_is_agent` trigger —
+ * the sibling of 0021 `agents_user_is_agent` and 0024 `rooms_agent_user_is_agent`
+ * — reading `users.principal_kind` for the agent arm only.
+ *
+ * Raw SQL, so a refusal surfaces the *named* trigger: drop it from 0027 and
+ * exactly the dishonest-attribution cases below go green (the row lands), while
+ * the honest case and the human/model arms are untouched.
+ */
+describe('an agent proposal names an agent, at the table (F5)', () => {
+  /** A room with a human author and an agent principal that can stage a `~`. */
+  async function seedProposerRoom(slug: string) {
+    const seeded = await seedRoom(handle, [`${slug}-human`, `${slug}-agent`], {
+      slug,
+      agents: [`${slug}-agent`],
+    });
+    return {
+      roomId: seeded.roomId,
+      humanId: seeded.people[`${slug}-human`] as string,
+      agentId: seeded.people[`${slug}-agent`] as string,
+    };
+  }
+
+  /** Stage a reading as `proposerKind`, attributed to `proposerUserId`. */
+  function stageProposal(input: {
+    roomId: string;
+    proposalId: string;
+    proposerKind: 'agent' | 'human';
+    proposerUserId: string;
+  }) {
+    return handle.db.execute(sql`
+      INSERT INTO proposals
+        (id, room_id, type, payload, confidence, proposer_kind, proposer_user_id,
+         staged_by_kind, staged_by_id, status)
+      VALUES
+        (${input.proposalId}, ${input.roomId}, 'claim',
+         ${JSON.stringify({ statement: 's', claimant: input.proposerUserId })}::jsonb,
+         0.9, ${input.proposerKind}, ${input.proposerUserId},
+         ${input.proposerKind}, ${input.proposerUserId}, 'proposed')
+    `);
+  }
+
+  it('ACCEPTS an agent proposal whose proposer_user_id is an agent-kind identity', async () => {
+    const r = await seedProposerRoom('honest');
+    const proposalId = randomUUID();
+    await stageProposal({
+      roomId: r.roomId,
+      proposalId,
+      proposerKind: 'agent',
+      proposerUserId: r.agentId,
+    }); // the one legal shape — a machine drafting `~` as itself.
+    const [row] = await handle.db.execute<{ proposer_kind: string }>(
+      sql`SELECT proposer_kind FROM proposals WHERE id = ${proposalId}`,
+    );
+    expect(row?.proposer_kind).toBe('agent');
+  });
+
+  it('REFUSES an agent proposal whose proposer_user_id is a HUMAN — the id the CHECK cannot cross to', async () => {
+    // The exact gauntlet finding: proposer_kind='agent' with a person's uuid. The
+    // CHECK passes (NOT NULL); the trigger reads users.principal_kind and refuses.
+    const r = await seedProposerRoom('dishonest');
+    await violatesConstraint('proposals_agent_proposer_is_agent', () =>
+      stageProposal({
+        roomId: r.roomId,
+        proposalId: randomUUID(),
+        proposerKind: 'agent',
+        proposerUserId: r.humanId,
+      }),
+    );
+  });
+
+  it('REFUSES re-attributing an agent proposal onto a human by UPDATE (the trigger fires on UPDATE too)', async () => {
+    // A regression to `BEFORE INSERT` alone would leave this green. Stage an honest
+    // agent proposal, then swing its proposer_user_id to the human — dishonest
+    // attribution introduced one act later, refused by the same trigger.
+    const r = await seedProposerRoom('mutate');
+    const proposalId = randomUUID();
+    await stageProposal({
+      roomId: r.roomId,
+      proposalId,
+      proposerKind: 'agent',
+      proposerUserId: r.agentId,
+    });
+    await violatesConstraint('proposals_agent_proposer_is_agent', () =>
+      handle.db.execute(
+        sql`UPDATE proposals SET proposer_user_id = ${r.humanId} WHERE id = ${proposalId}`,
+      ),
+    );
+  });
+
+  it('LEAVES the human arm alone — a human proposer naming a human is untouched by the agent trigger', async () => {
+    // The control that keeps the trigger honest: it guards the agent arm only, so
+    // the ordinary human-staged reading the rest of the system rests on is fine.
+    const r = await seedProposerRoom('control');
+    const proposalId = randomUUID();
+    await stageProposal({
+      roomId: r.roomId,
+      proposalId,
+      proposerKind: 'human',
+      proposerUserId: r.humanId,
+    });
+    const [row] = await handle.db.execute<{ proposer_kind: string }>(
+      sql`SELECT proposer_kind FROM proposals WHERE id = ${proposalId}`,
+    );
+    expect(row?.proposer_kind).toBe('human');
+  });
+});

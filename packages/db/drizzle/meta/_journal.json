@@ -190,6 +190,13 @@
       "when": 1786531200000,
       "tag": "0026_a_session_may_draft_a_reading",
       "breakpoints": true
+    },
+    {
+      "idx": 27,
+      "version": "7",
+      "when": 1786617600000,
+      "tag": "0027_an_agent_proposer_is_an_agent",
+      "breakpoints": true
     }
   ]
 }

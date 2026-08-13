@@ -1512,7 +1512,7 @@ describe('the proposal → acceptance boundary, over the wire', () => {
      */
     expect(refused.type).toBe('ack');
     expect(refused).toMatchObject({
-      issues: [expect.stringContaining('nobody validates their own attribution to a model')],
+      issues: [expect.stringContaining('nobody validates their own attribution to a machine')],
     });
 
     // No object, and the proposal is still open for somebody else to judge.

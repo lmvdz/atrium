@@ -9,7 +9,7 @@ import {
 import { hasContent, isBlank } from './matching.js';
 import { type AcceptedObject, type AcceptedObjectType, objectStatement } from './objects.js';
 import { decideSupersession, MODEL_ACCEPTANCE_FLOOR } from './policy.js';
-import type { Proposer, StoredProposal } from './proposal.js';
+import { type Proposer, proposerIsMachine, type StoredProposal } from './proposal.js';
 import { canonicalJson } from './state.js';
 
 /**
@@ -553,8 +553,14 @@ export function selfStagedReadingRefusal(input: {
   if (stagedBy.kind !== 'human' || stagedBy.userId !== actor.userId) return null;
 
   const cites = input.proposalId === null ? 'no proposal' : `proposal "${input.proposalId}"`;
-  if (proposer !== null && proposer.kind === 'model') {
-    return `${actorName(actor)} accepted ${cites}, which they staged themselves as a reading by model "${proposer.model}" — a human acceptance is the receipt for a machine's reading only when the person accepting is not the person who staged it; nobody validates their own attribution to a model. It needs somebody else in the room to accept it, or a non-human acceptance, which is checked against the messages it cites`;
+  // The machine predicate, not `kind === 'model'`: an `agent`-dressed reading is
+  // a machine reading exactly as a model's is (#117), and this gate — whose whole
+  // job is to refuse a stager blessing their own machine label (r9) — must not
+  // let the `agent` label walk through the door the `model` label is refused at.
+  if (proposer !== null && proposerIsMachine(proposer)) {
+    const machine =
+      proposer.kind === 'model' ? `model "${proposer.model}"` : `agent "${proposer.userId}"`;
+    return `${actorName(actor)} accepted ${cites}, which they staged themselves as a reading by ${machine} — a human acceptance is the receipt for a machine's reading only when the person accepting is not the person who staged it; nobody validates their own attribution to a machine. It needs somebody else in the room to accept it, or a non-human acceptance, which is checked against the messages it cites`;
   }
   const foreign = attributedTo.filter((userId) => userId !== actor.userId);
   const named = foreign[0];

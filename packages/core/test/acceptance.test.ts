@@ -1611,4 +1611,56 @@ describe('#117 — model and agent readings take one acceptance path', () => {
     expect(asHuman.verdict).not.toBe('discard');
     expect(asHuman.rule).toBe('human_proposer');
   });
+
+  it('holds an agent to the RECEIPT by the same machine-or-human split, not the label — #117 F6', () => {
+    // The equality matrix above quotes every citation verbatim and at full length,
+    // so its receipts are clean for machine and human alike — it never exercises
+    // the one place the receipt validator reads the proposer's kind.
+    // `validateProposalProvenance` holds a MACHINE reading to the receipt and
+    // exempts a person (the person IS the receipt), keyed on `proposerIsMachine`
+    // (escalation.ts, `fromMachine = proposer.kind !== 'human'`). Regress that to
+    // `kind === 'model'` and an AGENT reading is silently handed the human
+    // exemption — a machine reading no longer held to the receipt it must carry.
+    // Nothing above goes red on that revert; this does.
+    //
+    // The receipt problem that is reachable through a schema-valid proposal (a
+    // machine proposal cannot parse with empty provenance or a null quote, so
+    // `no_provenance` and `missing_quote` are not it) is `quote_too_short`: a
+    // real, verbatim, but sub-`minQuoteLength` span. A span that short "occurs in
+    // any thread, so it identifies the conversation rather than the sentence" —
+    // rejected for a machine, waved through for a person. The claim below is above
+    // θ_auto, so with a clean receipt it would auto-accept; the short quote is the
+    // only thing standing between it and `✓`, and only a machine is stopped by it.
+    const shortQuote = 'Flag is off in prod.'; // 20 chars, below minQuoteLength (24)
+    // The cited message IS the quote, so the span is verbatim and whole — the only
+    // receipt fault is its length, isolating the `quote_too_short` gate.
+    const window = room({ id: MESSAGE_ID.claim, authorId: ALICE, body: shortQuote });
+    const judge = (proposer: Proposal['proposer']) =>
+      decideAcceptance(
+        proposal({
+          type: 'claim',
+          confidence: 0.9,
+          payload: { statement: shortQuote, claimant: ALICE, verification: 'unverified' },
+          quote: shortQuote,
+          proposer,
+        }),
+        { messages: window },
+      );
+    const asModel = judge({ kind: 'model', model: 'test-model' });
+    const asAgent = judge(agent());
+    const asHuman = judge({ kind: 'human', userId: ALICE });
+
+    // The agent is a machine at the receipt: identical to the model, and refused
+    // the short receipt (discarded, never auto-accepted). Reverting `fromMachine`
+    // to `=== 'model'` flips this agent onto the human branch — the short quote
+    // stops being a fault, the claim auto-accepts, and this equality breaks.
+    expect(asModel.rule).toBe('provenance_failed');
+    expect(asModel.verdict).toBe('discard');
+    expect(asAgent).toEqual(asModel);
+    // The human keeps the exemption — the split is real, so the equality above is
+    // a property of the two machine kinds and not of the receipt being ignored.
+    expect(asHuman.rule).toBe('human_proposer');
+    expect(asHuman.verdict).not.toBe('discard');
+    expect(asAgent).not.toEqual(asHuman);
+  });
 });

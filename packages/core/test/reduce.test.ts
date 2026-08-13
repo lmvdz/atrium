@@ -219,7 +219,9 @@ describe('reduce — acceptance', () => {
     expect(state.objects).toEqual({});
     expect(state.proposals.prop_self?.status).toBe('proposed');
     expect(state.issues).toHaveLength(1);
-    expect(state.issues[0]?.reason).toContain('nobody validates their own attribution to a model');
+    expect(state.issues[0]?.reason).toContain(
+      'nobody validates their own attribution to a machine',
+    );
   });
 
   /**

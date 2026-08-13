@@ -12,6 +12,7 @@ import {
   CoreEvent as CoreEventSchema,
   type CoreState,
   type CorrectionAction,
+  epistemicStateOf,
   Proposal as ProposalSchema,
   type ProvenanceMessage,
   type RelationKind,
@@ -304,7 +305,7 @@ interface AcceptanceCase {
   actor: ActorKind;
   type: AcceptedObjectType;
   /** Cited proposal, or none at all (the answer-binding shape). */
-  cited: 'model_a' | 'human' | 'none';
+  cited: 'model_a' | 'agent' | 'human' | 'none';
   /**
    * Who *staged* the cited proposal, drawn independently of what it names as
    * proposer and of who accepts it.
@@ -346,6 +347,12 @@ function expectedForAcceptance(testCase: AcceptanceCase): Gate | 'allowed' {
   // when that reading wears a machine's name or puts somebody else's name on
   // something." Restated from `selfStagedReadingRefusal`, not imported from it.
   //
+  // **`cited === 'agent'` wears a machine's name exactly as `model_a` does (#117
+  // F4).** An `agent` proposer is a machine proposer, so a stager blessing their
+  // own `agent`-labelled reading is the same r9 defect the `model` clause refuses;
+  // the gate keys on the machine predicate, not the single label `model`, and so
+  // does this restatement.
+  //
   // `recordedBy: 'human'` is ALICE and so is the human accepter, which is what
   // makes those the same person. `NAMES` above says who each payload names:
   // BOB for a `claim` and a `commitment`, ALICE for a `decision` — so a decision
@@ -361,7 +368,9 @@ function expectedForAcceptance(testCase: AcceptanceCase): Gate | 'allowed' {
   // self-staged clause applies to it by construction, not by analogy.
   if (human && (testCase.cited === 'none' || testCase.recordedBy === 'human')) {
     const namesSomebodyElse = NAMES[testCase.type] !== null && NAMES[testCase.type] !== ALICE;
-    if (testCase.cited === 'model_a' || namesSomebodyElse) return 'self_staged_reading';
+    if (testCase.cited === 'model_a' || testCase.cited === 'agent' || namesSomebodyElse) {
+      return 'self_staged_reading';
+    }
   }
   // #67/#95 owner-confirm (#102). A human accepting a commitment it does not own
   // is refused — the confirmation must be the named owner's. This matrix owns
@@ -777,7 +786,7 @@ const OBJECT_TYPES: AcceptedObjectType[] = [...AcceptedObjectTypeSchema.options]
 const acceptanceCases: AcceptanceCase[] = [];
 for (const actor of ACTOR_KINDS) {
   for (const type of OBJECT_TYPES) {
-    for (const cited of ['model_a', 'human', 'none'] as const) {
+    for (const cited of ['model_a', 'agent', 'human', 'none'] as const) {
       for (const confidence of ['above', 'below'] as const) {
         // Confidence is a property of the cited proposal; with none cited there
         // is nothing to be above or below, so that half of the cross-product is
@@ -893,6 +902,53 @@ describe('authority matrix — object_accepted, every actor × type × citation 
     expect(verdictOf(state, 'ev_acc_self_verify')).toBe('self_verification');
     expect(state.objects.obj_self_verify).toBeUndefined();
   });
+
+  // ── #117 F6: what an agent's OWN acceptance actually mints — a `~`, never a `✓` ──
+  //
+  // The matrix cells above assert the *verdict* (allowed / refused) of an agent
+  // accepting its own reading; `actorMatchesProposer`'s agent arm is what makes
+  // those cells `allowed` (revert it and eighteen of them go red). What they do
+  // not read is the EPISTEMIC state of the object that acceptance mints — and the
+  // whole covenant rides on it: a machine may own and accept its own reading, but
+  // the result is `unconfirmed` (a `~`), never `confirmed` (a `✓`). `epistemicStateOf`
+  // is `isHuman(acceptedBy) || humanTouchedAt !== null`; an agent is not human and
+  // touches nothing, so its acceptance is a draft the room still owes a person.
+  // This reads that off the fold for both machine-mintable types, and is red if
+  // the agent arm is reverted (no object at all) — the far end the server covenant
+  // gate never lets a socket reach, proven here where the reducer can be driven.
+  for (const type of ['claim', 'open_question'] as const) {
+    it(`mints an agent's own accepted ${type} as an unconfirmed \`~\`, acceptedByKind=agent, humanTouchedAt=null (#117 F6)`, () => {
+      const proposalId = `prop_agent_${type}`;
+      const objectId = `obj_agent_${type}`;
+      const state = reduce([
+        proposalEvent({
+          id: proposalId,
+          type,
+          proposer: 'agent',
+          confidence: 0.95, // above θ_auto for both types
+          recordedBy: 'agent',
+        }),
+        acceptEvent({
+          id: `acc_agent_${type}`,
+          objectId,
+          type,
+          actor: 'agent',
+          proposalId,
+        }),
+      ]);
+      const record = state.objects[objectId];
+      // The agent owns and accepts its own reading — the object is minted (revert
+      // `actorMatchesProposer`'s agent arm and this is `undefined`).
+      expect(record, `${type} object minted`).toBeDefined();
+      const object = record as NonNullable<typeof record>;
+      // …but as a `~`, not a `✓`. All three halves of the predicate, read off the
+      // fold: the accepter is the agent, no person has touched it, so the state is
+      // unconfirmed.
+      expect(object.acceptedBy.kind, `${type} acceptedByKind`).toBe('agent');
+      expect(object.humanTouchedAt, `${type} humanTouchedAt`).toBeNull();
+      expect(epistemicStateOf(object), `${type} epistemic state`).toBe('unconfirmed');
+    });
+  }
 });
 
 describe('authority matrix — the receipt, every actor × shape', () => {
@@ -1645,11 +1701,17 @@ describe('authority matrix — relation_added, every actor × kind × retired ty
 });
 
 describe('the matrix as a whole', () => {
-  it('enumerates every cell it claims to — 5 actors × 5 types × 9 citation/staging/confidence shapes', () => {
-    // Per actor, per type: two cited proposals × two confidence bands × two
-    // stagers, plus the one direct shape (with nothing cited there is no band and
-    // no staging) = 9. Five types, of which `claim` is doubled for
-    // verified/unverified: 4×9 + 9×2 = 54 per actor.
+  it('enumerates every cell it claims to — 5 actors × 5 types × 13 citation/staging/confidence shapes', () => {
+    // Per actor, per type: three cited proposals (`model_a`, `agent`, `human`) ×
+    // two confidence bands × two stagers, plus the one direct shape (with nothing
+    // cited there is no band and no staging) = 13. Five types, of which `claim` is
+    // doubled for verified/unverified: 4×13 + 13×2 = 78 per actor.
+    //
+    // **`agent` is a cited proposer as of #117 F4** — a machine-labelled reading a
+    // stager can bless as their own, the exact shape r9 refuses for `model`. It was
+    // the one citation the acceptance matrix omitted while the lifecycle matrix
+    // below already ranged over it, so the self-staged clause was never exercised
+    // for `agent` and the gate's `model`-only key went uncaught.
     //
     // The staging dimension is r9's and is the one that was missing: every cell
     // here used to be recorded by `model_proposer`, so the whole *human*-staged
@@ -1662,7 +1724,7 @@ describe('the matrix as a whole', () => {
     // that list held, which is precisely the vacuity it exists to rule out. The
     // number is the claim in the title, and both move by hand when a kind is
     // added.
-    expect(acceptanceCases).toHaveLength(5 * (4 * 9 + 9 * 2));
+    expect(acceptanceCases).toHaveLength(5 * (4 * 13 + 13 * 2));
     const distinct = new Set(
       acceptanceCases.map(
         (entry) =>
@@ -1706,12 +1768,17 @@ describe('the matrix as a whole', () => {
       NAMES[entry.type] !== null && NAMES[entry.type] !== ALICE;
     const onlyJudgementInTheRoom = (entry: AcceptanceCase) =>
       (entry.cited === 'none' || entry.recordedBy === 'human') &&
-      (entry.cited === 'model_a' || namesSomebodyElse(entry));
+      (entry.cited === 'model_a' || entry.cited === 'agent' || namesSomebodyElse(entry));
 
     // The exception is a real part of the space, not an empty set the partition
     // is trivially true over — and all three of its grounds are populated.
     expect(
       humanRow.filter((entry) => onlyJudgementInTheRoom(entry) && entry.cited === 'model_a').length,
+    ).toBeGreaterThan(0);
+    // #117 F4: the `agent`-staged ground is populated too, so a stager blessing
+    // their own agent-labelled reading is a live cell of the human row.
+    expect(
+      humanRow.filter((entry) => onlyJudgementInTheRoom(entry) && entry.cited === 'agent').length,
     ).toBeGreaterThan(0);
     expect(
       humanRow.filter((entry) => onlyJudgementInTheRoom(entry) && entry.cited === 'human').length,
