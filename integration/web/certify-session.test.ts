@@ -37,6 +37,7 @@ afterAll(async () => handle.close());
 
 interface Fixture {
   roomId: string;
+  workspaceId: string;
   ada: string;
   bob: string;
   hexi: string;
@@ -99,6 +100,7 @@ async function fixture(): Promise<Fixture> {
 
   return {
     roomId: room.roomId,
+    workspaceId: room.workspaceId,
     ada,
     bob,
     hexi,
@@ -398,6 +400,78 @@ describe('the membership is re-derived in the write transaction', () => {
       authorizedRoomId: at.roomId,
       sessionId: at.sessionId,
     });
+    expect(outcome).toEqual({ ok: false, reason: 'not_in_room' });
+    expect((await read(at.sessionId))[0]?.certifiedBy).toBeNull();
+  });
+
+  /**
+   * FINDING (round 3, fix 1) — THE WORKSPACE-MEMBERS LEG OF THE TOCTOU.
+   *
+   * `loadRoomMembershipRow` INNER-JOINs `workspace_members` (a room grants nothing
+   * once the source-of-truth member row is gone), but on the append path it locks
+   * only `memberships` — a workspace revocation that lands mid-write is tolerated,
+   * caught by the next ~1s revalidation pass, because nothing an append writes is
+   * irreversible. Certification IS irreversible (drizzle/0033). A member whose
+   * WORKSPACE membership is revoked while the certify transaction is open must not
+   * be able to slip inside that window and permanently land an artifact.
+   *
+   * The certify path therefore takes the stronger `membership-and-workspace` lock
+   * (`FOR SHARE OF memberships, workspace_members`). This test drives the exact
+   * interleaving that scope closes: a `workspace_members` DELETE held open by a
+   * SECOND connection while certify runs. With the lock, certify's read waits on
+   * that row; when the DELETE commits, the join returns nothing and certify
+   * refuses `not_in_room`. Without it, certify reads the still-visible row under
+   * MVCC and lands the certification before the revocation is even visible.
+   *
+   * RED ON REVERT: change the certify-path lock back to `'membership'` (or drop
+   * the `of: [memberships, workspaceMembers]` scope). The certify then no longer
+   * waits on the workspace-member row, reads it as present, and CERTIFIES —
+   * authored by somebody the workspace had removed, on a write that can never be
+   * undone. Both outputs are shown in the round-3 receipt.
+   */
+  it('a workspace_members revocation racing inside the write refuses the certify', async () => {
+    const at = await fixture();
+    await armCertification({
+      database: handle.db,
+      viewerId: at.ada,
+      sessionId: at.sessionId,
+      authorizedRoomId: at.roomId,
+    });
+    await backdateArm(at.sessionId, CERTIFY_REQUIRED_HOLD_MS + 500);
+
+    /* A SECOND connection holds an uncommitted DELETE of ada's workspace-member
+       row — the revocation, in flight, landing between the caller's authorized
+       read and this write. A reserved connection pins one physical socket so the
+       transaction stays open across the awaits below. */
+    const reserved = await handle.sql.reserve();
+    let outcome: Awaited<ReturnType<typeof certifySession>>;
+    try {
+      await reserved`BEGIN`;
+      await reserved`DELETE FROM workspace_members
+        WHERE organization_id = ${at.workspaceId} AND user_id = ${at.ada}`;
+
+      /* Fire the certify WITHOUT awaiting. With the stronger lock its in-txn
+         membership read takes `FOR SHARE` on the workspace-member row and BLOCKS
+         on the uncommitted DELETE; without it, the read sees the still-visible
+         row under MVCC and the certify runs straight through to a landing. */
+      const pending = certifySession({
+        database: handle.db,
+        viewerId: at.ada,
+        authorizedRoomId: at.roomId,
+        sessionId: at.sessionId,
+      });
+
+      /* Give the un-locked (reverted) path time to certify and the locked path
+         time to reach the wait, then commit the revocation. A locked certify now
+         re-evaluates and finds the member row gone → `not_in_room`; a reverted
+         certify has already resolved `{ ok: true }`. */
+      await new Promise((resolve) => setTimeout(resolve, 400));
+      await reserved`COMMIT`;
+      outcome = await pending;
+    } finally {
+      await reserved.release();
+    }
+
     expect(outcome).toEqual({ ok: false, reason: 'not_in_room' });
     expect((await read(at.sessionId))[0]?.certifiedBy).toBeNull();
   });

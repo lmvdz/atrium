@@ -47,12 +47,16 @@ import { CERTIFY_ARM_TTL_MS, CERTIFY_REQUIRED_HOLD_MS } from './certify-hold';
  *   2. IN THE ROOM, STILL. The caller resolves the room through the authorized
  *      read path (`loadRoom`, which joins through `@atrium/auth`) and hands its id
  *      here; this file re-derives the membership INSIDE the transaction with
- *      `loadRoomMembershipRow(tx, …, { lock: 'share' })`, which takes the same
- *      workspace join and the same row lock the realtime append path takes. A
- *      concurrent revocation now waits for this transaction rather than slipping
- *      between the check and the write. This file still never names `memberships`
- *      itself — the boundary `room-access.test.ts` enforces is intact, because the
- *      query lives in `@atrium/auth` where every other one does.
+ *      `loadRoomMembershipRow(tx, …, { lock: 'membership-and-workspace' })`,
+ *      which takes the same workspace join as the realtime append path but a
+ *      STRONGER row lock — it locks the `workspace_members` row too, not only
+ *      `memberships`. A concurrent revocation of either now waits for this
+ *      transaction rather than slipping between the check and the write, because a
+ *      certification is irreversible and cannot afford the one-second workspace
+ *      revalidation window the append path is allowed to tolerate. This file still
+ *      never names `memberships` itself — the boundary `room-access.test.ts`
+ *      enforces is intact, because the query lives in `@atrium/auth` where every
+ *      other one does.
  *   3. SETTLED. A running or failed process has produced no landing to certify.
  *   4. ONCE. `isNull(certified_by)` scopes the write, the row is taken `FOR
  *      UPDATE`, and drizzle/0033's `sessions_certification_immutable` refuses a
@@ -127,12 +131,18 @@ async function viewerMayCertify(
 
   /* THE TOCTOU CLOSE. `loadRoom` ran in the Server Action, before this
      transaction opened; a membership revoked in between was invisible to it. This
-     read is inside the transaction that writes and takes a shared lock on the
-     membership row, so a concurrent DELETE waits for this commit or abort instead
-     of landing between the check and the write. Same query, same workspace join
-     and same fail-closed role clamp as every other authorization read. */
+     read is inside the transaction that writes and takes a shared lock on BOTH the
+     `memberships` row and the joined `workspace_members` row, so a concurrent
+     DELETE of either waits for this commit or abort instead of landing between the
+     check and the write. The `membership-and-workspace` scope is what the certify
+     path needs and the append path does not: certification is irreversible
+     (drizzle/0033), so the workspace-revocation window the append path defers to
+     the one-second revalidation pass would here be a window in which a
+     workspace-revoked member permanently lands an artifact. Same query, same
+     workspace join and same fail-closed role clamp as every other authorization
+     read — only the lock scope is stronger. */
   const membership = await loadRoomMembershipRow(tx, authorizedRoomId, viewerId, {
-    lock: 'share',
+    lock: 'membership-and-workspace',
   });
   if (membership === null) return 'not_in_room';
   return null;
