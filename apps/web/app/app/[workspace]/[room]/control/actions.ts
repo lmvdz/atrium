@@ -41,6 +41,21 @@ const CertifyInput = z.object({
   sessionId: z.uuid(),
   workspaceSlug: z.string().min(1).max(200),
   roomSlug: z.string().min(1).max(200),
+  /**
+   * THE HOLD'S ATTEMPT SEQUENCE — the client-minted, strictly-monotonic id of a
+   * single press (round-6 finding 3), carried identically on the arm, disarm and
+   * confirm so a release can be correlated to the arm it cancels. Optional in the
+   * schema (an old client, or the disarm of a hold that never armed, may not carry
+   * one), bounded to a safe integer.
+   */
+  attemptSeq: z.number().int().nonnegative().max(Number.MAX_SAFE_INTEGER).optional(),
+  /**
+   * THE REVIEWED-ARTIFACT DIGEST — the `md5(artifact::text)` the render carried
+   * (round-6 finding 1), handed back so the arm can bind the signature to the
+   * revision the human saw. Optional here; the arm refuses `stale_review` if it is
+   * present and no longer matches the row. Bounded to a hex md5's length.
+   */
+  reviewedDigest: z.string().min(1).max(64).optional(),
 });
 
 interface Resolved {
@@ -49,6 +64,8 @@ interface Resolved {
   readonly sessionId: string;
   readonly workspaceSlug: string;
   readonly roomSlug: string;
+  readonly attemptSeq?: number;
+  readonly reviewedDigest?: string;
 }
 
 /**
@@ -75,6 +92,8 @@ async function resolve(
       sessionId: parsed.data.sessionId,
       workspaceSlug: parsed.data.workspaceSlug,
       roomSlug: parsed.data.roomSlug,
+      attemptSeq: parsed.data.attemptSeq,
+      reviewedDigest: parsed.data.reviewedDigest,
     },
   };
 }
@@ -89,6 +108,8 @@ export async function armSessionCertificationAction(raw: unknown): Promise<ArmOu
     viewerId: resolved.at.userId,
     sessionId: resolved.at.sessionId,
     authorizedRoomId: resolved.at.roomId,
+    attemptSeq: resolved.at.attemptSeq,
+    reviewedDigest: resolved.at.reviewedDigest,
   });
 }
 
@@ -107,6 +128,7 @@ export async function disarmSessionCertificationAction(raw: unknown): Promise<Di
     viewerId: resolved.at.userId,
     sessionId: resolved.at.sessionId,
     authorizedRoomId: resolved.at.roomId,
+    attemptSeq: resolved.at.attemptSeq,
   });
 }
 
@@ -120,6 +142,7 @@ export async function certifySessionAction(raw: unknown): Promise<CertifyOutcome
     viewerId: resolved.at.userId,
     sessionId: resolved.at.sessionId,
     authorizedRoomId: resolved.at.roomId,
+    attemptSeq: resolved.at.attemptSeq,
   });
 
   if (outcome.ok) {

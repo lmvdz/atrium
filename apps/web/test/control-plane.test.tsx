@@ -87,6 +87,9 @@ function session(overrides: Partial<ControlSessionRow>): ControlSessionRow {
     spendMicros: 0,
     exitSummary: null,
     artifact: null,
+    artifactDigest: null,
+    certifiedById: null,
+    certifyArmedById: null,
     certifiedByName: null,
     certifiedByKind: null,
     certifiedAt: null,
@@ -112,6 +115,11 @@ function certifiedSession(overrides: Partial<ControlSessionRow> = {}): ControlSe
   return session({
     status: 'settled',
     artifact: { branch: 'feat/x', commit: 'abc123' },
+    /* The armer and the certifier are the SAME human, and the recorded hold agrees
+       with the interval the two stamps bracket (2.4s armed→certified, 2400ms held)
+       — the internally-consistent shape the round-6 finding-4 backstop requires. */
+    certifiedById: 'ada-id',
+    certifyArmedById: 'ada-id',
     certifiedByName: 'Ada',
     certifiedByKind: 'human',
     certifiedAt: '2026-08-13T01:00:00.000Z',
@@ -175,17 +183,19 @@ describe('the tick comes from a human signature and from nothing else', () => {
   it('a NON-HUMAN certifier does not mint a tick, whatever name is attached', () => {
     const machineSigned = certifiedSession({ certifiedByName: 'hexi', certifiedByKind: 'agent' });
     expect(sessionCertified(machineSigned)).toBe(false);
-    // Not the tick. The row is settled with an artifact, so it still owes a human
-    // (■) — the machine's name in the column buys it nothing.
+    /* Not the tick. The row already carries a certifier id (that the DB would never
+       have let be a machine), so it is not awaiting a fresh human either — a `✓` the
+       render refuses to honour falls to the machine's own account, `~`, not to a `■`
+       inviting a certification the immutable table would refuse (round-6 finding 4). */
     expect(glyphFor(sessionState(machineSigned, true))).not.toBe('✓');
-    expect(glyphFor(sessionState(machineSigned, true))).toBe('■');
+    expect(glyphFor(sessionState(machineSigned, true))).toBe('~');
   });
 
   it('an unreadable certifier kind fails CLOSED — never the privileged glyph', () => {
     const unreadable = certifiedSession({ certifiedByKind: null });
     expect(sessionCertified(unreadable)).toBe(false);
     expect(glyphFor(sessionState(unreadable, true))).not.toBe('✓');
-    expect(glyphFor(sessionState(unreadable, true))).toBe('■');
+    expect(glyphFor(sessionState(unreadable, true))).toBe('~');
   });
 
   it('a settled session with an uncertified artifact needs you, and certifying is not undoable (■)', () => {
@@ -204,6 +214,59 @@ describe('the tick comes from a human signature and from nothing else', () => {
     expect(glyphFor(sessionState(before, true))).toBe('■');
     expect(glyphFor(sessionState(after, true))).toBe('✓');
     expect(sessionAwaitsLanding(after)).toBe(false);
+  });
+
+  /**
+   * ROUND-6 FINDING 2 — an EMPTY or PARTIAL artifact is not reviewable, so it neither
+   * awaits a human (■) nor earns a `✓`. `SessionArtifact` has every field optional,
+   * so `{}` and `{ branch }` are non-null JSONB the null-checks accept — a signature
+   * on a blank page. A reviewable artifact needs a non-empty branch AND commit.
+   *
+   * MUTATION THAT MUST TURN THIS RED: revert `sessionCertified`/`sessionAwaitsLanding`
+   * to `artifact !== null` (from `isReviewableArtifact`). The `{}` certified row then
+   * reads `✓`, and the partial settled row reads `■`.
+   */
+  it('an empty {} or partial artifact is neither ■ nor ✓ — nothing reviewable to sign', () => {
+    for (const bad of [{}, { branch: 'feat/x' }, { commit: 'abc123' }, { branch: '  ' }]) {
+      const awaiting = session({ status: 'settled', artifact: bad });
+      expect(sessionAwaitsLanding(awaiting)).toBe(false);
+      expect(glyphFor(sessionState(awaiting, true))).toBe('~');
+      // Even a coherent human receipt over an empty artifact does not mint the tick.
+      const signed = certifiedSession({ artifact: bad });
+      expect(sessionCertified(signed)).toBe(false);
+      expect(glyphFor(sessionState(signed, true))).toBe('~');
+    }
+  });
+
+  /**
+   * ROUND-6 FINDING 4 — a present certification whose parts DISAGREE renders `~`, not
+   * `✓`. 0036 refuses these on write; the render must fail closed on the same shapes
+   * rather than mint the tick from a name-and-timestamps bag that never cohered.
+   *
+   * MUTATION THAT MUST TURN THIS RED: drop the armer===certifier / interval-consistency
+   * block from `sessionCertified`. Each of these inconsistent rows then reads `✓`.
+   */
+  it('an armer who is not the certifier renders ~, never ✓ (finding 4)', () => {
+    const adaBob = certifiedSession({ certifyArmedById: 'bob-id', certifyArmedByName: 'Bob' });
+    expect(sessionCertified(adaBob)).toBe(false);
+    expect(glyphFor(sessionState(adaBob, true))).toBe('~');
+  });
+
+  it('a held duration that no interval could produce renders ~ (finding 4)', () => {
+    // armed == certified (a zero interval) while held_ms claims 2400ms of hold.
+    const zeroInterval = certifiedSession({ certifyArmedAt: '2026-08-13T01:00:00.000Z' });
+    expect(sessionCertified(zeroInterval)).toBe(false);
+    expect(glyphFor(sessionState(zeroInterval, true))).toBe('~');
+
+    // certifyArmedAt AFTER certifiedAt — a negative interval — is refused too.
+    const negative = certifiedSession({ certifyArmedAt: '2026-08-13T01:00:03.000Z' });
+    expect(sessionCertified(negative)).toBe(false);
+    expect(glyphFor(sessionState(negative, true))).toBe('~');
+
+    // held_ms wildly larger than the 2.4s the stamps bracket — a claim, not a measure.
+    const inflated = certifiedSession({ certifiedHeldMs: 99_000 });
+    expect(sessionCertified(inflated)).toBe(false);
+    expect(glyphFor(sessionState(inflated, true))).toBe('~');
   });
 });
 
@@ -241,10 +304,11 @@ describe('the tree badge and the tree glyph read the SAME predicate', () => {
     const row = certifiedSession({ id: 's1', certifiedByKind: 'agent' });
     render(<ProcessTree agents={[agent([row])]} onOpenSession={() => {}} viewerIsHuman={true} />);
     const node = document.querySelector('[data-tree-session="s1"]');
-    // The machine's name does not mint the tick; the artifact-bearing settled row
-    // is still owed to a human (■), and it wears NO certified badge.
+    // The machine's name does not mint the tick; the row already carries a certifier
+    // id, so it is not awaiting a fresh human either — a `✓` the render refuses falls
+    // to `~`, the machine's own account, and it wears NO certified badge.
     expect(node?.querySelector('[data-glyph]')?.getAttribute('data-glyph')).not.toBe('✓');
-    expect(node?.querySelector('[data-glyph]')?.getAttribute('data-glyph')).toBe('■');
+    expect(node?.querySelector('[data-glyph]')?.getAttribute('data-glyph')).toBe('~');
     expect(document.querySelector('[data-session-certified]')).toBeNull();
   });
 });
@@ -451,7 +515,10 @@ describe('the pin is ordered by glyph hardness, and it renders only what needs a
     },
     {
       id: 'certify',
-      state: sessionState(session({ status: 'settled', artifact: { branch: 'b' } }), true),
+      state: sessionState(
+        session({ status: 'settled', artifact: { branch: 'b', commit: 'c0ffee' } }),
+        true,
+      ),
       title: 'certify the work',
       detail: '',
       meta: '',
@@ -586,17 +653,20 @@ describe('the pin and the decisions count are gated on the viewer being human', 
  */
 describe('the render fails closed on an incomplete certification receipt', () => {
   /* The invariant every case here proves: `sessionCertified` is false and the
-     glyph is NOT `✓`. An artifact-bearing settled session short of a valid
-     signature is not `~` — it is `■`, still owed to a human (the certification the
-     row lied about having is exactly what it still needs). The point is that the
-     render never mints the covenant tick from an incomplete receipt. */
-  it('a certified_by with no arm / held / stamp is not ✓ — it still needs a human (■)', () => {
+     glyph is NOT `✓`. A row that already CARRIES a certifier id but whose receipt
+     the render refuses is terminal — the immutable table (drizzle/0033) will not
+     let it be re-certified — so it reads `~`, the machine's own account, not a `■`
+     that would invite a certification that can never land (round-6 finding 4). The
+     one legitimately-`■` case is the row with NO certifier id at all, covered by
+     the finding-2/awaits tests above. The point here is that the render never mints
+     the covenant tick from an incomplete receipt. */
+  it('a certified_by with no arm / held / stamp is not ✓ — it is terminal, ~', () => {
     const noArm = certifiedSession({ certifyArmedAt: null });
     const noHeld = certifiedSession({ certifiedHeldMs: null });
     const noStamp = certifiedSession({ certifiedAt: null });
     for (const incomplete of [noArm, noHeld, noStamp]) {
       expect(sessionCertified(incomplete)).toBe(false);
-      expect(glyphFor(sessionState(incomplete, true))).toBe('■');
+      expect(glyphFor(sessionState(incomplete, true))).toBe('~');
     }
     // the complete receipt still mints the tick, so the check is closed, not broken
     expect(sessionCertified(certifiedSession())).toBe(true);

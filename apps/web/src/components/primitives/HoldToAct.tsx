@@ -42,6 +42,26 @@ import { useCallback, useEffect, useId, useRef, useState } from 'react';
 import { offeredText } from '../model/quotation';
 import styles from './primitives.module.css';
 
+/* ---------------------------------------------------------------------------
+ * A STRICTLY-MONOTONIC ATTEMPT SEQUENCE, per page.
+ *
+ * #121 round-6 finding 3. Each hold-begin mints one sequence, carried on the
+ * server arm, disarm and confirm of that single press so the server can correlate
+ * a release to the arm it cancels and refuse a late arm that a cancel already
+ * superseded. It must be STRICTLY increasing within a page: two presses in the
+ * same millisecond still get distinct, ordered ids. Seeded from wall-clock so the
+ * ids of two different clients on one session sort by real time; bumped past the
+ * last value otherwise. It orders and correlates a client's own requests — it is
+ * NOT a timing the server's gate trusts (that stays `now() - certify_armed_at`,
+ * measured server-side).
+ * ------------------------------------------------------------------------- */
+let lastAttemptSeq = 0;
+function nextAttemptSeq(): number {
+  const now = Date.now();
+  lastAttemptSeq = now > lastAttemptSeq ? now : lastAttemptSeq + 1;
+  return lastAttemptSeq;
+}
+
 /**
  * What the hold put on the record: WHO armed it, WHEN, and HOW LONG they held.
  *
@@ -64,6 +84,14 @@ export interface Arming {
    * never sent as the duration the covenant gates on (#121 CS-2).
    */
   readonly heldMs: number;
+  /**
+   * The strictly-monotonic id of this press (#121 round-6 finding 3), minted at
+   * hold-begin and identical across this hold's `onBegin` / `onCancel` / `onArm` /
+   * `onAct`. A caller wiring a server arm→confirm carries it on all three requests
+   * so a release can be correlated to the arm it cancels. Callers with no server
+   * round-trip (the attention cards' one-shot land) simply ignore it.
+   */
+  readonly attemptSeq: number;
 }
 
 export const DEFAULT_HOLD_MS = 2000;
@@ -88,8 +116,11 @@ export interface HoldToActProps {
    * A cancelled hold simply never reaches `onAct`; a caller that recorded
    * something on begin is responsible for that being harmless, and for certify it
    * is: a pending arm that is never confirmed certifies nothing and expires.
+   *
+   * Receives this press's `attemptSeq` (round-6 finding 3) so the server arm can be
+   * stamped with the id the matching disarm/confirm will carry.
    */
-  readonly onBegin?: () => void;
+  readonly onBegin?: (attemptSeq: number) => void;
   /**
    * Fired when a hold that had BEGUN is released before it completes — pointer up
    * or cancel, leaving or blurring the button, lifting the key. It does NOT fire
@@ -100,8 +131,13 @@ export interface HoldToActProps {
    * certify's server arm) can undo it on cancel (the server disarm), so a
    * cancelled hold leaves no live intention behind. A cancel that reaches nothing
    * must be harmless — this fires on every abort, including redundant ones.
+   *
+   * Receives this press's `attemptSeq` (round-6 finding 3) so the server disarm
+   * cancels the exact arm this hold began — and, carried on the disarm even when
+   * the arm has not yet landed, raises the cancel watermark that refuses a late
+   * arm which the network reordered ahead of it.
    */
-  readonly onCancel?: () => void;
+  readonly onCancel?: (attemptSeq: number) => void;
   readonly onArm?: (arming: Arming) => void;
   readonly onAct?: (arming: Arming) => void;
   readonly className?: string;
@@ -125,6 +161,9 @@ export function HoldToAct({
   const buttonRef = useRef<HTMLButtonElement | null>(null);
   const frameRef = useRef<number | null>(null);
   const startRef = useRef<number | null>(null);
+  /* This press's attempt sequence, minted at begin and read by cancel/complete/
+     unmount so all four callbacks carry the SAME id (round-6 finding 3). */
+  const attemptRef = useRef<number>(0);
 
   const meterRef = useRef<HTMLSpanElement | null>(null);
 
@@ -158,7 +197,7 @@ export function HoldToAct({
     stop();
     paint(0);
     setPhase('idle');
-    onCancel?.();
+    onCancel?.(attemptRef.current);
   }, [onCancel, paint, stop]);
 
   const complete = useCallback(() => {
@@ -168,7 +207,13 @@ export function HoldToAct({
     stop();
     paint(1);
     setPhase('armed');
-    const arming: Arming = { actionId, actor, armedAt: new Date().toISOString(), heldMs };
+    const arming: Arming = {
+      actionId,
+      actor,
+      armedAt: new Date().toISOString(),
+      heldMs,
+      attemptSeq: attemptRef.current,
+    };
     /* Arm first, act second. The record of who armed it and when must exist
        before the irreversible thing happens, not after it succeeded. */
     onArm?.(arming);
@@ -190,11 +235,14 @@ export function HoldToAct({
   const begin = useCallback(() => {
     if (startRef.current !== null) return;
     startRef.current = performance.now();
+    /* Mint this press's attempt id BEFORE arming, so the arm and the disarm/confirm
+       that follow all carry it (round-6 finding 3). */
+    attemptRef.current = nextAttemptSeq();
     setPhase('holding');
     paint(0);
     /* Before the first frame, so a caller that has to start a clock elsewhere
        starts it at the same instant this one does. */
-    onBegin?.();
+    onBegin?.(attemptRef.current);
     frameRef.current = requestAnimationFrame(tick);
   }, [onBegin, paint, tick]);
 
@@ -219,7 +267,7 @@ export function HoldToAct({
     }
     if (startRef.current === null) return;
     startRef.current = null;
-    onCancel?.();
+    onCancel?.(attemptRef.current);
   }, [onCancel]);
   const unmountRef = useRef(disarmOnUnmount);
   unmountRef.current = disarmOnUnmount;
@@ -264,14 +312,27 @@ export function HoldToAct({
      interface's first-person ban. Quotation marks are still refused — that is
      the one thing that makes offered copy read as an utterance. */
   const spoken = offeredText(label, 'HoldToAct label');
-  /* HONEST ABOUT WHAT THE HOLD IS. It used to say "the hold is the confirmation",
-     which reads as a claim that the continuous press itself is the attested act.
-     Against a scripted client, a continuous physical hold is unprovable server-side
-     without interaction attestation this does not have — what the server actually
-     enforces is a MINIMUM DELAY between two deliberate calls (certify-session.ts's
-     arm→confirm). So the copy describes the press as the affordance for meeting that
-     delay, and claims no more than is enforced (#121 round-5 finding 6). */
-  const contract = `${offeredText(describe, 'HoldToAct describe')} — press and hold for at least ${(holdMs / 1000).toFixed(0)} seconds; the server requires a minimum delay before it will confirm, and releasing early cancels it`;
+  /* HONEST ABOUT WHAT THE HOLD IS, PER CALLER. It used to say "the hold is the
+     confirmation", which reads as a claim that the continuous press itself is the
+     attested act. Against a scripted client, a continuous physical hold is
+     unprovable server-side without interaction attestation this does not have.
+     What some callers enforce is a MINIMUM DELAY between two deliberate server calls
+     (certify-session.ts's arm→confirm); the press is the affordance for meeting it.
+
+     But NOT every caller has that. The certify pane wires a server arm (`onBegin`);
+     the attention cards (AttentionCard/AttentionCompact) do not — their land is a
+     single client-measured hold with no server-timed arm→confirm behind it. Round-5
+     shipped this contract string claiming "the server requires a minimum delay" for
+     ALL of them, which was false for the attention path (grok's residual). So the
+     claim is scoped to what THIS caller's path actually enforces: the server-delay
+     sentence only when a server arm is wired, the plain client-hold sentence
+     otherwise. `onBegin` is exactly the presence of that server round-trip. */
+  const serverTimed = onBegin !== undefined;
+  const held = `press and hold for at least ${(holdMs / 1000).toFixed(0)} seconds`;
+  const tail = serverTimed
+    ? '; the server requires a minimum delay before it will confirm, and releasing early cancels it'
+    : ', and releasing early cancels it';
+  const contract = `${offeredText(describe, 'HoldToAct describe')} — ${held}${tail}`;
 
   return (
     <>

@@ -49,12 +49,17 @@ export interface ControlPlaneProps {
     sessionId: string;
     workspaceSlug: string;
     roomSlug: string;
+    /** This press's attempt sequence (round-6 finding 3). */
+    attemptSeq: number;
+    /** The digest of the artifact the human reviewed (round-6 finding 1). */
+    reviewedDigest: string | null;
   }) => Promise<ArmOutcome>;
   /** STEP TWO. Fired when the hold completes; the server measures its own clock. */
   readonly certifyAction: (input: {
     sessionId: string;
     workspaceSlug: string;
     roomSlug: string;
+    attemptSeq: number;
   }) => Promise<CertifyOutcome>;
   /**
    * CANCELLATION. Fired when the hold is released before it completes, so the
@@ -65,6 +70,7 @@ export interface ControlPlaneProps {
     sessionId: string;
     workspaceSlug: string;
     roomSlug: string;
+    attemptSeq: number;
   }) => Promise<DisarmOutcome>;
 }
 
@@ -104,7 +110,11 @@ function certifyErrorText(reason: string): string {
     case 'already_certified':
       return 'this session has already been certified, and a certification is written once';
     case 'no_artifact':
-      return 'this session produced no artifact to review — there is nothing to certify';
+      return 'this session produced no reviewable artifact — there is nothing to certify';
+    case 'stale_review':
+      return 'the artifact changed since this page loaded — reload to review the current one, then press and hold';
+    case 'arm_superseded':
+      return 'that hold was released — press and hold again to start a fresh one';
     case 'not_armed':
       return 'the server recorded no hold for this session — press and hold the control itself';
     case 'held_too_short':
@@ -292,15 +302,22 @@ export function ControlPlane({
      longer EVIDENCE, and none of it is sent. What the server gates on is the
      interval between its own clock at this call and its own clock at the confirm
      below, which is why this fires on hold-begin and not on hold-complete. */
-  const onArm = (sessionId: string) => {
+  const onArm = (sessionId: string, attemptSeq: number) => {
     setCertifyError(null);
-    void armAction({ sessionId, workspaceSlug, roomSlug }).then((outcome) => {
-      if (!outcome.ok) setCertifyError(certifyErrorText(outcome.reason));
-    });
+    /* The digest of the artifact THIS render showed, handed back so the server
+       binds the arm to the reviewed revision (round-6 finding 1). Resolved from
+       the loaded projection, so if the artifact moved server-side since load, the
+       stale digest is what goes out and the arm refuses `stale_review`. */
+    const reviewedDigest = index.get(sessionId)?.session.artifactDigest ?? null;
+    void armAction({ sessionId, workspaceSlug, roomSlug, attemptSeq, reviewedDigest }).then(
+      (outcome) => {
+        if (!outcome.ok) setCertifyError(certifyErrorText(outcome.reason));
+      },
+    );
   };
 
-  const onCertify = (sessionId: string) => {
-    void certifyAction({ sessionId, workspaceSlug, roomSlug }).then((outcome) => {
+  const onCertify = (sessionId: string, attemptSeq: number) => {
+    void certifyAction({ sessionId, workspaceSlug, roomSlug, attemptSeq }).then((outcome) => {
       if (outcome.ok) {
         router.refresh();
       } else {
@@ -315,8 +332,8 @@ export function ControlPlane({
      forget: a failed disarm is harmless (the arm's TTL and the confirm gate still
      hold), and surfacing an error for a release the person already walked away
      from would be noise. */
-  const onDisarm = (sessionId: string) => {
-    void disarmAction({ sessionId, workspaceSlug, roomSlug });
+  const onDisarm = (sessionId: string, attemptSeq: number) => {
+    void disarmAction({ sessionId, workspaceSlug, roomSlug, attemptSeq });
   };
 
   return (

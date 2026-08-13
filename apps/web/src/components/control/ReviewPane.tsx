@@ -61,10 +61,10 @@ export interface ReviewPaneProps {
   /** server-resolved; the certification is offered only when this is `human` */
   readonly viewerKind: ParticipantKind | 'unknown';
   /** fired when the hold BEGINS, so the server can stamp the start of it */
-  readonly onArm: (sessionId: string) => void;
-  readonly onCertify: (sessionId: string) => void;
+  readonly onArm: (sessionId: string, attemptSeq: number) => void;
+  readonly onCertify: (sessionId: string, attemptSeq: number) => void;
   /** fired when a hold is RELEASED before completing, so the server clears the arm */
-  readonly onDisarm: (sessionId: string) => void;
+  readonly onDisarm: (sessionId: string, attemptSeq: number) => void;
   readonly certifyError: string | null;
 }
 
@@ -262,18 +262,20 @@ export function ReviewPane({
             describe="put a human signature on this session's receipt"
             holdMs={CERTIFY_HOLD_MS}
             label="Certify this session"
-            onAct={() => onCertify(session.id)}
+            onAct={(arming) => onCertify(session.id, arming.attemptSeq)}
             /* The arm goes out on hold-BEGIN so the server's clock starts when
                the person's press does; `onArm` fires on completion and is the
-               local note that a confirm is in flight. */
+               local note that a confirm is in flight. The `attemptSeq` minted at
+               begin is carried on the arm, the confirm and the disarm alike so the
+               server can correlate them (round-6 finding 3). */
             onArm={() => setApplying(true)}
-            onBegin={() => onArm(session.id)}
+            onBegin={(attemptSeq) => onArm(session.id, attemptSeq)}
             /* Released before the meter filled: tell the server to clear the arm
                it stamped on begin, so a cancelled hold leaves nothing a later
                confirm could spend (CS-3). Also drops the local "recording" note. */
-            onCancel={() => {
+            onCancel={(attemptSeq) => {
               setApplying(false);
-              onDisarm(session.id);
+              onDisarm(session.id, attemptSeq);
             }}
           />
           {applying && certifyError === null ? (

@@ -115,6 +115,34 @@ async function fixture(): Promise<Fixture> {
   };
 }
 
+/** A settled session carrying a given artifact (used for the empty/partial cases). */
+async function settledWithArtifact(at: Fixture, artifact: unknown): Promise<string> {
+  const [row] = await handle.db
+    .insert(sessions)
+    .values({
+      roomId: at.roomId,
+      planId: at.planId,
+      harness: 'claude-code',
+      model: 'opus',
+      status: 'settled',
+      // biome-ignore lint/suspicious/noExplicitAny: the point is to seed a malformed artifact shape.
+      artifact: artifact as any,
+      exitSummary: 'done',
+    })
+    .returning({ id: sessions.id });
+  return (row as { id: string }).id;
+}
+
+/** The server's own `md5(artifact::text)` for a session — the reviewed digest the render carries. */
+async function digestOf(sessionId: string): Promise<string | null> {
+  const [row] = await handle.db
+    .select({ digest: sql<string | null>`md5(${sessions.artifact}::text)` })
+    .from(sessions)
+    .where(eq(sessions.id, sessionId))
+    .limit(1);
+  return (row as { digest: string | null } | undefined)?.digest ?? null;
+}
+
 /** A settled session with NO artifact — nothing for a signature to be a signature of. */
 async function settledNoArtifact(at: Fixture): Promise<string> {
   const [row] = await handle.db
@@ -1120,5 +1148,272 @@ describe('the table refuses an internally inconsistent receipt (#121 round-5 fin
       .set({ certifiedBy: at.ada, certifiedAt: sql`now()`, certifiedHeldMs: 2900 })
       .where(eq(sessions.id, at.sessionId));
     expect((await read(at.sessionId))[0]?.certifiedBy).toBe(at.ada);
+  });
+});
+
+describe('the arm binds to the artifact the human REVIEWED (#121 round-6 finding 1)', () => {
+  /**
+   * RENDER A, ARM B. The round-5 fix bound the confirm to the ARM-time artifact,
+   * not the reviewed one: between the render the human saw and the moment the arm
+   * locked the row, the still-mutable artifact could change, and the arm would
+   * digest the NEW revision — so a confirm certified work the pane never showed.
+   * The render now carries `md5(artifact::text)`; the arm refuses if the artifact
+   * moved since.
+   *
+   * RED ON REVERT: drop the `session.reviewedChanged` branch from `armCertification`.
+   * The arm over the mutated artifact then lands, and the reviewed-revision bind is
+   * gone one step earlier than the confirm's.
+   */
+  it('mutating the artifact between render and arm refuses the arm (stale_review)', async () => {
+    const at = await fixture();
+    // The digest the render carried — captured before the artifact moves.
+    const reviewedDigest = await digestOf(at.sessionId);
+
+    // The artifact changes AFTER the person reviewed it but BEFORE they press hold.
+    await handle.db
+      .update(sessions)
+      .set({ artifact: { branch: 'feat/x', commit: 'changed-since-review' } })
+      .where(eq(sessions.id, at.sessionId));
+
+    const outcome = await armCertification({
+      database: handle.db,
+      viewerId: at.ada,
+      sessionId: at.sessionId,
+      authorizedRoomId: at.roomId,
+      reviewedDigest,
+    });
+    expect(outcome).toEqual({ ok: false, reason: 'stale_review' });
+    expect((await read(at.sessionId))[0]?.armedBy).toBeNull();
+  });
+
+  /* THE CONTROL: an unchanged artifact — the reviewed digest still matches — arms. */
+  it('arming with the reviewed digest of the current artifact succeeds', async () => {
+    const at = await fixture();
+    const reviewedDigest = await digestOf(at.sessionId);
+    const outcome = await armCertification({
+      database: handle.db,
+      viewerId: at.ada,
+      sessionId: at.sessionId,
+      authorizedRoomId: at.roomId,
+      reviewedDigest,
+    });
+    expect(outcome).toEqual({ ok: true });
+    expect((await read(at.sessionId))[0]?.armedBy).toBe(at.ada);
+  });
+});
+
+describe('a certification needs a REVIEWABLE artifact (#121 round-6 finding 2)', () => {
+  /**
+   * AN EMPTY `{}` IS NOT REVIEWABLE. `SessionArtifact` has every field optional, so
+   * `{}` is non-null JSONB the round-5 null-checks accepted — a signature on a blank
+   * page. Arm and confirm now require a non-empty branch AND commit.
+   *
+   * RED ON REVERT: restore `session.artifact === null` (from `!isReviewableArtifact`)
+   * in `armCertification`. The arm over `{}` then lands.
+   */
+  it('arming an EMPTY {} artifact is refused', async () => {
+    const at = await fixture();
+    const sid = await settledWithArtifact(at, {});
+    const outcome = await armCertification({
+      database: handle.db,
+      viewerId: at.ada,
+      sessionId: sid,
+      authorizedRoomId: at.roomId,
+      reviewedDigest: await digestOf(sid),
+    });
+    expect(outcome).toEqual({ ok: false, reason: 'no_artifact' });
+    expect((await read(sid))[0]?.armedBy).toBeNull();
+  });
+
+  it('arming a PARTIAL artifact (branch only, no commit) is refused', async () => {
+    const at = await fixture();
+    const sid = await settledWithArtifact(at, { branch: 'feat/x' });
+    const outcome = await armCertification({
+      database: handle.db,
+      viewerId: at.ada,
+      sessionId: sid,
+      authorizedRoomId: at.roomId,
+      reviewedDigest: await digestOf(sid),
+    });
+    expect(outcome).toEqual({ ok: false, reason: 'no_artifact' });
+  });
+
+  /**
+   * THE TABLE, not the function: even with every application guard gone, a certifier
+   * cannot be named over an empty `{}`.
+   *
+   * RED ON REVERT: revert `atrium_sessions_certify_needs_artifact` to the 0034
+   * null-only body (drizzle/0038). The complete receipt over `{}` then writes.
+   */
+  it('the TABLE refuses a certifier over an empty {} artifact (drizzle/0038)', async () => {
+    const at = await fixture();
+    const sid = await settledWithArtifact(at, {});
+    await handle.db
+      .update(sessions)
+      .set({ certifyArmedBy: at.ada, certifyArmedAt: sql`now() - make_interval(secs => 3)` })
+      .where(eq(sessions.id, sid));
+    const why = await refusal(
+      handle.db
+        .update(sessions)
+        .set({ certifiedBy: at.ada, certifiedAt: sql`now()`, certifiedHeldMs: 2400 })
+        .where(eq(sessions.id, sid)),
+    );
+    expect(why).toMatch(/reviewable|empty work|branch\+commit|no branch/i);
+    expect((await read(sid))[0]?.certifiedBy).toBeNull();
+  });
+
+  /* THE CONTROL: a well-formed artifact (branch AND commit) still certifies through
+     the app path, so the guard refuses the empty shape, not the honest one. */
+  it('a well-formed artifact still arms and certifies', async () => {
+    const at = await fixture();
+    const sid = await settledWithArtifact(at, { branch: 'feat/y', commit: 'deadbee' });
+    expect(
+      await armCertification({
+        database: handle.db,
+        viewerId: at.ada,
+        sessionId: sid,
+        authorizedRoomId: at.roomId,
+        reviewedDigest: await digestOf(sid),
+      }),
+    ).toEqual({ ok: true });
+    await backdateArm(sid, CERTIFY_REQUIRED_HOLD_MS + 500);
+    expect(
+      await certifySession({
+        database: handle.db,
+        viewerId: at.ada,
+        sessionId: sid,
+        authorizedRoomId: at.roomId,
+      }),
+    ).toEqual({ ok: true });
+    expect((await read(sid))[0]?.certifiedBy).toBe(at.ada);
+  });
+});
+
+describe('a cancel wins its race with a late arm (#121 round-6 finding 3)', () => {
+  /**
+   * THE REORDER. begin→arm R1 fires, then release→disarm R2, but the network
+   * delivers R2 FIRST: it reaches the server before its own arm, finds nothing to
+   * clear — and the round-5 disarm did nothing more, so the delayed R1 then wrote a
+   * fresh live nonce a direct confirm could spend. The disarm now raises a cancel
+   * watermark even with no arm present; the late arm at or below it refuses.
+   *
+   * RED ON REVERT: drop the `attemptSeq <= session.cancelSeq` branch from
+   * `armCertification`. The reordered arm then lands its nonce, and the direct
+   * confirm after the gate certifies the released hold.
+   */
+  it('disarm-before-arm (reordered) blocks the late arm, and the direct confirm finds nothing', async () => {
+    const at = await fixture();
+    const reviewedDigest = await digestOf(at.sessionId);
+
+    // R2 reaches the server first — the release of a hold whose arm has not landed.
+    expect(
+      await disarmCertification({
+        database: handle.db,
+        viewerId: at.ada,
+        sessionId: at.sessionId,
+        authorizedRoomId: at.roomId,
+        attemptSeq: 1000,
+      }),
+    ).toEqual({ ok: true });
+
+    // R1, the delayed arm for the SAME press, arrives second — and is superseded.
+    const armed = await armCertification({
+      database: handle.db,
+      viewerId: at.ada,
+      sessionId: at.sessionId,
+      authorizedRoomId: at.roomId,
+      reviewedDigest,
+      attemptSeq: 1000,
+    });
+    expect(armed).toEqual({ ok: false, reason: 'arm_superseded' });
+    expect((await read(at.sessionId))[0]?.armedBy).toBeNull();
+
+    // A direct confirm after the gate has nothing to spend.
+    const outcome = await certifySession({
+      database: handle.db,
+      viewerId: at.ada,
+      sessionId: at.sessionId,
+      authorizedRoomId: at.roomId,
+      attemptSeq: 1000,
+    });
+    expect(outcome).toEqual({ ok: false, reason: 'not_armed' });
+    expect((await read(at.sessionId))[0]?.certifiedBy).toBeNull();
+  });
+
+  /* THE CONTROL: a genuinely FRESH press after a cancel mints a strictly larger
+     sequence, clears the watermark's grip, and certifies. The cancel blocks the
+     stale attempt, not every future one. */
+  it('a fresh press after a cancel (a larger sequence) arms and certifies', async () => {
+    const at = await fixture();
+    const reviewedDigest = await digestOf(at.sessionId);
+    await disarmCertification({
+      database: handle.db,
+      viewerId: at.ada,
+      sessionId: at.sessionId,
+      authorizedRoomId: at.roomId,
+      attemptSeq: 1000,
+    });
+    expect(
+      await armCertification({
+        database: handle.db,
+        viewerId: at.ada,
+        sessionId: at.sessionId,
+        authorizedRoomId: at.roomId,
+        reviewedDigest,
+        attemptSeq: 2000,
+      }),
+    ).toEqual({ ok: true });
+    await backdateArm(at.sessionId, CERTIFY_REQUIRED_HOLD_MS + 500);
+    expect(
+      await certifySession({
+        database: handle.db,
+        viewerId: at.ada,
+        sessionId: at.sessionId,
+        authorizedRoomId: at.roomId,
+        attemptSeq: 2000,
+      }),
+    ).toEqual({ ok: true });
+    expect((await read(at.sessionId))[0]?.certifiedBy).toBe(at.ada);
+  });
+
+  /**
+   * THE CONFIRM COMPLETES THE PRESS IT BEGAN. A confirm carrying a sequence that is
+   * not the pending arm's is refused — an older press cannot confirm a newer arm.
+   *
+   * RED ON REVERT: drop the `attemptSeq !== undefined && session.armSeq !== attemptSeq`
+   * clause from `certifySession`. The mismatched confirm then certifies.
+   */
+  it('a confirm whose sequence is not the pending arm’s is refused', async () => {
+    const at = await fixture();
+    const reviewedDigest = await digestOf(at.sessionId);
+    await armCertification({
+      database: handle.db,
+      viewerId: at.ada,
+      sessionId: at.sessionId,
+      authorizedRoomId: at.roomId,
+      reviewedDigest,
+      attemptSeq: 3000,
+    });
+    await backdateArm(at.sessionId, CERTIFY_REQUIRED_HOLD_MS + 500);
+    // A confirm for a DIFFERENT press.
+    expect(
+      await certifySession({
+        database: handle.db,
+        viewerId: at.ada,
+        sessionId: at.sessionId,
+        authorizedRoomId: at.roomId,
+        attemptSeq: 9999,
+      }),
+    ).toEqual({ ok: false, reason: 'not_armed' });
+    // The matching one still lands.
+    expect(
+      await certifySession({
+        database: handle.db,
+        viewerId: at.ada,
+        sessionId: at.sessionId,
+        authorizedRoomId: at.roomId,
+        attemptSeq: 3000,
+      }),
+    ).toEqual({ ok: true });
   });
 });

@@ -267,6 +267,20 @@
       "when": 1787481600000,
       "tag": "0037_the_arm_carries_a_nonce_and_the_reviewed_digest",
       "breakpoints": true
+    },
+    {
+      "idx": 38,
+      "version": "7",
+      "when": 1787568000000,
+      "tag": "0038_a_certification_needs_a_reviewable_artifact",
+      "breakpoints": true
+    },
+    {
+      "idx": 39,
+      "version": "7",
+      "when": 1787654400000,
+      "tag": "0039_the_arm_carries_an_attempt_sequence_and_a_cancel_watermark",
+      "breakpoints": true
     }
   ]
 }

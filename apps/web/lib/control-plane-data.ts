@@ -10,7 +10,7 @@ import {
   sessions,
   users,
 } from '@atrium/db';
-import { and, asc, desc, eq, gt, inArray } from 'drizzle-orm';
+import { and, asc, desc, eq, getTableColumns, gt, inArray, sql } from 'drizzle-orm';
 
 /* ---------------------------------------------------------------------------
  * The control-plane read model — issue #121.
@@ -72,6 +72,22 @@ export interface ControlSessionRow {
   readonly spendMicros: number;
   readonly exitSummary: string | null;
   readonly artifact: SessionArtifact | null;
+  /**
+   * The `md5(artifact::text)` of the artifact THIS row carries — the digest the
+   * client hands back on arm so the server can bind the signature to the reviewed
+   * revision (round-6 finding 1). NULL when there is no artifact.
+   */
+  readonly artifactDigest: string | null;
+  /**
+   * The raw id of the human who certified it — carried BESIDE the display name so
+   * the render backstop can check the armer and the certifier are the SAME person
+   * (round-6 finding 4). The read model used to keep only the name and kind, which
+   * cannot answer "same principal?"; a certification whose armer ≠ certifier is not
+   * a held human signature and `sessionCertified` refuses it. NULL until certified.
+   */
+  readonly certifiedById: string | null;
+  /** The raw id of the human who ARMED the hold — the other half of the same check. */
+  readonly certifyArmedById: string | null;
   /** The human who certified it, resolved to a display name; null until certified. */
   readonly certifiedByName: string | null;
   /**
@@ -221,7 +237,15 @@ export async function loadControlPlane(
       .where(eq(plans.roomId, roomId))
       .orderBy(asc(plans.createdAt), asc(plans.id)),
     database
-      .select()
+      .select({
+        ...getTableColumns(sessions),
+        /* THE DIGEST OF THE ARTIFACT THIS RENDER CARRIES — `md5(artifact::text)`,
+           the same expression the arm and confirm compute, so the client can hand
+           it back as its attestation of what it reviewed and the server can bind
+           the signature to that exact revision (round-6 finding 1). NULL for a null
+           artifact. */
+        artifactDigest: sql<string | null>`md5(${sessions.artifact}::text)`,
+      })
       .from(sessions)
       .where(eq(sessions.roomId, roomId))
       .orderBy(asc(sessions.createdAt), asc(sessions.id)),
@@ -311,6 +335,9 @@ export async function loadControlPlane(
       spendMicros: session.spendMicros,
       exitSummary: session.exitSummary,
       artifact: session.artifact ?? null,
+      artifactDigest: session.artifactDigest ?? null,
+      certifiedById: session.certifiedBy,
+      certifyArmedById: session.certifyArmedBy,
       certifiedByName:
         session.certifiedBy === null ? null : (principalNameById.get(session.certifiedBy) ?? null),
       certifiedByKind:

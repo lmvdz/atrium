@@ -41,7 +41,11 @@
  * ------------------------------------------------------------------------- */
 
 import { epistemicStateFromAcceptance } from '@atrium/core';
-import { CERTIFY_REQUIRED_HOLD_MS } from '@/lib/certify-hold';
+import {
+  CERTIFY_RECEIPT_SLACK_MS,
+  CERTIFY_REQUIRED_HOLD_MS,
+  isReviewableArtifact,
+} from '@/lib/certify-hold';
 import type {
   ControlAgentRow,
   ControlDecisionRow,
@@ -92,14 +96,24 @@ import { hardestState } from '../model/records';
  *     human-only act; a row whose armer is null or non-human is not a held human
  *     signature). The DB (0033/0036) binds armer-is-human and armer-is-certifier;
  *     the render fails closed on the armer identity it is handed.
+ *   * INTERNALLY CONSISTENT (round-6 finding 4) — the armer and the certifier are
+ *     the SAME principal id, and the recorded `certified_held_ms` agrees with the
+ *     interval `certified_at − certify_armed_at` its own stamps bracket (and that
+ *     interval meets the gate). The round-5 render checked the parts were present
+ *     but not that they cohere, so an Ada-armed/Bob-signed row, or a held duration
+ *     no interval could produce, still read `✓`. The read model now carries both
+ *     principal ids and both timestamps so the render can make the same agreement
+ *     check 0036 makes at the table.
  *
  * Any missing or invalid part renders `~` — the machine's own account — never the
- * privileged glyph. This is the exact fail-open the round-4 gauntlet found: the
- * write path refused these shapes, the render did not.
+ * privileged glyph. This is the exact fail-open the round-4/round-5 gauntlet found:
+ * the write path refused these shapes, the render did not.
  */
 export function sessionCertified(session: ControlSessionRow): boolean {
-  /* A signature is only for a settled landing that produced reviewable work. */
-  if (session.status !== 'settled' || session.artifact === null) return false;
+  /* A signature is only for a settled landing that produced REVIEWABLE work — an
+     artifact with the minimum content (branch AND commit) a human can sign, not a
+     null and not an empty `{}` (round-6 finding 2). */
+  if (session.status !== 'settled' || !isReviewableArtifact(session.artifact)) return false;
 
   /* The certifier: a present name, and a human kind through the one predicate. */
   if (session.certifiedByName === null || session.certifiedByKind === null) return false;
@@ -118,12 +132,54 @@ export function sessionCertified(session: ControlSessionRow): boolean {
      signature whose arm was performed by nobody (or by an unreadable/non-human
      kind that fails closed) is not a held human certification. */
   if (session.certifyArmedByName === null || session.certifyArmedByKind === null) return false;
-  return epistemicStateFromAcceptance(session.certifyArmedByKind, null) === 'confirmed';
+  if (epistemicStateFromAcceptance(session.certifyArmedByKind, null) !== 'confirmed') return false;
+
+  /* THE RECEIPT AGREES WITH ITSELF (round-6 finding 4). The write path (0036)
+     refuses an inconsistent one, but the mandated render backstop checked only that
+     the parts were PRESENT, not that they cohere — so an armer ≠ certifier, or a
+     held duration that no interval its own stamps bracket could produce, still read
+     `✓`. The read model now carries both principal ids and the two timestamps, and
+     the tick is minted only when they agree:
+
+       * THE ARMER IS THE CERTIFIER. One person's hold, that same person's signature
+         — not Ada's arm under Bob's name. Both ids present and equal. */
+  if (
+    session.certifiedById === null ||
+    session.certifyArmedById === null ||
+    session.certifiedById !== session.certifyArmedById
+  ) {
+    return false;
+  }
+  /*   * THE DURATION MATCHES THE INTERVAL ITS OWN STAMPS BRACKET, and that interval
+         meets the gate. `certifiedAt − certifyArmedAt` is the elapsed hold; a
+         `certified_held_ms` that disagrees beyond the confirm's SELECT→UPDATE slack
+         is a number typed into a column, not a measurement (the same check 0036
+         makes at the table). A `certifyArmedAt ≥ certifiedAt` (zero or negative
+         interval) fails the gate clause outright. */
+  const armedMs = Date.parse(session.certifyArmedAt);
+  const certifiedMs = Date.parse(session.certifiedAt);
+  if (!Number.isFinite(armedMs) || !Number.isFinite(certifiedMs)) return false;
+  const elapsedMs = certifiedMs - armedMs;
+  if (elapsedMs < CERTIFY_REQUIRED_HOLD_MS) return false;
+  return Math.abs(session.certifiedHeldMs - elapsedMs) <= CERTIFY_RECEIPT_SLACK_MS;
 }
 
-/** A settled session carries an artifact no human has certified yet. */
+/**
+ * A settled session carries REVIEWABLE work no human has begun to certify yet.
+ *
+ * "Begun to certify" is `certifiedById === null`, not `!sessionCertified`: a row
+ * that DOES carry a certifier but fails the fail-closed backstop (an inconsistent
+ * or defective signature) is not awaiting a fresh human — it already has a
+ * signature, just not one worth a `✓`. Such a row falls through to `self_reported`
+ * (`~`, round-6 finding 4) rather than back to `■` "needs you", which would invite
+ * a certification the immutable table (drizzle/0033) would refuse anyway.
+ */
 export function sessionAwaitsLanding(session: ControlSessionRow): boolean {
-  return session.status === 'settled' && session.artifact !== null && !sessionCertified(session);
+  return (
+    session.status === 'settled' &&
+    isReviewableArtifact(session.artifact) &&
+    session.certifiedById === null
+  );
 }
 
 /**

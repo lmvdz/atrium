@@ -34,6 +34,47 @@ export const CERTIFY_REQUIRED_HOLD_MS = 2000;
 export const CERTIFY_HOLD_MS = 2400;
 
 /**
+ * The tolerance, in milliseconds, between the held duration a receipt RECORDS and
+ * the arm→signature interval its own two stamps bracket.
+ *
+ * #121 round-6 finding 4. The confirm measures `certified_held_ms` at its SELECT
+ * and stamps `certified_at` at its UPDATE, a few milliseconds apart; the render
+ * derives the interval from `certified_at - certify_armed_at`. The two agree only
+ * within that gap, so both the DB backstop (drizzle/0036) and the render check
+ * `|certified_held_ms − interval|` against this slack. 1000ms is generous and
+ * still an order of magnitude under the smallest inconsistency a fabricated shape
+ * describes (a 2000ms hold across a 0ms interval). The DB repeats the number
+ * because a trigger cannot import it — the same reason the gate is repeated there.
+ */
+export const CERTIFY_RECEIPT_SLACK_MS = 1000;
+
+/**
+ * A settled session's artifact is REVIEWABLE — the minimum content a human can put
+ * a signature on — only when it names both a non-empty branch AND a non-empty
+ * commit.
+ *
+ * #121 round-6 finding 2. `SessionArtifact` has every field optional, so a non-null
+ * but empty `{}` (or a half-filled `{ branch }`) is JSONB the null-checks all
+ * accept — and a coherent receipt then earned a `✓` over an artifact with nothing
+ * in it to review. A signature is a signature OF something specific: the branch and
+ * commit are the least that makes "this human signed THIS artifact" mean anything.
+ * The server guards, the render backstop, and the DB trigger (drizzle/0038) all read
+ * this same shape, so an empty artifact is refused at arm, at confirm, at the table,
+ * and at the glyph alike.
+ *
+ * Whitespace-only is empty: a branch of spaces names no branch. Trimmed length is
+ * the test.
+ */
+export function isReviewableArtifact(
+  artifact: { branch?: string; commit?: string } | null | undefined,
+): boolean {
+  if (artifact === null || artifact === undefined) return false;
+  const branch = typeof artifact.branch === 'string' ? artifact.branch.trim() : '';
+  const commit = typeof artifact.commit === 'string' ? artifact.commit.trim() : '';
+  return branch.length > 0 && commit.length > 0;
+}
+
+/**
  * How long a pending arm stays live.
  *
  * An arm is a stated intention to certify, not a standing permission. Left
