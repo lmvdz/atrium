@@ -48,7 +48,9 @@ import {
   pinHardestFirst,
 } from '../src/components/control/ControlPin';
 import { ControlPlane } from '../src/components/control/ControlPlane';
+import { ControlSurfaces } from '../src/components/control/ControlSurfaces';
 import { ProcessTree } from '../src/components/control/ProcessTree';
+import { ReviewPane } from '../src/components/control/ReviewPane';
 import { HoldToAct } from '../src/components/primitives/HoldToAct';
 
 /* ControlPlane is a client component that reaches for the app router and Link.
@@ -354,6 +356,36 @@ describe('a plan and an agent roll up the hardest thing beneath them', () => {
       ],
     };
     expect(glyphFor(agentState(agent, true))).toBe('✗');
+  });
+
+  /**
+   * THE AGENT ROLLS UP ITS PLANS, NOT ONLY ITS SESSIONS (#121 round-8, fix 5).
+   *
+   * An empty SETTLED plan has a state of its own — a machine's report of its own
+   * completion, `~` (`planState`). The agent must be at least as hard as any plan
+   * under it; the session-only rollup skipped a plan with no sessions entirely, so
+   * such a plan rendered `~` while its parent agent stayed `·` — the agent claiming
+   * less than its child.
+   *
+   * MUTATION THAT MUST TURN THIS RED: roll the agent up over `plan.sessions` again
+   * (skipping `planState`). The empty settled plan then contributes nothing and the
+   * agent falls back to `·` routine, softer than the `~` plan beneath it.
+   */
+  it('an agent reflects an empty SETTLED plan (~), not just its sessions', () => {
+    const emptySettled = plan({ id: 'p-empty', status: 'settled', sessions: [] });
+    // The plan itself reads ~ — the machine's own account of its completion.
+    expect(glyphFor(planState(emptySettled, true))).toBe('~');
+    const agent = {
+      userId: 'agent-1',
+      name: 'hexi',
+      host: null,
+      harness: null,
+      model: null,
+      budgetLimitMicros: null,
+      plans: [emptySettled],
+    };
+    // …and the agent is no softer than that plan.
+    expect(glyphFor(agentState(agent, true))).toBe('~');
   });
 });
 
@@ -844,5 +876,86 @@ describe('an abandoned hold disarms on unmount', () => {
     // No press ever began, so there is no arm to clear.
     unmount();
     expect(onCancel).not.toHaveBeenCalled();
+  });
+});
+
+/**
+ * THE EMPTY DECISIONS COPY IS VIEWER-SCOPED, NOT ROOM-WIDE (#121 round-8, fix 2).
+ *
+ * The DECISIONS surface's line list is already filtered to what THIS viewer is owed
+ * (an agent-principal viewer is owed no human-only decision). The empty text used to
+ * read "nothing awaits a human here" — a room-wide claim a hidden item that DOES
+ * await a human would make false. It must describe the viewer's own empty queue.
+ */
+describe('the empty DECISIONS copy speaks to the viewer, not the room', () => {
+  it('an empty decisions surface says nothing is owed to YOU, never that the room holds nothing', () => {
+    const { container } = render(
+      <ControlSurfaces
+        cost={{ warn: false, plans: [] }}
+        decisions={{ count: 0, lines: [] }}
+        unseen={{ count: 0, lines: [] }}
+      />,
+    );
+    const decisions = container.querySelector('[data-surface="decisions"]');
+    expect(decisions?.textContent).toContain('nothing here is owed to you');
+    // The room-wide claim is gone: it cannot lie about a viewer-hidden owed item.
+    expect(decisions?.textContent ?? '').not.toContain('nothing awaits a human here');
+  });
+});
+
+/**
+ * THE FAIL-CLOSED REVIEW COPY NAMES THE RIGHT REASON (#121 round-8, fix 3).
+ *
+ * When a receipt is incomplete, `sessionCertified` correctly renders `~` and the
+ * pane offers no certify — but it used to say the session "produced no artifact to
+ * review" while the artifact was visibly present in the ARTIFACT section above.
+ * The copy must distinguish a genuinely artifact-less settle from a present artifact
+ * under a receipt that does not cohere.
+ */
+describe('the review pane distinguishes no-artifact from an incomplete receipt', () => {
+  const noop = () => {};
+  function pane(session: ControlSessionRow) {
+    return render(
+      <ReviewPane
+        agentName={null}
+        certifyError={null}
+        onArm={noop}
+        onCertify={noop}
+        onDisarm={noop}
+        planTitle={null}
+        session={session}
+        viewerId="ada-id"
+        viewerKind="human"
+      />,
+    );
+  }
+
+  it('a genuinely artifact-less settle still says "produced no artifact to review"', () => {
+    const { container } = pane(session({ status: 'settled', artifact: null }));
+    const cell = container.querySelector('[data-certify="unavailable"]');
+    expect(cell?.textContent).toContain('produced no artifact to review');
+  });
+
+  it('a settled row with a present artifact but an incomplete receipt says the RECEIPT is incomplete', () => {
+    // certifiedById set (so it is not awaiting a fresh human) but the hold receipt
+    // is incomplete — sessionCertified renders `~`, yet the artifact is present.
+    const incomplete = session({
+      status: 'settled',
+      artifact: { branch: 'feat/x', commit: 'abc123' },
+      certifiedById: 'ada-id',
+      certifiedByName: 'Ada',
+      certifiedByKind: 'human',
+      // certifiedHeldMs / stamps left null: the receipt does not cohere.
+    });
+    expect(sessionCertified(incomplete)).toBe(false);
+    expect(sessionAwaitsLanding(incomplete)).toBe(false);
+
+    const { container } = pane(incomplete);
+    const cell = container.querySelector('[data-certify="unavailable"]');
+    expect(cell?.textContent).toContain('receipt is incomplete');
+    // It must NOT claim there is no artifact — the artifact is rendered above.
+    expect(cell?.textContent ?? '').not.toContain('produced no artifact');
+    // And the artifact really is present in the pane.
+    expect(container.querySelector('[data-artifact-branch]')?.textContent).toContain('feat/x');
   });
 });

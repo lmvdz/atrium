@@ -268,6 +268,9 @@ describe('the SERVER refuses a non-human certifier', () => {
       viewerId: at.hexi,
       sessionId: at.sessionId,
       authorizedRoomId: at.roomId,
+      // A well-formed token is required now (round-8); it is refused not_human long
+      // before the attempt check, so a throwaway is the honest input here.
+      attemptToken: randomUUID(),
     });
     expect(outcome).toEqual({ ok: false, reason: 'not_human' });
     const [row] = await read(at.sessionId);
@@ -323,6 +326,8 @@ describe('the hold is measured by the server, and there is nothing to forge', ()
       viewerId: at.ada,
       sessionId: at.sessionId,
       authorizedRoomId: at.roomId,
+      // A well-formed token, but no arm was ever taken: refused not_armed.
+      attemptToken: randomUUID(),
     });
     expect(outcome).toEqual({ ok: false, reason: 'not_armed' });
     expect((await read(at.sessionId))[0]?.certifiedBy).toBeNull();
@@ -334,15 +339,14 @@ describe('the hold is measured by the server, and there is nothing to forge', ()
    */
   it('a certify IMMEDIATELY after the arm is refused — the interval is ~0ms', async () => {
     const at = await fixture();
-    expect((await arm({ viewerId: at.ada, sessionId: at.sessionId, roomId: at.roomId })).ok).toBe(
-      true,
-    );
+    const token = await armOk({ viewerId: at.ada, sessionId: at.sessionId, roomId: at.roomId });
 
     const outcome = await certifySession({
       database: handle.db,
       viewerId: at.ada,
       sessionId: at.sessionId,
       authorizedRoomId: at.roomId,
+      attemptToken: token,
     });
     expect(outcome).toEqual({ ok: false, reason: 'held_too_short' });
     expect((await read(at.sessionId))[0]?.certifiedBy).toBeNull();
@@ -350,7 +354,7 @@ describe('the hold is measured by the server, and there is nothing to forge', ()
 
   it('a hold past the gate certifies, and the recorded duration is the MEASURED one', async () => {
     const at = await fixture();
-    await armOk({ viewerId: at.ada, sessionId: at.sessionId, roomId: at.roomId });
+    const token = await armOk({ viewerId: at.ada, sessionId: at.sessionId, roomId: at.roomId });
     /* The arm stamp is the server's, so ageing it is the only way to make the
        server believe a hold happened — which is the property under test. */
     await backdateArm(at.sessionId, CERTIFY_REQUIRED_HOLD_MS + 500);
@@ -361,6 +365,7 @@ describe('the hold is measured by the server, and there is nothing to forge', ()
         viewerId: at.ada,
         sessionId: at.sessionId,
         authorizedRoomId: at.roomId,
+        attemptToken: token,
       }),
     ).toEqual({ ok: true });
 
@@ -381,7 +386,7 @@ describe('the hold is measured by the server, and there is nothing to forge', ()
    */
   it("a second person cannot confirm somebody else's arm", async () => {
     const at = await fixture();
-    await armOk({ viewerId: at.ada, sessionId: at.sessionId, roomId: at.roomId });
+    const token = await armOk({ viewerId: at.ada, sessionId: at.sessionId, roomId: at.roomId });
     await backdateArm(at.sessionId, CERTIFY_REQUIRED_HOLD_MS + 500);
 
     const outcome = await certifySession({
@@ -389,6 +394,8 @@ describe('the hold is measured by the server, and there is nothing to forge', ()
       viewerId: at.bob,
       sessionId: at.sessionId,
       authorizedRoomId: at.roomId,
+      // Bob even presents ADA's token — the arm is still not his, so not_armed.
+      attemptToken: token,
     });
     expect(outcome).toEqual({ ok: false, reason: 'not_armed' });
     expect((await read(at.sessionId))[0]?.certifiedBy).toBeNull();
@@ -403,7 +410,7 @@ describe('the hold is measured by the server, and there is nothing to forge', ()
    */
   it('a STALE arm is refused, not rewarded for being old', async () => {
     const at = await fixture();
-    await armOk({ viewerId: at.ada, sessionId: at.sessionId, roomId: at.roomId });
+    const token = await armOk({ viewerId: at.ada, sessionId: at.sessionId, roomId: at.roomId });
     await backdateArm(at.sessionId, CERTIFY_ARM_TTL_MS + 60_000);
 
     const outcome = await certifySession({
@@ -411,6 +418,7 @@ describe('the hold is measured by the server, and there is nothing to forge', ()
       viewerId: at.ada,
       sessionId: at.sessionId,
       authorizedRoomId: at.roomId,
+      attemptToken: token,
     });
     expect(outcome).toEqual({ ok: false, reason: 'arm_expired' });
     expect((await read(at.sessionId))[0]?.certifiedBy).toBeNull();
@@ -427,6 +435,7 @@ describe('the hold is measured by the server, and there is nothing to forge', ()
         viewerId: at.ada,
         sessionId: at.openSessionId,
         authorizedRoomId: at.roomId,
+        attemptToken: randomUUID(),
       }),
     ).toEqual({ ok: false, reason: 'not_settled' });
   });
@@ -475,7 +484,7 @@ describe('the arm stamp is the real clock, not the transaction start (#121 round
     } finally {
       await reserved.release();
     }
-    expect(armed.ok).toBe(true);
+    if (!armed.ok) throw new Error(`the arm was refused (${armed.reason}) and the case needs it`);
 
     /* Immediately confirm. With `clock_timestamp()` the arm stamped just now, so the
        measured interval is ~0ms and this is refused; with `now()` the stamp is >2s
@@ -485,6 +494,7 @@ describe('the arm stamp is the real clock, not the transaction start (#121 round
       viewerId: at.ada,
       sessionId: at.sessionId,
       authorizedRoomId: at.roomId,
+      attemptToken: armed.attemptToken,
     });
     expect(outcome).toEqual({ ok: false, reason: 'held_too_short' });
     expect((await read(at.sessionId))[0]?.certifiedBy).toBeNull();
@@ -503,7 +513,7 @@ describe('the membership is re-derived in the write transaction', () => {
    */
   it('a membership revoked after the caller resolved the room refuses the certify', async () => {
     const at = await fixture();
-    await armOk({ viewerId: at.ada, sessionId: at.sessionId, roomId: at.roomId });
+    const token = await armOk({ viewerId: at.ada, sessionId: at.sessionId, roomId: at.roomId });
     await backdateArm(at.sessionId, CERTIFY_REQUIRED_HOLD_MS + 500);
 
     // The revocation, landing between the caller's authorized read and the write.
@@ -517,6 +527,8 @@ describe('the membership is re-derived in the write transaction', () => {
       // The caller's STALE answer, handed in exactly as the Server Action would.
       authorizedRoomId: at.roomId,
       sessionId: at.sessionId,
+      // A live, valid token — the membership re-read still refuses first.
+      attemptToken: token,
     });
     expect(outcome).toEqual({ ok: false, reason: 'not_in_room' });
     expect((await read(at.sessionId))[0]?.certifiedBy).toBeNull();
@@ -549,7 +561,7 @@ describe('the membership is re-derived in the write transaction', () => {
    */
   it('a workspace_members revocation racing inside the write refuses the certify', async () => {
     const at = await fixture();
-    await armOk({ viewerId: at.ada, sessionId: at.sessionId, roomId: at.roomId });
+    const token = await armOk({ viewerId: at.ada, sessionId: at.sessionId, roomId: at.roomId });
     await backdateArm(at.sessionId, CERTIFY_REQUIRED_HOLD_MS + 500);
 
     /* A SECOND connection holds an uncommitted DELETE of ada's workspace-member
@@ -572,6 +584,7 @@ describe('the membership is re-derived in the write transaction', () => {
         viewerId: at.ada,
         authorizedRoomId: at.roomId,
         sessionId: at.sessionId,
+        attemptToken: token,
       });
 
       /* Give the un-locked (reverted) path time to certify and the locked path
@@ -597,6 +610,7 @@ describe('the membership is re-derived in the write transaction', () => {
       viewerId: at.ada,
       sessionId: at.sessionId,
       authorizedRoomId: elsewhere.roomId,
+      attemptToken: randomUUID(),
     });
     // Not a member of `elsewhere`, so the membership re-read refuses first.
     expect(outcome).toEqual({ ok: false, reason: 'not_in_room' });
@@ -605,7 +619,7 @@ describe('the membership is re-derived in the write transaction', () => {
 
 describe('a certification is written once', () => {
   async function certify(at: Fixture): Promise<void> {
-    await armOk({ viewerId: at.ada, sessionId: at.sessionId, roomId: at.roomId });
+    const token = await armOk({ viewerId: at.ada, sessionId: at.sessionId, roomId: at.roomId });
     await backdateArm(at.sessionId, CERTIFY_REQUIRED_HOLD_MS + 500);
     expect(
       await certifySession({
@@ -613,6 +627,7 @@ describe('a certification is written once', () => {
         viewerId: at.ada,
         sessionId: at.sessionId,
         authorizedRoomId: at.roomId,
+        attemptToken: token,
       }),
     ).toEqual({ ok: true });
   }
@@ -627,6 +642,7 @@ describe('a certification is written once', () => {
         viewerId: at.bob,
         sessionId: at.sessionId,
         authorizedRoomId: at.roomId,
+        attemptToken: randomUUID(),
       }),
     ).toEqual({ ok: false, reason: 'already_certified' });
     expect((await read(at.sessionId))[0]?.certifiedBy).toBe(at.ada);
@@ -783,6 +799,7 @@ describe('a certification is bound to an artifact to sign (#121 CS-1)', () => {
       viewerId: at.ada,
       sessionId: sid,
       authorizedRoomId: at.roomId,
+      attemptToken: randomUUID(),
     });
     expect(outcome).toEqual({ ok: false, reason: 'no_artifact' });
     expect((await read(sid))[0]?.certifiedBy).toBeNull();
@@ -898,12 +915,14 @@ describe('a cancelled hold leaves no live arm (#121 CS-3)', () => {
     expect((await read(at.sessionId))[0]?.armedAt).toBeNull();
     expect((await read(at.sessionId))[0]?.armedBy).toBeNull();
 
-    // Even after the gate would have elapsed, a direct confirm finds no arm.
+    // Even after the gate would have elapsed, a direct confirm finds no arm — even
+    // carrying the released press's token, whose nonce the disarm cleared.
     const outcome = await certifySession({
       database: handle.db,
       viewerId: at.ada,
       sessionId: at.sessionId,
       authorizedRoomId: at.roomId,
+      attemptToken: token,
     });
     expect(outcome).toEqual({ ok: false, reason: 'not_armed' });
     expect((await read(at.sessionId))[0]?.certifiedBy).toBeNull();
@@ -916,7 +935,7 @@ describe('a cancelled hold leaves no live arm (#121 CS-3)', () => {
    */
   it('a second confirm on a consumed arm is refused (already certified)', async () => {
     const at = await fixture();
-    await armOk({ viewerId: at.ada, sessionId: at.sessionId, roomId: at.roomId });
+    const token = await armOk({ viewerId: at.ada, sessionId: at.sessionId, roomId: at.roomId });
     await backdateArm(at.sessionId, CERTIFY_REQUIRED_HOLD_MS + 500);
     expect(
       await certifySession({
@@ -924,6 +943,7 @@ describe('a cancelled hold leaves no live arm (#121 CS-3)', () => {
         viewerId: at.ada,
         sessionId: at.sessionId,
         authorizedRoomId: at.roomId,
+        attemptToken: token,
       }),
     ).toEqual({ ok: true });
 
@@ -933,6 +953,7 @@ describe('a cancelled hold leaves no live arm (#121 CS-3)', () => {
       viewerId: at.ada,
       sessionId: at.sessionId,
       authorizedRoomId: at.roomId,
+      attemptToken: token,
     });
     expect(second).toEqual({ ok: false, reason: 'already_certified' });
   });
@@ -944,7 +965,7 @@ describe('a cancelled hold leaves no live arm (#121 CS-3)', () => {
    */
   it('a successful confirm consumes the arm nonce (it is null on the certified row)', async () => {
     const at = await fixture();
-    await armOk({ viewerId: at.ada, sessionId: at.sessionId, roomId: at.roomId });
+    const token = await armOk({ viewerId: at.ada, sessionId: at.sessionId, roomId: at.roomId });
     // The arm minted a nonce.
     const [armed] = await handle.db
       .select({ nonce: sessions.certifyArmNonce })
@@ -959,6 +980,7 @@ describe('a cancelled hold leaves no live arm (#121 CS-3)', () => {
         viewerId: at.ada,
         sessionId: at.sessionId,
         authorizedRoomId: at.roomId,
+        attemptToken: token,
       }),
     ).toEqual({ ok: true });
 
@@ -1001,6 +1023,8 @@ describe('a cancelled hold leaves no live arm (#121 CS-3)', () => {
       viewerId: at.ada,
       sessionId: at.sessionId,
       authorizedRoomId: at.roomId,
+      // Any well-formed token: the forced arm carries no live nonce to match.
+      attemptToken: randomUUID(),
     });
     expect(outcome).toEqual({ ok: false, reason: 'not_armed' });
     expect((await read(at.sessionId))[0]?.certifiedBy).toBeNull();
@@ -1052,6 +1076,8 @@ describe('the disarm authorizes on arm-ownership, not membership (#121 round-7 f
       viewerId: at.ada,
       sessionId: at.sessionId,
       authorizedRoomId: at.roomId,
+      // The released press's token — its arm was cleared by the disarm, so not_armed.
+      attemptToken: token,
     });
     expect(outcome).toEqual({ ok: false, reason: 'not_armed' });
     expect((await read(at.sessionId))[0]?.certifiedBy).toBeNull();
@@ -1112,7 +1138,7 @@ describe('a certification binds to the artifact reviewed (#121 round-5 finding 3
    */
   it('mutating the artifact between arm and confirm refuses the confirm', async () => {
     const at = await fixture();
-    await armOk({ viewerId: at.ada, sessionId: at.sessionId, roomId: at.roomId });
+    const token = await armOk({ viewerId: at.ada, sessionId: at.sessionId, roomId: at.roomId });
     await backdateArm(at.sessionId, CERTIFY_REQUIRED_HOLD_MS + 500);
 
     // The artifact changes AFTER the hold was armed over the original — the
@@ -1129,6 +1155,7 @@ describe('a certification binds to the artifact reviewed (#121 round-5 finding 3
       viewerId: at.ada,
       sessionId: at.sessionId,
       authorizedRoomId: at.roomId,
+      attemptToken: token,
     });
     expect(outcome).toEqual({ ok: false, reason: 'artifact_changed' });
     expect((await read(at.sessionId))[0]?.certifiedBy).toBeNull();
@@ -1138,7 +1165,7 @@ describe('a certification binds to the artifact reviewed (#121 round-5 finding 3
      mutation, not the honest confirm. */
   it('an unchanged artifact certifies through the bind', async () => {
     const at = await fixture();
-    await armOk({ viewerId: at.ada, sessionId: at.sessionId, roomId: at.roomId });
+    const token = await armOk({ viewerId: at.ada, sessionId: at.sessionId, roomId: at.roomId });
     await backdateArm(at.sessionId, CERTIFY_REQUIRED_HOLD_MS + 500);
     expect(
       await certifySession({
@@ -1146,6 +1173,7 @@ describe('a certification binds to the artifact reviewed (#121 round-5 finding 3
         viewerId: at.ada,
         sessionId: at.sessionId,
         authorizedRoomId: at.roomId,
+        attemptToken: token,
       }),
     ).toEqual({ ok: true });
     expect((await read(at.sessionId))[0]?.certifiedBy).toBe(at.ada);
@@ -1376,7 +1404,7 @@ describe('a certification needs a REVIEWABLE artifact (#121 round-6 finding 2)',
   it('a well-formed artifact still arms and certifies', async () => {
     const at = await fixture();
     const sid = await settledWithArtifact(at, { branch: 'feat/y', commit: 'deadbee' });
-    expect((await arm({ viewerId: at.ada, sessionId: sid, roomId: at.roomId })).ok).toBe(true);
+    const token = await armOk({ viewerId: at.ada, sessionId: sid, roomId: at.roomId });
     await backdateArm(sid, CERTIFY_REQUIRED_HOLD_MS + 500);
     expect(
       await certifySession({
@@ -1384,6 +1412,7 @@ describe('a certification needs a REVIEWABLE artifact (#121 round-6 finding 2)',
         viewerId: at.ada,
         sessionId: sid,
         authorizedRoomId: at.roomId,
+        attemptToken: token,
       }),
     ).toEqual({ ok: true });
     expect((await read(sid))[0]?.certifiedBy).toBe(at.ada);
@@ -1538,5 +1567,115 @@ describe('the attempt is server-issued, and no client value can jam it (#121 rou
         attemptToken: fresh,
       }),
     ).toEqual({ ok: true });
+  });
+
+  /**
+   * THE TOKEN IS REQUIRED, NOT OPTIONAL-WHEN-SUPPLIED (#121 round-8, fix 1).
+   *
+   * The confirm lib made `attemptToken` optional and compared it only when present —
+   * so a confirm carrying a LIVE, AGED arm but NO token slipped past the attempt
+   * check and certified. The Server Action already required the token, so it was not
+   * wire-reachable; but a green integration suite proving a tokenless certify
+   * succeeds is exactly the false-green this codebase must never ship (the arm's
+   * single-use attempt is its whole identity — a confirm that names none is not
+   * completing any press). The lib now requires the token at the TYPE, and compares
+   * it unconditionally, so a raw caller bypassing the type is still refused.
+   *
+   * RED ON REVERT: restore the `attemptToken !== undefined &&` guard on the nonce
+   * compare in `certifySession`. This tokenless confirm — a live arm, aged past the
+   * gate — then reaches the write and certifies, which is the shape fix 1 closes.
+   */
+  it('a confirm with NO token at all is refused — the attempt token is required', async () => {
+    const at = await fixture();
+    await armOk({ viewerId: at.ada, sessionId: at.sessionId, roomId: at.roomId });
+    await backdateArm(at.sessionId, CERTIFY_REQUIRED_HOLD_MS + 500);
+
+    // A raw caller bypassing the required-token TYPE (a hand-built request, an older
+    // client). The lib must refuse it rather than spend the live arm behind it.
+    const tokenless = {
+      database: handle.db,
+      viewerId: at.ada,
+      sessionId: at.sessionId,
+      authorizedRoomId: at.roomId,
+    } as unknown as Parameters<typeof certifySession>[0];
+    const outcome = await certifySession(tokenless);
+    expect(outcome).toEqual({ ok: false, reason: 'not_armed' });
+    expect((await read(at.sessionId))[0]?.certifiedBy).toBeNull();
+  });
+});
+
+describe('certified_at is stamped on the same real clock the hold is measured on (#121 round-8)', () => {
+  /**
+   * A CONFIRM THAT BLOCKS ON THE ROW LOCK MUST NOT REFUSE AN HONEST HOLD (fix 4).
+   *
+   * The hold is measured `clock_timestamp() - certify_armed_at` in the confirm's
+   * SELECT, which runs AFTER the row lock is acquired. `certified_at` must be
+   * stamped on that SAME real clock, or drizzle/0036's consistency check
+   * (`certified_held_ms ≈ certified_at − certify_armed_at`, within a 1s slack)
+   * refuses a hold that genuinely happened. When `certified_at` was `now()`
+   * (transaction-start), a confirm whose transaction OPENED and then blocked for
+   * over a second before it measured the hold stamped a `certified_at` more than the
+   * slack behind that measured interval, and 0036 refused the HONEST confirm — a
+   * false negative under lock contention.
+   *
+   * The block must fall BEFORE the confirm measures the hold, so the measurement
+   * clock and `certified_at`'s clock both land AFTER the wait while `now()` is stuck
+   * at transaction-start. The confirm's FIRST in-transaction act is the membership
+   * re-read (`viewerMayCertify`, a `FOR SHARE` on the membership row); a second
+   * connection holds that row `FOR UPDATE` for over a second, so the confirm's
+   * transaction is open (now() fixed at ~T0) while it waits, and only afterwards
+   * does it measure `clock_timestamp() - certify_armed_at` and stamp `certified_at`.
+   * With `certified_at = clock_timestamp()` the measurement and the stamp share that
+   * post-wait clock and the receipt is consistent; with `now()` the stamp is ~T0,
+   * over a second behind the measured hold, and 0036 refuses it.
+   *
+   * RED ON REVERT: change `certified_at` back to `sql\`now()\`` in `certifySession`.
+   * The confirm below then stamps a `certified_at` ~2s behind the measured hold,
+   * 0036 raises `certified_held_ms ... does not match the time that actually
+   * elapsed`, the UPDATE throws, and this test fails instead of returning ok:true.
+   */
+  it('an honest aged arm confirmed under a >1s-held lock still certifies', async () => {
+    const at = await fixture();
+    const token = await armOk({ viewerId: at.ada, sessionId: at.sessionId, roomId: at.roomId });
+    // Age the arm past the gate up front — the hold is honest, just not waited out.
+    await backdateArm(at.sessionId, CERTIFY_REQUIRED_HOLD_MS + 500);
+
+    const reserved = await handle.sql.reserve();
+    let outcome: Awaited<ReturnType<typeof certifySession>>;
+    try {
+      await reserved`BEGIN`;
+      /* Hold ADA's membership row FOR UPDATE — the row `viewerMayCertify` re-reads
+         FOR SHARE as the confirm's first in-transaction act. The confirm's
+         transaction opens, fixes now() at ~T0, then blocks HERE, before it ever
+         measures the hold or stamps certified_at. */
+      await reserved`SELECT role FROM memberships
+        WHERE room_id = ${at.roomId} AND user_id = ${at.ada} FOR UPDATE`;
+
+      // Fire the confirm WITHOUT awaiting: it opens its transaction and blocks on the
+      // membership row this connection holds.
+      const pending = certifySession({
+        database: handle.db,
+        viewerId: at.ada,
+        sessionId: at.sessionId,
+        authorizedRoomId: at.roomId,
+        attemptToken: token,
+      });
+
+      /* Hold the lock well over a second, so a reverted `now()` (transaction-start)
+         stamp is more than the 1s slack behind the clock the hold is measured on by
+         the time the confirm proceeds past the wait. */
+      await new Promise((resolve) => setTimeout(resolve, CERTIFY_REQUIRED_HOLD_MS));
+      await reserved`COMMIT`;
+      outcome = await pending;
+    } finally {
+      await reserved.release();
+    }
+
+    expect(outcome).toEqual({ ok: true });
+    const [row] = await read(at.sessionId);
+    expect(row?.certifiedBy).toBe(at.ada);
+    /* The recorded hold spans the real interval — the arm's age plus the >1s the
+       confirm spent blocked — not the transaction-start-relative one. */
+    expect(row?.certifiedHeldMs ?? 0).toBeGreaterThanOrEqual(CERTIFY_REQUIRED_HOLD_MS);
   });
 });

@@ -29,7 +29,7 @@
  * ------------------------------------------------------------------------- */
 
 import { useEffect, useState } from 'react';
-import { CERTIFY_HOLD_MS } from '@/lib/certify-hold';
+import { CERTIFY_HOLD_MS, isReviewableArtifact } from '@/lib/certify-hold';
 import type { ControlSessionRow } from '@/lib/control-plane-data';
 import type { ParticipantKind } from '../model/kind';
 import { systemText } from '../model/quotation';
@@ -243,9 +243,18 @@ export function ReviewPane({
         </div>
       ) : !awaitsLanding ? (
         <div className={styles.refused} data-certify="unavailable">
-          {session.status === 'settled'
-            ? 'this session produced no artifact to review — it settled on its own account, and no human signature is owed'
-            : 'a session is certified once it settles with an artifact; this one has not yet'}
+          {/* Three distinct reasons a settled-or-not session offers no certify, and
+              the copy must name the RIGHT one (round-8). The branch used to say
+              "produced no artifact to review" for every settled row — a lie when the
+              artifact is visibly present above and the row simply carries an
+              incomplete/defective receipt (`certifiedById` set, but the hold does not
+              cohere, so `sessionCertified` renders `~`). Distinguish: genuinely no
+              artifact vs. an artifact present under a receipt that does not stand. */}
+          {session.status !== 'settled'
+            ? 'a session is certified once it settles with an artifact; this one has not yet'
+            : !isReviewableArtifact(artifact)
+              ? 'this session produced no artifact to review — it settled on its own account, and no human signature is owed'
+              : "this session's certification receipt is incomplete — the artifact above is present, but the recorded hold does not cohere, so it does not stand as a human signature and reads as the machine's own account (~)"}
         </div>
       ) : viewerKind === 'human' ? (
         <div className={`${styles.certify} ${styles.certifyDestructive}`} data-certify="ready">

@@ -98,7 +98,12 @@ export function ControlSurfaces({ decisions, unseen, cost }: ControlSurfacesProp
           </span>
           <span className={`${styles.surfLabel} atr-lbl`}>DECISIONS OWED</span>
         </div>
-        <LineList empty="nothing awaits a human here" lines={decisions.lines} />
+        {/* VIEWER-SCOPED, not room-wide. The list is already filtered to what THIS
+            viewer is owed (an agent-principal viewer is owed no human-only decision),
+            so the empty text must describe the viewer's own empty queue — never
+            assert the room holds nothing awaiting a human, which a hidden owed item
+            would make a lie (round-8). */}
+        <LineList empty="nothing here is owed to you" lines={decisions.lines} />
       </section>
 
       <section className={styles.surf} data-surface="unseen">

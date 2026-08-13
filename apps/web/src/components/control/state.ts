@@ -272,12 +272,21 @@ export function planState(plan: ControlPlanRow, viewerIsHuman: boolean): Epistem
   return { kind: 'event', verification: 'routine', owedToViewer: false, irreversible: false };
 }
 
-/** An agent's state: the hardest of every session across all its plans. */
+/**
+ * An agent's state: the hardest of its PLANS' states — and each plan already rolls
+ * up the hardest of its own sessions AND its own lifecycle status.
+ *
+ * Rolling up the plans (not the raw sessions) is what makes the agent the hardest
+ * thing beneath it in full: a plan with no sessions still has a state of its own —
+ * an empty SETTLED plan is a machine's report of its own completion and reads `~`
+ * (`planState`) — and a session-only rollup skipped it entirely, so such a plan
+ * rendered `~` while its parent agent stayed `·` (routine), the agent claiming less
+ * than its child. Reading `planState` per plan carries every plan's own status into
+ * the agent, so the agent is never softer than a plan under it (round-8).
+ */
 export function agentState(agent: ControlAgentRow, viewerIsHuman: boolean): EpistemicState {
-  const sessionStates = agent.plans.flatMap((plan) =>
-    plan.sessions.map((session) => ({ state: sessionState(session, viewerIsHuman) })),
-  );
-  const hardest = hardestState(sessionStates);
+  const planStates = agent.plans.map((plan) => ({ state: planState(plan, viewerIsHuman) }));
+  const hardest = hardestState(planStates);
   if (hardest !== null) return hardest;
   return { kind: 'event', verification: 'routine', owedToViewer: false, irreversible: false };
 }

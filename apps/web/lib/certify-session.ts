@@ -41,8 +41,12 @@ import { CERTIFY_ARM_TTL_MS, CERTIFY_REQUIRED_HOLD_MS, isReviewableArtifact } fr
  *      {@link CERTIFY_ARM_TTL_MS}, anything whose ARTIFACT changed since the arm
  *      (the digest no longer matches — the person is confirming a revision they
  *      did not review, CS-1), and anything never armed or no longer carrying a
- *      live attempt nonce. `certified_held_ms` is that measured interval;
- *      `certified_at` is `now()`. Neither function takes a timing argument, so
+ *      live attempt nonce. `certified_held_ms` is that measured interval, and
+ *      `certified_at` is stamped `clock_timestamp()` too (round-8) — the SAME real
+ *      clock the interval is measured on, so a confirm that blocked on the row lock
+ *      cannot stamp a `certified_at` that disagrees with `certified_held_ms` and
+ *      trip drizzle/0036's consistency check on an honest hold. Neither function
+ *      takes a timing argument, so
  *      there is no forged value for a guard to have to catch. A successful confirm
  *      sets `certified_by` AND consumes the arm's nonce and digest in the same
  *      statement, and every write here is scoped `isNull(certified_by)` — so the
@@ -218,25 +222,27 @@ export interface ConfirmInput extends CertifyBase {
   readonly authorizedRoomId: string;
   /**
    * THE SERVER-ISSUED ATTEMPT TOKEN — the nonce {@link armCertification} minted and
-   * returned for this press (round-7 finding 2). The Server Action requires it; a
-   * raw internal caller may omit it, in which case the confirm spends whatever live
-   * arm this viewer holds (the round-5 nonce-single-use guarantee). When present it
-   * must equal the pending arm's nonce, so a confirm completes the exact press it
-   * began.
+   * returned for this press (round-7 finding 2). REQUIRED (round-8): the Server
+   * Action's zod schema demands it, and this type now demands it too, so the lib and
+   * the wire agree. There is no omit-and-spend-whatever-is-live branch — a
+   * tokenless confirm proved a green suite for a certify with no attempt behind it,
+   * exactly the false-green this codebase must never ship. It must equal the pending
+   * arm's nonce, so a confirm completes the exact press it began; a missing or
+   * mismatched token is refused `not_armed`, not defaulted.
    */
-  readonly attemptToken?: string;
+  readonly attemptToken: string;
 }
 
 export interface DisarmInput extends CertifyBase {
   /**
    * THE SERVER-ISSUED ATTEMPT TOKEN of the press being released (round-7 finding
-   * 2). The Server Action requires it; a raw caller may omit it to clear the
-   * viewer's own pending arm outright. When present the clear is scoped to the arm
+   * 2). REQUIRED (round-8): the Server Action demands it and so does this type —
+   * there is no omit-and-clear-the-whole-arm branch. The clear is scoped to the arm
    * carrying exactly this nonce, so a stale release cannot clobber a newer press's
    * arm. No `authorizedRoomId`: the disarm authorizes on ARM-OWNERSHIP, not room
    * membership (round-7 finding 4), so the owner can retract even after losing it.
    */
-  readonly attemptToken?: string;
+  readonly attemptToken: string;
 }
 
 /**
@@ -428,20 +434,23 @@ export async function certifySession(input: ConfirmInput): Promise<CertifyOutcom
        cannot be minted over empty work, nor left standing when the work changes. */
     if (!isReviewableArtifact(session.artifact)) return { ok: false, reason: 'no_artifact' };
 
-    /* THE ARM MUST BE THIS VIEWER'S, AND A LIVE ATTEMPT. Otherwise one person's
-       hold would arm a control a second person confirms, and the signature would
-       name somebody who never held anything. The nonce is the single-use half:
-       null means no pending attempt — a disarmed, already-spent, or hand-forged
-       arm — and is not confirmable however valid the timing looks (CS-3). When the
-       confirm carries the server-issued `attemptToken`, it must equal the pending
-       arm's nonce: a confirm completes the press it began, not whatever arm happens
-       to be on the row (round-7 finding 2). */
+    /* THE ARM MUST BE THIS VIEWER'S, AND A LIVE ATTEMPT THE TOKEN COMPLETES.
+       Otherwise one person's hold would arm a control a second person confirms, and
+       the signature would name somebody who never held anything. The nonce is the
+       single-use half: null means no pending attempt — a disarmed, already-spent, or
+       hand-forged arm — and is not confirmable however valid the timing looks (CS-3).
+       The server-issued `attemptToken` is REQUIRED (round-8) and must equal the
+       pending arm's nonce: a confirm completes the exact press it began, and a
+       missing token (a raw caller bypassing the type) reads as `armNonce !==
+       undefined` → refused, never spends a live arm it cannot name (round-7 finding
+       2). This is the unconditional compare — there is no absent-means-skip branch a
+       tokenless confirm could fall open through. */
     if (
       session.armedBy === null ||
       session.armedBy !== viewerId ||
       session.armNonce === null ||
       session.heldMs === null ||
-      (attemptToken !== undefined && session.armNonce !== attemptToken)
+      session.armNonce !== attemptToken
     ) {
       return { ok: false, reason: 'not_armed' };
     }
@@ -462,7 +471,16 @@ export async function certifySession(input: ConfirmInput): Promise<CertifyOutcom
       .update(sessions)
       .set({
         certifiedBy: viewerId,
-        certifiedAt: sql`now()`,
+        /* `clock_timestamp()`, not `now()` (round-8). `now()` is the
+           TRANSACTION-START time; if this confirm blocked on the row lock for
+           seconds, `now()` would stamp a `certified_at` earlier than the moment
+           `certified_held_ms` was measured (that interval ends at
+           `clock_timestamp()`, above), and drizzle/0036's consistency check —
+           `certified_held_ms ≈ certified_at − certify_armed_at` — would refuse an
+           HONEST hold as inconsistent (a false negative). Stamping `certified_at`
+           on the SAME real clock the interval is measured on keeps the arm stamp,
+           the elapsed measurement and `certified_at` mutually consistent. */
+        certifiedAt: sql`clock_timestamp()`,
         certifiedHeldMs: Math.round(heldMs),
         /* CONSUME THE ATTEMPT. The nonce and the armed digest were the pending
            hold's, not the receipt's — spent here in the same statement that lands
@@ -509,9 +527,10 @@ export async function certifySession(input: ConfirmInput): Promise<CertifyOutcom
  * clears nothing, so this is no back door onto anyone else's hold. The confirm is
  * NOT weakened: it still requires humanity, membership, and the elapsed gate.
  *
- * Scoped to the SERVER-ISSUED TOKEN when one is given (round-7 finding 2): the
- * clear touches only the arm carrying exactly this nonce, so a stale release cannot
- * clobber a newer press's arm. A certified session's arm is frozen (drizzle/0033)
+ * Scoped to the SERVER-ISSUED TOKEN, which is REQUIRED (round-8, round-7 finding
+ * 2): the clear touches only the arm carrying exactly this nonce, so a stale
+ * release cannot clobber a newer press's arm, and there is no omit-and-clear-the-
+ * whole-arm branch. A certified session's arm is frozen (drizzle/0033)
  * and part of the receipt, so it is deliberately out of reach here — disarming is
  * for a hold that never completed, never for un-writing one that did.
  *
@@ -525,12 +544,11 @@ export async function disarmCertification(input: DisarmInput): Promise<DisarmOut
 
   return database.transaction(async (tx) => {
     /* THE CLEAR — the whole pending arm goes, nonce and digest included, wherever
-       it is this viewer's own uncertified arm. Scoped to the server-issued token
-       when one is given (only the arm carrying this exact nonce, never a newer
-       press's), unconditional for the viewer's arm when none is (the raw round-5
-       behaviour). No room predicate: ownership is the authorization (round-7
-       finding 4). A cancelled hold leaves no live attempt a later confirm could
-       spend (CS-3). */
+       it is this viewer's own uncertified arm carrying EXACTLY this nonce. The
+       token is required (round-8), so the clear is always nonce-scoped: only the arm
+       carrying this exact nonce, never a newer press's. No room predicate: ownership
+       is the authorization (round-7 finding 4). A cancelled hold leaves no live
+       attempt a later confirm could spend (CS-3). */
     await tx
       .update(sessions)
       .set({
@@ -545,7 +563,7 @@ export async function disarmCertification(input: DisarmInput): Promise<DisarmOut
           eq(sessions.id, sessionId),
           eq(sessions.certifyArmedBy, viewerId),
           isNull(sessions.certifiedBy),
-          ...(attemptToken === undefined ? [] : [eq(sessions.certifyArmNonce, attemptToken)]),
+          eq(sessions.certifyArmNonce, attemptToken),
         ),
       );
     return { ok: true };
