@@ -1,38 +1,55 @@
 'use client';
 
 /* ---------------------------------------------------------------------------
- * The session REVIEW PANE — diff + tests + receipt + artifact, and a land gated
- * on a formal human `✓` (scout §9.5; #121; the Delta review-changes layout with
- * the tests and the receipt Delta never showed).
+ * The session REVIEW PANE — diff + tests + receipt + artifact, and a
+ * certification gated on a formal human hold (scout §9.5; #121; the Delta
+ * review-changes layout with the tests and the receipt Delta never showed).
  *
- * Borrows Delta's "everything about the change in one place" but NOT its
- * implicit "land when you're happy": the land is a HoldToAct — a real
- * press-and-hold, elapsed-time-gated, that records who armed it and how long
- * (primitives/HoldToAct.tsx). And it is offered only to a HUMAN viewer; an agent
- * or an unreadable-kind viewer sees the refusal in the covenant's own words, the
- * same fail-closed shape the live route's certify uses. The server
- * (lib/certify-session.ts) and the DB trigger (drizzle/0032) enforce it under
- * the affordance — the UI gate is the first of three, not the only one.
+ * Borrows Delta's "everything about the change in one place" but NOT its implicit
+ * "land when you're happy": certifying is a HoldToAct — a real press-and-hold
+ * whose duration is stamped and measured by the SERVER (lib/certify-session.ts's
+ * arm→confirm), not reported by this page. It is offered only to a HUMAN viewer;
+ * an agent or an unreadable-kind viewer sees the refusal in the covenant's own
+ * words. The server and the DB triggers (drizzle/0032, 0033) enforce all of it
+ * under the affordance — the UI gate is the first of three, not the only one.
+ *
+ * ## WHAT THIS PANE SAYS THE ACTION DOES, AND WHY IT CHANGED
+ *
+ * It used to read: "Certifying lands this work onto <branch>. It is not undoable."
+ * The first sentence was false. Nothing in this product merges, pushes, deploys
+ * or applies anything — `certifySession` writes four columns on the session row.
+ * The branch named in the artifact is where the agent's work ALREADY is; the
+ * action puts a person's signature on the record that it was reviewed. Copy that
+ * promises a merge on a control that writes a receipt is the most expensive kind
+ * of lie this interface can tell, because the person acts on it and then believes
+ * the branch moved.
+ *
+ * The second sentence is true and stays: drizzle/0033 makes a certification
+ * write-once, so it genuinely cannot be taken back.
  * ------------------------------------------------------------------------- */
 
 import { useEffect, useState } from 'react';
+import { CERTIFY_HOLD_MS } from '@/lib/certify-hold';
 import type { ControlSessionRow } from '@/lib/control-plane-data';
 import type { ParticipantKind } from '../model/kind';
 import { systemText } from '../model/quotation';
 import { Glyph } from '../primitives/Glyph';
-import { type Arming, HoldToAct } from '../primitives/HoldToAct';
+import { HoldToAct } from '../primitives/HoldToAct';
 import styles from './control.module.css';
-import { formatMicros, sessionAwaitsLanding, sessionState } from './state';
+import { formatMicros, sessionAwaitsLanding, sessionCertified, sessionState } from './state';
 
-/** The "landed by … · when · held Ns" line, composed once. */
+/** The "certified by … · when · held Ns" line, composed once. */
 function certifiedLine(session: ControlSessionRow): string {
   const when =
     session.certifiedAt === null ? '' : ` · ${session.certifiedAt.slice(0, 16).replace('T', ' ')}`;
+  /* The held duration the SERVER measured between its arm and its confirm. It is
+     evidence now rather than a number the browser reported, which is the only
+     reason it is worth printing on a receipt at all. */
   const held =
     session.certifiedHeldMs === null
       ? ''
       : ` · held ${(session.certifiedHeldMs / 1000).toFixed(1)}s`;
-  return `landed by ${session.certifiedByName}${when}${held}`;
+  return `certified by ${session.certifiedByName}${when}${held}`;
 }
 
 export interface ReviewPaneProps {
@@ -41,9 +58,11 @@ export interface ReviewPaneProps {
   readonly agentName: string | null;
   /** the person reading — the actor an arming records */
   readonly viewerId: string;
-  /** server-resolved; the land is offered only when this is `human` */
+  /** server-resolved; the certification is offered only when this is `human` */
   readonly viewerKind: ParticipantKind | 'unknown';
-  readonly onCertify: (sessionId: string, arming: Arming) => void;
+  /** fired when the hold BEGINS, so the server can stamp the start of it */
+  readonly onArm: (sessionId: string) => void;
+  readonly onCertify: (sessionId: string) => void;
   readonly certifyError: string | null;
 }
 
@@ -53,13 +72,14 @@ export function ReviewPane({
   agentName,
   viewerId,
   viewerKind,
+  onArm,
   onCertify,
   certifyError,
 }: ReviewPaneProps) {
   const [applying, setApplying] = useState(false);
-  // A new session, or a landed one, clears the optimistic "landing" note.
+  // A new session, or a certified one, clears the optimistic "recording" note.
   const sessionId = session?.id ?? null;
-  // biome-ignore lint/correctness/useExhaustiveDependencies: reset keys off the identity/landed-ness, not the whole row.
+  // biome-ignore lint/correctness/useExhaustiveDependencies: reset keys off the identity/certified-ness, not the whole row.
   useEffect(() => setApplying(false), [sessionId, session?.certifiedByName]);
 
   if (session === null) {
@@ -76,6 +96,9 @@ export function ReviewPane({
   const state = sessionState(session);
   const artifact = session.artifact;
   const awaitsLanding = sessionAwaitsLanding(session);
+  /* The SAME predicate the glyph derives from — not `certifiedByName !== null`,
+     which is a second source that would agree with the tick only by luck. */
+  const certified = sessionCertified(session);
 
   return (
     <div className={styles.review} data-region="review-pane" data-review-session={session.id}>
@@ -206,8 +229,8 @@ export function ReviewPane({
         </div>
       </section>
 
-      {/* ── CERTIFY / LAND ───────────────────────────────────────────────── */}
-      {session.certifiedByName !== null ? (
+      {/* ── CERTIFY ──────────────────────────────────────────────────────── */}
+      {certified ? (
         <div className={styles.certified} data-certified="true">
           <Glyph className={styles.certifiedGlyph} state={state} />
           <span>{systemText(certifiedLine(session), 'ReviewPane certified')}</span>
@@ -215,29 +238,34 @@ export function ReviewPane({
       ) : !awaitsLanding ? (
         <div className={styles.refused} data-certify="unavailable">
           {session.status === 'settled'
-            ? 'this session produced no artifact to land — a clean exit certifies nothing'
-            : 'a session is landed once it settles with an artifact; this one has not yet'}
+            ? 'this session produced no artifact to review — it settled on its own account, and no human signature is owed'
+            : 'a session is certified once it settles with an artifact; this one has not yet'}
         </div>
       ) : viewerKind === 'human' ? (
         <div className={`${styles.certify} ${styles.certifyDestructive}`} data-certify="ready">
-          <span className={`${styles.certifyHead} atr-lbl`}>LAND THIS SESSION</span>
+          <span className={`${styles.certifyHead} atr-lbl`}>CERTIFY THIS SESSION</span>
           <span className={styles.certifyNote}>
             {systemText(
-              `Certifying lands this work onto ${artifact?.branch ?? 'its branch'}. It is not undoable, and the record names who armed it and when.`,
+              `Certifying records a human signature on this session — who certified it, when, and how long the control was held, all measured by the server. It moves no code: the work already sits on ${artifact?.branch ?? 'its branch'}, and nothing here merges, pushes or deploys it. A certification is written once and cannot be taken back.`,
               'ReviewPane certify note',
             )}
           </span>
           <HoldToAct
             actionId={`certify-${session.id}`}
             actor={viewerId}
-            describe={`land the work onto ${artifact?.branch ?? 'its branch'}`}
-            label="Certify the landing"
+            describe="put a human signature on this session's receipt"
+            holdMs={CERTIFY_HOLD_MS}
+            label="Certify this session"
+            onAct={() => onCertify(session.id)}
+            /* The arm goes out on hold-BEGIN so the server's clock starts when
+               the person's press does; `onArm` fires on completion and is the
+               local note that a confirm is in flight. */
             onArm={() => setApplying(true)}
-            onAct={(arming) => onCertify(session.id, arming)}
+            onBegin={() => onArm(session.id)}
           />
           {applying && certifyError === null ? (
             <span className={styles.certifyNote} data-certify-applying="true">
-              landing recorded — applying…
+              hold complete — recording the signature…
             </span>
           ) : null}
           {certifyError === null ? null : (
@@ -248,8 +276,8 @@ export function ReviewPane({
         </div>
       ) : (
         <div className={styles.refused} data-certify="refused" data-certify-refused="true">
-          A session is landed only by a human — the covenant's second pair of eyes. A machine or a
-          voice path cannot certify this, and neither the server nor the table will let it.
+          A session is certified only by a human — the covenant's second pair of eyes. A machine or
+          a voice path cannot certify this, and neither the server nor the table will let it.
         </div>
       )}
     </div>

@@ -1444,6 +1444,31 @@ export const sessions = pgTable(
      * deliberate hold, not a click. NULL until certified.
      */
     certifiedHeldMs: integer('certified_held_ms'),
+    /**
+     * WHO ARMED THE PENDING CERTIFICATION, and WHEN — stamped by the SERVER.
+     *
+     * #121 fix round. The first cut of the certify path took the hold's timing
+     * from the CLIENT: the Server Action accepted `armedAt` and `heldMs` off the
+     * request, so `{ heldMs: 999999 }` from `curl` certified a session without
+     * anybody having held anything, and `{ heldMs: 0 }` did too. The asymmetric
+     * friction the covenant asks for was measured entirely on the attacker's
+     * side of the wire.
+     *
+     * These two columns are the fix. Arming is its own server round-trip and
+     * `certify_armed_at` is written as `now()` INSIDE the database, never from a
+     * value a request carried. Certification then computes the held duration as
+     * `now() - certify_armed_at` in SQL and refuses anything under the required
+     * hold. There is no client-supplied timing left to forge, and the recorded
+     * `certified_held_ms` is a measurement rather than a claim.
+     *
+     * `certify_armed_by` is held to a `human` principal by the
+     * `sessions_certify_armed_by_is_human` trigger (drizzle/0033), the same way
+     * `certified_by` is by 0032: the arm is half of the human-only act, so a
+     * machine may not perform it either.
+     */
+    certifyArmedBy: uuid('certify_armed_by').references(() => users.id, { onDelete: 'set null' }),
+    /** The SERVER's clock at the arm — `now()`, never a value a request sent. */
+    certifyArmedAt: timestamp('certify_armed_at', { withTimezone: true }),
     /** The `core_events.id` of the `session_opened` that projected this. */
     openedByEventId: text('opened_by_event_id'),
     /** The `core_events.id` of the settling/failing event, once it exits. */

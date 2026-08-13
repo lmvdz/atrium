@@ -8,7 +8,7 @@ import { db } from '@/lib/db';
 import { requireSession } from '@/lib/session';
 import { loadRoom, loadWorkspace } from '@/lib/workspaces';
 import { ControlPlane } from '@/src/components/control/ControlPlane';
-import { certifySessionAction } from './actions';
+import { armSessionCertificationAction, certifySessionAction } from './actions';
 
 export const metadata: Metadata = { title: 'Control · Atrium' };
 export const dynamic = 'force-dynamic';
@@ -37,7 +37,10 @@ export default async function ControlPage({
   if (!room) notFound();
 
   const [data, viewerRow] = await Promise.all([
-    loadControlPlane(db(), room.id, room.name),
+    /* The projection is THIS viewer's reading of the room: what is owed to them,
+       and what has happened past their own read cursor. It used to be the room's,
+       handed to everyone. */
+    loadControlPlane(db(), room.id, room.name, session.userId),
     db()
       .select({ kind: users.principalKind })
       .from(users)
@@ -49,6 +52,7 @@ export default async function ControlPage({
 
   return (
     <ControlPlane
+      armAction={armSessionCertificationAction}
       certifyAction={certifySessionAction}
       data={data}
       roomSlug={roomSlug}

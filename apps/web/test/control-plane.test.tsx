@@ -9,24 +9,48 @@
  * hardness, and that burn-vs-budget is read off the plan's columns — so
  * FLIPPING the input (a session's status, a plan's budget) moves the output.
  * The end-to-end DB proof is e2e/control-plane.spec.ts.
+ *
+ * ## THE CASE THIS FILE USED TO GET WRONG, WHICH IS WHY IT LEADS NOW
+ *
+ * It asserted `glyphFor(sessionState(session({ status: 'settled' }))) === '✓'`
+ * and called it "a clean settle is ✓". The assertion was true of the code and
+ * false of the covenant: a settled session nobody has certified had earned the
+ * glyph whose tooltip reads "certified — a person has accepted this reading", off
+ * nothing but a subprocess's exit code. A test that pins the defect is worse than
+ * no test, because it makes the fix look like the regression.
+ *
+ * The rule these now assert: `✓` iff a HUMAN certified. Settled-uncertified is
+ * `~` — the machine's own account. Every consumer moves on that one flip.
  * ------------------------------------------------------------------------- */
 
-import { render, screen } from '@testing-library/react';
-import { describe, expect, it } from 'vitest';
-import type { ControlPlanRow, ControlSessionRow } from '../lib/control-plane-data';
+import { cleanup, render, screen } from '@testing-library/react';
+import { afterEach, describe, expect, it } from 'vitest';
+import type {
+  ControlDecisionRow,
+  ControlPlanRow,
+  ControlSessionRow,
+} from '../lib/control-plane-data';
 import {
   ControlPin,
   type ControlPinItem,
   pinHardestFirst,
 } from '../src/components/control/ControlPin';
+import { ProcessTree } from '../src/components/control/ProcessTree';
 import {
   agentState,
+  decisionState,
   planCost,
   planState,
   sessionAwaitsLanding,
+  sessionCertified,
   sessionState,
 } from '../src/components/control/state';
 import { glyphFor } from '../src/components/model/glyph';
+
+/* These cases query `document` for the FIRST match, so a previous render left
+   mounted would answer for the current one — and a badge assertion that reads
+   the last test's DOM is exactly the false green this file is here to remove. */
+afterEach(cleanup);
 
 function session(overrides: Partial<ControlSessionRow>): ControlSessionRow {
   return {
@@ -40,12 +64,25 @@ function session(overrides: Partial<ControlSessionRow>): ControlSessionRow {
     exitSummary: null,
     artifact: null,
     certifiedByName: null,
+    certifiedByKind: null,
     certifiedAt: null,
     certifiedHeldMs: null,
     createdAt: '2026-08-13T00:00:00.000Z',
     updatedAt: '2026-08-13T00:00:00.000Z',
     ...overrides,
   };
+}
+
+/** A session a HUMAN certified — the only shape that earns the tick. */
+function certifiedSession(overrides: Partial<ControlSessionRow> = {}): ControlSessionRow {
+  return session({
+    status: 'settled',
+    certifiedByName: 'Ada',
+    certifiedByKind: 'human',
+    certifiedAt: '2026-08-13T01:00:00.000Z',
+    certifiedHeldMs: 2400,
+    ...overrides,
+  });
 }
 
 function plan(overrides: Partial<ControlPlanRow>): ControlPlanRow {
@@ -63,36 +100,107 @@ function plan(overrides: Partial<ControlPlanRow>): ControlPlanRow {
   };
 }
 
-describe("a session's glyph is its lifecycle status, derived", () => {
-  it('running is routine · , failed is ✗ , clean settle is ✓', () => {
-    expect(glyphFor(sessionState(session({ status: 'open' })))).toBe('·');
-    expect(glyphFor(sessionState(session({ status: 'failed' })))).toBe('✗');
-    expect(glyphFor(sessionState(session({ status: 'settled' })))).toBe('✓');
+describe('the tick comes from a human signature and from nothing else', () => {
+  /**
+   * THE CAMPAIGN-STOPPING ONE (#121 gauntlet, CS-1). The derivation read
+   * `status === 'settled' → verification: 'verified'`, so this exact row — a
+   * process that exited, that no person has looked at — rendered `✓`.
+   *
+   * MUTATION THAT MUST TURN THIS RED: put `verification: 'verified'` (or
+   * `'accepted'`) back on the `status === 'settled'` branch of `sessionState`.
+   */
+  it('a settled session NOBODY certified is ~ — the machine reporting its own exit', () => {
+    const settled = session({ status: 'settled' });
+    expect(sessionCertified(settled)).toBe(false);
+    expect(sessionState(settled).verification).toBe('self_reported');
+    expect(glyphFor(sessionState(settled))).toBe('~');
   });
 
-  it('a settled session with an uncertified artifact needs you, and landing is not undoable (■)', () => {
+  it('running is routine ·, failed is ✗', () => {
+    expect(glyphFor(sessionState(session({ status: 'open' })))).toBe('·');
+    expect(glyphFor(sessionState(session({ status: 'failed' })))).toBe('✗');
+  });
+
+  it('FLIP THE SIGNATURE: the same settled row moves ~ → ✓ when a human certifies it', () => {
+    const before = session({ status: 'settled' });
+    const after = certifiedSession();
+    expect(glyphFor(sessionState(before))).toBe('~');
+    expect(glyphFor(sessionState(after))).toBe('✓');
+    expect(sessionState(after).verification).toBe('accepted');
+  });
+
+  /**
+   * A NAME IS NOT A SIGNATURE. Two triggers make this row unwritable (0032,
+   * 0033) — this asserts the RENDER does not assume they held. The predicate is
+   * @atrium/core's `epistemicStateOf`, so mutating that one function moves this.
+   */
+  it('a NON-HUMAN certifier does not mint a tick, whatever name is attached', () => {
+    const machineSigned = certifiedSession({ certifiedByName: 'hexi', certifiedByKind: 'agent' });
+    expect(sessionCertified(machineSigned)).toBe(false);
+    expect(glyphFor(sessionState(machineSigned))).toBe('~');
+  });
+
+  it('an unreadable certifier kind fails CLOSED — ~, never the privileged glyph', () => {
+    const unreadable = certifiedSession({ certifiedByKind: null });
+    expect(sessionCertified(unreadable)).toBe(false);
+    expect(glyphFor(sessionState(unreadable))).toBe('~');
+  });
+
+  it('a settled session with an uncertified artifact needs you, and certifying is not undoable (■)', () => {
     const awaiting = session({
       status: 'settled',
       artifact: { branch: 'feat/x', commit: 'abc123' },
-      certifiedByName: null,
     });
     expect(sessionAwaitsLanding(awaiting)).toBe(true);
     expect(glyphFor(sessionState(awaiting))).toBe('■');
   });
 
-  it('once a human has landed it, the same session reads ✓ — the flip moves the glyph', () => {
+  it('once a human has certified it, the same artifact-bearing session reads ✓', () => {
     const artifact = { branch: 'feat/x', commit: 'abc123' };
-    const before = session({ status: 'settled', artifact, certifiedByName: null });
-    const after = session({ status: 'settled', artifact, certifiedByName: 'Ada' });
+    const before = session({ status: 'settled', artifact });
+    const after = certifiedSession({ artifact });
     expect(glyphFor(sessionState(before))).toBe('■');
     expect(glyphFor(sessionState(after))).toBe('✓');
     expect(sessionAwaitsLanding(after)).toBe(false);
   });
+});
 
-  it('a settled session with no artifact has nothing to land — a clean ✓', () => {
-    const clean = session({ status: 'settled', artifact: null });
-    expect(sessionAwaitsLanding(clean)).toBe(false);
-    expect(glyphFor(sessionState(clean))).toBe('✓');
+describe('the tree badge and the tree glyph read the SAME predicate', () => {
+  const agent = (sessions: readonly ControlSessionRow[]) => ({
+    userId: 'agent-1',
+    name: 'hexi',
+    host: null,
+    harness: null,
+    model: null,
+    budgetLimitMicros: null,
+    plans: [plan({ id: 'p1', sessions })],
+  });
+
+  /* CATCHES the badge becoming a second source. It used to test
+     `certifiedByName !== null`, which says "certified" beside a `~` the moment a
+     non-human name reaches the column. */
+  it('a settled-uncertified session wears ~ and no certified badge', () => {
+    const row = session({ id: 's1', status: 'settled' });
+    render(<ProcessTree agents={[agent([row])]} onOpenSession={() => {}} />);
+    const node = document.querySelector('[data-tree-session="s1"]');
+    expect(node?.querySelector('[data-glyph]')?.getAttribute('data-glyph')).toBe('~');
+    expect(document.querySelector('[data-session-certified]')).toBeNull();
+  });
+
+  it('a human-certified session wears ✓ and the badge, together', () => {
+    const row = certifiedSession({ id: 's1' });
+    render(<ProcessTree agents={[agent([row])]} onOpenSession={() => {}} />);
+    const node = document.querySelector('[data-tree-session="s1"]');
+    expect(node?.querySelector('[data-glyph]')?.getAttribute('data-glyph')).toBe('✓');
+    expect(document.querySelector('[data-session-certified]')?.textContent).toBe('certified');
+  });
+
+  it('a machine-named session wears neither — the badge moves with the glyph', () => {
+    const row = certifiedSession({ id: 's1', certifiedByKind: 'agent' });
+    render(<ProcessTree agents={[agent([row])]} onOpenSession={() => {}} />);
+    const node = document.querySelector('[data-tree-session="s1"]');
+    expect(node?.querySelector('[data-glyph]')?.getAttribute('data-glyph')).toBe('~');
+    expect(document.querySelector('[data-session-certified]')).toBeNull();
   });
 });
 
@@ -104,9 +212,22 @@ describe('a plan and an agent roll up the hardest thing beneath them', () => {
     expect(glyphFor(planState(p))).toBe('✗');
   });
 
-  it('a settled plan with no sessions is a clean ✓; an open one is routine ·', () => {
-    expect(glyphFor(planState(plan({ status: 'settled' })))).toBe('✓');
+  /* THE SAME DEFECT ONE LEVEL UP. `plans` carries no certification column at
+     all, so a settled plan is a machine's report of its own completion — and it
+     used to render `✓`, which would have kept the tick alive on every plan and
+     agent even after the session derivation was fixed. */
+  it('a settled plan with no sessions is ~, not ✓ — no column on it holds a signature', () => {
+    expect(glyphFor(planState(plan({ status: 'settled' })))).toBe('~');
     expect(glyphFor(planState(plan({ status: 'open' })))).toBe('·');
+  });
+
+  it('a plan rolls up its sessions: all human-certified is ✓, one uncertified is ~', () => {
+    const allSigned = plan({ sessions: [certifiedSession({ id: 's1' })] });
+    const oneUnsigned = plan({
+      sessions: [certifiedSession({ id: 's1' }), session({ id: 's2', status: 'settled' })],
+    });
+    expect(glyphFor(planState(allSigned))).toBe('✓');
+    expect(glyphFor(planState(oneUnsigned))).toBe('~');
   });
 
   it('an agent is the hardest session across all its plans', () => {
@@ -118,11 +239,46 @@ describe('a plan and an agent roll up the hardest thing beneath them', () => {
       model: null,
       budgetLimitMicros: null,
       plans: [
-        plan({ id: 'p1', sessions: [session({ id: 's1', status: 'settled' })] }),
+        plan({ id: 'p1', sessions: [certifiedSession({ id: 's1' })] }),
         plan({ id: 'p2', sessions: [session({ id: 's2', status: 'failed' })] }),
       ],
     };
     expect(glyphFor(agentState(agent))).toBe('✗');
+  });
+});
+
+describe('an owed decision is owed to SOMEBODY, and the glyph knows who', () => {
+  const item = (overrides: Partial<ControlDecisionRow> = {}): ControlDecisionRow => ({
+    id: 'att-1',
+    userId: 'ada',
+    owedToViewer: true,
+    class: 'needs_decision',
+    subjectKind: 'object',
+    subjectId: 'obj-1',
+    createdAt: '2026-08-13T00:00:00.000Z',
+    ...overrides,
+  });
+
+  /**
+   * FLIP THE VIEWER. `owedToViewer` was the literal `true` for every item and
+   * every reader, which made NEEDS YOU a room-wide queue wearing a second-person
+   * label. The read model derives it now, and the glyph moves with it.
+   *
+   * MUTATION THAT MUST TURN THIS RED: hard-code `owedToViewer: true` back into
+   * `decisionState`, or return the constant from the read model's derivation.
+   */
+  it('owed to this reader is ◆; the same item owed to somebody else is ~', () => {
+    expect(glyphFor(decisionState(item({ owedToViewer: true })))).toBe('◆');
+    expect(glyphFor(decisionState(item({ owedToViewer: false })))).toBe('~');
+  });
+
+  it('a blocking question owed to this reader is ?; owed to another it is still ?, uncoloured', () => {
+    const mine = decisionState(item({ class: 'blocking_question', owedToViewer: true }));
+    const theirs = decisionState(item({ class: 'blocking_question', owedToViewer: false }));
+    expect(glyphFor(mine)).toBe('?');
+    expect(mine.owedToViewer).toBe(true);
+    expect(glyphFor(theirs)).toBe('?');
+    expect(theirs.owedToViewer).toBe(false);
   });
 });
 
@@ -171,18 +327,16 @@ describe('the pin is ordered by glyph hardness, and it renders only what needs a
       meta: '',
     },
     {
-      id: 'land',
-      state: sessionState(
-        session({ status: 'settled', artifact: { branch: 'b' }, certifiedByName: null }),
-      ),
-      title: 'land the work',
+      id: 'certify',
+      state: sessionState(session({ status: 'settled', artifact: { branch: 'b' } })),
+      title: 'certify the work',
       detail: '',
       meta: '',
     },
   ];
 
-  it('hardest first: ✗ failed, then ■ land, then ◆ gate', () => {
-    expect(pinHardestFirst(items).map((item) => item.id)).toEqual(['failed', 'land', 'gate']);
+  it('hardest first: ✗ failed, then ■ certify, then ◆ gate', () => {
+    expect(pinHardestFirst(items).map((item) => item.id)).toEqual(['failed', 'certify', 'gate']);
   });
 
   it('renders the failed session as the first pin row', () => {

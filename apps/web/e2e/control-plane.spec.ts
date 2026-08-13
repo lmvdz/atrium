@@ -29,9 +29,19 @@ import { requireBrowser, signUpAndVerify, uniqueEmail } from './support/flows';
  *   - the three SURFACES read real projection data, and FLIPPING the input (a
  *     plan's budget, a session's status) moves them;
  *   - the REVIEW pane shows a session's diff + tests + receipt + artifact;
- *   - the certify/land is gated on a formal human HOLD-TO-ARM: holding it lands
- *     the session (a human's name reaches `certified_by`), and NO non-human path
- *     can — the DB trigger refuses an agent certifier outright.
+ *   - the certify is gated on a formal human HOLD-TO-ARM whose duration the
+ *     SERVER measures: holding it past the gate certifies (a human's name reaches
+ *     `certified_by`), a request with no server arm does NOT, and no non-human
+ *     path can — the DB triggers refuse an agent certifier or armer outright.
+ *
+ * ## AND THE TICK IS THE COVENANT'S (#121 fix round, CS-1)
+ *
+ * The seeded settled-with-artifact session reads `■` before certification and
+ * `✓` after, which the shipped build also did. What it did NOT do is read `~` for
+ * a settled session with nothing to certify: that rendered `✓` off an exit code,
+ * with no person involved. So this seeds a FOURTH session — settled, no artifact,
+ * uncertified — and asserts the tree renders `~` on it, in a browser, against the
+ * real projection. That is the case the whole fix round turns on.
  */
 
 let handle: ReturnType<typeof createDatabase>;
@@ -56,6 +66,8 @@ interface Seeded {
   openSessionId: string;
   settledSessionId: string;
   failedSessionId: string;
+  /** settled, NO artifact, uncertified — the row that used to lie with a ✓. */
+  cleanExitSessionId: string;
 }
 
 /** One room that is an agent's channel, a funded plan, and three sessions. */
@@ -173,7 +185,23 @@ async function seed(viewerEmail: string): Promise<Seeded> {
     })
     .returning({ id: sessions.id });
 
-  if (!openSession || !settledSession || !failedSession) {
+  /* A CLEAN EXIT WITH NOTHING TO CERTIFY. The process says it finished; no
+     person has looked at it; there is no artifact to review. Under the covenant
+     that is `~` — the claimant's own account — and it is what shipped as `✓`. */
+  const [cleanExitSession] = await db
+    .insert(sessions)
+    .values({
+      roomId: room.id,
+      planId: plan.id,
+      harness: 'omp',
+      model: 'sonnet · audit',
+      status: 'settled',
+      spendMicros: 90_000,
+      exitSummary: 'read-only audit; nothing to land',
+    })
+    .returning({ id: sessions.id });
+
+  if (!openSession || !settledSession || !failedSession || !cleanExitSession) {
     throw new Error('session inserts returned nothing');
   }
 
@@ -187,6 +215,7 @@ async function seed(viewerEmail: string): Promise<Seeded> {
     openSessionId: openSession.id,
     settledSessionId: settledSession.id,
     failedSessionId: failedSession.id,
+    cleanExitSessionId: cleanExitSession.id,
   };
 }
 
@@ -235,10 +264,19 @@ test.describe('the control plane renders the pin, tree, surfaces and a human-gat
       const failedRow = page.locator(`[data-tree-session="${at.failedSessionId}"]`);
       const settledRow = page.locator(`[data-tree-session="${at.settledSessionId}"]`);
       const openRow = page.locator(`[data-tree-session="${at.openSessionId}"]`);
+      const cleanExitRow = page.locator(`[data-tree-session="${at.cleanExitSessionId}"]`);
       await expect(failedRow.locator('[data-glyph]').first()).toHaveAttribute('data-glyph', '✗');
       await expect(openRow.locator('[data-glyph]').first()).toHaveAttribute('data-glyph', '·');
-      // settled-with-artifact, not yet landed → ■ (needs you, destructive)
+      // settled-with-artifact, not yet certified → ■ (needs you, and written once)
       await expect(settledRow.locator('[data-glyph]').first()).toHaveAttribute('data-glyph', '■');
+
+      /* CS-1, IN THE BROWSER. A settled session nobody has certified is `~`. It
+         rendered `✓` — the covenant's own glyph, minted by an exit code. */
+      await expect(cleanExitRow.locator('[data-glyph]').first()).toHaveAttribute('data-glyph', '~');
+      // …and it wears no certified badge, because nobody certified it.
+      await expect(page.locator(`[data-session-certified="${at.cleanExitSessionId}"]`)).toHaveCount(
+        0,
+      );
 
       // ── the SURFACES read real data ─────────────────────────────────────────
       await expect(page.locator('[data-surface="decisions"] [data-surface-count]')).not.toHaveText(
@@ -259,28 +297,51 @@ test.describe('the control plane renders the pin, tree, surfaces and a human-gat
       await expect(review.locator('[data-artifact-branch]')).toHaveText('feat/users-migration');
       await expect(review.locator('[data-artifact-commit]')).toHaveText('a1b2c3d');
 
-      // ── the CERTIFY gate: a human hold-to-arm, and nothing else, lands it ────
+      /* ── THE COPY TELLS THE TRUTH ABOUT WHAT THE ACTION DOES ──────────────
+         It used to read "Certifying lands this work onto <branch>", which is
+         false: nothing here merges, pushes or deploys — it writes four columns.
+         A person who acted on that sentence believed the branch had moved. */
       const certify = review.locator('[data-certify="ready"]');
       await expect(certify).toBeVisible();
+      await expect(certify).not.toContainText(/lands this work onto/i);
+      await expect(certify).toContainText(/moves no code/i);
+      await expect(certify).toContainText(/written once/i);
+
+      // ── the CERTIFY gate: a SERVER-measured human hold, and nothing else ─────
       const hold = certify.locator(`[data-hold-action="certify-${at.settledSessionId}"]`);
       await expect(hold).toBeVisible();
 
-      // it is not yet landed
+      // it is not yet certified, and nothing is armed
       const before = await db
-        .select({ certifiedBy: sessions.certifiedBy })
+        .select({ certifiedBy: sessions.certifiedBy, armedAt: sessions.certifyArmedAt })
         .from(sessions)
         .where(eq(sessions.id, at.settledSessionId));
       expect(before[0]?.certifiedBy).toBeNull();
+      expect(before[0]?.armedAt).toBeNull();
 
-      // press and HOLD past the 2s gate without releasing; onAct fires on the clock
+      /* A TAP IS NOT A HOLD. Press and release immediately: the control arms on
+         the server (that is what `onBegin` is for) and then cancels, so the
+         confirm never fires — and even if something fired one, the server-measured
+         interval would be milliseconds. Nothing may reach `certified_by`. */
       const box = await hold.boundingBox();
       if (!box) throw new Error('the hold control had no box');
       await page.mouse.move(box.x + box.width / 2, box.y + box.height / 2);
       await page.mouse.down();
-      await page.waitForTimeout(2400);
+      await page.mouse.up();
+      await page.waitForTimeout(1_000);
+      const afterTap = await db
+        .select({ certifiedBy: sessions.certifiedBy })
+        .from(sessions)
+        .where(eq(sessions.id, at.settledSessionId));
+      expect(afterTap[0]?.certifiedBy).toBeNull();
+
+      // Now press and HOLD past the gate without releasing; onAct fires on the clock.
+      await page.mouse.move(box.x + box.width / 2, box.y + box.height / 2);
+      await page.mouse.down();
+      await page.waitForTimeout(3_200);
       await page.mouse.up();
 
-      // a human's name reached certified_by — the session is landed
+      // a human's name reached certified_by — the session is certified
       await expect
         .poll(
           async () =>
@@ -294,7 +355,16 @@ test.describe('the control plane renders the pin, tree, surfaces and a human-gat
         )
         .toBe(at.viewerId);
 
-      // ── no non-human path can land: the DB trigger refuses an agent ──────────
+      /* AND THE RECORDED DURATION IS THE SERVER'S MEASUREMENT, not a number the
+         page sent — there is no longer any field for the page to send it in. */
+      const receipt = await db
+        .select({ heldMs: sessions.certifiedHeldMs, certifiedAt: sessions.certifiedAt })
+        .from(sessions)
+        .where(eq(sessions.id, at.settledSessionId));
+      expect(receipt[0]?.heldMs ?? 0).toBeGreaterThanOrEqual(2000);
+      expect(receipt[0]?.certifiedAt).not.toBeNull();
+
+      // ── no non-human path can certify: the DB triggers refuse an agent ───────
       let refused = false;
       try {
         await db
@@ -310,6 +380,18 @@ test.describe('the control plane renders the pin, tree, surfaces and a human-gat
         .from(sessions)
         .where(eq(sessions.id, at.failedSessionId));
       expect(failedStill[0]?.certifiedBy).toBeNull();
+
+      // …and a certification, once made, cannot be un-made (drizzle/0033).
+      let unlandRefused = false;
+      try {
+        await db
+          .update(sessions)
+          .set({ certifiedBy: null })
+          .where(eq(sessions.id, at.settledSessionId));
+      } catch {
+        unlandRefused = true;
+      }
+      expect(unlandRefused).toBe(true);
 
       // ── FLIP THE INPUT: lower the plan's ceiling below its draws → cost warns ─
       await db.update(plans).set({ rlimitSlice: 1 }).where(eq(plans.id, at.planId));
@@ -327,8 +409,20 @@ test.describe('the control plane renders the pin, tree, surfaces and a human-gat
       );
       // the once-running session is now a failure in the pin
       await expect(page.locator(`[data-pin-item="${at.openSessionId}"]`)).toBeVisible();
-      // and the landed session no longer needs a human — it left the pin
+      // and the certified session no longer needs a human — it left the pin
       await expect(page.locator(`[data-pin-item="${at.settledSessionId}"]`)).toHaveCount(0);
+      /* THE FLIP THAT MOVES THE TICK: the certified session now reads ✓ and wears
+         the badge, while the uncertified clean exit beside it still reads ~. One
+         glyph, one signature, and the two rows disagree because the DATA does. */
+      await expect(
+        page.locator(`[data-tree-session="${at.settledSessionId}"] [data-glyph]`).first(),
+      ).toHaveAttribute('data-glyph', '✓');
+      await expect(page.locator(`[data-session-certified="${at.settledSessionId}"]`)).toHaveCount(
+        1,
+      );
+      await expect(
+        page.locator(`[data-tree-session="${at.cleanExitSessionId}"] [data-glyph]`).first(),
+      ).toHaveAttribute('data-glyph', '~');
     } finally {
       await teardown(at);
     }

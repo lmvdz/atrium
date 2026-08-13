@@ -68,6 +68,20 @@ export interface HoldToActProps {
   /** what the hold will do, in words. Shown as the control's description. */
   readonly describe: string;
   readonly holdMs?: number;
+  /**
+   * Fired the instant the hold BEGINS — before anything has been held.
+   *
+   * Added for #121's certify, where the server has to stamp its own clock at the
+   * start of the interval it will later measure. Without it the only signal a
+   * caller got was hold-complete, and a server told about a hold only once it was
+   * over can do nothing but believe the duration it is handed — which is the
+   * client-supplied-timing defect the arm→confirm protocol exists to remove.
+   *
+   * A cancelled hold simply never reaches `onAct`; a caller that recorded
+   * something on begin is responsible for that being harmless, and for certify it
+   * is: a pending arm that is never confirmed certifies nothing and expires.
+   */
+  readonly onBegin?: () => void;
   readonly onArm?: (arming: Arming) => void;
   readonly onAct?: (arming: Arming) => void;
   readonly className?: string;
@@ -81,6 +95,7 @@ export function HoldToAct({
   label,
   describe,
   holdMs = DEFAULT_HOLD_MS,
+  onBegin,
   onArm,
   onAct,
   className,
@@ -151,8 +166,11 @@ export function HoldToAct({
     startRef.current = performance.now();
     setPhase('holding');
     paint(0);
+    /* Before the first frame, so a caller that has to start a clock elsewhere
+       starts it at the same instant this one does. */
+    onBegin?.();
     frameRef.current = requestAnimationFrame(tick);
-  }, [paint, tick]);
+  }, [onBegin, paint, tick]);
 
   useEffect(() => stop, [stop]);
 

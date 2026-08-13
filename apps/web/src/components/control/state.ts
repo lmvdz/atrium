@@ -13,32 +13,84 @@
  * not a covenant `~`/`✓`. But the seven-glyph vocabulary is exactly the alphabet
  * the operator already reads, so the tree speaks it: a failed process is `✗`
  * (unpaid attention, owed and sorted to the top), a running one is `·` (routine,
- * nothing owed), a clean exit is `✓`, and a settled session whose artifact still
- * needs a human to LAND it is `■` (needs you, and landing a merge is not
- * undoable). Those readings are mapped here, once.
+ * nothing owed), and a settled session whose artifact still needs a human is `■`
+ * (needs you, and certifying is not undoable). Those readings are mapped here.
+ *
+ * ## THE TICK IS THE COVENANT'S, AND IT IS NOT ON LOAN TO A PROCESS
+ *
+ * This file shipped `status === 'settled' → verification: 'verified'`, so a
+ * process that exited cleanly and that NO PERSON had ever looked at rendered `✓`
+ * — in the tree, in the pin's rollup, in the review pane's header, and in every
+ * plan and agent that rolled it up. The glyph whose tooltip reads "certified — a
+ * person has accepted this reading" was being minted by a subprocess reporting
+ * its own exit code. That is the exact claim-dressed-as-fact the whole product
+ * exists to refuse, and it was one string literal, invisible to typecheck.
+ *
+ * The rule, stated once: **`✓` derives from a human certification and from
+ * nothing else.** A settled session nobody has signed is the machine's own
+ * account of its own exit — `self_reported`, which renders `~`, whose tooltip
+ * already says "the claimant's own account, nothing has checked it". That is
+ * precisely what a green exit code is.
+ *
+ * And the signature is not taken on trust either: the certifier's principal kind
+ * travels with it from the read model, and the tick is minted by
+ * `epistemicStateFromAcceptance` — @atrium/core's ONE predicate, the same
+ * function the reducer's gate and every other rendered `✓` go through. A mutation
+ * of `epistemicStateOf` moves this glyph too, which is what makes it derived
+ * rather than merely correct today.
  * ------------------------------------------------------------------------- */
 
-import type { ControlAgentRow, ControlPlanRow, ControlSessionRow } from '@/lib/control-plane-data';
+import { epistemicStateFromAcceptance } from '@atrium/core';
+import type {
+  ControlAgentRow,
+  ControlDecisionRow,
+  ControlPlanRow,
+  ControlSessionRow,
+} from '@/lib/control-plane-data';
 import type { EpistemicState } from '../model/glyph';
 import { hardestState } from '../model/records';
 
-/** A settled session carries an artifact a human has not yet certified. */
+/**
+ * Has a HUMAN certified this session — through the one predicate.
+ *
+ * `epistemicStateFromAcceptance` is the same function `locallyAcceptedState`
+ * (replay) and the reducer's gate call go through, so there is one definition of
+ * "a person took this" in the product rather than a second one spelled
+ * `certifiedByName !== null` here.
+ *
+ * The second argument is `null` DELIBERATELY. `humanTouchedAt` is the predicate's
+ * corrected-by-a-person clause, and a session has no correction path — it has one
+ * signature or none — so passing `certifiedAt` would be handing the predicate a
+ * timestamp that is written for a certifier of ANY kind, which is the OR branch
+ * that would let a machine's name confirm. The only question here is whether the
+ * principal who signed is a person, and that is the argument the answer comes
+ * from.
+ *
+ * A name with an unreadable or non-human kind is therefore NOT a certification.
+ * Two DB triggers make such a row unwritable (0032, 0033) — this is what the
+ * render does if one ever is.
+ */
+export function sessionCertified(session: ControlSessionRow): boolean {
+  if (session.certifiedByName === null || session.certifiedByKind === null) return false;
+  return epistemicStateFromAcceptance(session.certifiedByKind, null) === 'confirmed';
+}
+
+/** A settled session carries an artifact no human has certified yet. */
 export function sessionAwaitsLanding(session: ControlSessionRow): boolean {
-  return (
-    session.status === 'settled' && session.artifact !== null && session.certifiedByName === null
-  );
+  return session.status === 'settled' && session.artifact !== null && !sessionCertified(session);
 }
 
 /**
- * A session's state, derived from its lifecycle status and whether its landing
- * is still owed. Order matters, and it is the same shape `glyphFor` uses:
+ * A session's state. Order matters, and it is the same shape `glyphFor` uses:
  *
- *   failed   → ✗, and OWED — a dead process is unpaid attention (scout §18), so
- *              `owedToViewer` is true and it pins and sorts above everything.
- *   settled + artifact + uncertified → ■, OWED and irreversible: a human must
- *              land it, and landing is not undoable (scout §9.5's armed merge).
- *   settled (certified, or no artifact to land) → ✓, a clean exit.
- *   open     → ·, routine: a running session owes nobody anything.
+ *   failed    → ✗, and OWED — a dead process is unpaid attention (scout §18), so
+ *               `owedToViewer` is true and it pins and sorts above everything.
+ *   settled + artifact + UNCERTIFIED → ■, OWED and irreversible: a human must
+ *               sign it, and a certification is written once (drizzle/0033).
+ *   CERTIFIED → ✓, and only here. A person put their name on it.
+ *   settled, uncertified, nothing to certify → `~`: the process says it exited
+ *               cleanly, and the process is the claimant.
+ *   open      → ·, routine: a running session owes nobody anything.
  */
 export function sessionState(session: ControlSessionRow): EpistemicState {
   if (session.status === 'failed') {
@@ -47,10 +99,18 @@ export function sessionState(session: ControlSessionRow): EpistemicState {
   if (sessionAwaitsLanding(session)) {
     return { kind: 'decision', verification: 'proposed', owedToViewer: true, irreversible: true };
   }
+  if (sessionCertified(session)) {
+    return {
+      kind: 'commitment',
+      verification: 'accepted',
+      owedToViewer: false,
+      irreversible: false,
+    };
+  }
   if (session.status === 'settled') {
     return {
       kind: 'commitment',
-      verification: 'verified',
+      verification: 'self_reported',
       owedToViewer: false,
       irreversible: false,
     };
@@ -60,9 +120,14 @@ export function sessionState(session: ControlSessionRow): EpistemicState {
 
 /**
  * A plan's state: the hardest of its sessions' states — a plan rolls its
- * children up (scout §9.4, "a needs-you propagates to every ancestor"). A plan
- * with no sessions yet reads from its own lifecycle status: a settled plan is a
- * clean exit (`✓`), an open one is routine (`·`).
+ * children up (scout §9.4, "a needs-you propagates to every ancestor").
+ *
+ * A plan with no sessions yet reads from its own lifecycle status, and it reads
+ * it the same way a session does: `plans` carries no certification column at all,
+ * so a settled plan is a machine's report of its own completion and renders `~`.
+ * It used to render `✓` — the same defect as the session's, one level up, and it
+ * would have kept the tick alive on every plan and agent even after the session
+ * derivation was fixed.
  */
 export function planState(plan: ControlPlanRow): EpistemicState {
   const childStates = plan.sessions.map(sessionState);
@@ -71,7 +136,7 @@ export function planState(plan: ControlPlanRow): EpistemicState {
   if (plan.status === 'settled') {
     return {
       kind: 'commitment',
-      verification: 'verified',
+      verification: 'self_reported',
       owedToViewer: false,
       irreversible: false,
     };
@@ -87,6 +152,57 @@ export function agentState(agent: ControlAgentRow): EpistemicState {
   const hardest = hardestState(sessionStates);
   if (hardest !== null) return hardest;
   return { kind: 'event', verification: 'routine', owedToViewer: false, irreversible: false };
+}
+
+/* ── owed decisions: whose attention item is this? ───────────────────────── */
+
+/**
+ * A pending attention item's state — its glyph is the class AND the ADDRESSEE.
+ *
+ * `owedToViewer` was hard-coded `true` in `ControlPlane`, for every item and
+ * every viewer, so the room's whole pending queue rendered as owed to whoever
+ * happened to be looking: a person owed nothing saw somebody else's four
+ * decisions counted under NEEDS YOU, in `◆` amber. The viewer's own reading of
+ * the item is now what decides, and it arrives on the row (`ControlDecisionRow`,
+ * derived in the read model from the item's `user_id`).
+ *
+ * `needsViewer` in glyph.ts is what turns that into `◆`/`?`, so an item NOT owed
+ * to this reader falls through to its verification and reads `~`/`?` — present,
+ * uncoloured, not claiming a debt that is not theirs. This lives here rather than
+ * in the component for the same reason every other derivation does: the pin, the
+ * surface and the count all have to be reading one answer.
+ */
+export function decisionState(decision: ControlDecisionRow): EpistemicState {
+  if (decision.class === 'blocking_question') {
+    return {
+      kind: 'question',
+      verification: 'open',
+      owedToViewer: decision.owedToViewer,
+      irreversible: false,
+    };
+  }
+  return {
+    kind: 'decision',
+    verification: 'proposed',
+    owedToViewer: decision.owedToViewer,
+    irreversible: false,
+  };
+}
+
+/** A system-voice label for an owed decision, by its class. */
+export function decisionLabel(cls: string): string {
+  switch (cls) {
+    case 'needs_decision':
+      return 'a decision awaits a human';
+    case 'blocking_question':
+      return 'an open question is blocking';
+    case 'owned_commitment':
+      return 'a commitment awaits confirmation';
+    case 'mention':
+      return 'a mention awaits a reply';
+    default:
+      return cls.replace(/_/g, ' ');
+  }
 }
 
 /* ── cost: burn vs budget, derived from `plans` columns (#118) ────────────── */

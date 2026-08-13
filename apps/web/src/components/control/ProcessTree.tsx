@@ -8,7 +8,9 @@
  * is DERIVED (state.ts → glyphFor) from real lifecycle state — a running session
  * is `·`, a failed one `✗`, a clean exit `✓`, a settled-awaiting-landing `■`;
  * a plan and an agent roll up the hardest thing beneath them. No glyph on this
- * tree is hand-set.
+ * tree is hand-set — and none of them is `✓` unless a HUMAN certified that
+ * session. A clean exit is the process's own account of itself and reads `~`;
+ * see state.ts for why that is the whole of the covenant rule.
  *
  * The cost chip beside a plan is the same burn-vs-budget the cost surface reads,
  * off the plan's own columns: draws against the enforced ceiling, dollars against
@@ -19,7 +21,14 @@ import type { ControlAgentRow, ControlSessionRow } from '@/lib/control-plane-dat
 import { systemText } from '../model/quotation';
 import { Glyph } from '../primitives/Glyph';
 import styles from './control.module.css';
-import { agentState, formatMicros, planCost, planState, sessionState } from './state';
+import {
+  agentState,
+  formatMicros,
+  planCost,
+  planState,
+  sessionCertified,
+  sessionState,
+} from './state';
 
 export interface ProcessTreeProps {
   readonly agents: readonly ControlAgentRow[];
@@ -136,11 +145,14 @@ export function ProcessTree({ agents, openSessionId, onOpenSession }: ProcessTre
                         </span>
                       </span>
                       <span className={styles.rowMeta}>
-                        {session.certifiedByName === null ? null : (
+                        {/* The SAME predicate the row's glyph derives from. A
+                            second test here — `certifiedByName !== null` — would
+                            be a badge free to say "certified" beside a `~`. */}
+                        {sessionCertified(session) ? (
                           <span className={styles.sub} data-session-certified={session.id}>
-                            landed
+                            certified
                           </span>
-                        )}
+                        ) : null}
                       </span>
                     </button>
                   ))}

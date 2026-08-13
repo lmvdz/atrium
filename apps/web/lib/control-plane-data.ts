@@ -1,4 +1,5 @@
 import 'server-only';
+import { loadRoomMembershipRow, type PrincipalKind, parsePrincipalKind } from '@atrium/auth';
 import {
   agents,
   attentionItems,
@@ -9,7 +10,7 @@ import {
   sessions,
   users,
 } from '@atrium/db';
-import { and, asc, desc, eq, inArray } from 'drizzle-orm';
+import { and, asc, desc, eq, gt, inArray } from 'drizzle-orm';
 
 /* ---------------------------------------------------------------------------
  * The control-plane read model — issue #121.
@@ -24,15 +25,39 @@ import { and, asc, desc, eq, inArray } from 'drizzle-orm';
  * allowance is unspent here.
  *
  * The ONE thing not previously projected anywhere is the execution artifact and
- * the human certification of a session's landing: those are the two nullable
- * `sessions` columns #121 added (`artifact`, `certified_*`, drizzle/0032). They
- * are non-epistemic session-receipt metadata (#114 T3), the same register as
- * `exit_summary` beside them — never a covenant `~`→`✓`.
+ * the human certification of a session: those are the nullable `sessions` columns
+ * #121 added (`artifact`, `certified_*`, drizzle/0032). The certification is
+ * non-epistemic in the LEDGER's sense (#114 T3) — it never writes an
+ * `accepted_objects` row — but it is exactly what the session's own glyph is
+ * derived from, because a settled process is a machine's report and only a human
+ * signature makes it more than that. Hence `certifiedByKind`: the certifier's
+ * principal kind travels WITH the name, so the glyph derivation can run the one
+ * predicate (`epistemicStateOf`) rather than trust that a name implies a person.
  *
- * Every field here is RAW state. No glyph, no tone, no ordering decision is made
- * in this file: the component layer derives all of those from the state, so the
- * one rule the whole product turns on — a glyph is derived, never hand-set —
- * holds across the seam. See src/components/control/state.ts.
+ * ## THIS VIEW BELONGS TO ONE VIEWER
+ *
+ * It used to belong to the room, which is the same defect twice:
+ *
+ *   * every pending attention item in the room was handed to every viewer and
+ *     rendered as owed to them, so a person who was owed nothing saw somebody
+ *     else's four decisions counted under NEEDS YOU;
+ *   * "unseen activity" was the last twelve lifecycle events, full stop —
+ *     `memberships.seen_seq`, the per-person read cursor this product already
+ *     maintains, was not consulted, so a person who had read everything was told
+ *     twelve things were new.
+ *
+ * Both now read the viewer: `owedToViewer` is derived from the item's addressee
+ * against `viewerId`, and "unseen" means `room_seq > seen_seq` for THIS viewer's
+ * membership. Flip the viewer and both surfaces move.
+ *
+ * The membership (and its cursor) is read through `@atrium/auth`, which owns
+ * every query that touches `memberships` — this file names the table nowhere,
+ * which is the boundary `packages/auth/test/room-access.test.ts` enforces.
+ *
+ * Every field here is otherwise RAW state. No glyph, no tone, no ordering
+ * decision is made in this file: the component layer derives all of those from
+ * the state, so the one rule the whole product turns on — a glyph is derived,
+ * never hand-set — holds across the seam. See src/components/control/state.ts.
  * ------------------------------------------------------------------------- */
 
 export type { SessionArtifact };
@@ -47,8 +72,19 @@ export interface ControlSessionRow {
   readonly spendMicros: number;
   readonly exitSummary: string | null;
   readonly artifact: SessionArtifact | null;
-  /** The human who landed it, resolved to a display name; null until certified. */
+  /** The human who certified it, resolved to a display name; null until certified. */
   readonly certifiedByName: string | null;
+  /**
+   * The certifier's PRINCIPAL KIND, carried beside the name so the glyph
+   * derivation can ask the one predicate instead of assuming.
+   *
+   * Failed closed: an unreadable `principal_kind` resolves to `null` here, which
+   * `sessionState` reads as "no human signature" and renders `~`. Two triggers
+   * (0032, 0033) already make a non-human name unwritable, so this should be
+   * unreachable — and it is exactly the sort of should-be-unreachable that the
+   * fail-open version of this file spelled `verification: 'verified'`.
+   */
+  readonly certifiedByKind: PrincipalKind | null;
   readonly certifiedAt: string | null;
   readonly certifiedHeldMs: number | null;
   readonly createdAt: string;
@@ -84,7 +120,18 @@ export interface ControlAgentRow {
 /** A pending attention item — a decision the room owes a human. */
 export interface ControlDecisionRow {
   readonly id: string;
+  /** Its ADDRESSEE. `attention_items` is per-person; this is the person. */
   readonly userId: string;
+  /**
+   * Whether this item is owed to the person reading the page — `userId` against
+   * the viewer, and nothing else.
+   *
+   * It was hard-coded `true` for every item and every viewer, which made NEEDS
+   * YOU a room-wide queue wearing a second-person label. Derived here rather than
+   * in the component so there is one answer for the pin, the surface and the
+   * count.
+   */
+  readonly owedToViewer: boolean;
   readonly class: 'needs_decision' | 'owned_commitment' | 'mention' | 'blocking_question';
   readonly subjectKind: string;
   readonly subjectId: string;
@@ -101,8 +148,11 @@ export interface ControlEventRow {
 
 export interface ControlPlaneData {
   readonly room: { readonly id: string; readonly name: string };
+  /** Whose reading of the room this is. Every per-viewer field below derives from it. */
+  readonly viewerId: string;
   readonly agents: readonly ControlAgentRow[];
   readonly decisions: readonly ControlDecisionRow[];
+  /** Lifecycle events past THIS viewer's `memberships.seen_seq`, newest first. */
   readonly unseen: readonly ControlEventRow[];
   readonly updatedAt: string;
 }
@@ -132,7 +182,17 @@ export async function loadControlPlane(
   database: Database,
   roomId: string,
   roomName: string,
+  viewerId: string,
 ): Promise<ControlPlaneData> {
+  /* THE VIEWER'S READ CURSOR, through the package that owns `memberships`.
+     A viewer with no membership row has read nothing (`0`) rather than
+     everything: an unreadable cursor must over-report what is new, never
+     under-report it, because the failure a person can see is the one they can
+     correct. The page's own authorization has already refused a non-member long
+     before this runs. */
+  const membership = await loadRoomMembershipRow(database, roomId, viewerId);
+  const seenSeq = membership?.seenSeq ?? 0;
+
   const [planRows, sessionRows, decisionRows, eventRows] = await Promise.all([
     database
       .select()
@@ -158,7 +218,15 @@ export async function loadControlPlane(
       })
       .from(coreEvents)
       .where(
-        and(eq(coreEvents.roomId, roomId), inArray(coreEvents.type, [...LIFECYCLE_EVENT_TYPES])),
+        and(
+          eq(coreEvents.roomId, roomId),
+          inArray(coreEvents.type, [...LIFECYCLE_EVENT_TYPES]),
+          /* UNSEEN MEANS UNSEEN BY THIS PERSON. Without this predicate the
+             surface was "the last twelve lifecycle events", which is a room
+             fact wearing a per-person label — a viewer who had read all of them
+             was still told twelve things happened while they were away. */
+          gt(coreEvents.roomSeq, seenSeq),
+        ),
       )
       .orderBy(desc(coreEvents.roomSeq))
       .limit(12),
@@ -190,7 +258,11 @@ export async function loadControlPlane(
       return certifierIds.length === 0
         ? Promise.resolve([])
         : database
-            .select({ id: users.id, name: users.displayName })
+            /* The KIND travels with the name. A display name says nothing about
+               whether a person signed this; `principal_kind` is what the one
+               predicate reads, and reading it here is what lets the glyph
+               derivation stop assuming. */
+            .select({ id: users.id, name: users.displayName, kind: users.principalKind })
             .from(users)
             .where(inArray(users.id, certifierIds));
     })(),
@@ -198,6 +270,9 @@ export async function loadControlPlane(
 
   const nameById = new Map(nameRows.map((row) => [row.id, row.name]));
   const certifierNameById = new Map(certifierNameRows.map((row) => [row.id, row.name]));
+  const certifierKindById = new Map(
+    certifierNameRows.map((row) => [row.id, parsePrincipalKind(row.kind)]),
+  );
   const configByAgent = new Map(agentConfigRows.map((row) => [row.userId, row]));
 
   const sessionsByPlan = new Map<string, ControlSessionRow[]>();
@@ -214,6 +289,8 @@ export async function loadControlPlane(
       artifact: session.artifact ?? null,
       certifiedByName:
         session.certifiedBy === null ? null : (certifierNameById.get(session.certifiedBy) ?? null),
+      certifiedByKind:
+        session.certifiedBy === null ? null : (certifierKindById.get(session.certifiedBy) ?? null),
       certifiedAt: session.certifiedAt === null ? null : session.certifiedAt.toISOString(),
       certifiedHeldMs: session.certifiedHeldMs,
       createdAt: session.createdAt.toISOString(),
@@ -258,6 +335,9 @@ export async function loadControlPlane(
   const decisions: ControlDecisionRow[] = decisionRows.map((item) => ({
     id: item.id,
     userId: item.userId,
+    /* THE WHOLE OF "owed to you": the item's addressee is this reader, or it is
+       not. It used to be the constant `true`. */
+    owedToViewer: item.userId === viewerId,
     class: item.class,
     subjectKind: item.subjectKind,
     subjectId: item.subjectId,
@@ -273,6 +353,7 @@ export async function loadControlPlane(
 
   return {
     room: { id: roomId, name: roomName },
+    viewerId,
     agents: agentRows,
     decisions,
     unseen,
