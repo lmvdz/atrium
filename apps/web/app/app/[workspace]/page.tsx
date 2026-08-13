@@ -95,6 +95,14 @@ export default async function WorkspacePage({
                 <Link className={styles.link} href={`/app/${workspace.slug}/${room.slug}`}>
                   #{room.slug}
                 </Link>
+                {/* The control plane sits beside the conversation: same room,
+                    the process-tree lens instead of the feed. */}
+                <Link
+                  className={styles.rowMeta}
+                  href={`/app/${workspace.slug}/${room.slug}/control`}
+                >
+                  control
+                </Link>
               </span>
               <span className={styles.roleTag}>{room.role}</span>
             </li>

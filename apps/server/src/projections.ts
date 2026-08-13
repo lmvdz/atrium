@@ -833,6 +833,22 @@ async function projectSessionExit(
       exitSummary: event.exitSummary,
       spendMicros: event.spendMicros ?? 0,
       contextPct: event.contextPct,
+      // THE PRODUCED ARTIFACT LANDS IN THE ROW HERE — the #120×#121 seam.
+      // #120's ExecutionProvider mints the verified artifact (`{branch, commit,
+      // remote}`) and carries it on the exit event; #121's control-plane review
+      // pane certifies `sessions.artifact` (`SessionArtifact`). The two were
+      // built apart — #120's projection wrote no column (there was none) and
+      // #121's column named #120 as "the eventual writer at settle time" without
+      // one. On the integrated tree the settle projection IS that writer: it
+      // persists the event's branch+commit into the column so the produced
+      // artifact is exactly what the human reviews and lands. `remote` is #120's
+      // internal scratch pointer and is not a review fact, so it is dropped;
+      // diff/test fields are not on #120's ExecutionArtifact and stay absent (a
+      // merge artifact carries branch+commit, per the column doc). Null exit
+      // artifact leaves the slot null — an external/audit/failed exit.
+      artifact: event.artifact
+        ? { branch: event.artifact.branch, commit: event.artifact.commit }
+        : null,
       settledByEventId: eventId,
       updatedAt: new Date(event.at),
     })

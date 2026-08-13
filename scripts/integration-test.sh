@@ -8,6 +8,10 @@
 #                                      # use a database you already have; this
 #                                      # script then touches compose not at all
 #
+#   ATRIUM_TEST_COMPOSE_PROJECT=lane2 ATRIUM_TEST_PG_PORT=55447 pnpm test:integration
+#                                      # a lane of its own: separate compose
+#                                      # project AND separate port
+#
 # There is no in-suite skip. A test that quietly passes when its database is
 # missing is worse than one that fails loudly, because the gate it guards keeps
 # reporting green — so if the database cannot be reached, this exits non-zero.
@@ -16,8 +20,13 @@ set -euo pipefail
 cd "$(dirname "$0")/.."
 
 COMPOSE_FILE=docker-compose.test.yml
-# Overridable so parallel worktrees can each run the suite against their own
-# isolated compose project (and Postgres port) without tearing down each other's.
+# THE PROJECT NAME IS A LANE, and it has to be overridable for the same reason
+# the port already is — so parallel worktrees can each run the suite against
+# their own isolated compose project (and Postgres port) without tearing down
+# each other's. It was hardcoded, so two agents running this concurrently on
+# different ports still shared one compose project — the second `up` adopted the
+# first's container and the trap on either one's exit tore the other's database
+# out from under it, mid-suite. A port without a project is half an isolation.
 PROJECT="${ATRIUM_TEST_COMPOSE_PROJECT:-atrium-test}"
 PORT="${ATRIUM_TEST_PG_PORT:-55445}"
 KEEP=0

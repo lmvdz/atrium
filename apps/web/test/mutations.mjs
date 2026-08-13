@@ -246,9 +246,8 @@ const LEDGER = [
   {
     name: 'the arming record loses the actor the convention requires',
     file: 'src/components/primitives/HoldToAct.tsx',
-    find: '    const arming: Arming = { actionId, actor, armedAt: new Date().toISOString(), heldMs };',
-    replace:
-      "    const arming: Arming = { actionId, actor: '', armedAt: new Date().toISOString(), heldMs };",
+    find: '      actor,\n      armedAt: new Date().toISOString(),\n      heldMs,',
+    replace: "      actor: '',\n      armedAt: new Date().toISOString(),\n      heldMs,",
     test: 'test/hold-to-act.test.tsx',
   },
   {

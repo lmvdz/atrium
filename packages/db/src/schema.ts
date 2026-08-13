@@ -1368,6 +1368,30 @@ export const plans = pgTable(
  * `session_failed` writes only these; it touches no `accepted_objects`
  * judgement column and so can never flip a `~` to a `✓`.
  */
+
+/**
+ * The execution artifact a settled session produced — #120's ExecutionProvider
+ * output, surfaced in #121's review pane. All fields optional: the shape a merge
+ * carries (branch + commit) differs from what a test run carries (pass/fail
+ * counts), and an audit session carries neither. `diffStat` is a rendered
+ * summary line (`+128 −34 · 6 files`), not structured hunks — the control plane
+ * shows the shape of the change, and the terminal is the break-glass detail.
+ */
+export interface SessionArtifact {
+  /** The branch the work landed on, when it produced one. */
+  readonly branch?: string;
+  /** The commit sha, when it produced one. */
+  readonly commit?: string;
+  /** A one-line diff summary — additions, deletions, files touched. */
+  readonly diffStat?: string;
+  /** Tests that passed, when the session ran a suite. */
+  readonly testsPassed?: number;
+  /** Tests that failed, when the session ran a suite. */
+  readonly testsFailed?: number;
+  /** A free one-line note about the artifact — kept short, system voice. */
+  readonly summary?: string;
+}
+
 export const sessions = pgTable(
   'sessions',
   {
@@ -1388,6 +1412,101 @@ export const sessions = pgTable(
     spendMicros: bigint('spend_micros', { mode: 'number' }).notNull().default(0),
     /** The session's exit receipt prose, once it settles or fails. */
     exitSummary: text('exit_summary'),
+    /**
+     * THE EXECUTION ARTIFACT (#120's forward slot, #121's review pane).
+     *
+     * What a settled session PRODUCED — the branch/commit it landed on, a diff
+     * stat, and a test summary — so the control-plane review pane can show diff +
+     * tests + receipt + artifact rather than only the exit prose. Nullable: a
+     * session with no code output (an audit, a dry-run) leaves it null, and a
+     * settled session that predates its ExecutionProvider leaves it null too. The
+     * #120 ExecutionProvider is the eventual writer at settle time; until it
+     * lands, this is the slot it fills, populated directly for a seeded session.
+     * It is non-epistemic (#114 T3), the same as `exit_summary` beside it: a
+     * process receipt, never an `accepted_objects` `~`→`✓`.
+     */
+    artifact: jsonb('artifact').$type<SessionArtifact>(),
+    /**
+     * WHO LANDED THIS SESSION — the human who certified it, and only ever a
+     * human. NULL until a person formally certifies (#121's hold-to-arm land),
+     * and held to a `human` principal by the `sessions_certified_by_is_human`
+     * trigger (drizzle/0032): certification is the covenant's human-only act made
+     * a table fact, so no non-human path — no machine, no voice — can write a
+     * name here even with triggers left on. `SET NULL` on the human's deletion:
+     * the session's receipt outlives the identity, the same as its channel does.
+     */
+    certifiedBy: uuid('certified_by').references(() => users.id, { onDelete: 'set null' }),
+    /** When the certification was armed and committed. NULL until certified. */
+    certifiedAt: timestamp('certified_at', { withTimezone: true }),
+    /**
+     * How long the human held the arm control, measured — the asymmetric-friction
+     * receipt (#102/#110). Recorded so a certification carries evidence it was a
+     * deliberate hold, not a click. NULL until certified.
+     */
+    certifiedHeldMs: integer('certified_held_ms'),
+    /**
+     * WHO ARMED THE PENDING CERTIFICATION, and WHEN — stamped by the SERVER.
+     *
+     * #121 fix round. The first cut of the certify path took the hold's timing
+     * from the CLIENT: the Server Action accepted `armedAt` and `heldMs` off the
+     * request, so `{ heldMs: 999999 }` from `curl` certified a session without
+     * anybody having held anything, and `{ heldMs: 0 }` did too. The asymmetric
+     * friction the covenant asks for was measured entirely on the attacker's
+     * side of the wire.
+     *
+     * These two columns are the fix. Arming is its own server round-trip and
+     * `certify_armed_at` is written as `now()` INSIDE the database, never from a
+     * value a request carried. Certification then computes the held duration as
+     * `now() - certify_armed_at` in SQL and refuses anything under the required
+     * hold. There is no client-supplied timing left to forge, and the recorded
+     * `certified_held_ms` is a measurement rather than a claim.
+     *
+     * `certify_armed_by` is held to a `human` principal by the
+     * `sessions_certify_armed_by_is_human` trigger (drizzle/0033), the same way
+     * `certified_by` is by 0032: the arm is half of the human-only act, so a
+     * machine may not perform it either.
+     */
+    certifyArmedBy: uuid('certify_armed_by').references(() => users.id, { onDelete: 'set null' }),
+    /** The SERVER's clock at the arm — `now()`, never a value a request sent. */
+    certifyArmedAt: timestamp('certify_armed_at', { withTimezone: true }),
+    /**
+     * THE ARM'S SINGLE-USE ATTEMPT ID — a `now()`-armed hold is a specific
+     * attempt, not a 120s standing permission.
+     *
+     * #121 fix round, CS-3 finished. The gauntlet found that a server arm survived
+     * its whole TTL and "a later direct confirm spends it": the arm was a window,
+     * not a token. `certify_arm_nonce` is stamped with a fresh `gen_random_uuid()`
+     * at arm and CONSUMED (set null) by the confirm that spends it, so the confirm
+     * honours only an arm minted by `armCertification` (the one path that stamps a
+     * nonce) and only once. A hand-forged or leaked arm without a live nonce is not
+     * a confirmable attempt. NULL whenever no hold is pending. Cleared on disarm.
+     */
+    certifyArmNonce: uuid('certify_arm_nonce'),
+    /**
+     * A DIGEST OF THE ARTIFACT THE HOLD WAS ARMED OVER — so the signature binds to
+     * the artifact the person REVIEWED, not merely to "an" artifact.
+     *
+     * #121 fix round, CS-1 finished. 0034 freezes the artifact once certified, but
+     * between arm and confirm the artifact is still mutable: render A, change it to
+     * B, confirm → 0034 froze B under a `✓` for work nobody reviewed. The arm now
+     * records `md5(artifact::text)` of what was on screen; the confirm recomputes
+     * it and REFUSES if the artifact changed underneath the hold. `md5` of jsonb's
+     * canonical text is stable for equal jsonb. NULL when no hold is pending;
+     * consumed (set null) by the confirm and cleared on disarm.
+     */
+    certifyArmedArtifactDigest: text('certify_armed_artifact_digest'),
+    /*
+     * ROUND 7 removed `certify_arm_seq` and `certify_cancel_seq` (drizzle/0040).
+     * Round 6 threaded a CLIENT-minted, strictly-monotonic `attemptSeq` through the
+     * arm/disarm/confirm and raised it into a session-global cancel watermark. That
+     * was the round-7 finding-2 hole: any member could `disarm(MAX_SAFE_INTEGER)`
+     * and jam every honest arm forever, and cross-client clock skew did it by
+     * accident. The attempt is SERVER-ISSUED now — `certify_arm_nonce` is the whole
+     * of it, minted by `armCertification` and returned to the client, which hands it
+     * back on the confirm and disarm. No client number reaches the row, so none can
+     * jam a future arm. The correlation the two dropped columns provided is the
+     * nonce's job now, and it is a capability, not a counter.
+     */
     /** The `core_events.id` of the `session_opened` that projected this. */
     openedByEventId: text('opened_by_event_id'),
     /** The `core_events.id` of the settling/failing event, once it exits. */

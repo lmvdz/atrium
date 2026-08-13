@@ -51,6 +51,21 @@ export default defineConfig({
   plugins: [react()],
   resolve: {
     alias: {
+      /**
+       * `@/*` — the app's own root alias, declared in `tsconfig.json` and used by
+       * app modules. It was absent here and nothing noticed, because every `@/`
+       * specifier in the component layer had been a TYPE import, which the
+       * compiler erases before vite ever sees it. The first VALUE import through
+       * it (#121's shared hold constants, which the gate and the affordance must
+       * read from one place) failed to resolve and took twenty-one suites down
+       * with it — including every sweep, which is the shape that matters: a
+       * resolution error reports as a failing file, and a failing sweep proves
+       * nothing about the rule it enforces.
+       *
+       * The key is `@/` and not `@`: `@atrium/db` starts with `@`, and a prefix
+       * alias on the bare sigil would swallow all three workspace packages below.
+       */
+      '@/': fileURLToPath(new URL('./', import.meta.url)),
       'server-only': fileURLToPath(new URL('./node_modules/server-only/empty.js', import.meta.url)),
       // Test against source, so `pnpm test` never depends on build order.
       '@atrium/auth': fileURLToPath(new URL('../../packages/auth/src/index.ts', import.meta.url)),

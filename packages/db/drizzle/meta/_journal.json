@@ -230,14 +230,77 @@
       "idx": 32,
       "version": "7",
       "when": 1787049600000,
-      "tag": "0032_execution_ownership_lease",
+      "tag": "0032_the_control_plane_lands_a_session",
       "breakpoints": true
     },
     {
       "idx": 33,
       "version": "7",
       "when": 1787136000000,
-      "tag": "0033_execution_authority_record",
+      "tag": "0033_a_certification_is_armed_by_the_server",
+      "breakpoints": true
+    },
+    {
+      "idx": 34,
+      "version": "7",
+      "when": 1787222400000,
+      "tag": "0034_a_certification_is_bound_to_its_artifact",
+      "breakpoints": true
+    },
+    {
+      "idx": 35,
+      "version": "7",
+      "when": 1787308800000,
+      "tag": "0035_a_certification_carries_a_complete_hold_receipt",
+      "breakpoints": true
+    },
+    {
+      "idx": 36,
+      "version": "7",
+      "when": 1787395200000,
+      "tag": "0036_a_certification_s_receipt_is_internally_consistent",
+      "breakpoints": true
+    },
+    {
+      "idx": 37,
+      "version": "7",
+      "when": 1787481600000,
+      "tag": "0037_the_arm_carries_a_nonce_and_the_reviewed_digest",
+      "breakpoints": true
+    },
+    {
+      "idx": 38,
+      "version": "7",
+      "when": 1787568000000,
+      "tag": "0038_a_certification_needs_a_reviewable_artifact",
+      "breakpoints": true
+    },
+    {
+      "idx": 39,
+      "version": "7",
+      "when": 1787654400000,
+      "tag": "0039_the_arm_carries_an_attempt_sequence_and_a_cancel_watermark",
+      "breakpoints": true
+    },
+    {
+      "idx": 40,
+      "version": "7",
+      "when": 1787740800000,
+      "tag": "0040_the_attempt_is_server_issued",
+      "breakpoints": true
+    },
+    {
+      "idx": 41,
+      "version": "7",
+      "when": 1787827200000,
+      "tag": "0041_execution_ownership_lease",
+      "breakpoints": true
+    },
+    {
+      "idx": 42,
+      "version": "7",
+      "when": 1787913600000,
+      "tag": "0042_execution_authority_record",
       "breakpoints": true
     }
   ]

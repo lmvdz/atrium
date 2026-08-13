@@ -207,7 +207,11 @@ export function createMembershipAuthorizer(db: Database): Authorizer {
       // room-access header is about, and `packages/auth/test/room-access.test.ts`
       // fails the build if an app reaches the table directly again.
       return loadRoomMembershipRow(runner, roomId, session.userId, {
-        lock: runner === db ? undefined : 'share',
+        // The append path locks `memberships` alone; a workspace revocation that
+        // lands mid-append is caught by the next revalidation pass, because
+        // nothing an append writes is irreversible. The certify path takes the
+        // stronger `membership-and-workspace` scope — see `loadRoomMembershipRow`.
+        lock: runner === db ? undefined : 'membership',
       });
     },
 

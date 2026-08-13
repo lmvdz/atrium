@@ -207,8 +207,11 @@ const sessionExit = {
   /**
    * The verified artifact this exit produced (#120), or `null`. Carried in the
    * ledger payload — the durable, receipt-indexed reference to the branch/commit
-   * the session's work became. The `sessions` projection does not read it; the
-   * ledger event IS the index (the ticket's "reuse the ledger").
+   * the session's work became; the ledger event remains the index (the ticket's
+   * "reuse the ledger"). On the integrated tree the settle projection ALSO
+   * persists its branch+commit into `sessions.artifact` (#121's `SessionArtifact`
+   * slot), so #121's control-plane review pane certifies exactly the artifact
+   * #120 produced. `remote` is #120's internal scratch pointer and is not copied.
    */
   artifact: ExecutionArtifact.nullable().default(null),
 };

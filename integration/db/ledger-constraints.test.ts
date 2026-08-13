@@ -3455,6 +3455,18 @@ describe('foreign keys — the audit is the catalog, not a paragraph', () => {
       // room but nulls the back-reference — a display pointer, not authority.
       'rooms_agent_user_id_fk',
       'rooms_created_by_users_id_fk',
+      /* #121's. WHO CERTIFIED a session, and who ARMED that certification.
+         Both null on the identity's deletion for this list's own reason: the
+         session's receipt outlives the person, and neither column is authority —
+         `certified_by` is held to a human by a trigger (0032/0033), and the act
+         itself is in the ledger.
+         `sessions_certified_by_fk` was added by 0032 and NOT recorded here, so
+         this assertion had been red on the branch since that migration landed —
+         found by adding the second one and reading a two-line diff where one was
+         expected. The audit is the catalog: it does its job by failing, and a
+         failure nobody reconciles is the same as no audit. */
+      'sessions_certified_by_fk',
+      'sessions_certify_armed_by_fk',
     ]);
 
     // `c` = CASCADE. Room deletes take the ledger with them (the row is gone, not

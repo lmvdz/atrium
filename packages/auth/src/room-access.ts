@@ -253,22 +253,43 @@ export interface RoomMembershipRow {
 /**
  * One membership, joined, optionally row-locked.
  *
- * `lock: 'share'` when the caller is inside the transaction that will write.
+ * A `lock` is taken when the caller is inside the transaction that will write.
  * Re-reading in the transaction closes most of the TOCTOU gap; the row lock
- * closes the rest, by making a concurrent DELETE wait for the append to commit
- * or abort instead of slipping between the read and the write. Cheap: one row,
- * one shared lock, held for the length of an append.
+ * closes the rest, by making a concurrent DELETE wait for that write to commit
+ * or abort instead of slipping between the read and the write. Cheap: one or two
+ * rows, one shared lock, held for the length of the write.
  *
- * The lock is taken on `memberships` — the row whose disappearance is the race —
- * and the joined `workspace_members` row is read without one: a workspace
- * revocation that lands mid-append is caught by the next revalidation pass,
- * which is the one-second window `MEMBERSHIP_REVALIDATE_INTERVAL_MS` names.
+ * There are TWO lock scopes, because the two write paths have different
+ * tolerances for a stale read:
+ *
+ *   - `'membership'` locks `memberships` alone — the row whose disappearance is
+ *     the room-revocation race. The joined `workspace_members` row is read
+ *     WITHOUT a lock: a workspace revocation that lands mid-write is caught by
+ *     the next revalidation pass, the one-second window
+ *     `MEMBERSHIP_REVALIDATE_INTERVAL_MS` names. This is the APPEND/broadcast
+ *     path's scope, and one second is an acceptable price there because nothing
+ *     an append writes is irreversible — the next pass evicts the socket and no
+ *     durable authority was granted in between.
+ *
+ *   - `'membership-and-workspace'` also takes the share lock on the joined
+ *     `workspace_members` row (`FOR SHARE OF memberships, workspace_members`).
+ *     The CERTIFY path needs this and the append path's one-second tolerance is
+ *     NOT good enough for it: certification is write-once and irreversible
+ *     (drizzle/0033). A member whose *workspace* membership is revoked must not
+ *     be able to race inside the revalidation window and permanently land an
+ *     artifact that can never be undone. Locking the source-of-truth row makes a
+ *     concurrent workspace-revocation DELETE wait for the certify transaction;
+ *     and when that DELETE has already committed, the locked read re-evaluates
+ *     and the inner join returns no row, so the certify refuses `not_in_room`
+ *     rather than inheriting a stale yes. It closes the exact gap the append
+ *     path is allowed to tolerate — the `workspace_members` row read once,
+ *     unlocked, then never re-checked before the irreversible write.
  */
 export async function loadRoomMembershipRow(
   runner: RoomAccessRunner,
   roomId: string,
   userId: string,
-  options: { lock?: 'share'; logger?: ReconcileLogger } = {},
+  options: { lock?: 'membership' | 'membership-and-workspace'; logger?: ReconcileLogger } = {},
 ): Promise<RoomMembershipRow | null> {
   const query = runner
     .select({
@@ -285,7 +306,16 @@ export async function loadRoomMembershipRow(
     )
     .limit(1);
 
-  const [row] = await (options.lock === 'share' ? query.for('share', { of: memberships }) : query);
+  // `of` names exactly which of the joined tables the share lock covers. The
+  // certify scope adds `workspace_members`; the append scope, and every unlocked
+  // read, does not touch it.
+  const locked =
+    options.lock === 'membership-and-workspace'
+      ? query.for('share', { of: [memberships, workspaceMembers] })
+      : options.lock === 'membership'
+        ? query.for('share', { of: memberships })
+        : query;
+  const [row] = await locked;
   const role = effectiveRoomRole(row, options.logger ?? silent);
   if (!row || role === null) return null;
   return { roomId: row.roomId, userId: row.userId, role, seenSeq: Number(row.seenSeq) };

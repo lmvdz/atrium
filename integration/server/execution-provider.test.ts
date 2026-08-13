@@ -287,6 +287,77 @@ describe('a funded session runs the shim, produces an artifact, and settles inde
     );
   });
 
+  /**
+   * THE #120×#121 SEAM — the produced artifact is exactly what the control
+   * plane certifies. #120's ExecutionProvider mints the artifact onto the exit
+   * EVENT ({branch, commit, remote}); #121's certify surface reads the
+   * `sessions.artifact` COLUMN (a `SessionArtifact`). The two were built apart —
+   * #120's settle projection wrote no column (there was none) and #121's column
+   * named #120 as "the eventual writer at settle time" without one — so on the
+   * merged tree the artifact reached the event but not the column, and certify
+   * saw `no_artifact`. The integration fix makes `projectSessionExit` persist the
+   * event's branch+commit into `sessions.artifact`, so a human reviews and lands
+   * exactly what execution produced.
+   *
+   * REVERT-REDS: drop the `artifact:` write from `projectSessionExit` and this
+   * reds — `sessions.artifact` stays null and the certify surface has nothing to
+   * be a signature of.
+   */
+  it('persists the produced artifact into sessions.artifact for the control plane to certify', async () => {
+    const planId = await openPlan();
+    await fundPlan(planId);
+
+    const outcome = await coordinator().openAndRun(agentSession, {
+      roomId: room.roomId,
+      planId,
+      harness: 'omp',
+      model: 'haiku',
+    });
+    expect(outcome.kind).toBe('settled');
+    if (outcome.kind !== 'settled') return;
+    const sessionId = outcome.sessionId;
+
+    // What #120 PRODUCED, read off the exit event it indexed.
+    const produced = await exitArtifact(sessionId, 'session_settled');
+    expect(produced).not.toBeNull();
+    if (!produced) return;
+
+    // What #121's control plane READS — the sessions.artifact column.
+    const [row] = await handle.db
+      .select({ artifact: sessions.artifact })
+      .from(sessions)
+      .where(eq(sessions.id, sessionId));
+
+    // The column carries exactly the produced branch+commit — the identity that
+    // composes the two seams. `remote` is #120's internal scratch pointer and is
+    // NOT a review fact, so it is not copied into the column.
+    expect(row?.artifact).toEqual({ branch: produced.branch, commit: produced.commit });
+    expect(row?.artifact).not.toHaveProperty('remote');
+    expect(row?.artifact?.branch).toBe(sessionBranch(sessionId));
+    expect(row?.artifact?.commit).toBe(produced.commit);
+  });
+
+  it('leaves sessions.artifact null on a failed exit — nothing for a signature to sign', async () => {
+    const planId = await openPlan();
+    await fundPlan(planId);
+
+    const outcome = await coordinator().openAndRun(agentSession, {
+      roomId: room.roomId,
+      planId,
+      harness: 'omp',
+      model: EXECUTION_FAIL_DIRECTIVE,
+    });
+    expect(outcome.kind).toBe('failed');
+    if (outcome.kind !== 'failed') return;
+
+    const [row] = await handle.db
+      .select({ artifact: sessions.artifact, status: sessions.status })
+      .from(sessions)
+      .where(eq(sessions.id, outcome.sessionId));
+    expect(row?.status).toBe('failed');
+    expect(row?.artifact).toBeNull();
+  });
+
   it('settles to session_failed with a receipt and no artifact when the harness fails', async () => {
     const planId = await openPlan();
     await fundPlan(planId);

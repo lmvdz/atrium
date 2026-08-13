@@ -26,7 +26,10 @@
  *     DOM through a ref rather than through state: one paint per frame, no
  *     React render per frame, and the value is observable in a test.
  *   - RELEASE BEFORE COMPLETE CANCELS. Pointer up, pointer cancel, leaving the
- *     button, blurring it, or lifting the key all abort with nothing fired.
+ *     button, blurring it, or lifting the key all abort with nothing fired to
+ *     `onAct`. A cancel fires `onCancel` (the mirror of `onBegin`), so a caller
+ *     that started something on begin — the certify's server arm — can undo it
+ *     when the hold is abandoned, rather than leave it live.
  *   - `onArm` and `onAct` are separate. Completing the hold produces an
  *     `Arming` record — the action, when it was armed, how long it was held —
  *     which goes to `onArm` first and then to `onAct`. A caller that must put
@@ -38,6 +41,19 @@
 import { useCallback, useEffect, useId, useRef, useState } from 'react';
 import { offeredText } from '../model/quotation';
 import styles from './primitives.module.css';
+
+/* ---------------------------------------------------------------------------
+ * NO CLIENT-MINTED ATTEMPT SEQUENCE ANY MORE (#121 round-7 finding 2).
+ *
+ * Round 6 minted a strictly-monotonic `attemptSeq` here from the wall clock and
+ * carried it on the server arm/disarm/confirm to correlate a release to its arm.
+ * But the server raised that client number into a session-global cancel watermark,
+ * so `disarm(MAX_SAFE_INTEGER)` jammed every honest arm and clock skew did it by
+ * accident. The correlation is the SERVER's job now: `armCertification` mints an
+ * opaque token and returns it, and the caller carries THAT back on the confirm and
+ * disarm (see ControlPlane). This control just reports begin / cancel / complete;
+ * it counts nothing the server trusts.
+ * ------------------------------------------------------------------------- */
 
 /**
  * What the hold put on the record: WHO armed it, WHEN, and HOW LONG they held.
@@ -54,7 +70,12 @@ export interface Arming {
   readonly actor: string;
   /** wall clock, ISO — the "when" the convention requires be recorded */
   readonly armedAt: string;
-  /** measured, not assumed: how long the control was actually held */
+  /**
+   * The client-side elapsed time of the press. This is the UI affordance's own
+   * number, NOT evidence: the server measures its own arm→confirm interval and
+   * records that (`certified_held_ms`). Kept as a local receipt of the gesture,
+   * never sent as the duration the covenant gates on (#121 CS-2).
+   */
   readonly heldMs: number;
 }
 
@@ -68,6 +89,40 @@ export interface HoldToActProps {
   /** what the hold will do, in words. Shown as the control's description. */
   readonly describe: string;
   readonly holdMs?: number;
+  /**
+   * Fired the instant the hold BEGINS — before anything has been held.
+   *
+   * Added for #121's certify, where the server has to stamp its own clock at the
+   * start of the interval it will later measure. Without it the only signal a
+   * caller got was hold-complete, and a server told about a hold only once it was
+   * over can do nothing but believe the duration it is handed — which is the
+   * client-supplied-timing defect the arm→confirm protocol exists to remove.
+   *
+   * A cancelled hold simply never reaches `onAct`; a caller that recorded
+   * something on begin is responsible for that being harmless, and for certify it
+   * is: a pending arm that is never confirmed certifies nothing and expires.
+   *
+   * Takes no argument: the attempt's identity is the server-issued token the arm
+   * this fires returns (round-7 finding 2), which the caller holds, not a number
+   * this control mints.
+   */
+  readonly onBegin?: () => void;
+  /**
+   * Fired when a hold that had BEGUN is released before it completes — pointer up
+   * or cancel, leaving or blurring the button, lifting the key. It does NOT fire
+   * for a release after completion (the hold already armed) or when nothing was
+   * being held.
+   *
+   * The mirror of `onBegin`: a caller that started something on begin (the
+   * certify's server arm) can undo it on cancel (the server disarm), so a
+   * cancelled hold leaves no live intention behind. A cancel that reaches nothing
+   * must be harmless — this fires on every abort, including redundant ones.
+   *
+   * Takes no argument: the caller cancels the exact arm this hold began by the
+   * server-issued token that arm returned (round-7 finding 2), so it awaits the arm
+   * before disarming and there is no client counter to carry.
+   */
+  readonly onCancel?: () => void;
   readonly onArm?: (arming: Arming) => void;
   readonly onAct?: (arming: Arming) => void;
   readonly className?: string;
@@ -81,6 +136,8 @@ export function HoldToAct({
   label,
   describe,
   holdMs = DEFAULT_HOLD_MS,
+  onBegin,
+  onCancel,
   onArm,
   onAct,
   className,
@@ -114,11 +171,16 @@ export function HoldToAct({
   }, []);
 
   const cancel = useCallback(() => {
+    /* Only a hold that had actually begun can be cancelled. `startRef` is null
+       after a completed hold (`stop()` clears it) and before any press, so a
+       pointer-up following a successful arm — or a stray blur — reaches nothing,
+       and `onCancel` fires ONLY for a real release-before-complete. */
     if (startRef.current === null) return;
     stop();
     paint(0);
     setPhase('idle');
-  }, [paint, stop]);
+    onCancel?.();
+  }, [onCancel, paint, stop]);
 
   const complete = useCallback(() => {
     const started = startRef.current;
@@ -127,7 +189,12 @@ export function HoldToAct({
     stop();
     paint(1);
     setPhase('armed');
-    const arming: Arming = { actionId, actor, armedAt: new Date().toISOString(), heldMs };
+    const arming: Arming = {
+      actionId,
+      actor,
+      armedAt: new Date().toISOString(),
+      heldMs,
+    };
     /* Arm first, act second. The record of who armed it and when must exist
        before the irreversible thing happens, not after it succeeded. */
     onArm?.(arming);
@@ -151,10 +218,39 @@ export function HoldToAct({
     startRef.current = performance.now();
     setPhase('holding');
     paint(0);
+    /* Before the first frame, so a caller that has to start a clock elsewhere
+       starts it at the same instant this one does. The arm this fires returns the
+       server-issued token the matching confirm/disarm carry (round-7 finding 2). */
+    onBegin?.();
     frameRef.current = requestAnimationFrame(tick);
-  }, [paint, tick]);
+  }, [onBegin, paint, tick]);
 
-  useEffect(() => stop, [stop]);
+  /* DISARM ON UNMOUNT — the mirror of release, for the navigation that never
+     released. A hold in progress when the control unmounts (the person left the
+     page mid-press) used to run only `stop()`, which cancels the animation frame
+     and nothing else: the server arm stamped on begin then outlived the page for
+     its whole TTL, and a later direct confirm could spend it (CS-3). This fires
+     `onCancel` — the server disarm — whenever a hold had actually begun, exactly
+     as a pointer-up does, so a navigated-away hold leaves no live arm behind. A
+     completed hold has already cleared `startRef`, so its in-flight confirm is not
+     disarmed. No `setPhase`/`paint` here: the component is leaving the tree.
+
+     Held in a ref so the empty-deps unmount effect always calls the latest
+     `onCancel` without re-subscribing (and thus re-running its cleanup) on every
+     render — a cleanup that ran on each `onCancel` identity change would disarm a
+     live hold mid-press. */
+  const disarmOnUnmount = useCallback(() => {
+    if (frameRef.current !== null) {
+      cancelAnimationFrame(frameRef.current);
+      frameRef.current = null;
+    }
+    if (startRef.current === null) return;
+    startRef.current = null;
+    onCancel?.();
+  }, [onCancel]);
+  const unmountRef = useRef(disarmOnUnmount);
+  unmountRef.current = disarmOnUnmount;
+  useEffect(() => () => unmountRef.current(), []);
 
   /* THE ACCESSIBLE NAME IS THE LABEL, NOT THE LABEL WITH A NUMBER GLUED TO IT.
      The progress indicator used to be a `role="progressbar"` DESCENDANT of the
@@ -195,7 +291,27 @@ export function HoldToAct({
      interface's first-person ban. Quotation marks are still refused — that is
      the one thing that makes offered copy read as an utterance. */
   const spoken = offeredText(label, 'HoldToAct label');
-  const contract = `${offeredText(describe, 'HoldToAct describe')} — press and hold for ${(holdMs / 1000).toFixed(0)} seconds; the hold is the confirmation, and releasing early cancels it`;
+  /* HONEST ABOUT WHAT THE HOLD IS, PER CALLER. It used to say "the hold is the
+     confirmation", which reads as a claim that the continuous press itself is the
+     attested act. Against a scripted client, a continuous physical hold is
+     unprovable server-side without interaction attestation this does not have.
+     What some callers enforce is a MINIMUM DELAY between two deliberate server calls
+     (certify-session.ts's arm→confirm); the press is the affordance for meeting it.
+
+     But NOT every caller has that. The certify pane wires a server arm (`onBegin`);
+     the attention cards (AttentionCard/AttentionCompact) do not — their land is a
+     single client-measured hold with no server-timed arm→confirm behind it. Round-5
+     shipped this contract string claiming "the server requires a minimum delay" for
+     ALL of them, which was false for the attention path (grok's residual). So the
+     claim is scoped to what THIS caller's path actually enforces: the server-delay
+     sentence only when a server arm is wired, the plain client-hold sentence
+     otherwise. `onBegin` is exactly the presence of that server round-trip. */
+  const serverTimed = onBegin !== undefined;
+  const held = `press and hold for at least ${(holdMs / 1000).toFixed(0)} seconds`;
+  const tail = serverTimed
+    ? '; the server requires a minimum delay before it will confirm, and releasing early cancels it'
+    : ', and releasing early cancels it';
+  const contract = `${offeredText(describe, 'HoldToAct describe')} — ${held}${tail}`;
 
   return (
     <>
