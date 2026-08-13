@@ -93,7 +93,10 @@ export function ReviewPane({
     );
   }
 
-  const state = sessionState(session);
+  /* The review header's glyph reads the same "owed to a human" gate the tree and
+     the pin do: an agent-principal viewer sees the process glyph, not a "needs
+     you" they cannot act on. `viewerKind` is server-resolved; allowlist `'human'`. */
+  const state = sessionState(session, viewerKind === 'human');
   const artifact = session.artifact;
   const awaitsLanding = sessionAwaitsLanding(session);
   /* The SAME predicate the glyph derives from — not `certifiedByName !== null`,

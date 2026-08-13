@@ -115,6 +115,13 @@ export function ControlPlane({
   const [openSessionId, setOpenSessionId] = useState<string | undefined>(undefined);
   const [certifyError, setCertifyError] = useState<string | null>(null);
 
+  /* WHO IS OWED. A failed session and an unlanded artifact are owed to any HUMAN
+     — certifying is a human-only act — so an agent-principal viewer must not be
+     told "needs you" for one. Allowlist the compliant form: only `'human'` is
+     owed; `'agent'` and the fail-closed `'unknown'` are not. Every owed
+     derivation below (pin, decisions surface) reads this one answer. */
+  const viewerIsHuman = viewerKind === 'human';
+
   // A flat index of every session with its plan + agent, so the pin and the
   // review pane resolve one by id without re-walking the tree each render.
   const index = useMemo(() => {
@@ -156,7 +163,7 @@ export function ControlPlane({
       if (session.status === 'failed') {
         items.push({
           id: session.id,
-          state: sessionState(session),
+          state: sessionState(session, viewerIsHuman),
           title: `${session.model} failed`,
           detail: session.exitSummary ?? 'the session exited without a clean receipt',
           meta: planTitle,
@@ -165,7 +172,7 @@ export function ControlPlane({
       } else if (sessionAwaitsLanding(session)) {
         items.push({
           id: session.id,
-          state: sessionState(session),
+          state: sessionState(session, viewerIsHuman),
           title: `certify ${session.model}`,
           detail:
             session.artifact?.diffStat ??
@@ -187,7 +194,7 @@ export function ControlPlane({
       });
     }
     return items;
-  }, [allSessions, owedDecisions]);
+  }, [allSessions, owedDecisions, viewerIsHuman]);
 
   // The three surfaces.
   const decisionsLines: SurfaceLine[] = [
@@ -195,7 +202,7 @@ export function ControlPlane({
       .filter((entry) => sessionAwaitsLanding(entry.session))
       .map((entry) => ({
         id: `certify:${entry.session.id}`,
-        state: sessionState(entry.session),
+        state: sessionState(entry.session, viewerIsHuman),
         text: `certify ${entry.session.model} · ${entry.planTitle}`,
       })),
     ...owedDecisions.map((decision) => ({
@@ -296,6 +303,7 @@ export function ControlPlane({
             agents={data.agents}
             onOpenSession={setOpenSessionId}
             openSessionId={openSessionId}
+            viewerIsHuman={viewerIsHuman}
           />
         </div>
         <div className={styles.right}>

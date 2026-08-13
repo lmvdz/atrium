@@ -83,21 +83,47 @@ export function sessionAwaitsLanding(session: ControlSessionRow): boolean {
 /**
  * A session's state. Order matters, and it is the same shape `glyphFor` uses:
  *
- *   failed    → ✗, and OWED — a dead process is unpaid attention (scout §18), so
- *               `owedToViewer` is true and it pins and sorts above everything.
- *   settled + artifact + UNCERTIFIED → ■, OWED and irreversible: a human must
- *               sign it, and a certification is written once (drizzle/0033).
+ *   failed    → ✗, and OWED to a human — a dead process is unpaid attention
+ *               (scout §18), so `owedToViewer` is true FOR A HUMAN VIEWER and it
+ *               pins and sorts above everything.
+ *   settled + artifact + UNCERTIFIED → ■, OWED to a human and irreversible: a
+ *               human must sign it, and a certification is written once
+ *               (drizzle/0033).
  *   CERTIFIED → ✓, and only here. A person put their name on it.
  *   settled, uncertified, nothing to certify → `~`: the process says it exited
  *               cleanly, and the process is the claimant.
  *   open      → ·, routine: a running session owes nobody anything.
+ *
+ * ## "OWED TO YOU" IS OWED TO A HUMAN, NOT TO WHOEVER IS LOOKING
+ *
+ * A failed session and an unlanded artifact are owed to *any human* in the room
+ * — that room-wide visibility is the design, because any human may certify — but
+ * they are owed to NO agent. Certifying is a human-only act (the server refuses a
+ * non-human identity; drizzle/0032, 0033 refuse the column outright), so telling
+ * an AGENT-principal viewer "needs you" would be pointing them at a control they
+ * can never operate. `viewerIsHuman` gates the room-wide `owedToViewer`: a human
+ * sees these owed exactly as before, a non-human (agent, or an unreadable
+ * `'unknown'` kind that fails closed to not-human) sees the underlying process
+ * glyph — a failed `✗`, an unlanded `~` — without the second-person debt. The
+ * flag is an allowlist of the compliant form (`=== 'human'`), never a denylist of
+ * `'agent'`, so a kind that is neither is not owed either.
  */
-export function sessionState(session: ControlSessionRow): EpistemicState {
+export function sessionState(session: ControlSessionRow, viewerIsHuman: boolean): EpistemicState {
   if (session.status === 'failed') {
-    return { kind: 'event', verification: 'failed', owedToViewer: true, irreversible: false };
+    return {
+      kind: 'event',
+      verification: 'failed',
+      owedToViewer: viewerIsHuman,
+      irreversible: false,
+    };
   }
   if (sessionAwaitsLanding(session)) {
-    return { kind: 'decision', verification: 'proposed', owedToViewer: true, irreversible: true };
+    return {
+      kind: 'decision',
+      verification: 'proposed',
+      owedToViewer: viewerIsHuman,
+      irreversible: true,
+    };
   }
   if (sessionCertified(session)) {
     return {
@@ -129,8 +155,8 @@ export function sessionState(session: ControlSessionRow): EpistemicState {
  * would have kept the tick alive on every plan and agent even after the session
  * derivation was fixed.
  */
-export function planState(plan: ControlPlanRow): EpistemicState {
-  const childStates = plan.sessions.map(sessionState);
+export function planState(plan: ControlPlanRow, viewerIsHuman: boolean): EpistemicState {
+  const childStates = plan.sessions.map((session) => sessionState(session, viewerIsHuman));
   const hardest = hardestState(childStates.map((state) => ({ state })));
   if (hardest !== null) return hardest;
   if (plan.status === 'settled') {
@@ -145,9 +171,9 @@ export function planState(plan: ControlPlanRow): EpistemicState {
 }
 
 /** An agent's state: the hardest of every session across all its plans. */
-export function agentState(agent: ControlAgentRow): EpistemicState {
+export function agentState(agent: ControlAgentRow, viewerIsHuman: boolean): EpistemicState {
   const sessionStates = agent.plans.flatMap((plan) =>
-    plan.sessions.map((session) => ({ state: sessionState(session) })),
+    plan.sessions.map((session) => ({ state: sessionState(session, viewerIsHuman) })),
   );
   const hardest = hardestState(sessionStates);
   if (hardest !== null) return hardest;

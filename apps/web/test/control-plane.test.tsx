@@ -21,6 +21,14 @@
  *
  * The rule these now assert: `✓` iff a HUMAN certified. Settled-uncertified is
  * `~` — the machine's own account. Every consumer moves on that one flip.
+ *
+ * ## THE VIEWER IS A HUMAN OR IT IS OWED NOTHING
+ *
+ * `sessionState`, `planState` and `agentState` take a `viewerIsHuman` flag. A
+ * failed session and an unlanded artifact are owed to any HUMAN (any human may
+ * certify), but to no agent — certifying is a human-only act. Almost every case
+ * here reads as a human (`true`), which is the design's common path; the last
+ * block flips the viewer to an agent and proves the room-wide "owed" drops.
  * ------------------------------------------------------------------------- */
 
 import { cleanup, render, screen } from '@testing-library/react';
@@ -112,21 +120,21 @@ describe('the tick comes from a human signature and from nothing else', () => {
   it('a settled session NOBODY certified is ~ — the machine reporting its own exit', () => {
     const settled = session({ status: 'settled' });
     expect(sessionCertified(settled)).toBe(false);
-    expect(sessionState(settled).verification).toBe('self_reported');
-    expect(glyphFor(sessionState(settled))).toBe('~');
+    expect(sessionState(settled, true).verification).toBe('self_reported');
+    expect(glyphFor(sessionState(settled, true))).toBe('~');
   });
 
   it('running is routine ·, failed is ✗', () => {
-    expect(glyphFor(sessionState(session({ status: 'open' })))).toBe('·');
-    expect(glyphFor(sessionState(session({ status: 'failed' })))).toBe('✗');
+    expect(glyphFor(sessionState(session({ status: 'open' }), true))).toBe('·');
+    expect(glyphFor(sessionState(session({ status: 'failed' }), true))).toBe('✗');
   });
 
   it('FLIP THE SIGNATURE: the same settled row moves ~ → ✓ when a human certifies it', () => {
     const before = session({ status: 'settled' });
     const after = certifiedSession();
-    expect(glyphFor(sessionState(before))).toBe('~');
-    expect(glyphFor(sessionState(after))).toBe('✓');
-    expect(sessionState(after).verification).toBe('accepted');
+    expect(glyphFor(sessionState(before, true))).toBe('~');
+    expect(glyphFor(sessionState(after, true))).toBe('✓');
+    expect(sessionState(after, true).verification).toBe('accepted');
   });
 
   /**
@@ -137,13 +145,13 @@ describe('the tick comes from a human signature and from nothing else', () => {
   it('a NON-HUMAN certifier does not mint a tick, whatever name is attached', () => {
     const machineSigned = certifiedSession({ certifiedByName: 'hexi', certifiedByKind: 'agent' });
     expect(sessionCertified(machineSigned)).toBe(false);
-    expect(glyphFor(sessionState(machineSigned))).toBe('~');
+    expect(glyphFor(sessionState(machineSigned, true))).toBe('~');
   });
 
   it('an unreadable certifier kind fails CLOSED — ~, never the privileged glyph', () => {
     const unreadable = certifiedSession({ certifiedByKind: null });
     expect(sessionCertified(unreadable)).toBe(false);
-    expect(glyphFor(sessionState(unreadable))).toBe('~');
+    expect(glyphFor(sessionState(unreadable, true))).toBe('~');
   });
 
   it('a settled session with an uncertified artifact needs you, and certifying is not undoable (■)', () => {
@@ -152,15 +160,15 @@ describe('the tick comes from a human signature and from nothing else', () => {
       artifact: { branch: 'feat/x', commit: 'abc123' },
     });
     expect(sessionAwaitsLanding(awaiting)).toBe(true);
-    expect(glyphFor(sessionState(awaiting))).toBe('■');
+    expect(glyphFor(sessionState(awaiting, true))).toBe('■');
   });
 
   it('once a human has certified it, the same artifact-bearing session reads ✓', () => {
     const artifact = { branch: 'feat/x', commit: 'abc123' };
     const before = session({ status: 'settled', artifact });
     const after = certifiedSession({ artifact });
-    expect(glyphFor(sessionState(before))).toBe('■');
-    expect(glyphFor(sessionState(after))).toBe('✓');
+    expect(glyphFor(sessionState(before, true))).toBe('■');
+    expect(glyphFor(sessionState(after, true))).toBe('✓');
     expect(sessionAwaitsLanding(after)).toBe(false);
   });
 });
@@ -181,7 +189,7 @@ describe('the tree badge and the tree glyph read the SAME predicate', () => {
      non-human name reaches the column. */
   it('a settled-uncertified session wears ~ and no certified badge', () => {
     const row = session({ id: 's1', status: 'settled' });
-    render(<ProcessTree agents={[agent([row])]} onOpenSession={() => {}} />);
+    render(<ProcessTree agents={[agent([row])]} onOpenSession={() => {}} viewerIsHuman={true} />);
     const node = document.querySelector('[data-tree-session="s1"]');
     expect(node?.querySelector('[data-glyph]')?.getAttribute('data-glyph')).toBe('~');
     expect(document.querySelector('[data-session-certified]')).toBeNull();
@@ -189,7 +197,7 @@ describe('the tree badge and the tree glyph read the SAME predicate', () => {
 
   it('a human-certified session wears ✓ and the badge, together', () => {
     const row = certifiedSession({ id: 's1' });
-    render(<ProcessTree agents={[agent([row])]} onOpenSession={() => {}} />);
+    render(<ProcessTree agents={[agent([row])]} onOpenSession={() => {}} viewerIsHuman={true} />);
     const node = document.querySelector('[data-tree-session="s1"]');
     expect(node?.querySelector('[data-glyph]')?.getAttribute('data-glyph')).toBe('✓');
     expect(document.querySelector('[data-session-certified]')?.textContent).toBe('certified');
@@ -197,7 +205,7 @@ describe('the tree badge and the tree glyph read the SAME predicate', () => {
 
   it('a machine-named session wears neither — the badge moves with the glyph', () => {
     const row = certifiedSession({ id: 's1', certifiedByKind: 'agent' });
-    render(<ProcessTree agents={[agent([row])]} onOpenSession={() => {}} />);
+    render(<ProcessTree agents={[agent([row])]} onOpenSession={() => {}} viewerIsHuman={true} />);
     const node = document.querySelector('[data-tree-session="s1"]');
     expect(node?.querySelector('[data-glyph]')?.getAttribute('data-glyph')).toBe('~');
     expect(document.querySelector('[data-session-certified]')).toBeNull();
@@ -209,7 +217,7 @@ describe('a plan and an agent roll up the hardest thing beneath them', () => {
     const p = plan({
       sessions: [session({ id: 's1', status: 'open' }), session({ id: 's2', status: 'failed' })],
     });
-    expect(glyphFor(planState(p))).toBe('✗');
+    expect(glyphFor(planState(p, true))).toBe('✗');
   });
 
   /* THE SAME DEFECT ONE LEVEL UP. `plans` carries no certification column at
@@ -217,8 +225,8 @@ describe('a plan and an agent roll up the hardest thing beneath them', () => {
      used to render `✓`, which would have kept the tick alive on every plan and
      agent even after the session derivation was fixed. */
   it('a settled plan with no sessions is ~, not ✓ — no column on it holds a signature', () => {
-    expect(glyphFor(planState(plan({ status: 'settled' })))).toBe('~');
-    expect(glyphFor(planState(plan({ status: 'open' })))).toBe('·');
+    expect(glyphFor(planState(plan({ status: 'settled' }), true))).toBe('~');
+    expect(glyphFor(planState(plan({ status: 'open' }), true))).toBe('·');
   });
 
   it('a plan rolls up its sessions: all human-certified is ✓, one uncertified is ~', () => {
@@ -226,8 +234,8 @@ describe('a plan and an agent roll up the hardest thing beneath them', () => {
     const oneUnsigned = plan({
       sessions: [certifiedSession({ id: 's1' }), session({ id: 's2', status: 'settled' })],
     });
-    expect(glyphFor(planState(allSigned))).toBe('✓');
-    expect(glyphFor(planState(oneUnsigned))).toBe('~');
+    expect(glyphFor(planState(allSigned, true))).toBe('✓');
+    expect(glyphFor(planState(oneUnsigned, true))).toBe('~');
   });
 
   it('an agent is the hardest session across all its plans', () => {
@@ -243,7 +251,85 @@ describe('a plan and an agent roll up the hardest thing beneath them', () => {
         plan({ id: 'p2', sessions: [session({ id: 's2', status: 'failed' })] }),
       ],
     };
-    expect(glyphFor(agentState(agent))).toBe('✗');
+    expect(glyphFor(agentState(agent, true))).toBe('✗');
+  });
+});
+
+/**
+ * OWED IS OWED TO A HUMAN, NOT TO WHOEVER IS LOOKING (#121 round 3, fix 2).
+ *
+ * A failed session and an unlanded artifact are owed to any HUMAN in the room —
+ * room-wide, because any human may certify — but they are owed to NO agent, since
+ * certifying is a human-only act (the server refuses a non-human identity;
+ * drizzle/0032, 0033 refuse the column). Telling an agent-principal viewer "needs
+ * you" would point them at a control they can never operate.
+ *
+ * MUTATION THAT MUST TURN THIS RED: drop the `viewerIsHuman` gate from
+ * `sessionState` — put `owedToViewer: true` back on the failed and
+ * awaits-landing branches. The agent-viewer cases below then read the failed
+ * session as owed and the artifact as ■ "needs you", which is the surface
+ * pointing a machine at a human-only act.
+ */
+describe('the room-wide owed is gated on the viewer being human', () => {
+  const awaiting = () =>
+    session({ id: 's-await', status: 'settled', artifact: { branch: 'feat/x', commit: 'abc' } });
+  const failed = () => session({ id: 's-fail', status: 'failed' });
+
+  it('an unlanded artifact is ■ "needs you" for a HUMAN, and ~ for an agent viewer', () => {
+    // The design's common path: a human is owed the certification, undoably-not.
+    expect(sessionState(awaiting(), true).owedToViewer).toBe(true);
+    expect(glyphFor(sessionState(awaiting(), true))).toBe('■');
+    // The agent viewer sees the machine's own report, not a second-person debt.
+    expect(sessionState(awaiting(), false).owedToViewer).toBe(false);
+    expect(glyphFor(sessionState(awaiting(), false))).toBe('~');
+  });
+
+  it('a failed session is owed to a human, and owed to no agent (the glyph stays ✗ either way)', () => {
+    // Failure outranks owed in the glyph, so ✗ is right for both — the flag is
+    // what the pin and the NEEDS YOU framing read, and it is what must differ.
+    expect(sessionState(failed(), true).owedToViewer).toBe(true);
+    expect(sessionState(failed(), false).owedToViewer).toBe(false);
+    expect(glyphFor(sessionState(failed(), true))).toBe('✗');
+    expect(glyphFor(sessionState(failed(), false))).toBe('✗');
+  });
+
+  it('the gate rolls up: a plan of an awaiting session is ■ for a human, ~ for an agent', () => {
+    const p = plan({ sessions: [awaiting()] });
+    expect(glyphFor(planState(p, true))).toBe('■');
+    expect(glyphFor(planState(p, false))).toBe('~');
+  });
+
+  it('the gate rolls up to the agent row too', () => {
+    const agentRow = {
+      userId: 'agent-1',
+      name: 'hexi',
+      host: null,
+      harness: null,
+      model: null,
+      budgetLimitMicros: null,
+      plans: [plan({ id: 'p1', sessions: [awaiting()] })],
+    };
+    expect(glyphFor(agentState(agentRow, true))).toBe('■');
+    expect(glyphFor(agentState(agentRow, false))).toBe('~');
+  });
+
+  it('an agent-principal viewer sees the tree glyph without the needs-you, in the DOM', () => {
+    const agentRow = {
+      userId: 'agent-1',
+      name: 'hexi',
+      host: null,
+      harness: null,
+      model: null,
+      budgetLimitMicros: null,
+      plans: [plan({ id: 'p1', sessions: [awaiting()] })],
+    };
+    render(<ProcessTree agents={[agentRow]} onOpenSession={() => {}} viewerIsHuman={false} />);
+    const node = document.querySelector('[data-tree-session="s-await"]');
+    expect(node?.querySelector('[data-glyph]')?.getAttribute('data-glyph')).toBe('~');
+    cleanup();
+    render(<ProcessTree agents={[agentRow]} onOpenSession={() => {}} viewerIsHuman={true} />);
+    const humanNode = document.querySelector('[data-tree-session="s-await"]');
+    expect(humanNode?.querySelector('[data-glyph]')?.getAttribute('data-glyph')).toBe('■');
   });
 });
 
@@ -321,14 +407,14 @@ describe('the pin is ordered by glyph hardness, and it renders only what needs a
     },
     {
       id: 'failed',
-      state: sessionState(session({ status: 'failed' })),
+      state: sessionState(session({ status: 'failed' }), true),
       title: 'a failed session',
       detail: '',
       meta: '',
     },
     {
       id: 'certify',
-      state: sessionState(session({ status: 'settled', artifact: { branch: 'b' } })),
+      state: sessionState(session({ status: 'settled', artifact: { branch: 'b' } }), true),
       title: 'certify the work',
       detail: '',
       meta: '',

@@ -34,6 +34,13 @@ export interface ProcessTreeProps {
   readonly agents: readonly ControlAgentRow[];
   readonly openSessionId?: string;
   readonly onOpenSession: (sessionId: string) => void;
+  /**
+   * Whether the person reading is a HUMAN. It gates the room-wide "owed" a failed
+   * session and an unlanded artifact carry: those are owed to any human (any human
+   * may certify) but to no agent, so a non-human viewer sees the process glyph
+   * without the second-person debt. Derived once in `ControlPlane` from `viewerKind`.
+   */
+  readonly viewerIsHuman: boolean;
 }
 
 function sessionSummary(session: ControlSessionRow): string {
@@ -45,7 +52,12 @@ function sessionSummary(session: ControlSessionRow): string {
   return parts.join(' · ');
 }
 
-export function ProcessTree({ agents, openSessionId, onOpenSession }: ProcessTreeProps) {
+export function ProcessTree({
+  agents,
+  openSessionId,
+  onOpenSession,
+  viewerIsHuman,
+}: ProcessTreeProps) {
   return (
     <section className={styles.tree} aria-label="Process tree" data-region="process-tree">
       <div className={styles.treeHead}>
@@ -61,7 +73,7 @@ export function ProcessTree({ agents, openSessionId, onOpenSession }: ProcessTre
         agents.map((agent) => (
           <div className={styles.agent} data-agent={agent.userId} key={agent.userId}>
             <div className={`${styles.row} ${styles.rowAgent}`} data-tree-agent={agent.userId}>
-              <Glyph className={styles.rowGlyph} state={agentState(agent)} />
+              <Glyph className={styles.rowGlyph} state={agentState(agent, viewerIsHuman)} />
               <span className={styles.rowMain}>
                 <span className={`${styles.name} ${styles.nameAgent}`}>
                   {systemText(agent.name, 'ProcessTree agent')}
@@ -101,7 +113,7 @@ export function ProcessTree({ agents, openSessionId, onOpenSession }: ProcessTre
               return (
                 <div data-tree-plan={plan.id} key={plan.id}>
                   <div className={`${styles.row} ${styles.rowPlan}`}>
-                    <Glyph className={styles.rowGlyph} state={planState(plan)} />
+                    <Glyph className={styles.rowGlyph} state={planState(plan, viewerIsHuman)} />
                     <span className={styles.rowMain}>
                       <span className={styles.name}>
                         {systemText(plan.title, 'ProcessTree plan')}
@@ -135,7 +147,10 @@ export function ProcessTree({ agents, openSessionId, onOpenSession }: ProcessTre
                       onClick={() => onOpenSession(session.id)}
                       type="button"
                     >
-                      <Glyph className={styles.rowGlyph} state={sessionState(session)} />
+                      <Glyph
+                        className={styles.rowGlyph}
+                        state={sessionState(session, viewerIsHuman)}
+                      />
                       <span className={styles.rowMain}>
                         <span className={styles.name}>
                           {systemText(session.model, 'ProcessTree session')}
