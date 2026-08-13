@@ -1392,12 +1392,61 @@ export const sessions = pgTable(
     openedByEventId: text('opened_by_event_id'),
     /** The `core_events.id` of the settling/failing event, once it exits. */
     settledByEventId: text('settled_by_event_id'),
+    /**
+     * EXECUTION-OWNERSHIP LEASE (#120 round-5 F4) — process-liveness bookkeeping,
+     * NOT covenant state and NOT written by the ledger projection. The instance id
+     * of the process whose ExecutionProvider is running this session, set when the
+     * coordinator claims the session and NULL for a session no local execution
+     * owns (the documented external-settle mode). Startup/periodic reconciliation
+     * reads it to tell a wedge THIS lineage must recover (leased, owner gone) from
+     * a live external-settle session (never leased) it must leave alone — replacing
+     * the round-4 boot-flag proxy that force-failed live external sessions on a
+     * disabled→enabled reboot and killed a peer instance's running sessions.
+     */
+    executionOwner: text('execution_owner'),
+    /**
+     * Last heartbeat from the owning process (#120 round-5 F4). Bumped on a timer
+     * while the owner runs; a lease whose heartbeat has gone stale is a dead
+     * owner's, and only THOSE are reconciled — a fresh heartbeat is a live owner,
+     * whether this process or a concurrent peer, and its session is left running.
+     */
+    executionHeartbeatAt: timestamp('execution_heartbeat_at', { withTimezone: true }),
+    /**
+     * EXECUTION-AUTHORITY RECORD (#120 round-6) — the mode this session's
+     * execution runs under, decided AT GRANT and written in the `session_opened`
+     * transaction. `provider` = a wired ExecutionProvider owns its execution and
+     * its terminal; `external` = no provider this boot, an outside member settles
+     * it (the documented external-settle mode). NULL for pre-migration rows, read
+     * as `external`. This is what a settle reads to know whether the capability
+     * token is required — bound to the SESSION, never to the boot's verifier.
+     */
+    executionMode: text('execution_mode'),
+    /**
+     * The unforgeable settlement CAPABILITY for a provider session (#120 round-6),
+     * minted at grant. Authorizes writing this session's terminal — settled OR
+     * failed. ROW-ONLY: never in the ledger event, never broadcast, so a room
+     * member (opener included) cannot forge either outcome. Held by the coordinator
+     * (via `claim`) and the reconciler (via a row read). NULL for external.
+     */
+    executionAuthority: text('execution_authority'),
+    /**
+     * NULL while a granted provider session is unclaimed; set exactly once when the
+     * coordinator claims it (#120 round-6, unclaimed → running). The claim's guarded
+     * UPDATE keys on this being NULL, so a re-entrant claim matches zero rows.
+     */
+    executionClaimedAt: timestamp('execution_claimed_at', { withTimezone: true }),
     createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
     updatedAt: timestamp('updated_at', { withTimezone: true }).notNull().defaultNow(),
   },
   (t) => [
     index('sessions_plan_idx').on(t.planId),
     index('sessions_room_status_idx').on(t.roomId, t.status),
+    /** Reconciliation scans open, leased sessions by heartbeat (#120 round-5 F4). */
+    index('sessions_execution_owner_idx').on(t.status, t.executionOwner, t.executionHeartbeatAt),
+    /** The claim keys on an unclaimed provider session (#120 round-6). */
+    index('sessions_execution_claim_idx')
+      .on(t.executionMode, t.executionClaimedAt)
+      .where(sql`${t.status} = 'open'`),
     /** The composite-FK target for provenance edges (`accepted_objects`/`proposals`). */
     uniqueIndex('sessions_room_id_key').on(t.roomId, t.id),
     /**

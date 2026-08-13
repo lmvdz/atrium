@@ -16,7 +16,9 @@ set -euo pipefail
 cd "$(dirname "$0")/.."
 
 COMPOSE_FILE=docker-compose.test.yml
-PROJECT=atrium-test
+# Overridable so parallel worktrees can each run the suite against their own
+# isolated compose project (and Postgres port) without tearing down each other's.
+PROJECT="${ATRIUM_TEST_COMPOSE_PROJECT:-atrium-test}"
 PORT="${ATRIUM_TEST_PG_PORT:-55445}"
 KEEP=0
 VITEST_ARGS=()

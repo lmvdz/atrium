@@ -160,8 +160,39 @@ export const SessionOpened = z.object({
   planId: Id,
   harness: z.string().min(1).max(120),
   model: z.string().min(1).max(120),
+  /**
+   * THE EXECUTION-AUTHORITY RECORD, decided at grant (#120 round-6). `provider`
+   * means a wired ExecutionProvider owns this session's execution and its
+   * terminal; `external` means an outside member settles it (external-settle
+   * mode). `executionOwner` is the granting process's instance id for a provider
+   * session, NULL for external. Both ride the event so replay reconstructs the
+   * grant-time authority deterministically. The capability TOKEN does NOT ride
+   * here — it is minted row-only in the projection so it never reaches the wire
+   * (`toWire` broadcasts the whole event). Defaulted so a pre-round-6 event (or an
+   * in-process caller that predates the field) folds as an external session, which
+   * is exactly its historical behaviour.
+   */
+  executionMode: z.enum(['provider', 'external']).default('external'),
+  executionOwner: z.string().min(1).max(200).nullable().default(null),
 });
 export type SessionOpened = z.infer<typeof SessionOpened>;
+
+/**
+ * The verified artifact a session's execution produced (#120): a branch and the
+ * commit it points at, in the scratch git remote the ExecutionProvider controls.
+ *
+ * It rides the exit event's payload — a `~` fact about the process, indexed by
+ * the ledger row, NOT a covenant `✓`. The branch is never `main` and is never
+ * merged: the land is a human `✓`, so a settled session references a branch
+ * waiting for one rather than one the adapter certified. Nullable, because a
+ * failing harness produces no verifiable object.
+ */
+export const ExecutionArtifact = z.object({
+  branch: z.string().min(1).max(200),
+  commit: z.string().min(1).max(64),
+  remote: z.string().min(1).max(1000),
+});
+export type ExecutionArtifact = z.infer<typeof ExecutionArtifact>;
 
 /** The two spellings of an exit receipt (§9.5). Both non-epistemic (#114 T3). */
 const sessionExit = {
@@ -173,6 +204,13 @@ const sessionExit = {
   spendMicros: Micros,
   /** Final context fill, 0..1. */
   contextPct: z.number().min(0).max(1).nullable().default(null),
+  /**
+   * The verified artifact this exit produced (#120), or `null`. Carried in the
+   * ledger payload — the durable, receipt-indexed reference to the branch/commit
+   * the session's work became. The `sessions` projection does not read it; the
+   * ledger event IS the index (the ticket's "reuse the ledger").
+   */
+  artifact: ExecutionArtifact.nullable().default(null),
 };
 
 /**

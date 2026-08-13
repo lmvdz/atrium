@@ -225,6 +225,20 @@
       "when": 1786963200000,
       "tag": "0031_a_plan_settles_only_after_its_children",
       "breakpoints": true
+    },
+    {
+      "idx": 32,
+      "version": "7",
+      "when": 1787049600000,
+      "tag": "0032_execution_ownership_lease",
+      "breakpoints": true
+    },
+    {
+      "idx": 33,
+      "version": "7",
+      "when": 1787136000000,
+      "tag": "0033_execution_authority_record",
+      "breakpoints": true
     }
   ]
 }
