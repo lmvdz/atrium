@@ -19,7 +19,7 @@ import {
   sessions,
   attachments as storedAttachments,
 } from '@atrium/db/schema';
-import { and, eq } from 'drizzle-orm';
+import { and, eq, sql } from 'drizzle-orm';
 import { CommandError, type ProjectionContext, type Tx } from './ledger.js';
 import type { RoomEvent } from './room-events.js';
 
@@ -105,6 +105,10 @@ export async function projectRoomEvent(
       return projectSessionFailed(context, event);
     case 'signal_raised':
       return projectSignalRaised(context, event);
+    case 'plan_rlimit_set':
+      return projectPlanRlimitSet(context, event);
+    case 'draw_refused':
+      return projectDrawRefused(context, event);
     default: {
       const exhaustive: never = event;
       throw new Error(`no projection for event ${JSON.stringify(exhaustive)}`);
@@ -720,6 +724,21 @@ async function projectSessionOpened(
     createdAt: new Date(event.at),
     updatedAt: new Date(event.at),
   });
+  // The draw is now GRANTED — record it in the committed authorized-draw
+  // accounting (#118). One increment per session_opened, in this same append
+  // transaction under the global ledger lock, so `authorized_draws` equals
+  // `count(sessions)` for the plan by construction. This is the quantity the
+  // spawn gate (in `commands.ts`, read under the same lock before the event was
+  // built) enforces the slice against — never the adapter-reported spend. A
+  // draw that would exceed the slice never reaches here: it is built as a
+  // `draw_refused` instead, so no session rows up and this counter does not move.
+  await tx
+    .update(plans)
+    .set({
+      authorizedDraws: sql`${plans.authorizedDraws} + 1`,
+      updatedAt: new Date(event.at),
+    })
+    .where(and(eq(plans.id, event.planId), eq(plans.roomId, roomId)));
 }
 
 /**
@@ -809,4 +828,58 @@ async function projectSignalRaised(
       createdAt: new Date(at),
     })
     .onConflictDoNothing();
+}
+
+/* ── the budget/rlimit enforcement projections (#118) ────────────────────────*/
+
+/**
+ * A plan's slice, set or raised — the human act that funds the plan (#118, #115
+ * decision 4). The human-only gate is one layer up (`commands.ts` refuses a
+ * non-human `set_plan_rlimit` before the append); this is the projection, the
+ * ONLY writer of `plans.rlimit_slice`, which is what makes "no machine-authored
+ * path raises a slice" true by construction — there is no other path to the
+ * column.
+ *
+ * Scoped to an `open` plan IN THIS ROOM and guarded the same way
+ * `projectPlanSettled` / `projectSessionOpened` are: a zero-row UPDATE throws and
+ * aborts the append, so a `set_plan_rlimit` naming a nonexistent, cross-room, or
+ * already-settled plan leaves NO ledger row and the caller gets a `nack`. A
+ * settled plan's contract is closed; its slice cannot be moved after the fact.
+ */
+async function projectPlanRlimitSet(
+  { tx, roomId, event: { at } }: ProjectionContext<RoomEvent>,
+  event: EventOf<'plan_rlimit_set'>,
+): Promise<void> {
+  const set = await tx
+    .update(plans)
+    .set({ rlimitSlice: event.slice, updatedAt: new Date(at) })
+    .where(and(eq(plans.id, event.planId), eq(plans.roomId, roomId), eq(plans.status, 'open')))
+    .returning({ id: plans.id });
+  if (set.length === 0) {
+    throw new CommandError(
+      'invalid',
+      `no open plan "${event.planId}" to set an rlimit slice on in room "${roomId}" — it does not exist here or has already settled`,
+    );
+  }
+}
+
+/**
+ * A draw refused at the authorization boundary (#118, #115 decision 2). The
+ * durable receipt IS this ledger row: `reason=budget`, carrying the slice and the
+ * committed draw count it was checked against. It writes NOTHING to `plans` or
+ * `sessions` — no session rows up and `authorized_draws` does not move, because
+ * the draw was not granted. That absence is the enforcement: the spawn that would
+ * have exceeded the slice leaves a visible refusal and no session, rather than a
+ * session the slice could not fund.
+ *
+ * A no-op projection is deterministic on replay by construction. The decision
+ * that produced this event — slice read, `authorized_draws + 1 > slice` — was
+ * made under the append lock in `commands.ts` before the event was built; it is
+ * not re-made here, exactly as no projection re-checks the pstree invariant.
+ */
+async function projectDrawRefused(
+  _context: ProjectionContext<RoomEvent>,
+  _event: EventOf<'draw_refused'>,
+): Promise<void> {
+  // Intentionally empty: the durable ledger row is the whole receipt.
 }

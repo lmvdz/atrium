@@ -833,8 +833,8 @@
       "kind": "file",
       "why": "The drizzle event_type enum grows a value the database does not have. _CoreEventTypeCoverage asserts only that every core event type is in the enum, so this compiles. It pins that a comparison exists at all — and it is honest to say it does not discriminate r7 from r6, because r6 compared Object.keys(OWN_KEY) against eventType.enumValues and this trips that too. The direction r7 added is the database growing a kind TypeScript has not heard of, which cannot be a mutant at all: ALTER TYPE ... ADD VALUE is irreversible, so it would leak a ninth kind into every later file in the run. That half is verified by hand and the test says so.",
       "file": "packages/db/src/schema.ts",
-      "find": "  'signal_raised',\n]);",
-      "replace": "  'signal_raised',\n  'ninth_kind',\n]);",
+      "find": "  'draw_refused',\n]);",
+      "replace": "  'draw_refused',\n  'ninth_kind',\n]);",
       "catches": ["takes its list of kinds from the deployed enum, not from a TypeScript constant"]
     },
     {
@@ -1256,12 +1256,22 @@
       "kind": "file",
       "file": "apps/server/src/commands.ts",
       "why": "The command-layer certification gate removed, leaving only the reducer's fold — #96 r2's finding 3. Every certification by a non-human still ends with no object in accepted_objects, so a fold-only suite stays green; what changes is that each attempt INSERTS a core_events row and comes back as an `ack` carrying `issues` rather than a nack. A client that renders acks and ignores `issues` shows the room a certification that did not happen, and the ledger grows durable history saying a machine tried to mint one.",
-      "find": "    if (!isHuman(actorOf(session)) && certificationClassOf(command.name) === 'certifies') {",
-      "replace": "    if (false as boolean) {",
+      "find": "      if (klass === 'certifies') {",
+      "replace": "      if (false as boolean) {",
       "catches": [
         "refuses every certification-class command from an agent, before anything is appended",
         "refuses an agent’s acceptance of a person’s decision proposal, and writes nothing"
       ]
+    },
+    {
+      "id": "a_machine_authorizes_its_own_spend",
+      "suite": "integration",
+      "kind": "file",
+      "file": "apps/server/src/commands.ts",
+      "why": "The command-layer SPEND gate removed (#118, #115 decision 4). Setting or raising a plan's rlimit slice is a human-only certification class; with this arm neutered a non-human set_plan_rlimit is no longer refused before the append, so a machine can raise its own (or any) plan's budget — the campaign-stopping act the gate exists to refuse. The projection still lands a plan_rlimit_set row, so the slice actually moves.",
+      "find": "      if (klass === 'authorizes-spend') {",
+      "replace": "      if (false as boolean) {",
+      "catches": ["refuses a machine raising its own slice, and lets a human raise it"]
     },
     {
       "id": "a_machine_retires_what_a_person_confirmed",

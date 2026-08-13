@@ -222,6 +222,8 @@ describe('ClientFrame', () => {
       'open_session',
       'settle_session',
       'raise_signal',
+      // The budget/rlimit spend-authorization (#118): human-only slice set/raise.
+      'set_plan_rlimit',
     ];
     const declared = Command.options.map((option) => option.shape.name.value);
     expect([...declared].sort()).toEqual([...names].sort());

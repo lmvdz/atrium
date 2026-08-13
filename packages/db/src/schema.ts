@@ -230,6 +230,16 @@ export const eventType = pgEnum('event_type', [
   'session_settled',
   'session_failed',
   'signal_raised',
+  // ── the budget/rlimit enforcement boundary (#118, from #115's resolution) ──
+  //
+  // Two more ledger-only kinds, KEPT OUT of `coreEventTypes` exactly as the six
+  // above are. `plan_rlimit_set` is the human-only spend-authorization that sets
+  // or raises a plan's `rlimit_slice`; `draw_refused` is the durable, receipted
+  // refusal a spawn takes when the slice is spent — "a row that won't balance",
+  // not a silent stop. Neither mints or moves a `✓`: the covenant reducer folds
+  // neither, and `plans`/`sessions` are still their only projections.
+  'plan_rlimit_set',
+  'draw_refused',
 ]);
 
 /**
@@ -900,6 +910,8 @@ export const coreEvents = pgTable(
         WHEN 'session_settled' THEN ARRAY['roomId']
         WHEN 'session_failed' THEN ARRAY['roomId']
         WHEN 'signal_raised' THEN ARRAY['roomId']
+        WHEN 'plan_rlimit_set' THEN ARRAY['roomId']
+        WHEN 'draw_refused' THEN ARRAY['roomId']
         WHEN 'proposal_rejected' THEN ARRAY[]::text[]
         WHEN 'proposal_superseded' THEN ARRAY[]::text[]
         WHEN 'object_corrected' THEN ARRAY[]::text[]
@@ -915,6 +927,8 @@ export const coreEvents = pgTable(
         WHEN 'session_settled' THEN ${t.payload}->>'roomId'
         WHEN 'session_failed' THEN ${t.payload}->>'roomId'
         WHEN 'signal_raised' THEN ${t.payload}->>'roomId'
+        WHEN 'plan_rlimit_set' THEN ${t.payload}->>'roomId'
+        WHEN 'draw_refused' THEN ${t.payload}->>'roomId'
         ELSE ${t.roomId}::text
       END, false)`,
     ),
@@ -1284,6 +1298,34 @@ export const plans = pgTable(
     budgetLimitMicros: bigint('budget_limit_micros', { mode: 'number' }),
     /** Rollup of its sessions' spend, in micro-dollars. */
     spentMicros: bigint('spent_micros', { mode: 'number' }).notNull().default(0),
+    /**
+     * THE ENFORCED CEILING (#118, #115's resolution decision 1). A human-set
+     * ceiling on the number of *authorized draws* — spawns/continues — this plan
+     * may be granted. `NULL` means unfunded: no ceiling, the pre-#118 behaviour a
+     * machine-opened plan keeps. A finite value is a hard ceiling, and the ONLY
+     * writer of it is `projectPlanRlimitSet`, from the human-only `set_plan_rlimit`
+     * verb — no machine-authored path raises a slice (that path is refused before
+     * the append, like a machine trying to certify; `commands.ts`).
+     *
+     * Denominated in DRAWS, not micro-dollars, and that is the whole point: the
+     * enforced quantity is the count of draws Atrium itself GRANTED, which it
+     * records and cannot be lied to about — so a session under-reporting its spend
+     * (`spent_micros`, `sessions.spend_micros`) cannot get one more draw than the
+     * slice funds. The `~` dollar layer (`budget_limit_micros` intent,
+     * `spent_micros` reported spend) is STRUCTURALLY SEPARATE and never the
+     * enforcement variable; a divergence between the two is a row that won't
+     * balance, surfaced to the human, not a gate.
+     */
+    rlimitSlice: bigint('rlimit_slice', { mode: 'number' }),
+    /**
+     * The committed authorized-draw accounting: how many draws Atrium has granted
+     * under this plan. Incremented by exactly one inside the same append
+     * transaction as each `session_opened` it grants (`projectSessionOpened`),
+     * under the global ledger lock, so it equals `count(sessions)` for the plan by
+     * construction and cannot be forged. This is the number the spawn gate reads
+     * and compares to `rlimit_slice` — never the adapter-reported `spent_micros`.
+     */
+    authorizedDraws: bigint('authorized_draws', { mode: 'number' }).notNull().default(0),
     /** The `core_events.id` of the `plan_opened` that projected this. */
     openedByEventId: text('opened_by_event_id'),
     /** The `core_events.id` of the `plan_settled`, once it has settled. */
@@ -1296,6 +1338,10 @@ export const plans = pgTable(
     index('plans_agent_idx').on(t.agentUserId),
     /** The composite-FK target a session's parent edge lands on. */
     uniqueIndex('plans_room_id_key').on(t.roomId, t.id),
+    /** A slice is a count of draws — never negative. NULL (unfunded) is allowed. */
+    check('plans_rlimit_slice_nonnegative', sql`${t.rlimitSlice} IS NULL OR ${t.rlimitSlice} >= 0`),
+    /** Draws granted only ever counts up from zero. */
+    check('plans_authorized_draws_nonnegative', sql`${t.authorizedDraws} >= 0`),
   ],
 );
 

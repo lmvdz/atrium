@@ -83,4 +83,35 @@ CREATE TRIGGER "proposals_agent_proposer_is_agent"
   FOR EACH ROW EXECUTE FUNCTION "atrium_proposals_agent_proposer_is_agent"();--> statement-breakpoint
 
 COMMENT ON FUNCTION "atrium_proposals_agent_proposer_is_agent"() IS
-  'Refuses any proposals row with proposer_kind=agent whose proposer_user_id names a users row that is not principal_kind=agent (#117 fix r2, F5). The half proposals_proposer_identified cannot state: a CHECK proves proposer_user_id IS NOT NULL but cannot cross to users.principal_kind, so an agent proposal could name a human uuid and read as its own agent-kind row when it is not. Mirrors 0021 agents_user_is_agent and 0024 rooms_agent_user_is_agent. Fires BEFORE INSERT OR UPDATE for the agent arm only. Compares proposer_kind::text so the agent label 0026 added is safe to reference in a shared migration transaction. No row lock — principal_kind is immutable (0017). Does not bind an operator who disables triggers.';
+  'Refuses any proposals row with proposer_kind=agent whose proposer_user_id names a users row that is not principal_kind=agent (#117 fix r2, F5). The half proposals_proposer_identified cannot state: a CHECK proves proposer_user_id IS NOT NULL but cannot cross to users.principal_kind, so an agent proposal could name a human uuid and read as its own agent-kind row when it is not. Mirrors 0021 agents_user_is_agent and 0024 rooms_agent_user_is_agent. Fires BEFORE INSERT OR UPDATE for the agent arm only. Compares proposer_kind::text so the agent label 0026 added is safe to reference in a shared migration transaction. No row lock — principal_kind is immutable (0017). Does not bind an operator who disables triggers.';--> statement-breakpoint
+
+-- ─────────────────────────────────────────────────────────────────────────────
+-- ## The rows already here — the half a BEFORE-INSERT trigger cannot reach.
+--
+-- #117 gauntlet leftover (F5), folded in by #118. The trigger above guards every
+-- FUTURE write, but a trigger validates nothing about rows that predate it. On
+-- this branch 0026 (proposer_kind gains 'agent') and 0027 co-ship, so no `agent`
+-- proposal can exist yet and this passes trivially — but making the invariant a
+-- one-time assertion over ALL existing rows, not only future ones, is what makes
+-- it hold over the whole table rather than the tail of it. The same LEFT JOIN
+-- shape mirrors the trigger's two refusal branches (a missing identity, or a
+-- non-agent one), and the same `::text` discipline keeps the newly-added 'agent'
+-- label safe to reference inside the migrator's single transaction.
+DO $$
+DECLARE
+  v_bad text;
+  v_kind text;
+BEGIN
+  SELECT p."id"::text, coalesce(u."principal_kind"::text, '<no such identity>')
+    INTO v_bad, v_kind
+  FROM public."proposals" p
+  LEFT JOIN public."users" u ON u."id" = p."proposer_user_id"
+  WHERE p."proposer_kind"::text = 'agent'
+    AND (u."id" IS NULL OR u."principal_kind"::text <> 'agent')
+  LIMIT 1;
+  IF v_bad IS NOT NULL THEN
+    RAISE EXCEPTION
+      'proposal %: proposer_kind=agent names a % — an agent proposal must name its own agent-kind users row. The trigger guards future writes; this one-time check refuses the rows already here (#117 F5).', v_bad, v_kind
+      USING ERRCODE = '23514', CONSTRAINT = 'proposals_agent_proposer_is_agent';
+  END IF;
+END $$;

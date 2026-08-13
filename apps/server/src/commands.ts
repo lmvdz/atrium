@@ -26,6 +26,7 @@ import {
   acceptedObjects,
   messages,
   objectSources,
+  plans,
   proposalSources,
   proposals,
   users,
@@ -371,6 +372,23 @@ export const Command = z.discriminatedUnion('name', [
     class: AttentionClass,
     reason: RationaleReason,
   }),
+
+  // ── the budget/rlimit enforcement boundary (#118) ──────────────────────────
+  //
+  // The human-only spend-authorization: setting or raising a plan's rlimit slice.
+  // Unlike the five lifecycle verbs above (which are `open` — a machine may
+  // perform them as itself), this is `authorizes-spend` in `certificationClassOf`
+  // and is refused to a non-human BEFORE the append, exactly as a machine trying
+  // to certify is. A spend-authorization is a human-only class (#115 decision 4):
+  // human = init sets the ceiling, and no machine-authored path raises its own.
+  z.object({
+    name: z.literal('set_plan_rlimit'),
+    roomId: Id,
+    /** The plan whose slice is being set or raised. */
+    planId: Id,
+    /** The new ceiling on authorized draws (spawns/continues). Non-negative. */
+    slice: z.number().int().nonnegative(),
+  }),
 ]);
 export type Command = z.infer<typeof Command>;
 
@@ -447,6 +465,16 @@ export type Command = z.infer<typeof Command>;
 export type CertificationClass =
   /** Puts the room's word on something. Human-only, refused before the append. */
   | 'certifies'
+  /**
+   * Authorizes SPEND — sets or raises a plan's rlimit slice (#118, #115's
+   * resolution). Human-only for the same reason `certifies` is, and refused the
+   * same way, before the append: a spend-authorization is a human-only
+   * certification class, `human = init` sets the ceiling, and no machine-authored
+   * path raises its own budget. Kept distinct from `certifies` because the two
+   * refuse for different reasons and say so differently — one is "a machine may
+   * not certify a `✓`", the other "a machine may not authorize its own spend".
+   */
+  | 'authorizes-spend'
   /** May or may not, depending on the object. Refused at the command's own site. */
   | 'conditional'
   /** Participation. Open to any member, of any kind. */
@@ -479,6 +507,12 @@ export function certificationClassOf(name: CommandName): CertificationClass {
     case 'settle_session':
     case 'raise_signal':
       return 'open';
+    // The spend-authorization (#118). NOT `open`: setting or raising a plan's
+    // rlimit slice is `human = init`'s act, refused to a machine before the
+    // append exactly as certifying is. A machine raising its own budget is
+    // campaign-stopping, and this is the single classification that stops it.
+    case 'set_plan_rlimit':
+      return 'authorizes-spend';
     default: {
       // A verb nobody has classified is not a verb a machine may perform.
       const exhaustive: never = name;
@@ -494,6 +528,17 @@ export function certificationClassOf(name: CommandName): CertificationClass {
  */
 export function nonHumanCertificationRefusal(name: CommandName, kind: string): string {
   return `"${name}" is a certification and this session is a ${kind} principal — a machine may draft a reading (~) and may never certify one (✓); nothing was appended. Stage the reading and let a person in the room accept it`;
+}
+
+/**
+ * What a room is told when a machine tries to authorize spend (#118). The parallel
+ * of `nonHumanCertificationRefusal` for the SPEND syscall: `human = init` sets a
+ * plan's rlimit slice, and a machine raising its own (or any) budget is
+ * campaign-stopping (#115 decision 4). Names the act and the route that stays
+ * open — a person in the room funds the plan.
+ */
+export function nonHumanSpendAuthorizationRefusal(name: CommandName, kind: string): string {
+  return `"${name}" authorizes spend — it sets a plan's rlimit slice — and this session is a ${kind} principal; a plan's budget is set by a person (human = init), and no machine may raise its own or any plan's ceiling. Nothing was appended. Ask a person in the room to fund the plan`;
 }
 
 /**
@@ -889,11 +934,23 @@ export function createCommandService({
     // one door and the reducer binds the fold itself, which is what a replay, a
     // second writer or the interpretation worker goes through. Two layers, the
     // same rule, and `certificationClassOf` is the only place the *list* lives.
-    if (!isHuman(actorOf(session)) && certificationClassOf(command.name) === 'certifies') {
-      throw new CommandError(
-        'invalid',
-        nonHumanCertificationRefusal(command.name, session.principalKind),
-      );
+    if (!isHuman(actorOf(session))) {
+      const klass = certificationClassOf(command.name);
+      if (klass === 'certifies') {
+        throw new CommandError(
+          'invalid',
+          nonHumanCertificationRefusal(command.name, session.principalKind),
+        );
+      }
+      // The SPEND syscall (#118), refused the same way and in the same place as a
+      // machine trying to certify: `human = init` sets a plan's rlimit slice, and
+      // no machine-authored path raises its own budget. Nothing durable, a `nack`.
+      if (klass === 'authorizes-spend') {
+        throw new CommandError(
+          'invalid',
+          nonHumanSpendAuthorizationRefusal(command.name, session.principalKind),
+        );
+      }
     }
 
     switch (command.name) {
@@ -1417,17 +1474,86 @@ export function createCommandService({
           planId: command.planId,
         }));
 
-      case 'open_session':
-        return appendAndProject(session, command.roomId, ({ id, at }) => ({
-          id,
-          at,
-          type: 'session_opened',
-          roomId: command.roomId,
-          sessionId: randomUUID(),
-          planId: command.planId,
-          harness: command.harness,
-          model: command.model,
-        }));
+      // A spawn is an AUTHORIZED DRAW (#118, #115's resolution). The draw check
+      // runs UNDER THE APPEND LOCK — in `authorize`, which the ledger runs after
+      // it takes the global lock and before `build` — mirroring #102's certify
+      // gate under the ledger lock. It reads the plan's committed
+      // `authorized_draws` (the count Atrium granted, which a session cannot lie
+      // to it about) against the human-set `rlimit_slice`, and decides which event
+      // this append is: a `session_opened` that grants the draw, or a
+      // `draw_refused` receipt when the slice is spent. The decision is made once,
+      // under the lock, and read by `build`; the two run in that order inside one
+      // transaction, so no second writer can move the count between them.
+      case 'open_session': {
+        const roomId = command.roomId;
+        const sessionId = randomUUID();
+        // Set in `authorize`, read in `build`. Non-null only when the plan is
+        // present, open, and FUNDED (a finite slice) — an unfunded plan (NULL
+        // slice) draws freely, the pre-#118 behaviour, and an absent/settled plan
+        // is left to `projectSessionOpened`'s existing guard to nack.
+        let refusal: { slice: number; authorizedDraws: number } | null = null;
+        const appended = await ledger.append({
+          roomId,
+          actor: actorOf(session),
+          authorize: async (tx) => {
+            await requireMembership(session, roomId, tx);
+            const [plan] = await tx
+              .select({
+                status: plans.status,
+                slice: plans.rlimitSlice,
+                authorizedDraws: plans.authorizedDraws,
+              })
+              .from(plans)
+              .where(and(eq(plans.id, command.planId), eq(plans.roomId, roomId)))
+              .for('share');
+            // Enforce only against a FINITE slice on an open plan. `authorized_draws
+            // + this one > slice` is the whole rule: a 4th draw against a slice that
+            // funds 3 is refused regardless of what the session claims to have spent.
+            if (plan && plan.status === 'open' && plan.slice !== null) {
+              if (plan.authorizedDraws + 1 > plan.slice) {
+                refusal = { slice: plan.slice, authorizedDraws: plan.authorizedDraws };
+              }
+            }
+          },
+          build: ({ id, at }): RoomEvent =>
+            refusal
+              ? {
+                  id,
+                  at,
+                  type: 'draw_refused',
+                  roomId,
+                  planId: command.planId,
+                  reason: 'budget',
+                  slice: refusal.slice,
+                  authorizedDraws: refusal.authorizedDraws,
+                  harness: command.harness,
+                  model: command.model,
+                }
+              : {
+                  id,
+                  at,
+                  type: 'session_opened',
+                  roomId,
+                  sessionId,
+                  planId: command.planId,
+                  harness: command.harness,
+                  model: command.model,
+                },
+          project: (context) => projectRoomEvent(context, projectionHooks),
+        });
+        return {
+          kind: 'appended',
+          roomId: appended.roomId,
+          seq: appended.seq,
+          roomSeq: appended.roomSeq,
+          actor: appended.actor,
+          event: appended.event,
+          issues:
+            appended.outcome?.outcome === 'applied_with_issue'
+              ? appended.outcome.issues.map((issue) => issue.reason)
+              : [],
+        };
+      }
 
       case 'settle_session':
         return appendAndProject(session, command.roomId, ({ id, at }) => ({
@@ -1455,6 +1581,20 @@ export function createCommandService({
           subjectId: command.subjectId,
           class: command.class,
           reason: command.reason,
+        }));
+
+      // The human-only spend-authorization (#118). The non-human refusal already
+      // happened above, before the switch, in the same place a machine's certify
+      // is refused. `projectPlanRlimitSet` is the only writer of `rlimit_slice`,
+      // and it guards for an open plan in this room.
+      case 'set_plan_rlimit':
+        return appendAndProject(session, command.roomId, ({ id, at }) => ({
+          id,
+          at,
+          type: 'plan_rlimit_set',
+          roomId: command.roomId,
+          planId: command.planId,
+          slice: command.slice,
         }));
 
       // ── ephemeral: broadcast, never appended (#14) ─────────────────────────

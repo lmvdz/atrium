@@ -264,6 +264,12 @@ describe('the durable ledger (issue #22)', () => {
       'session_settled',
       'session_failed',
       'signal_raised',
+      // The budget/rlimit enforcement kinds (#118): the human-only slice
+      // set/raise, and the durable draw refusal. Ledger-only like the six above —
+      // the covenant reducer folds neither, so adding either to `coreEventTypeSet`
+      // would move it out of this list, and this pins that it did not.
+      'plan_rlimit_set',
+      'draw_refused',
     ]);
   });
 
@@ -290,6 +296,12 @@ describe('the durable ledger (issue #22)', () => {
       'session_settled',
       'session_failed',
       'signal_raised',
+      // The budget/rlimit enforcement kinds (#118) join the same CHECK: each
+      // declares a top-level roomId, so the fail-closed tail would refuse an
+      // append of either until this arm is present in BOTH schema.ts and migration
+      // 0028. Same parity, two more kinds.
+      'plan_rlimit_set',
+      'draw_refused',
     ];
     for (const kind of lifecycleKinds) {
       // In the schema (drift target) AND in the migration (deployed truth): if

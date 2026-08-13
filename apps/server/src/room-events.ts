@@ -220,6 +220,59 @@ export const SignalRaised = z.object({
 });
 export type SignalRaised = z.infer<typeof SignalRaised>;
 
+/* ── the budget/rlimit enforcement boundary (#118, from #115's resolution) ────
+ *
+ * Both ledger-only, like the lifecycle six: they ride the spine for a `room_seq`
+ * and never join `CoreEvent`. `plan_rlimit_set` is the human-only
+ * spend-authorization that sets/raises a plan's slice; `draw_refused` is the
+ * durable receipt a spawn takes when the slice is spent. Neither touches an
+ * `accepted_objects` judgement column — a spend-authorization is a SPEND syscall
+ * (#115), not a covenant `✓`.
+ * ───────────────────────────────────────────────────────────────────────── */
+
+/**
+ * A plan's rlimit slice set or raised — the human act that funds the plan. The
+ * command that produces it (`set_plan_rlimit`) is human-only, refused for a
+ * non-human before the append exactly as a machine trying to certify is: no
+ * machine-authored path raises a slice (#115 decision 4). `slice` is a count of
+ * authorized draws — spawns/continues — this plan may be granted.
+ */
+export const PlanRlimitSet = z.object({
+  ...eventBase,
+  type: z.literal('plan_rlimit_set'),
+  roomId: Id,
+  planId: Id,
+  /** The new ceiling on authorized draws. Non-negative; may raise or lower. */
+  slice: z.number().int().nonnegative(),
+});
+export type PlanRlimitSet = z.infer<typeof PlanRlimitSet>;
+
+/**
+ * A draw refused at the authorization boundary — the durable, receipted refusal
+ * a spawn takes when its plan's slice is spent (#118, #115 decision 2). It is a
+ * ROW, not a silent stop-after: `reason=budget`, carrying the slice and the
+ * committed authorized-draw count it was checked against, so the refusal is
+ * visible and reconciles. No `sessions` row is created and no draw is granted —
+ * the whole point is that the draw did NOT happen.
+ */
+export const DrawRefused = z.object({
+  ...eventBase,
+  type: z.literal('draw_refused'),
+  roomId: Id,
+  /** The plan whose slice refused this draw. */
+  planId: Id,
+  /** Why the draw was refused. Only `budget` today; a closed set that may grow. */
+  reason: z.literal('budget'),
+  /** The plan's slice at the moment of refusal — what the draw was checked against. */
+  slice: z.number().int().nonnegative(),
+  /** The committed authorized-draw count at refusal. `+ 1 > slice` is why. */
+  authorizedDraws: z.number().int().nonnegative(),
+  /** The harness/model the refused spawn would have run — for the receipt. */
+  harness: z.string().min(1).max(120),
+  model: z.string().min(1).max(120),
+});
+export type DrawRefused = z.infer<typeof DrawRefused>;
+
 /** The payload union, before the no-actor guard. */
 const RoomEventVariants = z.discriminatedUnion('type', [
   ProposalRecorded,
@@ -236,6 +289,8 @@ const RoomEventVariants = z.discriminatedUnion('type', [
   SessionSettled,
   SessionFailed,
   SignalRaised,
+  PlanRlimitSet,
+  DrawRefused,
 ]);
 
 /**
@@ -315,7 +370,9 @@ export type ServerEvent =
   | SessionOpened
   | SessionSettled
   | SessionFailed
-  | SignalRaised;
+  | SignalRaised
+  | PlanRlimitSet
+  | DrawRefused;
 
 /** True when @atrium/core's `reduce` consumes this event. */
 export function isCoreEvent(event: RoomEvent): event is CoreEvent {
@@ -354,6 +411,8 @@ export function declaredRoomId(event: RoomEvent): string | null {
     case 'session_settled':
     case 'session_failed':
     case 'signal_raised':
+    case 'plan_rlimit_set':
+    case 'draw_refused':
       return event.roomId;
     case 'proposal_rejected':
     case 'proposal_superseded':

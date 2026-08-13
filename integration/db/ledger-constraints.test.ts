@@ -279,6 +279,23 @@ function kindRow(
         reason: { kind: 'question_names_you', question: 'which cutover?' },
       };
       break;
+    // The budget/rlimit enforcement kinds (#118), both declaring a top-level
+    // `roomId` like the lifecycle six — the CHECK treats them the same way.
+    case 'plan_rlimit_set':
+      payload = { ...base, roomId, planId: randomUUID(), slice: 3 };
+      break;
+    case 'draw_refused':
+      payload = {
+        ...base,
+        roomId,
+        planId: randomUUID(),
+        reason: 'budget',
+        slice: 1,
+        authorizedDraws: 1,
+        harness: 'omp',
+        model: 'haiku',
+      };
+      break;
     case 'proposal_rejected':
       payload = { ...base, proposalId, reason: null };
       break;
@@ -2685,6 +2702,9 @@ describe('core_events — the room key is the one this kind declares, and no oth
     session_settled: 'roomId',
     session_failed: 'roomId',
     signal_raised: 'roomId',
+    // The two budget/rlimit enforcement kinds (#118), also top-level `roomId`.
+    plan_rlimit_set: 'roomId',
+    draw_refused: 'roomId',
   };
 
   /** Write a room key into a payload at one of the four spellings. */
@@ -2740,10 +2760,11 @@ describe('core_events — the room key is the one this kind declares, and no oth
         }
       }
     }
-    // Non-vacuous, and the count is the product: 11 room-declaring kinds × 3
+    // Non-vacuous, and the count is the product: 13 room-declaring kinds × 3
     // foreign keys × 2 values. A loop that silently stopped iterating would
-    // otherwise pass. (Five original kinds plus the six #116 lifecycle kinds.)
-    expect(refused).toBe(66);
+    // otherwise pass. (Five original kinds, the six #116 lifecycle kinds, plus
+    // the two #118 budget/rlimit kinds.)
+    expect(refused).toBe(78);
   });
 
   it('refuses a room key on the three kinds that declare none', async () => {
@@ -2774,7 +2795,7 @@ describe('core_events — the room key is the one this kind declares, and no oth
   it('accepts every kind carrying exactly the room key its own shape declares', async () => {
     /**
      * The non-vacuity half, and it is load-bearing: a constraint that refused
-     * everything would satisfy both tests above. Every one of the eight kinds is
+     * everything would satisfy both tests above. Every one of the kinds is
      * appended honestly into `roomA` and lands.
      *
      * Catches: a check that requires a room key of the wrong kind, or requires one
@@ -2788,7 +2809,7 @@ describe('core_events — the room key is the one this kind declares, and no oth
       await expect(append(row)).resolves.toBeDefined();
       landed += 1;
     }
-    expect(landed).toBe(14);
+    expect(landed).toBe(16);
   });
 
   /**
@@ -2859,8 +2880,8 @@ describe('core_events — the room key is the one this kind declares, and no oth
         landed += 1;
       }
     }
-    // 11 room-declaring kinds × 3 foreign keys + 3 room-less kinds × 4 keys.
-    expect(landed).toBe(45);
+    // 13 room-declaring kinds × 3 foreign keys + 3 room-less kinds × 4 keys.
+    expect(landed).toBe(51);
     const filed = await handle.db
       .select({ roomId: coreEvents.roomId })
       .from(coreEvents)
