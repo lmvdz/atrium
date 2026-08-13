@@ -1,0 +1,257 @@
+'use client';
+
+/* ---------------------------------------------------------------------------
+ * The session REVIEW PANE — diff + tests + receipt + artifact, and a land gated
+ * on a formal human `✓` (scout §9.5; #121; the Delta review-changes layout with
+ * the tests and the receipt Delta never showed).
+ *
+ * Borrows Delta's "everything about the change in one place" but NOT its
+ * implicit "land when you're happy": the land is a HoldToAct — a real
+ * press-and-hold, elapsed-time-gated, that records who armed it and how long
+ * (primitives/HoldToAct.tsx). And it is offered only to a HUMAN viewer; an agent
+ * or an unreadable-kind viewer sees the refusal in the covenant's own words, the
+ * same fail-closed shape the live route's certify uses. The server
+ * (lib/certify-session.ts) and the DB trigger (drizzle/0032) enforce it under
+ * the affordance — the UI gate is the first of three, not the only one.
+ * ------------------------------------------------------------------------- */
+
+import { useEffect, useState } from 'react';
+import type { ControlSessionRow } from '@/lib/control-plane-data';
+import type { ParticipantKind } from '../model/kind';
+import { systemText } from '../model/quotation';
+import { Glyph } from '../primitives/Glyph';
+import { type Arming, HoldToAct } from '../primitives/HoldToAct';
+import styles from './control.module.css';
+import { formatMicros, sessionAwaitsLanding, sessionState } from './state';
+
+/** The "landed by … · when · held Ns" line, composed once. */
+function certifiedLine(session: ControlSessionRow): string {
+  const when =
+    session.certifiedAt === null ? '' : ` · ${session.certifiedAt.slice(0, 16).replace('T', ' ')}`;
+  const held =
+    session.certifiedHeldMs === null
+      ? ''
+      : ` · held ${(session.certifiedHeldMs / 1000).toFixed(1)}s`;
+  return `landed by ${session.certifiedByName}${when}${held}`;
+}
+
+export interface ReviewPaneProps {
+  readonly session: ControlSessionRow | null;
+  readonly planTitle: string | null;
+  readonly agentName: string | null;
+  /** the person reading — the actor an arming records */
+  readonly viewerId: string;
+  /** server-resolved; the land is offered only when this is `human` */
+  readonly viewerKind: ParticipantKind | 'unknown';
+  readonly onCertify: (sessionId: string, arming: Arming) => void;
+  readonly certifyError: string | null;
+}
+
+export function ReviewPane({
+  session,
+  planTitle,
+  agentName,
+  viewerId,
+  viewerKind,
+  onCertify,
+  certifyError,
+}: ReviewPaneProps) {
+  const [applying, setApplying] = useState(false);
+  // A new session, or a landed one, clears the optimistic "landing" note.
+  const sessionId = session?.id ?? null;
+  // biome-ignore lint/correctness/useExhaustiveDependencies: reset keys off the identity/landed-ness, not the whole row.
+  useEffect(() => setApplying(false), [sessionId, session?.certifiedByName]);
+
+  if (session === null) {
+    return (
+      <div className={styles.review} data-region="review-pane">
+        <div className={styles.reviewEmpty}>
+          <span className="atr-lbl">REVIEW</span>
+          <span>Select a session in the tree to review its diff, tests, receipt and artifact.</span>
+        </div>
+      </div>
+    );
+  }
+
+  const state = sessionState(session);
+  const artifact = session.artifact;
+  const awaitsLanding = sessionAwaitsLanding(session);
+
+  return (
+    <div className={styles.review} data-region="review-pane" data-review-session={session.id}>
+      <div className={styles.reviewHead}>
+        <Glyph state={state} />
+        <span className={styles.reviewTitle}>{systemText(session.model, 'ReviewPane model')}</span>
+        <span className="atr-meta">{systemText(session.status, 'ReviewPane status')}</span>
+      </div>
+      <span className="atr-meta">
+        {systemText(
+          `${agentName ?? 'agent'}${planTitle === null ? '' : ` · ${planTitle}`} · ${session.harness}`,
+          'ReviewPane provenance',
+        )}
+      </span>
+
+      {/* ── DIFF ─────────────────────────────────────────────────────────── */}
+      <section className={styles.section} data-review-diff="true">
+        <div className={`${styles.sectionHead} atr-lbl`}>DIFF</div>
+        <div className={styles.sectionBody}>
+          {artifact?.diffStat ? (
+            <span className={`${styles.v} ${styles.vMono}`} data-diff-stat="true">
+              {systemText(artifact.diffStat, 'ReviewPane diff')}
+            </span>
+          ) : (
+            <span className={styles.muted}>
+              no diff recorded — the ExecutionProvider (#120) records one at settle
+            </span>
+          )}
+        </div>
+      </section>
+
+      {/* ── TESTS ────────────────────────────────────────────────────────── */}
+      <section className={styles.section} data-review-tests="true">
+        <div className={`${styles.sectionHead} atr-lbl`}>TESTS</div>
+        <div className={styles.sectionBody}>
+          {artifact?.testsPassed === undefined && artifact?.testsFailed === undefined ? (
+            <span className={styles.muted}>no test run recorded</span>
+          ) : (
+            <span className={styles.v} data-tests="true">
+              <span className={styles.pass} data-tests-passed={artifact?.testsPassed ?? 0}>
+                {artifact?.testsPassed ?? 0} passed
+              </span>
+              {' · '}
+              <span
+                className={(artifact?.testsFailed ?? 0) > 0 ? styles.fail : styles.muted}
+                data-tests-failed={artifact?.testsFailed ?? 0}
+              >
+                {artifact?.testsFailed ?? 0} failed
+              </span>
+            </span>
+          )}
+        </div>
+      </section>
+
+      {/* ── RECEIPT ──────────────────────────────────────────────────────── */}
+      <section className={styles.section} data-review-receipt="true">
+        <div className={`${styles.sectionHead} atr-lbl`}>RECEIPT</div>
+        <div className={styles.sectionBody}>
+          <div className={styles.kv}>
+            <span className={styles.k}>status</span>
+            <span className={styles.v}>
+              {systemText(session.status, 'ReviewPane receipt status')}
+            </span>
+          </div>
+          <div className={styles.kv}>
+            <span className={styles.k}>spend</span>
+            <span className={styles.v}>
+              {systemText(formatMicros(session.spendMicros), 'ReviewPane receipt spend')}
+            </span>
+          </div>
+          {session.contextPct === null ? null : (
+            <div className={styles.kv}>
+              <span className={styles.k}>context</span>
+              <span className={styles.v}>
+                {systemText(`${Math.round(session.contextPct * 100)}%`, 'ReviewPane context')}
+              </span>
+            </div>
+          )}
+          <div className={styles.kv}>
+            <span className={styles.k}>summary</span>
+            <span className={`${styles.v} ${styles.receiptProse}`} data-exit-summary="true">
+              {session.exitSummary === null ? (
+                <span className={styles.muted}>no exit prose recorded</span>
+              ) : (
+                systemText(session.exitSummary, 'ReviewPane exit summary')
+              )}
+            </span>
+          </div>
+        </div>
+      </section>
+
+      {/* ── ARTIFACT ─────────────────────────────────────────────────────── */}
+      <section className={styles.section} data-review-artifact="true">
+        <div className={`${styles.sectionHead} atr-lbl`}>ARTIFACT</div>
+        <div className={styles.sectionBody}>
+          {artifact === null ? (
+            <span className={styles.muted}>
+              no execution artifact — an audit or a dry-run produces none
+            </span>
+          ) : (
+            <>
+              {artifact.branch === undefined ? null : (
+                <div className={styles.kv}>
+                  <span className={styles.k}>branch</span>
+                  <span className={`${styles.v} ${styles.vMono}`} data-artifact-branch="true">
+                    {systemText(artifact.branch, 'ReviewPane branch')}
+                  </span>
+                </div>
+              )}
+              {artifact.commit === undefined ? null : (
+                <div className={styles.kv}>
+                  <span className={styles.k}>commit</span>
+                  <span className={`${styles.v} ${styles.vMono}`} data-artifact-commit="true">
+                    {systemText(artifact.commit, 'ReviewPane commit')}
+                  </span>
+                </div>
+              )}
+              {artifact.summary === undefined ? null : (
+                <div className={styles.kv}>
+                  <span className={styles.k}>note</span>
+                  <span className={styles.v}>
+                    {systemText(artifact.summary, 'ReviewPane note')}
+                  </span>
+                </div>
+              )}
+            </>
+          )}
+        </div>
+      </section>
+
+      {/* ── CERTIFY / LAND ───────────────────────────────────────────────── */}
+      {session.certifiedByName !== null ? (
+        <div className={styles.certified} data-certified="true">
+          <Glyph className={styles.certifiedGlyph} state={state} />
+          <span>{systemText(certifiedLine(session), 'ReviewPane certified')}</span>
+        </div>
+      ) : !awaitsLanding ? (
+        <div className={styles.refused} data-certify="unavailable">
+          {session.status === 'settled'
+            ? 'this session produced no artifact to land — a clean exit certifies nothing'
+            : 'a session is landed once it settles with an artifact; this one has not yet'}
+        </div>
+      ) : viewerKind === 'human' ? (
+        <div className={`${styles.certify} ${styles.certifyDestructive}`} data-certify="ready">
+          <span className={`${styles.certifyHead} atr-lbl`}>LAND THIS SESSION</span>
+          <span className={styles.certifyNote}>
+            {systemText(
+              `Certifying lands this work onto ${artifact?.branch ?? 'its branch'}. It is not undoable, and the record names who armed it and when.`,
+              'ReviewPane certify note',
+            )}
+          </span>
+          <HoldToAct
+            actionId={`certify-${session.id}`}
+            actor={viewerId}
+            describe={`land the work onto ${artifact?.branch ?? 'its branch'}`}
+            label="Certify the landing"
+            onArm={() => setApplying(true)}
+            onAct={(arming) => onCertify(session.id, arming)}
+          />
+          {applying && certifyError === null ? (
+            <span className={styles.certifyNote} data-certify-applying="true">
+              landing recorded — applying…
+            </span>
+          ) : null}
+          {certifyError === null ? null : (
+            <span className={styles.error} data-certify-error="true">
+              {systemText(certifyError, 'ReviewPane certify error')}
+            </span>
+          )}
+        </div>
+      ) : (
+        <div className={styles.refused} data-certify="refused" data-certify-refused="true">
+          A session is landed only by a human — the covenant's second pair of eyes. A machine or a
+          voice path cannot certify this, and neither the server nor the table will let it.
+        </div>
+      )}
+    </div>
+  );
+}

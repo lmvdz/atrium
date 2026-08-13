@@ -255,6 +255,7 @@ describe('room membership is not reachable outside @atrium/auth', () => {
        */
       exempt: [
         'apps/web/e2e/agent-participant.spec.ts',
+        'apps/web/e2e/control-plane.spec.ts',
         'apps/web/e2e/destination-scenario.spec.ts',
         'apps/web/e2e/role-sync.spec.ts',
         'apps/web/e2e/room-access.spec.ts',

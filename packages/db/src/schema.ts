@@ -1368,6 +1368,30 @@ export const plans = pgTable(
  * `session_failed` writes only these; it touches no `accepted_objects`
  * judgement column and so can never flip a `~` to a `✓`.
  */
+
+/**
+ * The execution artifact a settled session produced — #120's ExecutionProvider
+ * output, surfaced in #121's review pane. All fields optional: the shape a merge
+ * carries (branch + commit) differs from what a test run carries (pass/fail
+ * counts), and an audit session carries neither. `diffStat` is a rendered
+ * summary line (`+128 −34 · 6 files`), not structured hunks — the control plane
+ * shows the shape of the change, and the terminal is the break-glass detail.
+ */
+export interface SessionArtifact {
+  /** The branch the work landed on, when it produced one. */
+  readonly branch?: string;
+  /** The commit sha, when it produced one. */
+  readonly commit?: string;
+  /** A one-line diff summary — additions, deletions, files touched. */
+  readonly diffStat?: string;
+  /** Tests that passed, when the session ran a suite. */
+  readonly testsPassed?: number;
+  /** Tests that failed, when the session ran a suite. */
+  readonly testsFailed?: number;
+  /** A free one-line note about the artifact — kept short, system voice. */
+  readonly summary?: string;
+}
+
 export const sessions = pgTable(
   'sessions',
   {
@@ -1388,6 +1412,38 @@ export const sessions = pgTable(
     spendMicros: bigint('spend_micros', { mode: 'number' }).notNull().default(0),
     /** The session's exit receipt prose, once it settles or fails. */
     exitSummary: text('exit_summary'),
+    /**
+     * THE EXECUTION ARTIFACT (#120's forward slot, #121's review pane).
+     *
+     * What a settled session PRODUCED — the branch/commit it landed on, a diff
+     * stat, and a test summary — so the control-plane review pane can show diff +
+     * tests + receipt + artifact rather than only the exit prose. Nullable: a
+     * session with no code output (an audit, a dry-run) leaves it null, and a
+     * settled session that predates its ExecutionProvider leaves it null too. The
+     * #120 ExecutionProvider is the eventual writer at settle time; until it
+     * lands, this is the slot it fills, populated directly for a seeded session.
+     * It is non-epistemic (#114 T3), the same as `exit_summary` beside it: a
+     * process receipt, never an `accepted_objects` `~`→`✓`.
+     */
+    artifact: jsonb('artifact').$type<SessionArtifact>(),
+    /**
+     * WHO LANDED THIS SESSION — the human who certified it, and only ever a
+     * human. NULL until a person formally certifies (#121's hold-to-arm land),
+     * and held to a `human` principal by the `sessions_certified_by_is_human`
+     * trigger (drizzle/0032): certification is the covenant's human-only act made
+     * a table fact, so no non-human path — no machine, no voice — can write a
+     * name here even with triggers left on. `SET NULL` on the human's deletion:
+     * the session's receipt outlives the identity, the same as its channel does.
+     */
+    certifiedBy: uuid('certified_by').references(() => users.id, { onDelete: 'set null' }),
+    /** When the certification was armed and committed. NULL until certified. */
+    certifiedAt: timestamp('certified_at', { withTimezone: true }),
+    /**
+     * How long the human held the arm control, measured — the asymmetric-friction
+     * receipt (#102/#110). Recorded so a certification carries evidence it was a
+     * deliberate hold, not a click. NULL until certified.
+     */
+    certifiedHeldMs: integer('certified_held_ms'),
     /** The `core_events.id` of the `session_opened` that projected this. */
     openedByEventId: text('opened_by_event_id'),
     /** The `core_events.id` of the settling/failing event, once it exits. */
