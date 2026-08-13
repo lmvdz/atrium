@@ -206,30 +206,44 @@ describe('the agent/plan/session lifecycle appends, projects, and touches no cov
     const claimId = await seedMachineReading();
 
     /**
-     * The whole-table census, not just the one seeded row (#116 fix r3, F-D).
+     * The whole-table, GLOBAL census, not just the one seeded row nor just this
+     * room (#116 fix r3, F-D; strengthened again r3.1 per the round-3 gauntlet
+     * finding F-D — the census was still an incomplete proxy for the `✓`
+     * predicate on two axes).
+     *
+     * Axis 1 — scope: a room filter (`WHERE room_id = ...`) makes a projection
+     * that certifies an object in a DIFFERENT room invisible. The covenant binds
+     * every lifecycle projection everywhere, not just in this test's room, so
+     * the census counts across ALL rooms.
+     *
+     * Axis 2 — predicate: `certified` must mirror `epistemicStateOf`
+     * (packages/core/src/epistemic.ts) exactly — `isHuman(acceptedBy) ||
+     * humanTouchedAt !== null` — not just the second half. A projection that set
+     * `accepted_by_kind = 'human'` without ever touching `human_touched_at`
+     * would earn a `✓` under the real predicate (`isHuman` alone confirms it)
+     * while leaving a `humanTouchedAt IS NOT NULL`-only census unmoved.
      *
      * Asserting the seeded `~` is byte-unchanged catches a projection that
-     * REWRITES it — but not one that CERTIFIES a *different* or *new* object: a
-     * lifecycle arm that inserted its own `accepted_objects` row, or flipped some
-     * other object's `human_touched_at`, would leave this row alone and pass. So
-     * the covenant claim is measured across the table: how many objects exist,
-     * and how many are certified (`✓` — a human touch). If no lifecycle
-     * projection may reach a judgement column, BOTH numbers are invariant across
-     * the six events, and "byte-unchanged seeded row" becomes one corollary of
-     * the stronger "the certified census does not move".
+     * REWRITES it — but not one that CERTIFIES a *different* or *new* object
+     * anywhere in the database. So the covenant claim is measured globally: how
+     * many objects exist, and how many are certified by the full predicate. If
+     * no lifecycle projection may reach a judgement column, BOTH numbers are
+     * invariant across the six events, and "byte-unchanged seeded row" becomes
+     * one corollary of the stronger "the certified census does not move".
      */
     const census = async () => {
       const [row] = await handle.db
         .select({
           total: sql<number>`count(*)::int`,
-          certified: sql<number>`count(*) FILTER (WHERE ${acceptedObjects.humanTouchedAt} IS NOT NULL)::int`,
+          certified: sql<number>`count(*) FILTER (WHERE ${acceptedObjects.acceptedByKind} = 'human' OR ${acceptedObjects.humanTouchedAt} IS NOT NULL)::int`,
         })
-        .from(acceptedObjects)
-        .where(eq(acceptedObjects.roomId, room.roomId));
+        .from(acceptedObjects);
       return row ?? { total: 0, certified: 0 };
     };
     const censusBefore = await census();
-    // The seeded reading is a `~`: it counts as an object, and as zero certified.
+    // The harness resets the whole database before each test (see beforeEach),
+    // so the global census equals the single-room census here: the seeded
+    // reading is the only object in the database, a `~`, so zero certified.
     expect(censusBefore).toEqual({ total: 1, certified: 0 });
 
     const before = await handle.db
@@ -353,10 +367,12 @@ describe('the agent/plan/session lifecycle appends, projects, and touches no cov
       ]),
     );
 
-    // The census has not moved: no lifecycle arm inserted a certified row, and
-    // none flipped an existing one to `✓`. This is the assertion the
-    // single-row check could not make — a projection certifying some OTHER
-    // object would pass byte-equality on `claimId` and fail here.
+    // The GLOBAL census, under the FULL `✓` predicate, has not moved: no
+    // lifecycle arm inserted a certified row anywhere, none flipped an existing
+    // one's `human_touched_at`, and none set `accepted_by_kind = 'human'`
+    // without a human touch either. This is the assertion the single-row check
+    // could not make — a projection certifying some OTHER object, in this room
+    // or any other, would pass byte-equality on `claimId` and fail here.
     expect(await census()).toEqual(censusBefore);
 
     const after = await handle.db
