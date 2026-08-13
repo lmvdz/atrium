@@ -13,7 +13,7 @@
 
 import Link from 'next/link';
 import { useRouter } from 'next/navigation';
-import { useMemo, useState } from 'react';
+import { useMemo, useRef, useState } from 'react';
 import type { ArmOutcome, CertifyOutcome, DisarmOutcome } from '@/lib/certify-session';
 import type { ControlPlaneData, ControlSessionRow } from '@/lib/control-plane-data';
 import type { ParticipantKind } from '../model/kind';
@@ -41,36 +41,38 @@ export interface ControlPlaneProps {
   /**
    * STEP ONE of the human-only certify, as a Server Action. Fired when the hold
    * BEGINS, so the server stamps the start of the interval it later measures. It
-   * carries no timing — that is the whole point (CS-2). The interval is a
-   * minimum-delay between two deliberate server calls, not a proof of a continuous
-   * physical hold (see certify-session.ts's honesty note).
+   * carries no timing — that is the whole point (CS-2). On success it RETURNS the
+   * server-issued attempt token (round-7 finding 2), which the confirm and disarm
+   * of this press carry back. The interval is a minimum-delay between two
+   * deliberate server calls, not a proof of a continuous physical hold (see
+   * certify-session.ts's honesty note).
    */
   readonly armAction: (input: {
     sessionId: string;
     workspaceSlug: string;
     roomSlug: string;
-    /** This press's attempt sequence (round-6 finding 3). */
-    attemptSeq: number;
-    /** The digest of the artifact the human reviewed (round-6 finding 1). */
-    reviewedDigest: string | null;
+    /** The digest of the artifact the human reviewed — REQUIRED (round-6/7 finding 1). */
+    reviewedDigest: string;
   }) => Promise<ArmOutcome>;
   /** STEP TWO. Fired when the hold completes; the server measures its own clock. */
   readonly certifyAction: (input: {
     sessionId: string;
     workspaceSlug: string;
     roomSlug: string;
-    attemptSeq: number;
+    /** The server-issued token the arm returned (round-7 finding 2). */
+    attemptToken: string;
   }) => Promise<CertifyOutcome>;
   /**
    * CANCELLATION. Fired when the hold is released before it completes, so the
    * server can clear the arm it stamped on begin. Without it a released hold left
-   * a live arm for its whole TTL, and a later direct confirm certified (CS-3).
+   * a live arm for its whole TTL, and a later direct confirm certified (CS-3). It
+   * carries the server-issued token so the release cancels exactly the arm this
+   * press began, and needs no room slugs — the disarm authorizes on arm-ownership
+   * (round-7 finding 4).
    */
   readonly disarmAction: (input: {
     sessionId: string;
-    workspaceSlug: string;
-    roomSlug: string;
-    attemptSeq: number;
+    attemptToken: string;
   }) => Promise<DisarmOutcome>;
 }
 
@@ -113,8 +115,6 @@ function certifyErrorText(reason: string): string {
       return 'this session produced no reviewable artifact — there is nothing to certify';
     case 'stale_review':
       return 'the artifact changed since this page loaded — reload to review the current one, then press and hold';
-    case 'arm_superseded':
-      return 'that hold was released — press and hold again to start a fresh one';
     case 'not_armed':
       return 'the server recorded no hold for this session — press and hold the control itself';
     case 'held_too_short':
@@ -297,43 +297,75 @@ export function ControlPlane({
 
   const open = openSessionId === undefined ? null : (index.get(openSessionId) ?? null);
 
+  /* THE PRESS'S SERVER-ISSUED TOKEN, held between begin and complete/cancel.
+     `armAction` mints the token and returns it (round-7 finding 2); the confirm and
+     the disarm of the same press need it, and they fire LATER (on hold-complete or
+     release). So the arm's promise — resolving to the token, or `null` if the arm
+     was refused — is stashed per session and awaited by both. Nothing the client
+     mints participates in the authority; the correlation is the server's token,
+     carried, not a counter. A ref, not state: it is plumbing between callbacks, not
+     something a render reads. */
+  const armTokens = useRef<Map<string, Promise<string | null>>>(new Map());
+
   /* ARM at the START of the hold. The `Arming` record the control produces is
      still the local receipt of who pressed and for how long — it is just no
      longer EVIDENCE, and none of it is sent. What the server gates on is the
      interval between its own clock at this call and its own clock at the confirm
      below, which is why this fires on hold-begin and not on hold-complete. */
-  const onArm = (sessionId: string, attemptSeq: number) => {
+  const onArm = (sessionId: string) => {
     setCertifyError(null);
     /* The digest of the artifact THIS render showed, handed back so the server
-       binds the arm to the reviewed revision (round-6 finding 1). Resolved from
-       the loaded projection, so if the artifact moved server-side since load, the
-       stale digest is what goes out and the arm refuses `stale_review`. */
+       binds the arm to the reviewed revision (round-6 finding 1) — REQUIRED now, so
+       a session with no digest to attest cannot be armed. Resolved from the loaded
+       projection, so if the artifact moved server-side since load, the stale digest
+       is what goes out and the arm refuses `stale_review`. */
     const reviewedDigest = index.get(sessionId)?.session.artifactDigest ?? null;
-    void armAction({ sessionId, workspaceSlug, roomSlug, attemptSeq, reviewedDigest }).then(
+    if (reviewedDigest === null) {
+      setCertifyError(certifyErrorText('stale_review'));
+      armTokens.current.set(sessionId, Promise.resolve(null));
+      return;
+    }
+    const armPromise = armAction({ sessionId, workspaceSlug, roomSlug, reviewedDigest }).then(
       (outcome) => {
-        if (!outcome.ok) setCertifyError(certifyErrorText(outcome.reason));
+        if (outcome.ok) return outcome.attemptToken;
+        setCertifyError(certifyErrorText(outcome.reason));
+        return null;
       },
     );
+    armTokens.current.set(sessionId, armPromise);
+    void armPromise;
   };
 
-  const onCertify = (sessionId: string, attemptSeq: number) => {
-    void certifyAction({ sessionId, workspaceSlug, roomSlug, attemptSeq }).then((outcome) => {
-      if (outcome.ok) {
-        router.refresh();
-      } else {
-        setCertifyError(certifyErrorText(outcome.reason));
-      }
+  const onCertify = (sessionId: string) => {
+    /* Complete the exact press this began: await the arm's token, then confirm with
+       it. If the arm was refused the token is `null` and its error is already
+       shown; there is nothing to confirm. */
+    const pending = armTokens.current.get(sessionId) ?? Promise.resolve(null);
+    void pending.then((attemptToken) => {
+      if (attemptToken === null) return;
+      return certifyAction({ sessionId, workspaceSlug, roomSlug, attemptToken }).then((outcome) => {
+        if (outcome.ok) router.refresh();
+        else setCertifyError(certifyErrorText(outcome.reason));
+      });
     });
   };
 
   /* DISARM on cancel. The control fires this when a hold is released before it
-     completes, so the server clears the arm it stamped on begin — a cancelled
-     hold must not leave a live arm a later confirm could spend (CS-3). Fire and
-     forget: a failed disarm is harmless (the arm's TTL and the confirm gate still
-     hold), and surfacing an error for a release the person already walked away
-     from would be noise. */
-  const onDisarm = (sessionId: string, attemptSeq: number) => {
-    void disarmAction({ sessionId, workspaceSlug, roomSlug, attemptSeq });
+     completes, so the server clears the arm it stamped on begin — a cancelled hold
+     must not leave a live arm a later confirm could spend (CS-3). It AWAITS the
+     arm's token first, so a release that outran its own arm still cancels the exact
+     attempt (there is no reorder to guard against once the client serialises on the
+     token). Fire and forget: a failed disarm is harmless (the arm's TTL and the
+     confirm gate still hold), and surfacing an error for a release the person
+     already walked away from would be noise. */
+  const onDisarm = (sessionId: string) => {
+    const pending = armTokens.current.get(sessionId);
+    if (pending === undefined) return;
+    armTokens.current.delete(sessionId);
+    void pending.then((attemptToken) => {
+      if (attemptToken === null) return;
+      void disarmAction({ sessionId, attemptToken });
+    });
   };
 
   return (
@@ -358,7 +390,15 @@ export function ControlPlane({
           <ControlSurfaces
             cost={{ warn: costWarn, plans: costPlans }}
             decisions={{ count: decisionsCount, lines: decisionsLines }}
-            unseen={{ count: data.unseen.length, lines: unseenLines }}
+            /* The count is the LISTED length, marked `truncated` when the true
+               total exceeds it (round-7 finding 5) — so the surface shows `12+`, a
+               count consistent with the twelve rows it renders, never the cap
+               misreported as the whole. */
+            unseen={{
+              count: unseenLines.length,
+              lines: unseenLines,
+              truncated: data.unseenTotal > data.unseen.length,
+            }}
           />
           <ProcessTree
             agents={data.agents}

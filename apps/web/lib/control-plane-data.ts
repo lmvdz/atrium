@@ -189,8 +189,15 @@ export interface ControlPlaneData {
   readonly viewerId: string;
   readonly agents: readonly ControlAgentRow[];
   readonly decisions: readonly ControlDecisionRow[];
-  /** Lifecycle events past THIS viewer's `memberships.seen_seq`, newest first. */
+  /** Lifecycle events past THIS viewer's `memberships.seen_seq`, newest first — capped for display. */
   readonly unseen: readonly ControlEventRow[];
+  /**
+   * The TRUE count of unseen lifecycle events for this viewer, uncapped. `unseen`
+   * lists at most {@link UNSEEN_LIST_LIMIT}; this is how many there really are, so
+   * the surface can say `12+` instead of misreporting a capped list length as the
+   * whole (round-7 finding 5). Always `>= unseen.length`.
+   */
+  readonly unseenTotal: number;
   readonly updatedAt: string;
 }
 
@@ -209,6 +216,15 @@ const LIFECYCLE_EVENT_TYPES = [
   'plan_rlimit_set',
   'draw_refused',
 ] as const;
+
+/**
+ * How many unseen events the surface LISTS. The surface reports the true total
+ * beside the list (`unseenTotal`), so a thirteenth unseen event reads `12+` rather
+ * than a silent "12" (round-7 finding 5) — the count and the list are then
+ * consistent (twelve rows, "twelve or more"), where before the list was capped and
+ * the count read the capped length as if it were the whole.
+ */
+const UNSEEN_LIST_LIMIT = 12;
 
 /**
  * Load one room's control plane. `null` when the room has no lifecycle work at
@@ -230,7 +246,19 @@ export async function loadControlPlane(
   const membership = await loadRoomMembershipRow(database, roomId, viewerId);
   const seenSeq = membership?.seenSeq ?? 0;
 
-  const [planRows, sessionRows, decisionRows, eventRows] = await Promise.all([
+  /* UNSEEN MEANS UNSEEN BY THIS PERSON, in a room. Shared by the display query and
+     the total-count query so the "12+" the surface shows and the twelve it lists
+     are the same set, differing only in the cap (round-7 finding 5). */
+  const unseenPredicate = and(
+    eq(coreEvents.roomId, roomId),
+    inArray(coreEvents.type, [...LIFECYCLE_EVENT_TYPES]),
+    /* Without this predicate the surface was "the last twelve lifecycle events",
+       which is a room fact wearing a per-person label — a viewer who had read all
+       of them was still told twelve things happened while they were away. */
+    gt(coreEvents.roomSeq, seenSeq),
+  );
+
+  const [planRows, sessionRows, decisionRows, eventRows, unseenCountRows] = await Promise.all([
     database
       .select()
       .from(plans)
@@ -249,10 +277,22 @@ export async function loadControlPlane(
       .from(sessions)
       .where(eq(sessions.roomId, roomId))
       .orderBy(asc(sessions.createdAt), asc(sessions.id)),
+    /* THE DECISIONS OWED TO THIS VIEWER, filtered AT THE QUERY (round-7 finding 6).
+       `attention_items` is per-person (`user_id` is the addressee), so the whole
+       pending queue is not this reader's to see: handing every viewer the room's
+       items and filtering only at render meant the server shipped one person's
+       decisions to another. Scoped to `user_id = viewerId` here, so two viewers get
+       two different payloads from the server, not the same payload masked twice. */
     database
       .select()
       .from(attentionItems)
-      .where(and(eq(attentionItems.roomId, roomId), eq(attentionItems.status, 'pending')))
+      .where(
+        and(
+          eq(attentionItems.roomId, roomId),
+          eq(attentionItems.status, 'pending'),
+          eq(attentionItems.userId, viewerId),
+        ),
+      )
       .orderBy(asc(attentionItems.createdAt), asc(attentionItems.id)),
     database
       .select({
@@ -262,20 +302,14 @@ export async function loadControlPlane(
         at: coreEvents.occurredAt,
       })
       .from(coreEvents)
-      .where(
-        and(
-          eq(coreEvents.roomId, roomId),
-          inArray(coreEvents.type, [...LIFECYCLE_EVENT_TYPES]),
-          /* UNSEEN MEANS UNSEEN BY THIS PERSON. Without this predicate the
-             surface was "the last twelve lifecycle events", which is a room
-             fact wearing a per-person label — a viewer who had read all of them
-             was still told twelve things happened while they were away. */
-          gt(coreEvents.roomSeq, seenSeq),
-        ),
-      )
+      .where(unseenPredicate)
       .orderBy(desc(coreEvents.roomSeq))
-      .limit(12),
+      .limit(UNSEEN_LIST_LIMIT),
+    /* THE TRUE TOTAL, uncapped — so the surface reports `12+` rather than a capped
+       "12" that lies when a thirteenth event arrives (round-7 finding 5). */
+    database.select({ total: sql<number>`count(*)::int` }).from(coreEvents).where(unseenPredicate),
   ]);
+  const unseenTotal = unseenCountRows[0]?.total ?? 0;
 
   /* The agents whose work lives in this room: every agent named by a plan here.
      A plan's `agent_user_id` is exactly its channel owner (the
@@ -396,7 +430,10 @@ export async function loadControlPlane(
     id: item.id,
     userId: item.userId,
     /* THE WHOLE OF "owed to you": the item's addressee is this reader, or it is
-       not. It used to be the constant `true`. */
+       not. The query already filters to `user_id = viewerId` (round-7 finding 6),
+       so this is now always true on a returned row — kept as the honest derivation
+       rather than a constant, so the render's own gate reads a real answer and a
+       future query change cannot silently make it lie. */
     owedToViewer: item.userId === viewerId,
     class: item.class,
     subjectKind: item.subjectKind,
@@ -417,6 +454,7 @@ export async function loadControlPlane(
     agents: agentRows,
     decisions,
     unseen,
+    unseenTotal,
     updatedAt: new Date().toISOString(),
   };
 }

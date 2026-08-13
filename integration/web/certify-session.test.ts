@@ -12,11 +12,10 @@ import {
 import { openDatabase, resetDatabase, seedRoom } from '../support/harness.js';
 
 /* ---------------------------------------------------------------------------
- * THE CERTIFY PATH, ON A REAL POSTGRES — #121 fix round, CS-2 and finding 6/7.
+ * THE CERTIFY PATH, ON A REAL POSTGRES — #121 fix round, CS-2 and the later findings.
  *
- * The blind gauntlet found three things a unit test could not have seen, because
- * all three are properties of the SERVER path and the TABLE rather than of a
- * component:
+ * The blind gauntlet found things a unit test could not have seen, because each is
+ * a property of the SERVER path and the TABLE rather than of a component:
  *
  *   * the hold was a number the CLIENT sent. `heldMs: 0` certified. So did
  *     `heldMs: 999999` from something that had never rendered the control.
@@ -24,6 +23,10 @@ import { openDatabase, resetDatabase, seedRoom } from '../support/harness.js';
  *     removed from the room between the read and the write still certified.
  *   * nothing froze a certification once made — `SET certified_by = NULL`
  *     un-landed it.
+ *   * (round 7) `reviewedDigest` was OPTIONAL and absent-means-unchanged, the
+ *     cancel watermark was a CLIENT wall-clock any member could jam, the arm stamp
+ *     was `now()` (transaction-start) so a blocked arm backdated itself, and a
+ *     cancellation was refused the moment the owner lost membership.
  *
  * Every case below is written so that REVERTING the guard turns it red, and the
  * revert is named in the docblock. That is the acceptance bar these exist to
@@ -143,6 +146,47 @@ async function digestOf(sessionId: string): Promise<string | null> {
   return (row as { digest: string | null } | undefined)?.digest ?? null;
 }
 
+/**
+ * Arm through the REAL function, with the row's current reviewed digest.
+ *
+ * `reviewedDigest` is REQUIRED now (round-7 finding 1): there is no
+ * absent-means-unchanged branch, so a raw caller computes it exactly as the render
+ * would. Defaults to the digest of the artifact on the row (the honest attestation);
+ * pass one explicitly to drive the stale-review case. Returns the whole outcome so a
+ * caller can assert on it AND read back the server-issued token.
+ */
+async function arm(params: {
+  sessionId: string;
+  viewerId: string;
+  roomId: string;
+  reviewedDigest?: string | null;
+}): Promise<Awaited<ReturnType<typeof armCertification>>> {
+  const reviewedDigest =
+    params.reviewedDigest !== undefined ? params.reviewedDigest : await digestOf(params.sessionId);
+  return armCertification({
+    database: handle.db,
+    viewerId: params.viewerId,
+    sessionId: params.sessionId,
+    authorizedRoomId: params.roomId,
+    // Empty string when the row has no digest (a null/empty artifact): the arm
+    // refuses `no_artifact` before it ever compares the digest, so the value is
+    // moot there and the type stays a plain string.
+    reviewedDigest: reviewedDigest ?? '',
+  });
+}
+
+/** Arm and assert it landed; return the server-issued attempt token. */
+async function armOk(params: {
+  sessionId: string;
+  viewerId: string;
+  roomId: string;
+  reviewedDigest?: string | null;
+}): Promise<string> {
+  const outcome = await arm(params);
+  if (!outcome.ok) throw new Error(`the arm was refused (${outcome.reason}) and the case needs it`);
+  return outcome.attemptToken;
+}
+
 /** A settled session with NO artifact — nothing for a signature to be a signature of. */
 async function settledNoArtifact(at: Fixture): Promise<string> {
   const [row] = await handle.db
@@ -232,12 +276,7 @@ describe('the SERVER refuses a non-human certifier', () => {
 
   it('an agent principal cannot even ARM — the hold is half of the human-only act', async () => {
     const at = await fixture();
-    const outcome = await armCertification({
-      database: handle.db,
-      viewerId: at.hexi,
-      sessionId: at.sessionId,
-      authorizedRoomId: at.roomId,
-    });
+    const outcome = await arm({ viewerId: at.hexi, sessionId: at.sessionId, roomId: at.roomId });
     expect(outcome).toEqual({ ok: false, reason: 'not_human' });
     const [row] = await read(at.sessionId);
     expect(row?.armedBy).toBeNull();
@@ -295,14 +334,9 @@ describe('the hold is measured by the server, and there is nothing to forge', ()
    */
   it('a certify IMMEDIATELY after the arm is refused — the interval is ~0ms', async () => {
     const at = await fixture();
-    expect(
-      await armCertification({
-        database: handle.db,
-        viewerId: at.ada,
-        sessionId: at.sessionId,
-        authorizedRoomId: at.roomId,
-      }),
-    ).toEqual({ ok: true });
+    expect((await arm({ viewerId: at.ada, sessionId: at.sessionId, roomId: at.roomId })).ok).toBe(
+      true,
+    );
 
     const outcome = await certifySession({
       database: handle.db,
@@ -316,12 +350,7 @@ describe('the hold is measured by the server, and there is nothing to forge', ()
 
   it('a hold past the gate certifies, and the recorded duration is the MEASURED one', async () => {
     const at = await fixture();
-    await armCertification({
-      database: handle.db,
-      viewerId: at.ada,
-      sessionId: at.sessionId,
-      authorizedRoomId: at.roomId,
-    });
+    await armOk({ viewerId: at.ada, sessionId: at.sessionId, roomId: at.roomId });
     /* The arm stamp is the server's, so ageing it is the only way to make the
        server believe a hold happened — which is the property under test. */
     await backdateArm(at.sessionId, CERTIFY_REQUIRED_HOLD_MS + 500);
@@ -352,12 +381,7 @@ describe('the hold is measured by the server, and there is nothing to forge', ()
    */
   it("a second person cannot confirm somebody else's arm", async () => {
     const at = await fixture();
-    await armCertification({
-      database: handle.db,
-      viewerId: at.ada,
-      sessionId: at.sessionId,
-      authorizedRoomId: at.roomId,
-    });
+    await armOk({ viewerId: at.ada, sessionId: at.sessionId, roomId: at.roomId });
     await backdateArm(at.sessionId, CERTIFY_REQUIRED_HOLD_MS + 500);
 
     const outcome = await certifySession({
@@ -379,12 +403,7 @@ describe('the hold is measured by the server, and there is nothing to forge', ()
    */
   it('a STALE arm is refused, not rewarded for being old', async () => {
     const at = await fixture();
-    await armCertification({
-      database: handle.db,
-      viewerId: at.ada,
-      sessionId: at.sessionId,
-      authorizedRoomId: at.roomId,
-    });
+    await armOk({ viewerId: at.ada, sessionId: at.sessionId, roomId: at.roomId });
     await backdateArm(at.sessionId, CERTIFY_ARM_TTL_MS + 60_000);
 
     const outcome = await certifySession({
@@ -399,14 +418,9 @@ describe('the hold is measured by the server, and there is nothing to forge', ()
 
   it('a running session cannot be armed or certified at all', async () => {
     const at = await fixture();
-    expect(
-      await armCertification({
-        database: handle.db,
-        viewerId: at.ada,
-        sessionId: at.openSessionId,
-        authorizedRoomId: at.roomId,
-      }),
-    ).toEqual({ ok: false, reason: 'not_settled' });
+    expect(await arm({ viewerId: at.ada, sessionId: at.openSessionId, roomId: at.roomId })).toEqual(
+      { ok: false, reason: 'not_settled' },
+    );
     expect(
       await certifySession({
         database: handle.db,
@@ -415,6 +429,65 @@ describe('the hold is measured by the server, and there is nothing to forge', ()
         authorizedRoomId: at.roomId,
       }),
     ).toEqual({ ok: false, reason: 'not_settled' });
+  });
+});
+
+describe('the arm stamp is the real clock, not the transaction start (#121 round-7 finding 3)', () => {
+  /**
+   * THE BACKDATE-BY-BLOCKING HOLE. The arm used to stamp `certify_armed_at = now()`,
+   * which is the TRANSACTION-START time. If the arm's `SELECT … FOR UPDATE` blocked
+   * on the row lock for longer than the gate, `now()` was already that far in the
+   * past when the stamp finally wrote — so an immediate confirm measured a hold that
+   * never happened and certified. `clock_timestamp()` is evaluated when the UPDATE
+   * runs, after the lock is acquired, so the interval is measured from the real
+   * moment the arm landed.
+   *
+   * This drives the exact interleaving: a second connection holds the session row's
+   * lock while the arm blocks on it for longer than the gate; when it releases, the
+   * arm stamps and we confirm at once. With `clock_timestamp()` the measured hold is
+   * ~0ms → `held_too_short`. With `now()` it is the whole block → it certifies.
+   *
+   * RED ON REVERT: change the arm's stamp back to `certifyArmedAt: sql\`now()\``.
+   * The arm then backdates itself to its blocked transaction's start, and this
+   * immediate confirm reads a >2s hold and certifies.
+   */
+  it('an arm blocked past the gate, then stamped, cannot immediately confirm', async () => {
+    const at = await fixture();
+
+    /* A SECOND connection pins the session row with an uncommitted `FOR UPDATE`, so
+       the arm's own `SELECT … FOR UPDATE` blocks behind it. A reserved connection
+       keeps one physical socket across the awaits. */
+    const reserved = await handle.sql.reserve();
+    let armed: Awaited<ReturnType<typeof armCertification>>;
+    try {
+      await reserved`BEGIN`;
+      await reserved`SELECT id FROM sessions WHERE id = ${at.sessionId} FOR UPDATE`;
+
+      /* Fire the arm WITHOUT awaiting: its transaction opens now (fixing `now()` to
+         ~T0), then it blocks on the row lock the reserved connection holds. */
+      const pending = arm({ viewerId: at.ada, sessionId: at.sessionId, roomId: at.roomId });
+
+      /* Hold the lock well past the gate, so a reverted arm's `now()` is more than
+         the required hold in the past by the time it finally stamps. */
+      await new Promise((resolve) => setTimeout(resolve, CERTIFY_REQUIRED_HOLD_MS + 800));
+      await reserved`COMMIT`;
+      armed = await pending;
+    } finally {
+      await reserved.release();
+    }
+    expect(armed.ok).toBe(true);
+
+    /* Immediately confirm. With `clock_timestamp()` the arm stamped just now, so the
+       measured interval is ~0ms and this is refused; with `now()` the stamp is >2s
+       old and this certifies. */
+    const outcome = await certifySession({
+      database: handle.db,
+      viewerId: at.ada,
+      sessionId: at.sessionId,
+      authorizedRoomId: at.roomId,
+    });
+    expect(outcome).toEqual({ ok: false, reason: 'held_too_short' });
+    expect((await read(at.sessionId))[0]?.certifiedBy).toBeNull();
   });
 });
 
@@ -430,12 +503,7 @@ describe('the membership is re-derived in the write transaction', () => {
    */
   it('a membership revoked after the caller resolved the room refuses the certify', async () => {
     const at = await fixture();
-    await armCertification({
-      database: handle.db,
-      viewerId: at.ada,
-      sessionId: at.sessionId,
-      authorizedRoomId: at.roomId,
-    });
+    await armOk({ viewerId: at.ada, sessionId: at.sessionId, roomId: at.roomId });
     await backdateArm(at.sessionId, CERTIFY_REQUIRED_HOLD_MS + 500);
 
     // The revocation, landing between the caller's authorized read and the write.
@@ -481,12 +549,7 @@ describe('the membership is re-derived in the write transaction', () => {
    */
   it('a workspace_members revocation racing inside the write refuses the certify', async () => {
     const at = await fixture();
-    await armCertification({
-      database: handle.db,
-      viewerId: at.ada,
-      sessionId: at.sessionId,
-      authorizedRoomId: at.roomId,
-    });
+    await armOk({ viewerId: at.ada, sessionId: at.sessionId, roomId: at.roomId });
     await backdateArm(at.sessionId, CERTIFY_REQUIRED_HOLD_MS + 500);
 
     /* A SECOND connection holds an uncommitted DELETE of ada's workspace-member
@@ -542,12 +605,7 @@ describe('the membership is re-derived in the write transaction', () => {
 
 describe('a certification is written once', () => {
   async function certify(at: Fixture): Promise<void> {
-    await armCertification({
-      database: handle.db,
-      viewerId: at.ada,
-      sessionId: at.sessionId,
-      authorizedRoomId: at.roomId,
-    });
+    await armOk({ viewerId: at.ada, sessionId: at.sessionId, roomId: at.roomId });
     await backdateArm(at.sessionId, CERTIFY_REQUIRED_HOLD_MS + 500);
     expect(
       await certifySession({
@@ -562,12 +620,7 @@ describe('a certification is written once', () => {
   it('a second certify is refused by the application', async () => {
     const at = await fixture();
     await certify(at);
-    await armCertification({
-      database: handle.db,
-      viewerId: at.bob,
-      sessionId: at.sessionId,
-      authorizedRoomId: at.roomId,
-    });
+    await arm({ viewerId: at.bob, sessionId: at.sessionId, roomId: at.roomId });
     expect(
       await certifySession({
         database: handle.db,
@@ -695,18 +748,13 @@ describe('a certification is bound to an artifact to sign (#121 CS-1)', () => {
    * reviewable work; arming a hold over it would let a person hold a control
    * against nothing.
    *
-   * RED ON REVERT: drop the `session.artifact === null` guard from
+   * RED ON REVERT: drop the `!isReviewableArtifact(session.artifact)` guard from
    * `armCertification`. The arm then lands on a session with nothing to certify.
    */
   it('arming a NULL-ARTIFACT session is refused', async () => {
     const at = await fixture();
     const sid = await settledNoArtifact(at);
-    const outcome = await armCertification({
-      database: handle.db,
-      viewerId: at.ada,
-      sessionId: sid,
-      authorizedRoomId: at.roomId,
-    });
+    const outcome = await arm({ viewerId: at.ada, sessionId: sid, roomId: at.roomId });
     expect(outcome).toEqual({ ok: false, reason: 'no_artifact' });
     expect((await read(sid))[0]?.armedBy).toBeNull();
   });
@@ -715,7 +763,7 @@ describe('a certification is bound to an artifact to sign (#121 CS-1)', () => {
    * And a confirm cannot slip past a missing artifact either — even if a raw arm
    * were forced onto the row, the confirm re-checks.
    *
-   * RED ON REVERT: drop the `session.artifact === null` guard from
+   * RED ON REVERT: drop the `!isReviewableArtifact(session.artifact)` guard from
    * `certifySession`.
    */
   it('confirming a NULL-ARTIFACT session is refused, even with a forced arm', async () => {
@@ -834,23 +882,17 @@ describe('a cancelled hold leaves no live arm (#121 CS-3)', () => {
    */
   it('arm → disarm → (wait) → confirm is refused: the arm was consumed by the cancel', async () => {
     const at = await fixture();
-    expect(
-      await armCertification({
-        database: handle.db,
-        viewerId: at.ada,
-        sessionId: at.sessionId,
-        authorizedRoomId: at.roomId,
-      }),
-    ).toEqual({ ok: true });
+    const token = await armOk({ viewerId: at.ada, sessionId: at.sessionId, roomId: at.roomId });
     expect((await read(at.sessionId))[0]?.armedAt).not.toBeNull();
 
-    // The release, now a server disarm rather than a local-only cancel.
+    // The release, now a server disarm rather than a local-only cancel — carrying
+    // the server-issued token so it cancels exactly this attempt.
     expect(
       await disarmCertification({
         database: handle.db,
         viewerId: at.ada,
         sessionId: at.sessionId,
-        authorizedRoomId: at.roomId,
+        attemptToken: token,
       }),
     ).toEqual({ ok: true });
     expect((await read(at.sessionId))[0]?.armedAt).toBeNull();
@@ -874,12 +916,7 @@ describe('a cancelled hold leaves no live arm (#121 CS-3)', () => {
    */
   it('a second confirm on a consumed arm is refused (already certified)', async () => {
     const at = await fixture();
-    await armCertification({
-      database: handle.db,
-      viewerId: at.ada,
-      sessionId: at.sessionId,
-      authorizedRoomId: at.roomId,
-    });
+    await armOk({ viewerId: at.ada, sessionId: at.sessionId, roomId: at.roomId });
     await backdateArm(at.sessionId, CERTIFY_REQUIRED_HOLD_MS + 500);
     expect(
       await certifySession({
@@ -900,21 +937,6 @@ describe('a cancelled hold leaves no live arm (#121 CS-3)', () => {
     expect(second).toEqual({ ok: false, reason: 'already_certified' });
   });
 
-  /* A non-member cannot disarm somebody's arm — the same membership gate the arm
-     and confirm take. Disarm is not a back door around it. */
-  it('disarm refuses a viewer who is not in the room', async () => {
-    const at = await fixture();
-    const elsewhere = await seedRoom(handle, ['stranger']);
-    const stranger = elsewhere.people.stranger as string;
-    const outcome = await disarmCertification({
-      database: handle.db,
-      viewerId: stranger,
-      sessionId: at.sessionId,
-      authorizedRoomId: at.roomId,
-    });
-    expect(outcome).toEqual({ ok: false, reason: 'not_in_room' });
-  });
-
   /**
    * THE CONSUMED NONCE. A successful confirm spends the arm's single-use attempt
    * id — it is cleared in the same statement that lands the signature, so the arm
@@ -922,12 +944,7 @@ describe('a cancelled hold leaves no live arm (#121 CS-3)', () => {
    */
   it('a successful confirm consumes the arm nonce (it is null on the certified row)', async () => {
     const at = await fixture();
-    await armCertification({
-      database: handle.db,
-      viewerId: at.ada,
-      sessionId: at.sessionId,
-      authorizedRoomId: at.roomId,
-    });
+    await armOk({ viewerId: at.ada, sessionId: at.sessionId, roomId: at.roomId });
     // The arm minted a nonce.
     const [armed] = await handle.db
       .select({ nonce: sessions.certifyArmNonce })
@@ -990,6 +1007,97 @@ describe('a cancelled hold leaves no live arm (#121 CS-3)', () => {
   });
 });
 
+describe('the disarm authorizes on arm-ownership, not membership (#121 round-7 finding 4)', () => {
+  /**
+   * ARM → LOSE MEMBERSHIP → RELEASE STILL CLEARS THE ARM. The round-6 disarm ran the
+   * same membership gate as the confirm, so a person who armed as a member and then
+   * lost membership got `not_in_room` on release — the arm stayed live, and a
+   * confirm after regaining membership within the TTL spent the cancelled hold.
+   * Retracting your OWN pending intention is not an act on the room; the owner may
+   * always cancel their own.
+   *
+   * RED ON REVERT: put the `viewerMayCertify` membership gate back at the top of
+   * `disarmCertification`. The disarm below then refuses `not_in_room`, the arm
+   * survives, and the later confirm (once membership is back) spends it.
+   */
+  it('arm → lose membership → disarm clears the arm; a later confirm cannot spend it', async () => {
+    const at = await fixture();
+    const token = await armOk({ viewerId: at.ada, sessionId: at.sessionId, roomId: at.roomId });
+    await backdateArm(at.sessionId, CERTIFY_REQUIRED_HOLD_MS + 500);
+
+    // Ada is removed from the room AFTER arming, BEFORE releasing.
+    await handle.db
+      .delete(memberships)
+      .where(and(eq(memberships.roomId, at.roomId), eq(memberships.userId, at.ada)));
+
+    // The release still clears the arm — ownership authorizes it, membership does not.
+    expect(
+      await disarmCertification({
+        database: handle.db,
+        viewerId: at.ada,
+        sessionId: at.sessionId,
+        attemptToken: token,
+      }),
+    ).toEqual({ ok: true });
+    expect((await read(at.sessionId))[0]?.armedBy).toBeNull();
+    expect((await read(at.sessionId))[0]?.armedAt).toBeNull();
+
+    // Membership comes back (a re-invite) — but the arm is gone, so there is
+    // nothing for a direct confirm to spend.
+    await handle.db
+      .insert(memberships)
+      .values({ roomId: at.roomId, userId: at.ada, role: 'member' });
+    const outcome = await certifySession({
+      database: handle.db,
+      viewerId: at.ada,
+      sessionId: at.sessionId,
+      authorizedRoomId: at.roomId,
+    });
+    expect(outcome).toEqual({ ok: false, reason: 'not_armed' });
+    expect((await read(at.sessionId))[0]?.certifiedBy).toBeNull();
+  });
+
+  /**
+   * OWNERSHIP IS THE SCOPE — a disarm cannot reach SOMEBODY ELSE'S arm. The disarm
+   * clears only where `certify_armed_by = viewerId`, so a second person's release
+   * (even a stranger's, and even carrying the token) leaves the owner's arm holding.
+   *
+   * RED ON REVERT: drop the `eq(sessions.certifyArmedBy, viewerId)` scope from the
+   * disarm's clear. Bob's disarm then wipes Ada's live arm, and her held hold is
+   * cancelled out from under her.
+   */
+  it("one viewer's disarm cannot clear another viewer's arm", async () => {
+    const at = await fixture();
+    const token = await armOk({ viewerId: at.ada, sessionId: at.sessionId, roomId: at.roomId });
+
+    // Bob releases — but he owns no arm on this session, so nothing is cleared,
+    // even though he presents the token.
+    expect(
+      await disarmCertification({
+        database: handle.db,
+        viewerId: at.bob,
+        sessionId: at.sessionId,
+        attemptToken: token,
+      }),
+    ).toEqual({ ok: true });
+    // Ada's arm still stands.
+    expect((await read(at.sessionId))[0]?.armedBy).toBe(at.ada);
+
+    // …and Ada can still carry it through to a signature past the gate.
+    await backdateArm(at.sessionId, CERTIFY_REQUIRED_HOLD_MS + 500);
+    expect(
+      await certifySession({
+        database: handle.db,
+        viewerId: at.ada,
+        sessionId: at.sessionId,
+        authorizedRoomId: at.roomId,
+        attemptToken: token,
+      }),
+    ).toEqual({ ok: true });
+    expect((await read(at.sessionId))[0]?.certifiedBy).toBe(at.ada);
+  });
+});
+
 describe('a certification binds to the artifact reviewed (#121 round-5 finding 3)', () => {
   /**
    * RENDER A, CONFIRM B. The hold is armed over the artifact on screen; if it
@@ -1004,12 +1112,7 @@ describe('a certification binds to the artifact reviewed (#121 round-5 finding 3
    */
   it('mutating the artifact between arm and confirm refuses the confirm', async () => {
     const at = await fixture();
-    await armCertification({
-      database: handle.db,
-      viewerId: at.ada,
-      sessionId: at.sessionId,
-      authorizedRoomId: at.roomId,
-    });
+    await armOk({ viewerId: at.ada, sessionId: at.sessionId, roomId: at.roomId });
     await backdateArm(at.sessionId, CERTIFY_REQUIRED_HOLD_MS + 500);
 
     // The artifact changes AFTER the hold was armed over the original — the
@@ -1035,12 +1138,7 @@ describe('a certification binds to the artifact reviewed (#121 round-5 finding 3
      mutation, not the honest confirm. */
   it('an unchanged artifact certifies through the bind', async () => {
     const at = await fixture();
-    await armCertification({
-      database: handle.db,
-      viewerId: at.ada,
-      sessionId: at.sessionId,
-      authorizedRoomId: at.roomId,
-    });
+    await armOk({ viewerId: at.ada, sessionId: at.sessionId, roomId: at.roomId });
     await backdateArm(at.sessionId, CERTIFY_REQUIRED_HOLD_MS + 500);
     expect(
       await certifySession({
@@ -1175,12 +1273,36 @@ describe('the arm binds to the artifact the human REVIEWED (#121 round-6 finding
       .set({ artifact: { branch: 'feat/x', commit: 'changed-since-review' } })
       .where(eq(sessions.id, at.sessionId));
 
-    const outcome = await armCertification({
-      database: handle.db,
+    const outcome = await arm({
       viewerId: at.ada,
       sessionId: at.sessionId,
-      authorizedRoomId: at.roomId,
+      roomId: at.roomId,
       reviewedDigest,
+    });
+    expect(outcome).toEqual({ ok: false, reason: 'stale_review' });
+    expect((await read(at.sessionId))[0]?.armedBy).toBeNull();
+  });
+
+  /**
+   * THE FAIL-OPEN THAT SHIPPED (round-7 finding 1). Round 6 treated an ABSENT
+   * `reviewedDigest` as "unchanged" and skipped the check, so a scripted caller that
+   * simply omitted it armed over whatever was current — binding a signature to work
+   * it never rendered. `reviewedDigest` is REQUIRED now; there is no absent branch.
+   * A caller that attests the WRONG digest (as an omission once silently did) is
+   * refused `stale_review`.
+   *
+   * RED ON REVERT: make `reviewedDigest` optional again and skip the compare when it
+   * is undefined/null. An arm attesting a mismatched (or no) digest then lands over
+   * the current artifact.
+   */
+  it('an arm attesting the wrong digest is refused — there is no absent-means-unchanged', async () => {
+    const at = await fixture();
+    const outcome = await arm({
+      viewerId: at.ada,
+      sessionId: at.sessionId,
+      roomId: at.roomId,
+      // A digest that is not the row's — the shape an omission used to fall open to.
+      reviewedDigest: 'ffffffffffffffffffffffffffffffff',
     });
     expect(outcome).toEqual({ ok: false, reason: 'stale_review' });
     expect((await read(at.sessionId))[0]?.armedBy).toBeNull();
@@ -1190,14 +1312,13 @@ describe('the arm binds to the artifact the human REVIEWED (#121 round-6 finding
   it('arming with the reviewed digest of the current artifact succeeds', async () => {
     const at = await fixture();
     const reviewedDigest = await digestOf(at.sessionId);
-    const outcome = await armCertification({
-      database: handle.db,
+    const outcome = await arm({
       viewerId: at.ada,
       sessionId: at.sessionId,
-      authorizedRoomId: at.roomId,
+      roomId: at.roomId,
       reviewedDigest,
     });
-    expect(outcome).toEqual({ ok: true });
+    expect(outcome.ok).toBe(true);
     expect((await read(at.sessionId))[0]?.armedBy).toBe(at.ada);
   });
 });
@@ -1214,13 +1335,7 @@ describe('a certification needs a REVIEWABLE artifact (#121 round-6 finding 2)',
   it('arming an EMPTY {} artifact is refused', async () => {
     const at = await fixture();
     const sid = await settledWithArtifact(at, {});
-    const outcome = await armCertification({
-      database: handle.db,
-      viewerId: at.ada,
-      sessionId: sid,
-      authorizedRoomId: at.roomId,
-      reviewedDigest: await digestOf(sid),
-    });
+    const outcome = await arm({ viewerId: at.ada, sessionId: sid, roomId: at.roomId });
     expect(outcome).toEqual({ ok: false, reason: 'no_artifact' });
     expect((await read(sid))[0]?.armedBy).toBeNull();
   });
@@ -1228,13 +1343,7 @@ describe('a certification needs a REVIEWABLE artifact (#121 round-6 finding 2)',
   it('arming a PARTIAL artifact (branch only, no commit) is refused', async () => {
     const at = await fixture();
     const sid = await settledWithArtifact(at, { branch: 'feat/x' });
-    const outcome = await armCertification({
-      database: handle.db,
-      viewerId: at.ada,
-      sessionId: sid,
-      authorizedRoomId: at.roomId,
-      reviewedDigest: await digestOf(sid),
-    });
+    const outcome = await arm({ viewerId: at.ada, sessionId: sid, roomId: at.roomId });
     expect(outcome).toEqual({ ok: false, reason: 'no_artifact' });
   });
 
@@ -1267,15 +1376,7 @@ describe('a certification needs a REVIEWABLE artifact (#121 round-6 finding 2)',
   it('a well-formed artifact still arms and certifies', async () => {
     const at = await fixture();
     const sid = await settledWithArtifact(at, { branch: 'feat/y', commit: 'deadbee' });
-    expect(
-      await armCertification({
-        database: handle.db,
-        viewerId: at.ada,
-        sessionId: sid,
-        authorizedRoomId: at.roomId,
-        reviewedDigest: await digestOf(sid),
-      }),
-    ).toEqual({ ok: true });
+    expect((await arm({ viewerId: at.ada, sessionId: sid, roomId: at.roomId })).ok).toBe(true);
     await backdateArm(sid, CERTIFY_REQUIRED_HOLD_MS + 500);
     expect(
       await certifySession({
@@ -1289,80 +1390,36 @@ describe('a certification needs a REVIEWABLE artifact (#121 round-6 finding 2)',
   });
 });
 
-describe('a cancel wins its race with a late arm (#121 round-6 finding 3)', () => {
+describe('the attempt is server-issued, and no client value can jam it (#121 round-7 finding 2)', () => {
   /**
-   * THE REORDER. begin→arm R1 fires, then release→disarm R2, but the network
-   * delivers R2 FIRST: it reaches the server before its own arm, finds nothing to
-   * clear — and the round-5 disarm did nothing more, so the delayed R1 then wrote a
-   * fresh live nonce a direct confirm could spend. The disarm now raises a cancel
-   * watermark even with no arm present; the late arm at or below it refuses.
+   * THE DoS THAT SHIPPED. Round 6 raised a session-global cancel watermark from a
+   * CLIENT-minted `attemptSeq`: `disarm(attemptSeq = MAX_SAFE_INTEGER)` set an
+   * unbounded watermark that refused every honest arm forever, and cross-client
+   * clock skew tripped it by accident. The attempt is SERVER-ISSUED now — the nonce
+   * the arm mints and returns is its whole identity, and there is no watermark and
+   * no client number to raise. So a cancel cannot jam a future arm: a fresh press
+   * arms and certifies right after one.
    *
-   * RED ON REVERT: drop the `attemptSeq <= session.cancelSeq` branch from
-   * `armCertification`. The reordered arm then lands its nonce, and the direct
-   * confirm after the gate certifies the released hold.
+   * RED ON REVERT: reintroduce a client-supplied cancel watermark (`certify_cancel_seq`
+   * raised by the disarm, an arm refusing at or below it). A disarm carrying a huge
+   * value would then block the fresh arm below, which this test forbids.
    */
-  it('disarm-before-arm (reordered) blocks the late arm, and the direct confirm finds nothing', async () => {
+  it('a release does not jam the next arm — begin → release → begin → confirm still lands', async () => {
     const at = await fixture();
-    const reviewedDigest = await digestOf(at.sessionId);
-
-    // R2 reaches the server first — the release of a hold whose arm has not landed.
+    const token1 = await armOk({ viewerId: at.ada, sessionId: at.sessionId, roomId: at.roomId });
+    // Release the first press.
     expect(
       await disarmCertification({
         database: handle.db,
         viewerId: at.ada,
         sessionId: at.sessionId,
-        authorizedRoomId: at.roomId,
-        attemptSeq: 1000,
+        attemptToken: token1,
       }),
     ).toEqual({ ok: true });
 
-    // R1, the delayed arm for the SAME press, arrives second — and is superseded.
-    const armed = await armCertification({
-      database: handle.db,
-      viewerId: at.ada,
-      sessionId: at.sessionId,
-      authorizedRoomId: at.roomId,
-      reviewedDigest,
-      attemptSeq: 1000,
-    });
-    expect(armed).toEqual({ ok: false, reason: 'arm_superseded' });
-    expect((await read(at.sessionId))[0]?.armedBy).toBeNull();
-
-    // A direct confirm after the gate has nothing to spend.
-    const outcome = await certifySession({
-      database: handle.db,
-      viewerId: at.ada,
-      sessionId: at.sessionId,
-      authorizedRoomId: at.roomId,
-      attemptSeq: 1000,
-    });
-    expect(outcome).toEqual({ ok: false, reason: 'not_armed' });
-    expect((await read(at.sessionId))[0]?.certifiedBy).toBeNull();
-  });
-
-  /* THE CONTROL: a genuinely FRESH press after a cancel mints a strictly larger
-     sequence, clears the watermark's grip, and certifies. The cancel blocks the
-     stale attempt, not every future one. */
-  it('a fresh press after a cancel (a larger sequence) arms and certifies', async () => {
-    const at = await fixture();
-    const reviewedDigest = await digestOf(at.sessionId);
-    await disarmCertification({
-      database: handle.db,
-      viewerId: at.ada,
-      sessionId: at.sessionId,
-      authorizedRoomId: at.roomId,
-      attemptSeq: 1000,
-    });
-    expect(
-      await armCertification({
-        database: handle.db,
-        viewerId: at.ada,
-        sessionId: at.sessionId,
-        authorizedRoomId: at.roomId,
-        reviewedDigest,
-        attemptSeq: 2000,
-      }),
-    ).toEqual({ ok: true });
+    // A genuinely fresh press arms cleanly — nothing the release left behind blocks it.
+    const token2 = await armOk({ viewerId: at.ada, sessionId: at.sessionId, roomId: at.roomId });
+    expect(token2).not.toBe(token1);
     await backdateArm(at.sessionId, CERTIFY_REQUIRED_HOLD_MS + 500);
     expect(
       await certifySession({
@@ -1370,49 +1427,115 @@ describe('a cancel wins its race with a late arm (#121 round-6 finding 3)', () =
         viewerId: at.ada,
         sessionId: at.sessionId,
         authorizedRoomId: at.roomId,
-        attemptSeq: 2000,
+        attemptToken: token2,
       }),
     ).toEqual({ ok: true });
     expect((await read(at.sessionId))[0]?.certifiedBy).toBe(at.ada);
   });
 
   /**
-   * THE CONFIRM COMPLETES THE PRESS IT BEGAN. A confirm carrying a sequence that is
-   * not the pending arm's is refused — an older press cannot confirm a newer arm.
+   * BEGIN → RELEASE → (REORDERED) CONFIRM STILL REFUSES. The release clears the
+   * nonce; a confirm that presents the released press's token — however it was
+   * reordered onto the wire — finds no live attempt and is refused.
    *
-   * RED ON REVERT: drop the `attemptSeq !== undefined && session.armSeq !== attemptSeq`
-   * clause from `certifySession`. The mismatched confirm then certifies.
+   * RED ON REVERT: make `disarmCertification` a no-op. The confirm carrying the
+   * token then finds the arm still live past the gate and certifies the released
+   * hold.
    */
-  it('a confirm whose sequence is not the pending arm’s is refused', async () => {
+  it('a confirm carrying a released token is refused (the nonce is cleared)', async () => {
     const at = await fixture();
-    const reviewedDigest = await digestOf(at.sessionId);
-    await armCertification({
+    const token = await armOk({ viewerId: at.ada, sessionId: at.sessionId, roomId: at.roomId });
+    await backdateArm(at.sessionId, CERTIFY_REQUIRED_HOLD_MS + 500);
+    expect(
+      await disarmCertification({
+        database: handle.db,
+        viewerId: at.ada,
+        sessionId: at.sessionId,
+        attemptToken: token,
+      }),
+    ).toEqual({ ok: true });
+
+    // The confirm for the released press — even with its token, past the gate.
+    const outcome = await certifySession({
       database: handle.db,
       viewerId: at.ada,
       sessionId: at.sessionId,
       authorizedRoomId: at.roomId,
-      reviewedDigest,
-      attemptSeq: 3000,
+      attemptToken: token,
     });
+    expect(outcome).toEqual({ ok: false, reason: 'not_armed' });
+    expect((await read(at.sessionId))[0]?.certifiedBy).toBeNull();
+  });
+
+  /**
+   * THE CONFIRM COMPLETES THE PRESS IT BEGAN. A confirm carrying a token that is not
+   * the pending arm's is refused — a stale or forged token cannot spend the live arm.
+   *
+   * RED ON REVERT: drop the `attemptToken !== undefined && session.armNonce !== attemptToken`
+   * clause from `certifySession`. The mismatched-token confirm then certifies.
+   */
+  it('a confirm whose token is not the pending arm’s is refused', async () => {
+    const at = await fixture();
+    const token = await armOk({ viewerId: at.ada, sessionId: at.sessionId, roomId: at.roomId });
     await backdateArm(at.sessionId, CERTIFY_REQUIRED_HOLD_MS + 500);
-    // A confirm for a DIFFERENT press.
+    // A confirm carrying a DIFFERENT token than the one the arm returned.
     expect(
       await certifySession({
         database: handle.db,
         viewerId: at.ada,
         sessionId: at.sessionId,
         authorizedRoomId: at.roomId,
-        attemptSeq: 9999,
+        attemptToken: randomUUID(),
       }),
     ).toEqual({ ok: false, reason: 'not_armed' });
-    // The matching one still lands.
+    // The right token still lands.
     expect(
       await certifySession({
         database: handle.db,
         viewerId: at.ada,
         sessionId: at.sessionId,
         authorizedRoomId: at.roomId,
-        attemptSeq: 3000,
+        attemptToken: token,
+      }),
+    ).toEqual({ ok: true });
+  });
+
+  /**
+   * A STALE RELEASE CANNOT CLOBBER A NEWER PRESS. A disarm carrying an OLD token
+   * clears nothing when a fresh press has since re-armed with a new nonce, so the
+   * live hold survives.
+   *
+   * RED ON REVERT: drop the `eq(sessions.certifyArmNonce, attemptToken)` scope from
+   * the disarm's clear. The stale release then wipes the newer press's arm.
+   */
+  it('a disarm carrying a stale token does not clear a newer press’s arm', async () => {
+    const at = await fixture();
+    const stale = await armOk({ viewerId: at.ada, sessionId: at.sessionId, roomId: at.roomId });
+    // A fresh press re-arms (a new nonce), superseding the first in the browser.
+    const fresh = await armOk({ viewerId: at.ada, sessionId: at.sessionId, roomId: at.roomId });
+    expect(fresh).not.toBe(stale);
+
+    // The stale release (for the first press) arrives late — and clears nothing,
+    // because the pending arm now carries the fresh nonce.
+    expect(
+      await disarmCertification({
+        database: handle.db,
+        viewerId: at.ada,
+        sessionId: at.sessionId,
+        attemptToken: stale,
+      }),
+    ).toEqual({ ok: true });
+    expect((await read(at.sessionId))[0]?.armedBy).toBe(at.ada);
+
+    // The fresh press still certifies.
+    await backdateArm(at.sessionId, CERTIFY_REQUIRED_HOLD_MS + 500);
+    expect(
+      await certifySession({
+        database: handle.db,
+        viewerId: at.ada,
+        sessionId: at.sessionId,
+        authorizedRoomId: at.roomId,
+        attemptToken: fresh,
       }),
     ).toEqual({ ok: true });
   });

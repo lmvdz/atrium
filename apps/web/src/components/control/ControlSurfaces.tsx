@@ -37,7 +37,17 @@ export interface CostPlanLine {
 
 export interface ControlSurfacesProps {
   readonly decisions: { readonly count: number; readonly lines: readonly SurfaceLine[] };
-  readonly unseen: { readonly count: number; readonly lines: readonly SurfaceLine[] };
+  readonly unseen: {
+    readonly count: number;
+    readonly lines: readonly SurfaceLine[];
+    /**
+     * True when there are MORE unseen events than the list shows — the query caps
+     * the list, so the count reads `12+` rather than misreporting the cap as the
+     * whole (round-7 finding 5). The count stays consistent with the list: twelve
+     * rows, "twelve or more".
+     */
+    readonly truncated?: boolean;
+  };
   readonly cost: { readonly warn: boolean; readonly plans: readonly CostPlanLine[] };
 }
 
@@ -93,8 +103,14 @@ export function ControlSurfaces({ decisions, unseen, cost }: ControlSurfacesProp
 
       <section className={styles.surf} data-surface="unseen">
         <div className={styles.surfHead}>
-          <span className={styles.surfCount} data-surface-count={unseen.count}>
+          {/* `12+` when the true total exceeds the list — an honest "more than
+              twelve", never the capped list length passed off as the whole. */}
+          <span
+            className={styles.surfCount}
+            data-surface-count={`${unseen.count}${unseen.truncated ? '+' : ''}`}
+          >
             {unseen.count}
+            {unseen.truncated ? '+' : ''}
           </span>
           <span className={`${styles.surfLabel} atr-lbl`}>UNSEEN ACTIVITY</span>
         </div>

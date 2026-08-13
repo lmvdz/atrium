@@ -93,14 +93,17 @@ async function agentWithChannel(userId: string, ownerId: string, roomId: string)
 
 describe('DECISIONS OWED is owed to somebody in particular', () => {
   /**
-   * FLIP THE VIEWER. The projection used to mark every item owed to whoever
-   * asked.
+   * FLIP THE VIEWER. The projection used to hand EVERY viewer the room's whole
+   * pending queue and only mark ownership at render (round-7 finding 6) — so the
+   * server shipped one person's decisions to another, filtered late. The query
+   * filters `user_id = viewerId` now, so two viewers get two DIFFERENT payloads
+   * from the server: ada gets her item, bob gets nothing of hers.
    *
-   * RED ON REVERT: set `owedToViewer: true` unconditionally in
-   * `loadControlPlane`'s decision mapping — both readings then come back
-   * identical and every assertion below about `bob` fails.
+   * RED ON REVERT: drop the `eq(attentionItems.userId, viewerId)` predicate from
+   * `loadControlPlane`'s decisions query — bob's payload then carries ada's item
+   * again (masked to `owedToViewer: false`), and the length assertion below fails.
    */
-  it("ada's item is owed to ada and not to bob, in the same room", async () => {
+  it("ada's item is in ada's payload and ABSENT from bob's, in the same room", async () => {
     const room = await seedRoom(handle, ['ada', 'bob']);
     const ada = room.people.ada as string;
     const bob = room.people.bob as string;
@@ -121,12 +124,47 @@ describe('DECISIONS OWED is owed to somebody in particular', () => {
     expect(asAda.decisions).toHaveLength(1);
     expect(asAda.decisions[0]?.owedToViewer).toBe(true);
 
-    // Bob sees the same room. The item is not his, and the projection says so.
-    expect(asBob.decisions).toHaveLength(1);
-    expect(asBob.decisions[0]?.owedToViewer).toBe(false);
+    // Bob sees the same room. The item is NOT in his payload at all — the server
+    // never hands it to him, rather than handing it over and masking it.
+    expect(asBob.decisions).toHaveLength(0);
 
     expect(asAda.viewerId).toBe(ada);
     expect(asBob.viewerId).toBe(bob);
+  });
+
+  /**
+   * TWO PEOPLE, TWO QUEUES, ONE ROOM. Each viewer's payload is exactly their own
+   * items — proof the filter is per-viewer AT THE SERVER, not a render mask.
+   */
+  it("each viewer's payload is their own items and only theirs", async () => {
+    const room = await seedRoom(handle, ['ada', 'bob']);
+    const ada = room.people.ada as string;
+    const bob = room.people.bob as string;
+    await handle.db.insert(attentionItems).values([
+      {
+        roomId: room.roomId,
+        userId: ada,
+        subjectKind: 'message',
+        subjectId: await messageIn(room.roomId, ada),
+        class: 'needs_decision',
+        reason: { kind: 'mention', request: 'ada decides' },
+        status: 'pending',
+      },
+      {
+        roomId: room.roomId,
+        userId: bob,
+        subjectKind: 'message',
+        subjectId: await messageIn(room.roomId, bob),
+        class: 'blocking_question',
+        reason: { kind: 'mention', request: 'bob answers' },
+        status: 'pending',
+      },
+    ]);
+
+    const asAda = await loadControlPlane(handle.db, room.roomId, 'fleet', ada);
+    const asBob = await loadControlPlane(handle.db, room.roomId, 'fleet', bob);
+    expect(asAda.decisions.map((d) => d.userId)).toEqual([ada]);
+    expect(asBob.decisions.map((d) => d.userId)).toEqual([bob]);
   });
 
   it('a resolved item is owed to nobody — status still filters before the viewer does', async () => {
@@ -186,6 +224,29 @@ describe('UNSEEN ACTIVITY is what THIS reader has not seen', () => {
     await advanceSeenSeq(handle.db, room.roomId, ada, 2);
     const view = await loadControlPlane(handle.db, room.roomId, 'fleet', ada);
     expect(view.unseen).toHaveLength(1);
+    expect(view.unseenTotal).toBe(1);
+  });
+
+  /**
+   * THE COUNT DOES NOT LIE PAST TWELVE (round-7 finding 5). The list caps at twelve;
+   * a thirteenth unseen event must not read as "12". The projection returns the TRUE
+   * total beside the capped list, so the surface can say `12+`.
+   *
+   * RED ON REVERT: render `data.unseen.length` as the total again (drop `unseenTotal`
+   * / the count query). `unseen` is 12, and a 13th event is silently swallowed.
+   */
+  it('with thirteen unseen events the list caps at twelve but the total is thirteen', async () => {
+    const room = await seedRoom(handle, ['ada', 'hexi'], { agents: ['hexi'] });
+    const ada = room.people.ada as string;
+    const hexi = room.people.hexi as string;
+    for (let i = 0; i < 13; i += 1) await lifecycleEvent(room.roomId, hexi);
+
+    const view = await loadControlPlane(handle.db, room.roomId, 'fleet', ada);
+    // The displayed list is capped…
+    expect(view.unseen).toHaveLength(12);
+    // …but the reported total is the truth, so the surface reads "12+", not "12".
+    expect(view.unseenTotal).toBe(13);
+    expect(view.unseenTotal).toBeGreaterThan(view.unseen.length);
   });
 });
 

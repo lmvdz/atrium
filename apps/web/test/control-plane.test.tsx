@@ -37,6 +37,7 @@ import { CERTIFY_REQUIRED_HOLD_MS } from '../lib/certify-hold';
 import type {
   ControlAgentRow,
   ControlDecisionRow,
+  ControlEventRow,
   ControlPlaneData,
   ControlPlanRow,
   ControlSessionRow,
@@ -590,15 +591,20 @@ describe('the pin and the decisions count are gated on the viewer being human', 
     // the count here are the session-derived items, which is what the gate covers.
     decisions: [],
     unseen: [],
+    unseenTotal: 0,
     updatedAt: '2026-08-13T00:00:00.000Z',
   });
 
+  // The arm returns the SERVER-ISSUED token (round-7 finding 2); the confirm and
+  // disarm just resolve. None of them fire in these gating tests, but the props are
+  // typed, so the stubs match the real Server Action shapes.
+  const armNoop = async () => ({ ok: true, attemptToken: 'tok' }) as const;
   const noop = async () => ({ ok: true }) as const;
 
   function renderPlane(viewerKind: 'human' | 'agent') {
     return render(
       <ControlPlane
-        armAction={noop}
+        armAction={armNoop}
         certifyAction={noop}
         data={data('viewer-1')}
         disarmAction={noop}
@@ -632,6 +638,76 @@ describe('the pin and the decisions count are gated on the viewer being human', 
         .querySelector('[data-surface="decisions"] [data-surface-count]')
         ?.getAttribute('data-surface-count'),
     ).toBe('0');
+  });
+});
+
+/**
+ * THE UNSEEN COUNT DOES NOT LIE PAST TWELVE (#121 round-7 finding 5).
+ *
+ * The unseen list caps at twelve; the surface count used to read
+ * `data.unseen.length`, so a thirteenth event still showed "12". The read model
+ * carries the TRUE total (`unseenTotal`) now, and the surface renders `12+` when the
+ * list is truncated — a count consistent with the twelve rows, honest about there
+ * being more.
+ *
+ * MUTATION THAT MUST TURN THIS RED: pass `count: data.unseen.length` without the
+ * `truncated` flag (or drop the `+` render). The surface then reads "12" over a
+ * thirteen-event backlog.
+ */
+describe('the unseen surface says 12+ when there is more than it lists', () => {
+  const events = (n: number): ControlEventRow[] =>
+    Array.from({ length: n }, (_, i) => ({
+      id: `ev-${i}`,
+      type: 'session_settled',
+      actorKind: 'agent' as const,
+      at: '2026-08-13T00:00:00.000Z',
+    }));
+
+  const noop = async () => ({ ok: true }) as const;
+  const armNoop = async () => ({ ok: true, attemptToken: 'tok' }) as const;
+
+  function planeWith(unseen: ControlEventRow[], unseenTotal: number) {
+    const data: ControlPlaneData = {
+      room: { id: 'room-1', name: 'fleet' },
+      viewerId: 'viewer-1',
+      agents: [],
+      decisions: [],
+      unseen,
+      unseenTotal,
+      updatedAt: '2026-08-13T00:00:00.000Z',
+    };
+    return render(
+      <ControlPlane
+        armAction={armNoop}
+        certifyAction={noop}
+        data={data}
+        disarmAction={noop}
+        roomSlug="fleet"
+        viewerId="viewer-1"
+        viewerKind="human"
+        workspaceSlug="acme"
+      />,
+    );
+  }
+
+  it('twelve listed, thirteen total → the count reads 12+, not 12', () => {
+    planeWith(events(12), 13);
+    const count = document
+      .querySelector('[data-surface="unseen"] [data-surface-count]')
+      ?.getAttribute('data-surface-count');
+    expect(count).toBe('12+');
+    expect(
+      document.querySelector('[data-surface="unseen"] [data-surface-count]')?.textContent,
+    ).toBe('12+');
+  });
+
+  it('twelve listed, twelve total → a plain 12, no plus', () => {
+    planeWith(events(12), 12);
+    expect(
+      document
+        .querySelector('[data-surface="unseen"] [data-surface-count]')
+        ?.getAttribute('data-surface-count'),
+    ).toBe('12');
   });
 });
 

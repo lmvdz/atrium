@@ -1495,44 +1495,18 @@ export const sessions = pgTable(
      * consumed (set null) by the confirm and cleared on disarm.
      */
     certifyArmedArtifactDigest: text('certify_armed_artifact_digest'),
-    /**
-     * THE LIVE ARM'S ATTEMPT SEQUENCE — the client-minted, strictly-monotonic id
-     * of the hold this arm belongs to.
-     *
-     * #121 round-6 finding 3. A server arm and a server disarm are two independent
-     * requests that the network may deliver out of order. The gauntlet found the
-     * reordering that mattered: begin→arm R1 fired, then release→disarm R2 fired,
-     * but R2 reached the server first and cleared nothing (no arm was there yet),
-     * and the delayed R1 then wrote a fresh live nonce — so a direct confirm after
-     * the gate certified despite the release. The disarm was not correlated to the
-     * attempt it was cancelling.
-     *
-     * Each hold mints one strictly-increasing `attemptSeq` on the CLIENT at
-     * hold-begin (the only place with the identity of a single press), carried on
-     * the arm, the disarm and the confirm alike. The arm stamps it here; the disarm
-     * clears the arm only when this equals the attempt it is cancelling; the confirm
-     * honours only an arm whose stored sequence is the one it is completing. Paired
-     * with `certify_cancel_seq` (the cancel watermark), a late arm cannot outrun the
-     * release that superseded it. NULL whenever no hold is pending; consumed (set
-     * null) by the confirm and cleared on disarm. It orders and correlates a single
-     * client's own arm/disarm; it is NOT a timing the gate trusts — the held
-     * duration is still `now() - certify_armed_at`, measured server-side.
+    /*
+     * ROUND 7 removed `certify_arm_seq` and `certify_cancel_seq` (drizzle/0040).
+     * Round 6 threaded a CLIENT-minted, strictly-monotonic `attemptSeq` through the
+     * arm/disarm/confirm and raised it into a session-global cancel watermark. That
+     * was the round-7 finding-2 hole: any member could `disarm(MAX_SAFE_INTEGER)`
+     * and jam every honest arm forever, and cross-client clock skew did it by
+     * accident. The attempt is SERVER-ISSUED now — `certify_arm_nonce` is the whole
+     * of it, minted by `armCertification` and returned to the client, which hands it
+     * back on the confirm and disarm. No client number reaches the row, so none can
+     * jam a future arm. The correlation the two dropped columns provided is the
+     * nonce's job now, and it is a capability, not a counter.
      */
-    certifyArmSeq: bigint('certify_arm_seq', { mode: 'number' }),
-    /**
-     * THE CANCEL WATERMARK — the highest attempt sequence any release has cancelled
-     * for this session.
-     *
-     * #121 round-6 finding 3, the half that makes cancel win a race with a late arm.
-     * A disarm always raises this to at least its own attempt's sequence, EVEN WHEN
-     * no arm has landed yet (a disarm that arrives before its arm). An arm then
-     * refuses if its own sequence is at or below the watermark — the release for
-     * this attempt (or a newer one) already happened, so the arm must not resurrect
-     * it. A fresh press mints a strictly larger sequence and arms cleanly. Inert
-     * once certified (nothing reads it after `certified_by` is set); never frozen,
-     * so the confirm's clearing of the pending columns is unaffected. Starts null.
-     */
-    certifyCancelSeq: bigint('certify_cancel_seq', { mode: 'number' }),
     /** The `core_events.id` of the `session_opened` that projected this. */
     openedByEventId: text('opened_by_event_id'),
     /** The `core_events.id` of the settling/failing event, once it exits. */

@@ -43,24 +43,17 @@ import { offeredText } from '../model/quotation';
 import styles from './primitives.module.css';
 
 /* ---------------------------------------------------------------------------
- * A STRICTLY-MONOTONIC ATTEMPT SEQUENCE, per page.
+ * NO CLIENT-MINTED ATTEMPT SEQUENCE ANY MORE (#121 round-7 finding 2).
  *
- * #121 round-6 finding 3. Each hold-begin mints one sequence, carried on the
- * server arm, disarm and confirm of that single press so the server can correlate
- * a release to the arm it cancels and refuse a late arm that a cancel already
- * superseded. It must be STRICTLY increasing within a page: two presses in the
- * same millisecond still get distinct, ordered ids. Seeded from wall-clock so the
- * ids of two different clients on one session sort by real time; bumped past the
- * last value otherwise. It orders and correlates a client's own requests — it is
- * NOT a timing the server's gate trusts (that stays `now() - certify_armed_at`,
- * measured server-side).
+ * Round 6 minted a strictly-monotonic `attemptSeq` here from the wall clock and
+ * carried it on the server arm/disarm/confirm to correlate a release to its arm.
+ * But the server raised that client number into a session-global cancel watermark,
+ * so `disarm(MAX_SAFE_INTEGER)` jammed every honest arm and clock skew did it by
+ * accident. The correlation is the SERVER's job now: `armCertification` mints an
+ * opaque token and returns it, and the caller carries THAT back on the confirm and
+ * disarm (see ControlPlane). This control just reports begin / cancel / complete;
+ * it counts nothing the server trusts.
  * ------------------------------------------------------------------------- */
-let lastAttemptSeq = 0;
-function nextAttemptSeq(): number {
-  const now = Date.now();
-  lastAttemptSeq = now > lastAttemptSeq ? now : lastAttemptSeq + 1;
-  return lastAttemptSeq;
-}
 
 /**
  * What the hold put on the record: WHO armed it, WHEN, and HOW LONG they held.
@@ -84,14 +77,6 @@ export interface Arming {
    * never sent as the duration the covenant gates on (#121 CS-2).
    */
   readonly heldMs: number;
-  /**
-   * The strictly-monotonic id of this press (#121 round-6 finding 3), minted at
-   * hold-begin and identical across this hold's `onBegin` / `onCancel` / `onArm` /
-   * `onAct`. A caller wiring a server arm→confirm carries it on all three requests
-   * so a release can be correlated to the arm it cancels. Callers with no server
-   * round-trip (the attention cards' one-shot land) simply ignore it.
-   */
-  readonly attemptSeq: number;
 }
 
 export const DEFAULT_HOLD_MS = 2000;
@@ -117,10 +102,11 @@ export interface HoldToActProps {
    * something on begin is responsible for that being harmless, and for certify it
    * is: a pending arm that is never confirmed certifies nothing and expires.
    *
-   * Receives this press's `attemptSeq` (round-6 finding 3) so the server arm can be
-   * stamped with the id the matching disarm/confirm will carry.
+   * Takes no argument: the attempt's identity is the server-issued token the arm
+   * this fires returns (round-7 finding 2), which the caller holds, not a number
+   * this control mints.
    */
-  readonly onBegin?: (attemptSeq: number) => void;
+  readonly onBegin?: () => void;
   /**
    * Fired when a hold that had BEGUN is released before it completes — pointer up
    * or cancel, leaving or blurring the button, lifting the key. It does NOT fire
@@ -132,12 +118,11 @@ export interface HoldToActProps {
    * cancelled hold leaves no live intention behind. A cancel that reaches nothing
    * must be harmless — this fires on every abort, including redundant ones.
    *
-   * Receives this press's `attemptSeq` (round-6 finding 3) so the server disarm
-   * cancels the exact arm this hold began — and, carried on the disarm even when
-   * the arm has not yet landed, raises the cancel watermark that refuses a late
-   * arm which the network reordered ahead of it.
+   * Takes no argument: the caller cancels the exact arm this hold began by the
+   * server-issued token that arm returned (round-7 finding 2), so it awaits the arm
+   * before disarming and there is no client counter to carry.
    */
-  readonly onCancel?: (attemptSeq: number) => void;
+  readonly onCancel?: () => void;
   readonly onArm?: (arming: Arming) => void;
   readonly onAct?: (arming: Arming) => void;
   readonly className?: string;
@@ -161,9 +146,6 @@ export function HoldToAct({
   const buttonRef = useRef<HTMLButtonElement | null>(null);
   const frameRef = useRef<number | null>(null);
   const startRef = useRef<number | null>(null);
-  /* This press's attempt sequence, minted at begin and read by cancel/complete/
-     unmount so all four callbacks carry the SAME id (round-6 finding 3). */
-  const attemptRef = useRef<number>(0);
 
   const meterRef = useRef<HTMLSpanElement | null>(null);
 
@@ -197,7 +179,7 @@ export function HoldToAct({
     stop();
     paint(0);
     setPhase('idle');
-    onCancel?.(attemptRef.current);
+    onCancel?.();
   }, [onCancel, paint, stop]);
 
   const complete = useCallback(() => {
@@ -212,7 +194,6 @@ export function HoldToAct({
       actor,
       armedAt: new Date().toISOString(),
       heldMs,
-      attemptSeq: attemptRef.current,
     };
     /* Arm first, act second. The record of who armed it and when must exist
        before the irreversible thing happens, not after it succeeded. */
@@ -235,14 +216,12 @@ export function HoldToAct({
   const begin = useCallback(() => {
     if (startRef.current !== null) return;
     startRef.current = performance.now();
-    /* Mint this press's attempt id BEFORE arming, so the arm and the disarm/confirm
-       that follow all carry it (round-6 finding 3). */
-    attemptRef.current = nextAttemptSeq();
     setPhase('holding');
     paint(0);
     /* Before the first frame, so a caller that has to start a clock elsewhere
-       starts it at the same instant this one does. */
-    onBegin?.(attemptRef.current);
+       starts it at the same instant this one does. The arm this fires returns the
+       server-issued token the matching confirm/disarm carry (round-7 finding 2). */
+    onBegin?.();
     frameRef.current = requestAnimationFrame(tick);
   }, [onBegin, paint, tick]);
 
@@ -267,7 +246,7 @@ export function HoldToAct({
     }
     if (startRef.current === null) return;
     startRef.current = null;
-    onCancel?.(attemptRef.current);
+    onCancel?.();
   }, [onCancel]);
   const unmountRef = useRef(disarmOnUnmount);
   unmountRef.current = disarmOnUnmount;

@@ -29,49 +29,55 @@ import { CERTIFY_ARM_TTL_MS, CERTIFY_REQUIRED_HOLD_MS, isReviewableArtifact } fr
  * So certification is now ARM then CONFIRM, and every clock and every membership
  * read is the server's:
  *
- *   1. {@link armCertification} stamps `certify_armed_at = now()` — evaluated by
- *      Postgres, never a value that crossed the wire — and `certify_armed_by` with
- *      the authenticated viewer.
- *   2. {@link certifySession} computes `now() - certify_armed_at` IN SQL and
- *      refuses anything under {@link CERTIFY_REQUIRED_HOLD_MS}, anything armed by
- *      somebody else, anything armed longer ago than {@link CERTIFY_ARM_TTL_MS},
- *      anything whose ARTIFACT changed since the arm (the digest no longer
- *      matches — the person is confirming a revision they did not review, CS-1),
- *      and anything never armed or no longer carrying a live attempt nonce.
- *      `certified_held_ms` is that measured interval; `certified_at` is `now()`.
- *      Neither function takes a timing argument, so there is no forged value for a
- *      guard to have to catch. A successful confirm sets `certified_by` AND
- *      consumes the arm's nonce and digest in the same statement, and every write
- *      here is scoped `isNull(certified_by)` — so the arm is SINGLE-USE twice over:
- *      the nonce it required is spent, and a second confirm finds the session
- *      certified and is refused. The arm is a specific attempt, not a standing
- *      120s window a later direct confirm can walk into; drizzle/0033 freezes the
- *      arm columns underneath.
+ *   1. {@link armCertification} stamps `certify_armed_at = clock_timestamp()` —
+ *      the REAL time the UPDATE runs, evaluated by Postgres, never a value that
+ *      crossed the wire — and `certify_armed_by` with the authenticated viewer. It
+ *      mints a fresh single-use attempt nonce and RETURNS it: that opaque
+ *      server-issued token is the whole of the attempt's identity (round-7
+ *      finding 2). Nothing the client counts participates in the authority.
+ *   2. {@link certifySession} computes `clock_timestamp() - certify_armed_at` IN
+ *      SQL and refuses anything under {@link CERTIFY_REQUIRED_HOLD_MS}, anything
+ *      armed by somebody else, anything armed longer ago than
+ *      {@link CERTIFY_ARM_TTL_MS}, anything whose ARTIFACT changed since the arm
+ *      (the digest no longer matches — the person is confirming a revision they
+ *      did not review, CS-1), and anything never armed or no longer carrying a
+ *      live attempt nonce. `certified_held_ms` is that measured interval;
+ *      `certified_at` is `now()`. Neither function takes a timing argument, so
+ *      there is no forged value for a guard to have to catch. A successful confirm
+ *      sets `certified_by` AND consumes the arm's nonce and digest in the same
+ *      statement, and every write here is scoped `isNull(certified_by)` — so the
+ *      arm is SINGLE-USE twice over: the nonce it required is spent, and a second
+ *      confirm finds the session certified and is refused. The arm is a specific
+ *      attempt, not a standing 120s window a later direct confirm can walk into;
+ *      drizzle/0033 freezes the arm columns underneath.
  *   3. {@link disarmCertification} clears a pending arm the person released
  *      without confirming. The browser's cancel is local; without a server disarm
  *      the arm outlived the release for its whole TTL, and "arm, release, wait,
  *      confirm" certified anyway (CS-3). Every cancellation path calls it.
  *
- * ## THE ROUND-6 CONSOLIDATION — ONE COHERENT ATTEMPT, BOUND TO THE REVIEWED WORK
+ * ## THE ROUND-7 CONSOLIDATION — THE ATTEMPT IS THE SERVER'S, END TO END
  *
- * The round-5 fix left three subtle holes the arm/confirm/disarm now close together
- * rather than patch apart:
+ * The round-6 fix threaded CLIENT-supplied authority values through the arm/
+ * confirm/disarm — an optional `reviewedDigest`, and a client-minted `attemptSeq`
+ * wall-clock raised into a session-global cancel watermark. Both were holes:
  *
- *   * BOUND TO THE ARTIFACT REVIEWED, not merely the arm-time one (finding 1). The
- *     render carries `md5(artifact::text)` and the arm carries it back; the arm
- *     refuses `stale_review` unless it still matches the row, so the person can only
- *     arm over the revision they saw. The stored armed digest then equals the
- *     reviewed one, and the confirm's `artifact_changed` bind carries that guarantee
- *     forward to the signature.
- *   * A REVIEWABLE artifact, not merely a non-null one (finding 2). Arm and confirm
- *     require a well-formed artifact (branch AND commit; {@link isReviewableArtifact}),
- *     so an empty `{}` is refused rather than signed over — the DB backstop is
- *     drizzle/0038.
- *   * ONE CORRELATED ATTEMPT, cancel-wins (finding 3). Each press mints a client
- *     `attemptSeq` carried on the arm, disarm and confirm alike. The disarm raises a
- *     per-session cancel watermark even before its own arm lands, so a late arm the
- *     network reordered ahead of a release refuses `arm_superseded`; the confirm
- *     honours only the arm whose sequence it is completing.
+ *   * A REQUEST MISSING `reviewedDigest` FELL OPEN (round-7 finding 1). The value
+ *     was optional, and absent it the stale-review check was SKIPPED — so a
+ *     scripted caller that omitted it armed over whatever artifact was current with
+ *     no attestation of what it had reviewed. `reviewedDigest` is REQUIRED now, at
+ *     the Server Action and here; there is no absent-means-unchanged branch left.
+ *   * THE CANCEL WATERMARK WAS A CLIENT WALL-CLOCK (round-7 finding 2). Any member
+ *     could `disarm(attemptSeq = MAX_SAFE_INTEGER)` and raise a session-global,
+ *     unbounded watermark that refused every honest arm forever (`arm_superseded`);
+ *     cross-client clock skew did it by accident. The attempt is SERVER-ISSUED now:
+ *     {@link armCertification} mints the nonce and returns it, and the disarm and
+ *     confirm reference THAT token. A cancel affects only its own attempt — no
+ *     client number reaches a global gate, so none can jam future arms.
+ *
+ * The arm binds to the reviewed artifact exactly as round 6 intended, and the
+ * confirm carries that bind forward; a REVIEWABLE artifact (branch AND commit;
+ * {@link isReviewableArtifact}) is still required at arm and confirm, an empty `{}`
+ * refused, the DB backstop drizzle/0038.
  *
  * ## WHAT THE HOLD PROVES, STATED HONESTLY
  *
@@ -102,7 +108,9 @@ import { CERTIFY_ARM_TTL_MS, CERTIFY_REQUIRED_HOLD_MS, isReviewableArtifact } fr
  *      revalidation window the append path is allowed to tolerate. This file still
  *      never names `memberships` itself — the boundary `room-access.test.ts`
  *      enforces is intact, because the query lives in `@atrium/auth` where every
- *      other one does.
+ *      other one does. The DISARM is the one exception, and deliberately: the arm
+ *      OWNER may retract their own pending arm even after losing membership
+ *      (round-7 finding 4), so it authorizes on arm-ownership, not on the room.
  *   3. SETTLED. A running or failed process has produced no landing to certify.
  *   4. ONCE. `isNull(certified_by)` scopes the write, the row is taken `FOR
  *      UPDATE`, and drizzle/0033's `sessions_certification_immutable` refuses a
@@ -144,13 +152,6 @@ export type CertifyRefusal =
    * all. Press and hold again re-reviews the current one.
    */
   | 'stale_review'
-  /**
-   * A release for this attempt (or a newer one) already reached the server, so a
-   * late arm must not resurrect the cancelled hold (round-6 finding 3). The arm's
-   * own sequence is at or below the session's cancel watermark; refused rather
-   * than writing a fresh live nonce a direct confirm could then spend.
-   */
-  | 'arm_superseded'
   /** No pending server arm for this viewer — nothing was held. */
   | 'not_armed'
   /** The server-measured interval between arm and confirm was under the gate. */
@@ -170,17 +171,28 @@ export type CertifyOutcome =
   | { readonly ok: false; readonly reason: CertifyRefusal };
 
 export type ArmOutcome =
-  | { readonly ok: true }
+  /**
+   * The arm landed, and here is the SERVER-ISSUED attempt token (round-7 finding
+   * 2) — the opaque nonce the arm minted. The confirm and the disarm of this same
+   * press carry it back so the server can bind them to this exact attempt; no
+   * client-minted number participates in the authority, so none can jam a future
+   * arm. It is a single-use capability, spent by the confirm or cleared by the
+   * disarm.
+   */
+  | { readonly ok: true; readonly attemptToken: string }
   | { readonly ok: false; readonly reason: CertifyRefusal };
 
 export type DisarmOutcome =
   | { readonly ok: true }
   | { readonly ok: false; readonly reason: CertifyRefusal };
 
-export interface CertifyInput {
+interface CertifyBase {
   readonly database: Database;
   readonly viewerId: string;
   readonly sessionId: string;
+}
+
+export interface ArmInput extends CertifyBase {
   /**
    * The room the caller authorized the viewer into, resolved through
    * `@atrium/auth`'s room read. The session must belong to it — and the viewer
@@ -192,40 +204,49 @@ export interface CertifyInput {
    * THE DIGEST OF THE ARTIFACT THE HUMAN REVIEWED — the `md5(artifact::text)` the
    * render carried (projected by `loadControlPlane`), handed back verbatim so the
    * server can bind the signature to the revision that was on screen (round-6
-   * finding 1). A legitimate human attestation of what they reviewed, distinct
-   * from the server-internal arm nonce.
-   *
-   * The Server Action always supplies it (its zod schema requires it); it is
-   * OPTIONAL here only so a raw internal caller — the integration suite driving
-   * the function directly, which has no render — may omit it. When present, the
-   * arm refuses `stale_review` unless it matches the artifact currently on the row.
-   * The confirm's arm→signature digest bind (`artifact_changed`) then carries the
-   * guarantee forward: the arm stored the reviewed digest, so a confirm over a
-   * moved artifact is refused there.
+   * finding 1). REQUIRED (round-7 finding 1): the Server Action's zod schema
+   * demands it, and a raw internal caller (the integration suite driving the
+   * function directly) computes it from the row. There is no absent-means-unchanged
+   * branch — an arm without an attestation of what was reviewed is not something
+   * this function will land. The arm refuses `stale_review` unless it matches the
+   * artifact currently on the row.
    */
-  readonly reviewedDigest?: string | null;
+  readonly reviewedDigest: string;
+}
+
+export interface ConfirmInput extends CertifyBase {
+  readonly authorizedRoomId: string;
   /**
-   * THE HOLD'S ATTEMPT SEQUENCE — the client-minted, strictly-monotonic id of the
-   * single press this call belongs to (round-6 finding 3). Carried identically on
-   * the arm, the disarm and the confirm of one hold, so a release can be
-   * correlated to the arm it cancels and a late arm cannot outrun it.
-   *
-   * The Server Action always supplies it; OPTIONAL here only for the raw internal
-   * caller. When present: the arm refuses if it is at or below the cancel
-   * watermark and otherwise stamps it; the disarm raises the watermark to it and
-   * clears the matching arm; the confirm honours only an arm carrying this exact
-   * sequence. Absent (a raw call), the mechanism degrades to the nonce-only
-   * single-use guarantee the round-5 path already had.
+   * THE SERVER-ISSUED ATTEMPT TOKEN — the nonce {@link armCertification} minted and
+   * returned for this press (round-7 finding 2). The Server Action requires it; a
+   * raw internal caller may omit it, in which case the confirm spends whatever live
+   * arm this viewer holds (the round-5 nonce-single-use guarantee). When present it
+   * must equal the pending arm's nonce, so a confirm completes the exact press it
+   * began.
    */
-  readonly attemptSeq?: number;
+  readonly attemptToken?: string;
+}
+
+export interface DisarmInput extends CertifyBase {
+  /**
+   * THE SERVER-ISSUED ATTEMPT TOKEN of the press being released (round-7 finding
+   * 2). The Server Action requires it; a raw caller may omit it to clear the
+   * viewer's own pending arm outright. When present the clear is scoped to the arm
+   * carrying exactly this nonce, so a stale release cannot clobber a newer press's
+   * arm. No `authorizedRoomId`: the disarm authorizes on ARM-OWNERSHIP, not room
+   * membership (round-7 finding 4), so the owner can retract even after losing it.
+   */
+  readonly attemptToken?: string;
 }
 
 /**
- * Both steps' shared preamble: is this viewer, right now, inside this
+ * Both certifying steps' shared preamble: is this viewer, right now, inside this
  * transaction, a human who may act in this room?
  *
  * One function because two copies of a security predicate is how the fourth call
- * site forgets it — the same reason `@atrium/auth` owns the membership query.
+ * site forgets it — the same reason `@atrium/auth` owns the membership query. The
+ * disarm does NOT run this: it authorizes on arm-ownership rather than membership
+ * (round-7 finding 4).
  */
 async function viewerMayCertify(
   tx: Pick<Database, 'select'>,
@@ -259,14 +280,16 @@ async function viewerMayCertify(
 }
 
 /**
- * STEP ONE — arm, with the server's clock.
+ * STEP ONE — arm, with the server's clock, and hand back the server's token.
  *
- * Writes `certify_armed_at = now()`. Idempotent in the sense that matters: a
- * second arm restarts the interval, so a person who presses, releases early and
- * presses again is measured from the second press rather than the first.
+ * Writes `certify_armed_at = clock_timestamp()`. Idempotent in the sense that
+ * matters: a second arm restarts the interval, so a person who presses, releases
+ * early and presses again is measured from the second press rather than the first.
+ * On success it RETURNS the freshly-minted attempt nonce — the opaque token the
+ * confirm and disarm of this press carry back (round-7 finding 2).
  */
-export async function armCertification(input: CertifyInput): Promise<ArmOutcome> {
-  const { database, viewerId, sessionId, authorizedRoomId, reviewedDigest, attemptSeq } = input;
+export async function armCertification(input: ArmInput): Promise<ArmOutcome> {
+  const { database, viewerId, sessionId, authorizedRoomId, reviewedDigest } = input;
 
   return database.transaction(async (tx) => {
     const refusal = await viewerMayCertify(tx, viewerId, authorizedRoomId);
@@ -278,18 +301,14 @@ export async function armCertification(input: CertifyInput): Promise<ArmOutcome>
         status: sessions.status,
         certifiedBy: sessions.certifiedBy,
         artifact: sessions.artifact,
-        cancelSeq: sessions.certifyCancelSeq,
         /* Whether the artifact on the row still matches the digest the human
            attests reviewing (round-6 finding 1). `true` when the client's
            reviewedDigest differs from the current `md5(artifact::text)` — the
            artifact moved between the render and this arm. `IS DISTINCT FROM` so a
-           null current digest reads as changed rather than as a match. Only
-           meaningful when a reviewedDigest was supplied; the guard below skips it
-           for a raw caller that has no render to attest. */
-        reviewedChanged:
-          reviewedDigest === undefined || reviewedDigest === null
-            ? sql<boolean>`false`
-            : sql<boolean>`(md5(${sessions.artifact}::text) IS DISTINCT FROM ${reviewedDigest})`,
+           null current digest reads as changed rather than as a match. Always
+           evaluated: `reviewedDigest` is REQUIRED (round-7 finding 1), so there is
+           no absent-means-unchanged branch to fall open through. */
+        reviewedChanged: sql<boolean>`(md5(${sessions.artifact}::text) IS DISTINCT FROM ${reviewedDigest})`,
       })
       .from(sessions)
       .where(eq(sessions.id, sessionId))
@@ -309,33 +328,25 @@ export async function armCertification(input: CertifyInput): Promise<ArmOutcome>
        the round-6 finding 1 hole, one step earlier than the arm→confirm bind.
        Refuse; the person re-reviews the current artifact on the next press. */
     if (session.reviewedChanged) return { ok: false, reason: 'stale_review' };
-    /* CANCEL WINS A RACE WITH A LATE ARM. If a release for this attempt (or a
-       newer one) already raised the cancel watermark to at or above this arm's
-       sequence, the arm arrived after its own cancellation and must not write a
-       fresh live nonce (round-6 finding 3). A new press mints a strictly larger
-       sequence and passes. Only enforced when the client supplied a sequence. */
-    if (attemptSeq !== undefined && session.cancelSeq !== null && attemptSeq <= session.cancelSeq) {
-      return { ok: false, reason: 'arm_superseded' };
-    }
 
-    await tx
+    /* A FRESH SINGLE-USE ATTEMPT ID, MINTED AND RETURNED. The arm is a specific
+       attempt, not a 120s standing permission a later direct confirm can walk into
+       (CS-3). `gen_random_uuid()` is minted here — the one path that mints one —
+       and RETURNED so the confirm and disarm of this press reference this exact
+       token (round-7 finding 2); the confirm consumes it. Nothing the client counts
+       reaches the row, so no client value can jam a future arm. */
+    const [armed] = await tx
       .update(sessions)
       .set({
         certifyArmedBy: viewerId,
-        /* `now()`, not `new Date()`. The value is produced by the database the
-           interval will later be measured against, so the two clock reads are the
-           same clock — and nothing about the arm's timing ever crossed a wire. */
-        certifyArmedAt: sql`now()`,
-        /* A FRESH SINGLE-USE ATTEMPT ID. The arm is a specific attempt, not a
-           120s standing permission a later direct confirm can walk into (CS-3).
-           Minted here — the one path that mints one — and consumed by the confirm
-           that spends it, so an arm is confirmable at most once and only if it
-           carries a live nonce. */
+        /* `clock_timestamp()`, not `now()`. `now()` is the TRANSACTION-START time;
+           if this arm blocked on the row lock for seconds, `now()` would backdate
+           the stamp and a confirm's `clock_timestamp() - certify_armed_at` would
+           read a hold that never happened (round-7 finding 3). `clock_timestamp()`
+           is evaluated when this statement executes — after the lock is held — so
+           the interval is measured from the real moment the arm landed. */
+        certifyArmedAt: sql`clock_timestamp()`,
         certifyArmNonce: sql`gen_random_uuid()`,
-        /* THIS HOLD'S CLIENT-MINTED SEQUENCE. Correlates the disarm and the confirm
-           of the same press to this exact arm (round-6 finding 3). `null` for a raw
-           caller that supplied none. */
-        certifyArmSeq: attemptSeq ?? null,
         /* THE ARTIFACT THE HOLD IS ARMED OVER, digested. Equal to the reviewed
            digest checked above, so it carries the reviewed-revision bind forward:
            the confirm compares this to the artifact then present and refuses if it
@@ -350,8 +361,11 @@ export async function armCertification(input: CertifyInput): Promise<ArmOutcome>
           eq(sessions.status, 'settled'),
           isNull(sessions.certifiedBy),
         ),
-      );
-    return { ok: true };
+      )
+      .returning({ nonce: sessions.certifyArmNonce });
+    const attemptToken = armed?.nonce ?? null;
+    if (attemptToken === null) return { ok: false, reason: 'not_armed' };
+    return { ok: true, attemptToken };
   });
 }
 
@@ -359,11 +373,11 @@ export async function armCertification(input: CertifyInput): Promise<ArmOutcome>
  * STEP TWO — confirm, gated on the interval the SERVER measured.
  *
  * Takes no timing argument, by construction: there is no `heldMs` to forge and no
- * `armedAt` to backdate. The held duration is `now() - certify_armed_at` computed
- * in SQL, and it is what lands in `certified_held_ms`.
+ * `armedAt` to backdate. The held duration is `clock_timestamp() -
+ * certify_armed_at` computed in SQL, and it is what lands in `certified_held_ms`.
  */
-export async function certifySession(input: CertifyInput): Promise<CertifyOutcome> {
-  const { database, viewerId, sessionId, authorizedRoomId, attemptSeq } = input;
+export async function certifySession(input: ConfirmInput): Promise<CertifyOutcome> {
+  const { database, viewerId, sessionId, authorizedRoomId, attemptToken } = input;
 
   return database.transaction(async (tx) => {
     const refusal = await viewerMayCertify(tx, viewerId, authorizedRoomId);
@@ -376,15 +390,13 @@ export async function certifySession(input: CertifyInput): Promise<CertifyOutcom
         certifiedBy: sessions.certifiedBy,
         armedBy: sessions.certifyArmedBy,
         artifact: sessions.artifact,
-        /* The live attempt id. A confirm honours only an arm that still carries
-           one (CS-3): null means no pending attempt — a disarmed, spent, or forged
-           arm — and is refused as `not_armed` however valid the rest looks. */
+        /* The live attempt id / server-issued token. A confirm honours only an arm
+           that still carries one (CS-3): null means no pending attempt — a
+           disarmed, spent, or forged arm — and is refused as `not_armed` however
+           valid the rest looks. When the confirm carries an `attemptToken` it must
+           equal this, so a confirm completes the exact press it began (round-7
+           finding 2). */
         armNonce: sessions.certifyArmNonce,
-        /* The arm's client-minted sequence. When the confirm carries a sequence,
-           it must match the pending arm's (round-6 finding 3): a confirm completes
-           the specific press it began, not whatever arm happens to be on the row —
-           so a superseded-then-refused arm cannot be confirmed by an older press. */
-        armSeq: sessions.certifyArmSeq,
         /* Whether the artifact under the hold still matches the one the arm was
            taken over. `true` when the current `md5(artifact::text)` differs from
            the digest stamped at arm — the artifact moved between review and
@@ -392,13 +404,14 @@ export async function certifySession(input: CertifyInput): Promise<CertifyOutcom
            with no digest) also reads as changed rather than as a match. */
         artifactChanged: sql<boolean>`(${sessions.certifyArmedArtifactDigest} IS DISTINCT FROM md5(${sessions.artifact}::text))`,
         /* The whole gate, in one expression the client cannot reach: milliseconds
-           between the server's clock at the arm and the server's clock now. NULL
-           when nothing is armed, which `heldMs === null` reads as "not armed"
-           rather than as zero. `double precision` so postgres-js hands back a
-           number — `extract(epoch …)` is numeric, and numeric arrives as a string. */
+           between the server's real clock at the arm and the server's real clock
+           now. Both reads are `clock_timestamp()` (round-7 finding 3) so a blocked
+           arm cannot backdate the interval. NULL when nothing is armed, which
+           `heldMs === null` reads as "not armed" rather than as zero. `double
+           precision` so postgres-js hands back a number. */
         heldMs: sql<
           number | null
-        >`(extract(epoch from (now() - ${sessions.certifyArmedAt})) * 1000)::double precision`,
+        >`(extract(epoch from (clock_timestamp() - ${sessions.certifyArmedAt})) * 1000)::double precision`,
       })
       .from(sessions)
       .where(eq(sessions.id, sessionId))
@@ -420,15 +433,15 @@ export async function certifySession(input: CertifyInput): Promise<CertifyOutcom
        name somebody who never held anything. The nonce is the single-use half:
        null means no pending attempt — a disarmed, already-spent, or hand-forged
        arm — and is not confirmable however valid the timing looks (CS-3). When the
-       confirm carries an attempt sequence, it must be the pending arm's: a confirm
-       completes the press it began, so a late arm that was refused as superseded
-       leaves nothing for an older press to confirm (round-6 finding 3). */
+       confirm carries the server-issued `attemptToken`, it must equal the pending
+       arm's nonce: a confirm completes the press it began, not whatever arm happens
+       to be on the row (round-7 finding 2). */
     if (
       session.armedBy === null ||
       session.armedBy !== viewerId ||
       session.armNonce === null ||
       session.heldMs === null ||
-      (attemptSeq !== undefined && session.armSeq !== attemptSeq)
+      (attemptToken !== undefined && session.armNonce !== attemptToken)
     ) {
       return { ok: false, reason: 'not_armed' };
     }
@@ -451,13 +464,12 @@ export async function certifySession(input: CertifyInput): Promise<CertifyOutcom
         certifiedBy: viewerId,
         certifiedAt: sql`now()`,
         certifiedHeldMs: Math.round(heldMs),
-        /* CONSUME THE ATTEMPT. The nonce, the armed digest and the arm sequence
-           were the pending hold's, not the receipt's — spent here in the same
-           statement that lands the signature, so this arm cannot be confirmed a
-           second time (CS-3) and nothing stale is left on the certified row. */
+        /* CONSUME THE ATTEMPT. The nonce and the armed digest were the pending
+           hold's, not the receipt's — spent here in the same statement that lands
+           the signature, so this arm cannot be confirmed a second time (CS-3) and
+           nothing stale is left on the certified row. */
         certifyArmNonce: null,
         certifyArmedArtifactDigest: null,
-        certifyArmSeq: null,
         updatedAt: sql`now()`,
       })
       .where(
@@ -484,62 +496,41 @@ export async function certifySession(input: CertifyInput): Promise<CertifyOutcom
  * could see. Every cancellation path in the control now calls this, so a
  * cancelled hold leaves no live arm behind.
  *
- * Scoped to THIS viewer's own uncertified arm: it clears `certify_armed_at` /
- * `certify_armed_by` only where the arm is this viewer's and the session is not
- * yet certified. A certified session's arm is frozen (drizzle/0033) and part of
- * the receipt, so it is deliberately out of reach here — disarming is for a hold
- * that never completed, never for un-writing one that did.
+ * ## IT AUTHORIZES ON ARM-OWNERSHIP, NOT ROOM MEMBERSHIP (round-7 finding 4)
  *
- * Best-effort by design: it takes no lock beyond the rows it touches and returns
- * `ok` even when there was nothing to clear (an already-cancelled or never-armed
- * session). The confirm gate and the arm TTL remain the load-bearing backstops;
- * this narrows the window a cancelled hold leaves open, it does not replace them.
+ * The round-6 disarm ran the same membership gate as the confirm, so "arm as a
+ * member, lose membership, release" refused `not_in_room` — the arm stayed live,
+ * and a confirm after regaining membership within the TTL spent the cancelled
+ * hold. But retracting your OWN pending intention is not an act ON the room; it is
+ * the owner taking back a hold they never completed. So this clears the arm wherever
+ * it is THIS VIEWER'S own uncertified arm (`certify_armed_by = viewerId`,
+ * `certified_by IS NULL`), with no membership check at all — the owner may always
+ * cancel their own. A viewer who never armed this session owns no arm here and
+ * clears nothing, so this is no back door onto anyone else's hold. The confirm is
+ * NOT weakened: it still requires humanity, membership, and the elapsed gate.
  *
- * ## CANCEL WINS A RACE WITH A LATE ARM (round-6 finding 3)
+ * Scoped to the SERVER-ISSUED TOKEN when one is given (round-7 finding 2): the
+ * clear touches only the arm carrying exactly this nonce, so a stale release cannot
+ * clobber a newer press's arm. A certified session's arm is frozen (drizzle/0033)
+ * and part of the receipt, so it is deliberately out of reach here — disarming is
+ * for a hold that never completed, never for un-writing one that did.
  *
- * Clearing the arm is not enough on its own: an arm request and a disarm request
- * are independent round-trips the network may REORDER. If the disarm reaches the
- * server first (before its own arm has landed) it would find nothing to clear, and
- * the delayed arm would then write a fresh live nonce a direct confirm could spend
- * — the release lost the race. So a disarm carrying an attempt sequence ALSO raises
- * the session's cancel watermark to at least that sequence, unconditionally,
- * whether or not an arm is present. A late arm at or below that watermark then
- * refuses (`arm_superseded`). The clear is surgical — it releases the arm only when
- * it belongs to this attempt (or an older one) — so a newer press already armed is
- * left holding.
+ * Best-effort by design: it returns `ok` even when there was nothing to clear (an
+ * already-cancelled or never-armed session). The confirm gate and the arm TTL
+ * remain the load-bearing backstops; this narrows the window a cancelled hold
+ * leaves open, it does not replace them.
  */
-export async function disarmCertification(input: CertifyInput): Promise<DisarmOutcome> {
-  const { database, viewerId, sessionId, authorizedRoomId, attemptSeq } = input;
+export async function disarmCertification(input: DisarmInput): Promise<DisarmOutcome> {
+  const { database, viewerId, sessionId, attemptToken } = input;
 
   return database.transaction(async (tx) => {
-    const refusal = await viewerMayCertify(tx, viewerId, authorizedRoomId);
-    if (refusal !== null) return { ok: false, reason: refusal };
-
-    /* THE CANCEL WATERMARK — raised to this attempt's sequence even when no arm is
-       on the row yet, so a disarm that outran its own arm still blocks it. Scoped
-       to the uncertified session in this room; a certified row's receipt is frozen
-       and out of reach. Only when the client supplied a sequence. */
-    if (attemptSeq !== undefined) {
-      await tx
-        .update(sessions)
-        .set({
-          certifyCancelSeq: sql`greatest(coalesce(${sessions.certifyCancelSeq}, 0), ${attemptSeq})`,
-          updatedAt: sql`now()`,
-        })
-        .where(
-          and(
-            eq(sessions.id, sessionId),
-            eq(sessions.roomId, authorizedRoomId),
-            isNull(sessions.certifiedBy),
-          ),
-        );
-    }
-
-    /* THE CLEAR — surgical when a sequence is given (only this attempt or an older
-       one, never a newer press already armed), unconditional for the viewer's arm
-       when none is (the raw round-5 behaviour). The whole pending arm goes, nonce,
-       digest and sequence included — a cancelled hold leaves no live attempt a
-       later confirm could spend (CS-3). */
+    /* THE CLEAR — the whole pending arm goes, nonce and digest included, wherever
+       it is this viewer's own uncertified arm. Scoped to the server-issued token
+       when one is given (only the arm carrying this exact nonce, never a newer
+       press's), unconditional for the viewer's arm when none is (the raw round-5
+       behaviour). No room predicate: ownership is the authorization (round-7
+       finding 4). A cancelled hold leaves no live attempt a later confirm could
+       spend (CS-3). */
     await tx
       .update(sessions)
       .set({
@@ -547,20 +538,14 @@ export async function disarmCertification(input: CertifyInput): Promise<DisarmOu
         certifyArmedBy: null,
         certifyArmNonce: null,
         certifyArmedArtifactDigest: null,
-        certifyArmSeq: null,
         updatedAt: sql`now()`,
       })
       .where(
         and(
           eq(sessions.id, sessionId),
-          eq(sessions.roomId, authorizedRoomId),
           eq(sessions.certifyArmedBy, viewerId),
           isNull(sessions.certifiedBy),
-          ...(attemptSeq === undefined
-            ? []
-            : [
-                sql`(${sessions.certifyArmSeq} IS NULL OR ${sessions.certifyArmSeq} <= ${attemptSeq})`,
-              ]),
+          ...(attemptToken === undefined ? [] : [eq(sessions.certifyArmNonce, attemptToken)]),
         ),
       );
     return { ok: true };
