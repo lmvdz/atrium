@@ -1,5 +1,4 @@
-import { execFile } from 'node:child_process';
-import { promisify } from 'node:util';
+import { type ChildProcess, spawn } from 'node:child_process';
 import {
   type ArtifactRepo,
   addWorktree,
@@ -13,7 +12,72 @@ import {
 } from './git.js';
 import type { ExecutionProvider, ExecutionReport, SessionContext, Workspace } from './provider.js';
 
-const run = promisify(execFile);
+/** The outcome of running a harness child to completion (or timeout/kill). */
+interface HarnessRun {
+  readonly exitCode: number | null;
+  readonly detail?: string;
+}
+
+/**
+ * Spawn the harness in its OWN process group and run it to completion (#120
+ * round-7 F4). `detached: true` makes the child a group leader (pgid = pid), so a
+ * later signal to `-pid` reaches the whole tree — a `bash -lc` and everything it
+ * spawned — which is what `cancelAll` needs to leave nothing running loose.
+ * `execFile` cannot do this: it does not forward `detached` to `spawn`.
+ *
+ * stdout/stderr are drained into a small capped tail (not the harness's payload —
+ * that is the git tree) so a chatty child never blocks on a full pipe, and a
+ * non-zero exit carries a short reason. `onSpawn` hands the live `ChildProcess`
+ * to the caller for cancellation tracking. A timeout kills the group and reports
+ * a timed-out failure.
+ */
+function runHarness(
+  bin: string,
+  args: readonly string[],
+  options: { cwd: string; env: NodeJS.ProcessEnv; timeoutMs: number },
+  onSpawn: (child: ChildProcess) => void,
+): Promise<HarnessRun> {
+  return new Promise<HarnessRun>((resolve) => {
+    const child = spawn(bin, [...args], {
+      cwd: options.cwd,
+      env: options.env,
+      detached: true,
+      stdio: ['ignore', 'pipe', 'pipe'],
+    });
+    onSpawn(child);
+
+    let stderrTail = '';
+    const capture = (chunk: Buffer) => {
+      if (stderrTail.length < 2000) stderrTail += chunk.toString('utf8');
+    };
+    child.stdout?.on('data', () => {});
+    child.stderr?.on('data', capture);
+
+    let settled = false;
+    const done = (run: HarnessRun) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      resolve(run);
+    };
+
+    const timer = setTimeout(() => {
+      killGroup(child);
+      done({ exitCode: null, detail: `harness timed out after ${options.timeoutMs}ms` });
+    }, options.timeoutMs);
+
+    child.on('error', (error: Error) => {
+      done({ exitCode: 1, detail: error.message.split('\n')[0]?.slice(0, 500) });
+    });
+    child.on('close', (code, signal) => {
+      if (code === 0) return done({ exitCode: 0 });
+      const reason =
+        stderrTail.trim().split('\n').pop()?.slice(0, 500) ??
+        (signal ? `killed by ${signal}` : 'harness command failed');
+      done({ exitCode: code, detail: signal ? `killed by ${signal}` : reason });
+    });
+  });
+}
 
 /**
  * The one REAL worktree adapter (#120) — runs a REAL command in an isolated git
@@ -151,6 +215,13 @@ export function createWorktreeCommandProvider(options: WorktreeCommandOptions): 
   }
   const [bin, ...args] = command;
 
+  // ── IN-FLIGHT CHILDREN, TRACKED FOR CANCELLATION (#120 round-7 F4) ──────────
+  //
+  // Every live harness child, keyed by session id, so `cancelAll` can terminate
+  // it on shutdown. Without this the child is spawned fire-and-forget and a
+  // `SIGTERM` abandons it: Atrium exits and the harness keeps running loose.
+  const children = new Map<string, ChildProcess>();
+
   return {
     kind: 'worktree',
 
@@ -170,25 +241,21 @@ export function createWorktreeCommandProvider(options: WorktreeCommandOptions): 
     async run(workspace: Workspace, ctx: SessionContext): Promise<ExecutionReport> {
       const checkout = (workspace as WorktreeWorkspace).checkout;
 
-      let exitCode: number | null = 0;
-      let detail: string | undefined;
-      try {
-        await run(bin as string, args, {
-          cwd: checkout.dir,
-          timeout: timeoutMs,
-          maxBuffer: 16 * 1024 * 1024,
-          // The harness gets an allowlisted env — never the server's secrets, and
-          // scrubbed of any var that could retarget its git off this worktree.
-          env: await harnessEnv(ctx.sessionId),
-        });
-      } catch (error) {
-        const code = (error as { code?: unknown }).code;
-        exitCode = typeof code === 'number' ? code : 1;
-        detail =
-          error instanceof Error
-            ? error.message.split('\n')[0]?.slice(0, 500)
-            : 'harness command failed';
-      }
+      // Run the harness in its own process group, tracked for cancellation. The
+      // harness gets an allowlisted env — never the server's secrets, and scrubbed
+      // of any var that could retarget its git off this worktree.
+      const outcome = await runHarness(
+        bin as string,
+        args,
+        { cwd: checkout.dir, env: await harnessEnv(ctx.sessionId), timeoutMs },
+        (child) => {
+          children.set(ctx.sessionId, child);
+          child.once('close', () => children.delete(ctx.sessionId));
+          child.once('error', () => children.delete(ctx.sessionId));
+        },
+      );
+      const exitCode = outcome.exitCode;
+      const detail = outcome.detail;
 
       // Commit whatever the command produced, regardless of exit — a failing run
       // may still have left a partial artifact worth inspecting, but its terminal
@@ -211,14 +278,14 @@ export function createWorktreeCommandProvider(options: WorktreeCommandOptions): 
             const durable = await pushArtifactBranch(checkout, artifactRepo);
             artifact = { branch: checkout.branch, commit: durable, remote: artifactRepo.dir };
           } catch (error) {
-            detail =
+            const pushDetail =
               error instanceof Error
                 ? `artifact push failed: ${error.message.split('\n')[0]?.slice(0, 400)}`
                 : 'artifact push failed';
             return {
-              terminal: { ok: false, exitCode: exitCode ?? 1, detail },
+              terminal: { ok: false, exitCode: exitCode ?? 1, detail: pushDetail },
               receipt: {
-                exitSummary: `worktree harness produced no durable artifact: ${detail}`,
+                exitSummary: `worktree harness produced no durable artifact: ${pushDetail}`,
                 spendMicros: null,
                 contextPct: null,
                 artifact: null,
@@ -242,5 +309,38 @@ export function createWorktreeCommandProvider(options: WorktreeCommandOptions): 
         },
       };
     },
+
+    async cancelAll(): Promise<void> {
+      // Kill every in-flight harness's whole process GROUP (#120 round-7 F4).
+      // Each child was spawned `detached`, so its pgid is its own pid and the
+      // negated-pid signal reaches the harness AND anything it spawned. `SIGKILL`
+      // rather than `SIGTERM` because this is the shutdown backstop — the run
+      // already had its drain grace, and a harness that ignores `SIGTERM` must not
+      // outlive the process that abandoned it. Best-effort and never throws: a
+      // child that already exited (ESRCH) is exactly the state we want.
+      for (const child of children.values()) killGroup(child);
+      children.clear();
+    },
   };
+}
+
+/**
+ * Terminate a detached child's whole process group (#120 round-7 F4). The child
+ * is its own group leader (spawned `detached`), so signalling `-pid` reaches every
+ * descendant. Falls back to signalling the child directly if the group send fails
+ * (e.g. the leader already reaped), and swallows `ESRCH` — an already-dead process
+ * is the goal, not an error.
+ */
+function killGroup(child: ChildProcess): void {
+  const pid = child.pid;
+  if (pid === undefined) return;
+  try {
+    process.kill(-pid, 'SIGKILL');
+  } catch {
+    try {
+      child.kill('SIGKILL');
+    } catch {
+      // Already gone — nothing to kill, which is the desired end state.
+    }
+  }
 }

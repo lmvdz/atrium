@@ -10,7 +10,8 @@ import type {
 } from './provider.js';
 
 /**
- * THE PROVIDER REPORT, VALIDATED AT RUNTIME (#120 round-6 F7).
+ * THE PROVIDER REPORT, VALIDATED AND BOUNDS-CHECKED AT RUNTIME (#120 round-6 F7,
+ * round-7 F2).
  *
  * `ExecutionProvider.run` returns an `ExecutionReport` — a TS interface with NO
  * runtime guarantee. A provider that returns `undefined`, or a malformed object,
@@ -19,6 +20,17 @@ import type {
  * fire-and-forget catch and left the granted session `open` with its draw spent.
  * This schema is parsed INSIDE the boundary, so a missing or malformed report
  * throws where the catch turns it into a synthesized failed receipt instead.
+ *
+ * ROUND 7 F2: the receipt's numeric fields carry the SAME bounds the durable
+ * settle boundary enforces (`SettleReceiptBounds` in `commands.ts`) — `contextPct`
+ * in [0,1], `spendMicros` a non-negative integer, `exitSummary` length-capped. A
+ * provider that reported `contextPct: 2` / `spendMicros: -1` used to PARSE here
+ * (the schema bounded nothing), so the primary settle then rejected the out-of-
+ * range receipt at the durable boundary, the fallback failed-settle REUSED the
+ * same invalid values and rejected too, and `runGranted` returned `{failed}` with
+ * NO ledger receipt — the session left `open` forever, heartbeated. Bounding the
+ * report at parse means a garbage report is caught HERE, in the try, and
+ * synthesized into a clean failed receipt (safe null values) that actually lands.
  */
 const ReportSchema = z.object({
   terminal: z.object({
@@ -27,9 +39,11 @@ const ReportSchema = z.object({
     detail: z.string().optional(),
   }),
   receipt: z.object({
-    exitSummary: z.string(),
-    spendMicros: z.number().nullable(),
-    contextPct: z.number().nullable(),
+    // Same cap the durable `SettleReceiptBounds` uses, so a report that parses
+    // here is one the settle boundary will also accept.
+    exitSummary: z.string().max(4000),
+    spendMicros: z.number().int().nonnegative().nullable(),
+    contextPct: z.number().min(0).max(1).nullable(),
     artifact: z
       .object({
         branch: z.string(),
@@ -222,10 +236,42 @@ export function createExecutionCoordinator(
     // provider is never reached. `ownership` is MANDATORY (F4) — there is no
     // no-guard path to fall through. Revert the claim guard and a fabricated
     // session id resolves and runs.
-    const claimed = await ownership.claim({
-      sessionId: granted.sessionId,
-      roomId: granted.roomId,
-    });
+    //
+    // ── THE CLAIM IS INSIDE THE FAILURE BOUNDARY (#120 round-7 F3) ─────────────
+    //
+    // `claim` is a database UPDATE, so it can THROW — a deadlock, a connection
+    // blip, a transient fault. That throw used to escape `runGranted` into the
+    // fire-and-forget `.catch` in `wireExecutionCoordinator`, which only logs. But
+    // the session was leased AT GRANT (round-6): `execution_owner` is this
+    // instance and its heartbeat is warm. Left un-driven, the process heartbeat
+    // kept refreshing that row (it was scoped to every open owned session), so its
+    // lease never went stale and reconciliation could never see the wedge while
+    // this process lived — a spent draw, an `open` session, no receipt, forever.
+    // Catching the throw here turns a claim fault into the SAME `{failed}` a null
+    // claim returns: nothing was resolved or run, and — because the row stays
+    // granted-but-UNCLAIMED — the heartbeat (now scoped to CLAIMED sessions,
+    // `configure.ts`) no longer warms it, so its grant-stamped lease ages out and
+    // reconciliation drives it to a receipt. Revert this try/catch and a claim
+    // throw wedges the session open-and-heartbeated for the life of the process.
+    let claimed: ClaimedSession | null;
+    try {
+      claimed = await ownership.claim({
+        sessionId: granted.sessionId,
+        roomId: granted.roomId,
+      });
+    } catch (error) {
+      logger.error('ownership claim threw — leaving the session for reconciliation', {
+        sessionId: granted.sessionId,
+        roomId: granted.roomId,
+        provider: provider.kind,
+        error: error instanceof Error ? error.message : String(error),
+      });
+      // Nothing was resolved, run, or settled, and the row is still the granted-
+      // unclaimed lease the grant wrote. It is NOT heartbeated as if running, so
+      // its lease goes stale and reconciliation repairs it. Report failed so the
+      // caller sees the run did not happen.
+      return { kind: 'failed', sessionId: granted.sessionId, artifact: null };
+    }
     if (!claimed) {
       logger.error('refusing to run a session without a committed, unclaimed granted draw', {
         sessionId: granted.sessionId,
@@ -345,8 +391,13 @@ export function createExecutionCoordinator(
           exitSummary:
             `execution completed (${outcome}) but the settle failed: ` +
             (error instanceof Error ? error.message : String(error)).slice(0, 500),
-          spendMicros: report.receipt.spendMicros,
-          contextPct: report.receipt.contextPct,
+          // SAFE values, never the report's (#120 round-7 F2). `ReportSchema` now
+          // bounds these at parse, so `report.receipt` is in-range here — but the
+          // fallback is the last write before reconciliation, and it must not be
+          // the thing that carries an out-of-range value into a receipt. A failed
+          // exit's spend/context are not load-bearing; null/0 always append.
+          spendMicros: null,
+          contextPct: null,
           // No artifact on a fallback settle. The run's artifact may well be
           // real, but the settle that would have carried it did not land, and a
           // receipt asserting a tuple whose write path just faulted is a claim

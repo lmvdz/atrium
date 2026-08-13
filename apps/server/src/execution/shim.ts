@@ -150,6 +150,12 @@ export function createDeterministicShimProvider(
         },
       };
     },
+
+    // Nothing to cancel (#120 round-7 F4): the shim's "harness" is a synchronous
+    // in-process routine — it spawns no child and holds no remote sandbox, so a
+    // `run` is either not started or already returned. The seam still answers the
+    // question, it just has nothing to kill.
+    async cancelAll(): Promise<void> {},
   };
 }
 

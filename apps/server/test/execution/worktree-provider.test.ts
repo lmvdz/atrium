@@ -1,5 +1,12 @@
+import { readFile } from 'node:fs/promises';
+import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
-import { DANGEROUS_GIT_VARS } from '../../src/execution/git.js';
+import {
+  createScratchRepo,
+  DANGEROUS_GIT_VARS,
+  disposeScratchRepo,
+} from '../../src/execution/git.js';
+import type { SessionContext } from '../../src/execution/provider.js';
 import {
   createWorktreeCommandProvider,
   harnessEnv,
@@ -119,5 +126,106 @@ describe('the unsandboxed provider cannot be constructed without the opt-in (#12
     delete process.env.EXECUTION_ALLOW_UNSANDBOXED;
     expect(unsandboxedExecutionAllowed()).toBe(false);
     expect(build).toThrow(/EXECUTION_ALLOW_UNSANDBOXED/);
+  });
+});
+
+/**
+ * ROUND 7 F4 — SIGTERM MUST NOT ABANDON THE CHILD.
+ *
+ * The provider spawns a harness on the server's own disk. Before this fix the
+ * ExecutionProvider seam had no cancellation verb, so shutdown expired the drain
+ * grace, deleted scratch and `process.exit`'d WITHOUT killing the child — a silent
+ * harness kept executing after Atrium abandoned the session. `cancelAll` is the
+ * verb, and this proves it terminates not just the direct child but its whole
+ * process GROUP: a `bash -lc` AND the grandchild it backgrounded both die.
+ */
+describe('cancelAll terminates a running harness and its whole process group (#120 r7 F4)', () => {
+  let savedOptIn: string | undefined;
+  beforeEach(() => {
+    savedOptIn = process.env.EXECUTION_ALLOW_UNSANDBOXED;
+    process.env.EXECUTION_ALLOW_UNSANDBOXED = '1';
+  });
+  afterEach(() => {
+    if (savedOptIn === undefined) delete process.env.EXECUTION_ALLOW_UNSANDBOXED;
+    else process.env.EXECUTION_ALLOW_UNSANDBOXED = savedOptIn;
+  });
+
+  /** Is `pid` a live process? `kill(pid, 0)` sends no signal — it only probes. */
+  function alive(pid: number): boolean {
+    try {
+      process.kill(pid, 0);
+      return true;
+    } catch (error) {
+      // ESRCH = no such process (dead). EPERM = alive but not ours to signal.
+      return (error as NodeJS.ErrnoException).code === 'EPERM';
+    }
+  }
+
+  async function waitUntilDead(pid: number, timeoutMs = 5_000): Promise<void> {
+    const deadline = Date.now() + timeoutMs;
+    while (Date.now() < deadline) {
+      if (!alive(pid)) return;
+      await new Promise((r) => setTimeout(r, 25));
+    }
+    throw new Error(`process ${pid} was still alive after ${timeoutMs}ms`);
+  }
+
+  it('kills the child and the grandchild it backgrounded, so nothing runs loose', async () => {
+    const repo = await createScratchRepo();
+    // The harness backgrounds a long `sleep` (the grandchild), records BOTH its own
+    // pid ($$) and the grandchild's ($!), then blocks on `wait`. A run this shape is
+    // exactly the orphan-maker: kill only the direct child and the grandchild lives.
+    const provider = createWorktreeCommandProvider({
+      repo,
+      command: ['bash', '-lc', 'sleep 300 & echo "$!" > pids.txt; echo "$$" >> pids.txt; wait'],
+    });
+    const ctx: SessionContext = {
+      sessionId: 'cancel-me',
+      roomId: 'r',
+      planId: 'p',
+      harness: 'omp',
+      model: 'haiku',
+    };
+    const workspace = await provider.resolve(ctx);
+    // Start the run but DO NOT await it — it blocks on `wait` until we cancel.
+    const runPromise = provider.run(workspace, ctx);
+
+    // Wait for the harness to record both pids.
+    const pidfile = join(workspace.dir, 'pids.txt');
+    let sleepPid = 0;
+    let bashPid = 0;
+    const deadline = Date.now() + 5_000;
+    while (Date.now() < deadline) {
+      try {
+        const lines = (await readFile(pidfile, 'utf8')).trim().split('\n');
+        if (lines.length >= 2 && lines[0] && lines[1]) {
+          sleepPid = Number(lines[0]);
+          bashPid = Number(lines[1]);
+          break;
+        }
+      } catch {
+        // not written yet
+      }
+      await new Promise((r) => setTimeout(r, 25));
+    }
+    expect(sleepPid).toBeGreaterThan(0);
+    expect(bashPid).toBeGreaterThan(0);
+    // Both are running before we cancel.
+    expect(alive(bashPid)).toBe(true);
+    expect(alive(sleepPid)).toBe(true);
+
+    // THE CANCEL. REVERT-REDS: return the ExecutionProvider interface to no
+    // `cancelAll` (or make it a no-op / kill only `child.pid` without the group),
+    // and the grandchild `sleep` survives — an orphan spending against an abandoned
+    // session.
+    await provider.cancelAll();
+
+    await waitUntilDead(bashPid);
+    await waitUntilDead(sleepPid);
+
+    // The run resolves once its child is gone; clean up.
+    await runPromise;
+    await workspace.dispose().catch(() => undefined);
+    await disposeScratchRepo(repo);
   });
 });

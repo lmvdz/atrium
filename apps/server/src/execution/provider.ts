@@ -129,4 +129,25 @@ export interface ExecutionProvider {
   resolve(ctx: SessionContext): Promise<Workspace>;
   /** RUN the harness in the workspace and REPORT terminal + receipt. */
   run(workspace: Workspace, ctx: SessionContext): Promise<ExecutionReport>;
+  /**
+   * CANCEL every in-flight execution this provider is running (#120 round-7 F4).
+   *
+   * The seam runs a process Atrium does not own — a spawned child on the server's
+   * disk (worktree), or a remote sandbox (BUY). Nothing in `resolve`/`run` gives
+   * shutdown a way to STOP one: on `SIGTERM` the process expired its drain grace,
+   * deleted scratch, closed the DB and `process.exit`'d WITHOUT killing the child
+   * or signalling the sandbox — so a harness kept executing after Atrium abandoned
+   * the session, an orphaned process spending against a plan whose room is gone.
+   *
+   * `cancelAll` is the missing verb: it terminates whatever this provider still
+   * has running — the LOCAL child's whole process GROUP (so grandchildren a
+   * `bash -lc` spawned die too, not just the direct child), the REMOTE sandbox by
+   * its stop/destroy call. It is idempotent and never throws: called once from the
+   * shutdown path AFTER the drain grace and BEFORE scratch is deleted, it is the
+   * last chance to not leave a process running loose. A provider with nothing
+   * spawned (the shim's in-process routine, the unconfigured sandbox stub)
+   * implements it as a no-op — the point is that the seam MUST answer the
+   * question, not that every implementation has something to kill.
+   */
+  cancelAll(): Promise<void>;
 }

@@ -1010,14 +1010,38 @@ export function createCommandService({
      * membership failure.
      */
     guard?: (tx: Tx) => Promise<void>,
+    /**
+     * Skip the built-in membership authorization (#120 round-7 F1). ONLY
+     * `settle_session` sets this, and only because it does its OWN authorization
+     * in the `guard`: a PROVIDER-bound session's terminal is authorized by a
+     * capability TOKEN, not by the opener's current room membership (the opener
+     * may have lost membership, or be a dead process the reconciler is repairing).
+     * When the guard cannot prove the token, it falls back to `requireMembership`
+     * itself, so a MANUAL settle is still membership-gated — this option moves the
+     * check into the guard, it does not remove it.
+     */
+    skipMembershipGate = false,
+    /**
+     * Append as THIS actor rather than the calling session (#120 round-7 F1). ONLY
+     * a token-authorized provider settle sets it, to `{ kind: 'system' }`: that
+     * exit comes from the execution provider's authority (the capability token),
+     * not from the opener as a room participant, and the DB's actor-authorization
+     * trigger (`atrium_core_events_invariants`) requires an IDENTIFIED actor
+     * (human/agent) to hold a current membership while EXEMPTING the anonymous
+     * `system` kind. Attributing the settle to the opener would be refused by that
+     * trigger the moment the opener left the room — the whole point of F1. A system
+     * settle is covenant-safe: it is non-epistemic (§9.5), flips no `~` to a `✓`,
+     * and is reachable only by a holder of the row-only token.
+     */
+    actorOverride?: Actor,
   ): Promise<CommandResult> {
     const appended = await ledger.append({
       roomId,
-      actor: actorOf(session),
+      actor: actorOverride ?? actorOf(session),
       // The authorization that counts: same question, asked again under the
       // append lock, on the transaction that is about to write.
       authorize: async (tx) => {
-        await requireMembership(session, roomId, tx);
+        if (!skipMembershipGate) await requireMembership(session, roomId, tx);
         if (guard) await guard(tx);
       },
       build,
@@ -1042,7 +1066,18 @@ export function createCommandService({
     // The cheap early refusal. The one that decides whether an append is
     // allowed to become durable is inside the append transaction — see
     // `appendAndProject`.
-    await requireMembership(session, command.roomId);
+    //
+    // `settle_session` is the ONE exception (#120 round-7 F1): a provider session's
+    // terminal is authorized by a capability TOKEN, and its legitimate holders —
+    // the coordinator and the reconciler — settle AS the opener, who may since have
+    // lost room membership. An early membership refusal here would reject that
+    // token-authorized settle before its own authorization could run. So settle
+    // does all of its authorization (membership for a manual settle, the token for
+    // a provider one) inside its `guard`, under the append lock, and skips this
+    // proxy. Every other command keeps the cheap early check.
+    if (command.name !== 'settle_session') {
+      await requireMembership(session, command.roomId);
+    }
 
     // ── The covenant, before the append rather than during the fold ──────────
     //
@@ -1736,6 +1771,30 @@ export function createCommandService({
               .join('; ')}`,
           );
         }
+        // ── IS THIS A TOKEN-AUTHORIZED PROVIDER SETTLE? (#120 round-7 F1) ────────
+        //
+        // Read the session's execution-authority record — `execution_mode` and the
+        // capability token — to decide, BEFORE the append, whether this settle is
+        // authorized by the token rather than by the caller's membership. Both
+        // fields are written once at grant and never change (the terminal-immutable
+        // trigger and the grant-only writer), so reading them here rather than under
+        // the guard's lock cannot race: what changes under load is `status`, which
+        // the guard reads `for('share')`. A token-authorized settle appends as the
+        // SYSTEM actor (the provider's authority, DB-exempt from the opener-
+        // membership rule) and skips the membership gate; everything else appends as
+        // the caller and runs the ordinary gates in the guard.
+        const [authRecord] = await db
+          .select({
+            executionMode: sessions.executionMode,
+            executionAuthority: sessions.executionAuthority,
+          })
+          .from(sessions)
+          .where(and(eq(sessions.id, command.sessionId), eq(sessions.roomId, command.roomId)));
+        const tokenAuthorized =
+          authRecord?.executionMode === 'provider' &&
+          authRecord.executionAuthority !== null &&
+          command.authority === authRecord.executionAuthority;
+
         // Set in the guard, read in `build` — the `open_session` pattern, and for
         // the same reason: both must happen under the ONE append lock.
         let verifiedArtifact: z.infer<typeof ExecutionArtifact> | null = null;
@@ -1757,49 +1816,60 @@ export function createCommandService({
             artifact: verifiedArtifact,
           }),
           async (tx) => {
-            // ── A SESSION'S EXIT IS ITS OWNER'S TO WRITE (#120 round-3 F3) ────
+            // ── WHO MAY WRITE A SESSION'S EXIT (#120 round-3 F3, round-6 F2/F6,
+            //    round-7 F1) ──────────────────────────────────────────────────
             //
             // `settle_session` is `open`-class, which decides whether a MACHINE
             // may perform it (#114 T3: it is non-epistemic, so yes). It never
-            // decided WHICH member may perform it, and the answer was "any of
-            // them". So while a granted harness was still running, any bystander
-            // in the room could append `settle_session {outcome:'settled',
-            // artifact:null}`; the one-exit predicate in `projectSessionExit`
-            // would honour the fabricated clean exit, the provider's real settle
-            // would then find no `open` session and throw, and the ledger would
-            // index a caller-chosen outcome with the real artifact unindexed. A
-            // false green on the covenant surface: a machine's — or a
-            // bystander's — assertion standing as a session's receipt.
+            // decided WHICH party may perform it, and the answer was "any member".
+            // So while a granted harness was still running, any bystander in the
+            // room could append `settle_session {outcome:'settled', artifact:null}`;
+            // the one-exit predicate in `projectSessionExit` would honour the
+            // fabricated clean exit, the provider's real settle would then find no
+            // `open` session and throw, and the ledger would index a caller-chosen
+            // outcome with the real artifact unindexed.
             //
-            // The mechanism is an OWNER check against the row the open already
-            // wrote, deliberately in preference to the two alternatives:
+            // Read the row under the append lock (`for('share')`, so it cannot exit
+            // underneath the check), then decide authorization. There is ONE new
+            // door versus round-6, and it only ever OPENS one that was wrongly
+            // closed (round-7 F1):
             //
-            //  • A coordinator-only command would mean the exit could only ever
-            //    be written by this process. A session whose coordinator died
-            //    could then never be settled by anything, which is the wedge F2
-            //    and F5 exist to prevent.
-            //  • An opener TOKEN (minted at open, presented at settle) is
-            //    strictly stronger and needs a column to hold its hash plus a
-            //    channel to carry it. It buys protection against a compromised
-            //    opener, which is not the threat here — the opener is the party
-            //    the covenant already trusts with this session.
+            //  • A valid CAPABILITY TOKEN on a `provider` session is the WHOLE of
+            //    the authorization. The token (`execution_authority`) is minted
+            //    row-only at grant and never put on the wire — the coordinator gets
+            //    it from `claim`, the reconciler reads it off the row — so presenting
+            //    it proves the settle comes from the process that owns the run, not a
+            //    room member. When it is present and correct, the opener's CURRENT
+            //    room membership is NOT additionally required: the coordinator settles
+            //    the run it just executed and the reconciler repairs a wedge THIS
+            //    process owns, both AS the opener, who may since have lost membership
+            //    (or, for the reconciler, be a dead process). Re-checking membership
+            //    on top of the token left such a session wedged `open` forever, its
+            //    draw spent, unreconcilable — the round-7 F1 defect.
             //
-            // So: the settler must be the actor that opened it. That fact is
-            // already durable and needs no migration — `sessions.opened_by_event_id`
-            // names the `session_opened` row, and `core_events.actor_id` is the
-            // trusted actor it was appended under (never a client-supplied
-            // field). Read under the append lock, `for('share')` on the session
-            // row so it cannot exit underneath the check.
+            //  • WITHOUT a valid token, nothing changes from round-6. The settle
+            //    runs the ordinary gates in the ordinary order: membership first (a
+            //    non-member is refused `not_a_member`, exactly as any command is —
+            //    the early proxy in `execute` is skipped for settle, so this is where
+            //    it happens), then the OPENER check (round-3 F3: a member who did not
+            //    open the session cannot write its receipt), then, for a `provider`
+            //    session, the capability refusal (round-6 F2/F6: a member — the opener
+            //    included — holds no token, so their manual settle of either spelling
+            //    cannot terminate a running provider session). An `external` session
+            //    has no token and is governed by membership + opener alone.
+            //
+            // Revert the token bypass and a membership-removed opener's token settle
+            // is refused (round-7 F1); revert the capability refusal and a member's
+            // tokenless settle terminates a provider session mid-run (round-6 F2/F6).
             const [owned] = await tx
               .select({
                 status: sessions.status,
                 openerId: coreEvents.actorId,
                 openedByEventId: sessions.openedByEventId,
-                // The execution-authority record, read under the same lock (#120
-                // round-6): the mode decides whether a capability token is required,
-                // and the token is the value it is checked against.
+                // The mode, read under the append lock, decides the manual-path
+                // capability refusal and the clean-settle-needs-artifact rule. The
+                // token itself was already checked (immutably) into `tokenAuthorized`.
                 executionMode: sessions.executionMode,
-                executionAuthority: sessions.executionAuthority,
               })
               .from(sessions)
               .leftJoin(coreEvents, eq(coreEvents.id, sessions.openedByEventId))
@@ -1813,38 +1883,31 @@ export function createCommandService({
                 `no session "${command.sessionId}" to settle in room "${command.roomId}" — it does not exist here`,
               );
             }
-            if (owned.openedByEventId === null || owned.openerId === null) {
-              // A session with no recorded opener has no party authorized to
-              // settle it. Fail CLOSED: the alternative is that the one row that
-              // cannot name its owner is settleable by anybody.
-              throw new CommandError('invalid', sessionSettleRefusal(command.sessionId));
-            }
-            if (owned.openerId !== session.userId) {
-              throw new CommandError('invalid', sessionSettleRefusal(command.sessionId));
-            }
 
-            // ── THE SETTLEMENT CAPABILITY GATES A PROVIDER SESSION (#120 r6 F2/F6) ──
-            //
-            // A `provider`-mode session's terminal — settled OR failed — belongs to
-            // the ExecutionProvider that owns it, reported through the coordinator.
-            // Round 5 closed only the fabricated-CLEAN-exit half (a settle needed a
-            // verified artifact); a bystanding opener could still fabricate a
-            // `failed` exit and win the one-exit race, force-failing a running
-            // provider session from the outside. The fix is one capability that
-            // covers both outcomes: a provider session may be settled only by a
-            // caller presenting its `execution_authority` token. That token is
-            // minted row-only at grant and never leaves the process — the
-            // coordinator gets it from `claim`, the reconciler reads it off the row
-            // — so a room member (the opener included) cannot present it, and their
-            // manual settle of either spelling is refused. `external` sessions carry
-            // no token and are governed by the opener check alone (external-settle
-            // mode). Revert this and a room member's fabricated `failed` (or, with
-            // the F2 revert, `settled`) terminates a provider session mid-run.
-            if (owned.executionMode === 'provider') {
-              if (
-                owned.executionAuthority === null ||
-                command.authority !== owned.executionAuthority
-              ) {
+            // `tokenAuthorized` was decided from the immutable authority record
+            // above (round-7 F1). A provider session settled by its valid capability
+            // token is authorized in full by the token — the opener-membership and
+            // identity gates are bypassed, and the append is a SYSTEM one. Every
+            // other path falls through to the ordinary gates, in the ordinary order.
+            if (!tokenAuthorized) {
+              // Membership FIRST, so a non-member is refused `not_a_member` exactly
+              // as any other command is (the early proxy in `execute` is skipped for
+              // settle, so it is enforced here under the append lock).
+              await requireMembership(session, command.roomId, tx);
+              // Then the OPENER check (round-3 F3): a session's exit is its opener's
+              // to write. Fail CLOSED when the opener is unrecorded.
+              if (owned.openedByEventId === null || owned.openerId === null) {
+                throw new CommandError('invalid', sessionSettleRefusal(command.sessionId));
+              }
+              if (owned.openerId !== session.userId) {
+                throw new CommandError('invalid', sessionSettleRefusal(command.sessionId));
+              }
+              // Then, for a PROVIDER session, the capability refusal (round-6 F2/F6):
+              // its terminal belongs to the provider, and a room member — the opener
+              // included — holds no token, so a manual settle of EITHER spelling
+              // cannot terminate a running provider session. (`external` sessions
+              // carry no token and are governed by membership + opener alone.)
+              if (owned.executionMode === 'provider') {
                 throw new CommandError(
                   'invalid',
                   providerSettleCapabilityRefusal(command.sessionId),
@@ -1915,6 +1978,15 @@ export function createCommandService({
               );
             }
           },
+          // Settle owns its own authorization in the guard above (round-7 F1): a
+          // provider session by its capability token, a manual one by membership.
+          // Skip the built-in membership gate so a token-authorized settle by an
+          // opener who lost membership is not refused before its token is checked.
+          true,
+          // A token-authorized provider settle appends as SYSTEM (the provider's
+          // authority), which the DB actor-authorization trigger exempts from the
+          // opener-membership rule; a manual settle appends as the caller as usual.
+          tokenAuthorized ? { kind: 'system' } : undefined,
         );
       }
 

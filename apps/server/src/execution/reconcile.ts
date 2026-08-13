@@ -69,19 +69,24 @@ import type { Session } from '../session.js';
  * dead owner from a live peer, and killing a live peer's session is the worse
  * error. So the lease is honored until it is provably stale.
  *
- * ## It settles AS THE OPENER, through the ordinary command path
+ * ## It settles a PROVIDER session by its capability, attributed to the opener
  *
- * F3 made a session's exit its opener's to write. This does not carve an
- * exception out of that: it reconstructs the opener's `Session` from the durable
- * record (`sessions.opened_by_event_id` → `core_events.actor_id`, and that user's
- * `principal_kind`) and appends through the same `CommandService` a live settle
- * uses. One path, one set of gates, one refusal shape — a reconciliation that
- * bypassed the owner check would be exactly the adjacent-path bypass F3 closes.
+ * Every row this reconciler acts on is leased (`execution_owner IS NOT NULL`),
+ * which is a `provider`-mode session. A provider session's terminal is authorized
+ * by its `execution_authority` TOKEN (round-6), not by the opener's current room
+ * membership (round-7 F1). So this reads the token off the row and presents it —
+ * it is a trusted in-process holder, exactly as the coordinator is with the token
+ * `claim` returns — and the settle lands on the strength of the capability alone.
  *
- * The honest cost of that choice: if the opener has since lost membership in the
- * room, the append is refused and the session stays open. That is logged loudly,
- * per session, and left — inventing a system actor with authority to write any
- * room's receipts would be a larger hole than the one it patched.
+ * The event is still ATTRIBUTED to the opener (reconstructed from
+ * `sessions.opened_by_event_id → core_events.actor_id` and that user's
+ * `principal_kind`), because that is who opened the session and the ledger needs a
+ * real actor. But attribution is not authorization here: a leased session whose
+ * opener has since lost membership is STILL reconciled, because the token is the
+ * authority and membership is not re-checked on the provider path. Before round-7
+ * that membership re-check refused exactly this repair, and the wedge stayed
+ * `open` forever. The only rows still left unreconciled are those whose opener is
+ * unresolvable at all (no actor to attribute to) — logged loudly, per session.
  */
 
 /** What one pass did. Returned so a test — and the boot log — can assert on it. */

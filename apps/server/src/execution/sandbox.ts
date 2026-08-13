@@ -78,19 +78,29 @@ interface SandboxWorkspace extends Workspace {
 export function createSandboxProvider(options: SandboxProviderOptions = {}): ExecutionProvider {
   const { client } = options;
 
+  // In-flight sandbox handles, so `cancelAll` can signal a running remote sandbox
+  // to stop on shutdown (#120 round-7 F4). A handle is tracked from `resolve`
+  // until its workspace is disposed; the unconfigured stub creates none, so its
+  // `cancelAll` has nothing to do.
+  const handles = new Map<string, SandboxHandle>();
+
   return {
     kind: 'sandbox',
 
     async resolve(ctx: SessionContext): Promise<Workspace> {
       if (!client) throw new SandboxNotConfiguredError();
       const handle = await client.createWorkspace(ctx);
+      handles.set(ctx.sessionId, handle);
       const workspace: SandboxWorkspace = {
         sessionId: ctx.sessionId,
         dir: handle.workdir,
         branch: handle.branch,
         remote: handle.remote,
         handle,
-        dispose: () => handle.destroy(),
+        dispose: async () => {
+          handles.delete(ctx.sessionId);
+          await handle.destroy();
+        },
       };
       return workspace;
     },
@@ -98,6 +108,15 @@ export function createSandboxProvider(options: SandboxProviderOptions = {}): Exe
     async run(workspace: Workspace, ctx: SessionContext): Promise<ExecutionReport> {
       if (!client) throw new SandboxNotConfiguredError();
       return client.runHarness((workspace as SandboxWorkspace).handle, ctx);
+    },
+
+    async cancelAll(): Promise<void> {
+      // Destroy every still-resolved sandbox — the remote-machine equivalent of
+      // killing a local child (#120 round-7 F4). Best-effort and never throws: a
+      // sandbox that already tore down is the desired end state.
+      const live = [...handles.values()];
+      handles.clear();
+      await Promise.all(live.map((handle) => handle.destroy().catch(() => undefined)));
     },
   };
 }

@@ -16,6 +16,7 @@ import {
 import { createExecutionCoordinator } from '../../apps/server/src/execution/coordinator.js';
 import {
   type ArtifactRepo,
+  addWorktree,
   artifactBranchCommit,
   artifactCommitResolves,
   branchCommit,
@@ -24,11 +25,17 @@ import {
   disposeScratchRepo,
   listSessionBranches,
   mainCommit,
+  removeWorktree,
   type ScratchRepo,
   sessionBranch,
   settledArtifactRef,
 } from '../../apps/server/src/execution/git.js';
-import type { ExecutionArtifact } from '../../apps/server/src/execution/provider.js';
+import type {
+  ExecutionArtifact,
+  ExecutionProvider,
+  SessionContext,
+  Workspace,
+} from '../../apps/server/src/execution/provider.js';
 import { reconcileWedgedSessions } from '../../apps/server/src/execution/reconcile.js';
 import {
   createDeterministicShimProvider,
@@ -1251,3 +1258,159 @@ describe('the claim is once-only and returns stored context (#120 r6 F5, red-on-
     expect(await peer.claim({ sessionId, roomId: room.roomId })).toBeNull();
   });
 });
+
+/* ═══════════════════════════════════════════════════════════════════════════
+ * ROUND 7 — the token is the settlement authority, decoupled from membership.
+ * ═══════════════════════════════════════════════════════════════════════════ */
+
+describe('a provider settle is the token, not the opener membership (#120 r7 F1, red-on-revert)', () => {
+  /** Remove a member from the room, as a sign-out / removal / revocation would. */
+  async function removeMembership(userId: string): Promise<void> {
+    await handle.db.execute(
+      sql`DELETE FROM memberships WHERE room_id = ${room.roomId} AND user_id = ${userId}`,
+    );
+  }
+
+  it('settles a running provider session by its token AFTER the opener loses membership', async () => {
+    const planId = await openPlan();
+    await fundPlan(planId);
+    const sessionId = await openGrantedSession(planId, agentSession);
+    const authority = await sessionAuthority(sessionId);
+
+    // The opener loses room membership WHILE its harness is still running — the
+    // exact race round 7 F1 is about: signed out, removed, or session revoked.
+    await removeMembership(agentId);
+
+    // A TOKENLESS manual settle by the now-ex-member is refused — membership is
+    // checked first, exactly as for any command (a bystander-fabrication hole must
+    // stay closed). Nothing is appended.
+    await expect(
+      commandService().execute(agentSession, {
+        name: 'settle_session',
+        roomId: room.roomId,
+        sessionId,
+        outcome: 'failed',
+        exitSummary: 'no token, no membership',
+        spendMicros: null,
+        contextPct: null,
+        artifact: null,
+      }),
+    ).rejects.toThrow(/no membership/);
+    const [stillOpen] = await handle.db.select().from(sessions).where(eq(sessions.id, sessionId));
+    expect(stillOpen?.status).toBe('open');
+
+    // The CAPABILITY settle — the coordinator's/reconciler's path — STILL lands,
+    // membership notwithstanding: the token is the whole of the authority. This is
+    // the coordinator settling as the opener whose membership just vanished.
+    // REVERT-REDS: re-require the opener's current membership on the provider path
+    // (drop the `tokenAuthorized` bypass) and this throws `/no membership/`, leaving
+    // the granted session wedged open with its draw spent and no receipt.
+    const settled = await commandService().execute(agentSession, {
+      name: 'settle_session',
+      roomId: room.roomId,
+      sessionId,
+      outcome: 'failed',
+      exitSummary: 'the run finished after the opener left the room',
+      spendMicros: null,
+      contextPct: null,
+      artifact: null,
+      authority,
+    });
+    expect(settled.kind).toBe('appended');
+    const [after] = await handle.db.select().from(sessions).where(eq(sessions.id, sessionId));
+    expect(after?.status).toBe('failed');
+    expect(after?.settledByEventId).toBeTruthy();
+  });
+
+  it('reconciles a stale-leased wedge whose opener has since left the room', async () => {
+    const T0 = new Date('2026-02-01T00:00:00.000Z');
+    const STALE_MS = 30_000;
+    const planId = await openPlan();
+    await fundPlan(planId);
+    // A granted provider session, leased at grant to this instance. Its owner dies
+    // (heartbeat frozen and stale) AND its opener has left the room.
+    const sessionId = await openGrantedSession(planId, agentSession);
+    await handle.db.execute(
+      sql`UPDATE sessions SET execution_heartbeat_at = ${T0.toISOString()}::timestamptz
+          WHERE id = ${sessionId} AND room_id = ${room.roomId}`,
+    );
+    await removeMembership(agentId);
+
+    // Reconciliation drives it to a receipt on the strength of the row's token,
+    // attributed to the opener but NOT gated on the opener's (now absent) membership.
+    // REVERT-REDS: re-require membership on the provider settle and this reconcile is
+    // refused — `unreconciled: 1`, and the wedge stays `open` forever.
+    const result = await reconcileWedgedSessions({
+      db: handle.db,
+      commands: commandService(),
+      logger,
+      staleAfterMs: STALE_MS,
+      now: new Date(T0.getTime() + STALE_MS + 1_000),
+    });
+    expect(result).toEqual({ found: 1, failed: 1, unreconciled: 0 });
+    const [after] = await handle.db.select().from(sessions).where(eq(sessions.id, sessionId));
+    expect(after?.status).toBe('failed');
+    expect(await exitArtifact(sessionId, 'session_failed')).toBeNull();
+  });
+});
+
+describe('a garbage provider report still reaches a terminal receipt (#120 r7 F2, red-on-revert)', () => {
+  it('does not wedge the session open when the report is out of range', async () => {
+    const planId = await openPlan();
+    await fundPlan(planId);
+
+    // A provider whose report is well-shaped but OUT OF BOUNDS — `contextPct` above
+    // 1, a negative spend. Round 6 parsed it, the primary settle rejected it at the
+    // durable bounds, the fallback reused the same values and rejected too, and the
+    // session was left `open` with no receipt. Round 7 bounds the report at parse,
+    // so it is caught inside the coordinator's failure boundary and settled failed.
+    const provider: ExecutionProvider = {
+      kind: 'out-of-range',
+      resolve: shimResolve,
+      run: async () => ({
+        terminal: { ok: true, exitCode: 0 },
+        receipt: { exitSummary: 'garbage', spendMicros: -1, contextPct: 2, artifact: null },
+      }),
+      cancelAll: async () => {},
+    };
+    const commands = commandService();
+    const coord = createExecutionCoordinator({
+      commands,
+      provider,
+      logger,
+      ownership: ownership(),
+    });
+
+    const outcome = await coord.openAndRun(agentSession, {
+      roomId: room.roomId,
+      planId,
+      harness: 'omp',
+      model: 'haiku',
+    });
+
+    // REVERT-REDS: drop the bounds from `ReportSchema` (and the safe-value fallback)
+    // and the out-of-range report is rejected at the durable boundary with NO
+    // receipt — the session stays `open`. With the fix it reaches a `failed` receipt.
+    expect(outcome.kind).toBe('failed');
+    if (outcome.kind !== 'failed') return;
+    const [row] = await handle.db.select().from(sessions).where(eq(sessions.id, outcome.sessionId));
+    expect(row?.status).toBe('failed');
+    expect(row?.settledByEventId).toBeTruthy();
+  });
+});
+
+/**
+ * A minimal real workspace resolver reused by the out-of-range report test — the
+ * report is what is under test, not the git plumbing, so this resolves a real
+ * scratch worktree exactly as the shim does and lets the coordinator dispose it.
+ */
+async function shimResolve(ctx: SessionContext): Promise<Workspace> {
+  const checkout = await addWorktree(repo, ctx.sessionId);
+  return {
+    sessionId: ctx.sessionId,
+    dir: checkout.dir,
+    branch: checkout.branch,
+    remote: artifactRepo.dir,
+    dispose: () => removeWorktree(checkout),
+  };
+}

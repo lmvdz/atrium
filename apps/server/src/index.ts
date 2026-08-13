@@ -407,6 +407,23 @@ async function main(): Promise<void> {
           logger.warn('shutting down with executions still running', { count: stranded });
         }
       }
+      // CANCEL whatever the drain grace did not settle (#120 round-7 F4). The
+      // grace above buys the common case — a run seconds from its settle — its
+      // receipt; this kills the rest before we tear their workspace out from under
+      // them. Without it, `SIGTERM` deleted scratch and `process.exit`'d while a
+      // harness child (or a remote sandbox) kept executing loose — an orphaned
+      // process spending against a session Atrium had already abandoned. Ordered
+      // AFTER the drain (so a settling run is not severed early) and BEFORE the
+      // scratch dispose (so nothing is still writing into a directory we delete).
+      if (executionRuntime) {
+        try {
+          await executionRuntime.provider.cancelAll();
+        } catch (error) {
+          logSafely('cancelling in-flight executions failed', () => ({
+            error: describeUnknown(error),
+          }));
+        }
+      }
       // Tears down the SCRATCH working repo only; the DURABLE artifact repo is
       // left intact so settled receipts still resolve after shutdown (#120 F3).
       if (executionRuntime) await executionRuntime.dispose();

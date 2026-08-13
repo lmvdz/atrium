@@ -76,6 +76,7 @@ function spyProvider(report: ExecutionReport): ExecutionProvider & {
       state.ran++;
       return report;
     },
+    cancelAll: async () => {},
     get resolved() {
       return state.resolved;
     },
@@ -261,6 +262,7 @@ describe('the coordinator enforces the budget guard (#118)', () => {
         ran++;
         return settledReport;
       },
+      cancelAll: async () => {},
     };
     const coordinator = createExecutionCoordinator({
       commands,
@@ -558,6 +560,7 @@ describe('the run context is the STORED context, not the caller payload (#120 r6
         };
       },
       run: async () => settledReport,
+      cancelAll: async () => {},
     };
     // The STORED context differs from what the caller passes to runGranted — the
     // coordinator must use the stored values, never the caller's.
@@ -618,6 +621,7 @@ describe('a malformed provider report never leaves the session open (#120 r6 F7)
       }),
       // Malformed: not an ExecutionReport at all.
       run: async () => undefined as never,
+      cancelAll: async () => {},
     };
     const coordinator = createExecutionCoordinator({
       commands,
@@ -643,5 +647,121 @@ describe('a malformed provider report never leaves the session open (#120 r6 F7)
     const settle = commands.calls.find((c) => c.name === 'settle_session');
     expect(settle?.name).toBe('settle_session');
     if (settle?.name === 'settle_session') expect(settle.outcome).toBe('failed');
+  });
+
+  it('rejects an OUT-OF-RANGE report at parse and still reaches a failed receipt (#120 r7 F2)', async () => {
+    const sessionId = randomUUID();
+    const commands = fakeCommands({
+      kind: 'appended',
+      roomId: 'r',
+      seq: 1,
+      roomSeq: 1,
+      actor: { kind: 'agent', userId: agent.userId },
+      event: {} as never,
+      issues: [],
+    });
+    // A provider whose report is well-SHAPED but OUT OF BOUNDS: contextPct above 1,
+    // a negative spend. Round 6's schema bounded nothing, so this PARSED; the
+    // primary settle then rejected it at the durable `SettleReceiptBounds`, and the
+    // fallback failed-settle REUSED the same invalid values and rejected too — the
+    // session left open with no receipt. Round 7 bounds the report at parse.
+    const provider: ExecutionProvider = {
+      kind: 'out-of-range',
+      resolve: async (ctx) => ({
+        sessionId: ctx.sessionId,
+        dir: '/tmp/none',
+        branch: `atrium/session/${ctx.sessionId}`,
+        remote: '/tmp/repo',
+        dispose: async () => {},
+      }),
+      run: async () => ({
+        terminal: { ok: true, exitCode: 0 },
+        receipt: {
+          exitSummary: 'claims a clean exit',
+          spendMicros: -1,
+          contextPct: 2,
+          artifact: null,
+        },
+      }),
+      cancelAll: async () => {},
+    };
+    const coordinator = createExecutionCoordinator({
+      commands,
+      provider,
+      logger,
+      ownership: okOwnership(),
+    });
+
+    // REVERT-REDS: drop the bounds from `ReportSchema` (contextPct min/max,
+    // spendMicros nonnegative int) and this report parses; the settle path rejects
+    // it at the durable boundary and, absent the safe-value fallback, never lands a
+    // receipt — the session stays open. With the fix the garbage is caught at parse
+    // and a failed terminal is synthesized and settled.
+    const outcome = await coordinator.runGranted(agent, {
+      sessionId,
+      roomId: randomUUID(),
+      planId: randomUUID(),
+      harness: 'omp',
+      model: 'haiku',
+    });
+
+    expect(outcome.kind).toBe('failed');
+    const settle = commands.calls.find((c) => c.name === 'settle_session');
+    expect(settle?.name).toBe('settle_session');
+    if (settle?.name === 'settle_session') {
+      expect(settle.outcome).toBe('failed');
+      // The settle carries SAFE values, never the report's out-of-range ones, so
+      // the durable bounds accept it.
+      expect(settle.spendMicros === null || settle.spendMicros >= 0).toBe(true);
+      expect(settle.contextPct === null || settle.contextPct <= 1).toBe(true);
+    }
+  });
+});
+
+describe('a claim throw is inside the failure boundary (#120 r7 F3, red-on-revert)', () => {
+  it('returns failed — never throws — when ownership.claim throws, so the session is reconcilable', async () => {
+    const sessionId = randomUUID();
+    const commands = fakeCommands({
+      kind: 'appended',
+      roomId: 'r',
+      seq: 1,
+      roomSeq: 1,
+      actor: { kind: 'agent', userId: agent.userId },
+      event: {} as never,
+      issues: [],
+    });
+    // The provider must NEVER be reached — a claim that throws resolved no lease, so
+    // there is nothing to run.
+    const provider = spyProvider(settledReport);
+    // A claim that THROWS (a deadlock, a connection blip) rather than returning null.
+    const claim = vi.fn(async (): Promise<never> => {
+      throw new Error('deadlock detected');
+    });
+    const coordinator = createExecutionCoordinator({
+      commands,
+      provider,
+      logger,
+      ownership: { claim },
+    });
+
+    // REVERT-REDS: remove the try/catch around `ownership.claim` in `runGranted` and
+    // the throw escapes into the fire-and-forget `.catch`, wedging the leased-at-
+    // grant session open-and-heartbeated. With the fix it returns `{failed}` and the
+    // provider is never touched, so the grant-stamped lease ages out and
+    // reconciliation repairs it.
+    const outcome = await coordinator.runGranted(agent, {
+      sessionId,
+      roomId: randomUUID(),
+      planId: randomUUID(),
+      harness: 'omp',
+      model: 'haiku',
+    });
+
+    expect(outcome.kind).toBe('failed');
+    if (outcome.kind === 'failed') expect(outcome.artifact).toBeNull();
+    // Nothing was resolved, run, or settled — the claim faulted before any of it.
+    expect(provider.resolved).toBe(0);
+    expect(provider.ran).toBe(0);
+    expect(commands.calls.find((c) => c.name === 'settle_session')).toBeUndefined();
   });
 });

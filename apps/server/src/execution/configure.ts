@@ -312,10 +312,28 @@ export function createExecutionOwnership(input: {
       };
     },
     heartbeat: async () => {
+      // ── ONLY A CLAIMED (RUNNING) LEASE IS WARMED (#120 round-7 F3) ──────────
+      //
+      // The heartbeat warms sessions this process is ACTUALLY running — the ones
+      // `claim` transitioned `unclaimed → running` (`execution_claimed_at IS NOT
+      // NULL`). A session that is leased-at-grant but NOT yet claimed — because
+      // its claim is pending, or FAILED (a claim throw, round-7 F3) — is not
+      // being run by anything, so warming it would keep a wedge looking live
+      // forever and block reconciliation for the life of the process. Scoped to
+      // claimed rows, an unclaimed lease ages out on its grant-stamped heartbeat
+      // and reconciliation recovers it. The normal grant→claim window is
+      // milliseconds and the claim stamps a fresh heartbeat, so a genuinely
+      // running session is never read as stale for want of this warming.
       const bumped = await db
         .update(sessions)
         .set({ executionHeartbeatAt: new Date() })
-        .where(and(eq(sessions.executionOwner, instanceId), eq(sessions.status, 'open')))
+        .where(
+          and(
+            eq(sessions.executionOwner, instanceId),
+            eq(sessions.status, 'open'),
+            isNotNull(sessions.executionClaimedAt),
+          ),
+        )
         .returning({ id: sessions.id });
       if (bumped.length > 0) {
         logger.debug?.('execution ownership heartbeat', { instanceId, count: bumped.length });
