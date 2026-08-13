@@ -100,15 +100,25 @@ export function createExecutionCoordinator(
     };
 
     // RESOLVE → RUN → REPORT, disposing the ephemeral workspace no matter what.
-    const workspace = await provider.resolve(ctx);
+    //
+    // `resolve` is INSIDE the try (#120 F5). A resolve-throw — an unwired
+    // sandbox, a colliding ref, a wedged scratch repo — is just as much a
+    // failure owed triage as a run-throw: if it escaped, the granted session
+    // would be left `open` forever, its draw spent, with no receipt and an
+    // orphaned temp dir. Catching it here settles `session_failed` (artifact
+    // null) and disposes whatever workspace resolve managed to create. Revert
+    // this — hoist `resolve` back above the try — and a resolve-throw orphans the
+    // session (the F5 red-on-revert guard in coordinator.test.ts).
+    let workspace: Awaited<ReturnType<ExecutionProvider['resolve']>> | null = null;
     let report: Awaited<ReturnType<ExecutionProvider['run']>>;
     try {
+      workspace = await provider.resolve(ctx);
       report = await provider.run(workspace, ctx);
     } catch (error) {
-      // The provider itself threw — the process could not even be observed. That
-      // is a failure owed triage, not a settle. Report it, then settle failed
-      // with no artifact.
-      logger.error('execution provider threw during run', {
+      // The provider threw before a clean terminal could be observed. That is a
+      // failure owed triage, not a settle. Report it, then settle failed with no
+      // artifact.
+      logger.error('execution provider threw during resolve/run', {
         sessionId: granted.sessionId,
         provider: provider.kind,
         error: error instanceof Error ? error.message : String(error),
@@ -123,12 +133,16 @@ export function createExecutionCoordinator(
         },
       };
     } finally {
-      await workspace.dispose().catch((error: unknown) => {
-        logger.warn('execution workspace dispose failed', {
-          sessionId: granted.sessionId,
-          error: error instanceof Error ? error.message : String(error),
+      // Dispose only what resolve actually produced — a resolve-throw may leave
+      // no workspace to reclaim (its own cleanup handled the partial).
+      if (workspace) {
+        await workspace.dispose().catch((error: unknown) => {
+          logger.warn('execution workspace dispose failed', {
+            sessionId: granted.sessionId,
+            error: error instanceof Error ? error.message : String(error),
+          });
         });
-      });
+      }
     }
 
     // The terminal chooses the exit spelling (§9.5); the receipt is carried into

@@ -236,6 +236,26 @@ const RawEnvSchema = BaseEnvSchema.extend({
    * `EXECUTION_PROVIDER=worktree`. Never a shell string — argv only.
    */
   EXECUTION_HARNESS_COMMAND: z.string().min(1).optional(),
+  /**
+   * The DURABLE artifact repo (#120 F3) — a stable path where the provider PUSHES
+   * each settled session branch, so a receipt's `{branch,commit,remote}` still
+   * resolves after the process (and its scratch working repo) is gone. Optional:
+   * unset, a stable `artifacts` subdir under `EXECUTION_SCRATCH_DIR` is used, and
+   * that repo is NEVER torn down on shutdown.
+   */
+  EXECUTION_ARTIFACT_DIR: z.string().min(1).optional(),
+  /**
+   * The loud, explicit opt-in that the UNSANDBOXED worktree provider requires
+   * (#120 F1). `worktree` runs an arbitrary harness on the SERVER'S OWN disk and
+   * is NOT a security boundary — real containment needs the `sandbox` BUY seam,
+   * not yet wired. So selecting `EXECUTION_PROVIDER=worktree` without setting this
+   * to `1`/`true` is a hard boot failure: the unsafe path can never be turned on
+   * by accident. Meaningless for `shim` (safe) and `sandbox` (contained).
+   */
+  EXECUTION_ALLOW_UNSANDBOXED: z
+    .enum(['1', 'true', '0', 'false'])
+    .optional()
+    .transform((value) => value === '1' || value === 'true'),
 
   S3_ENDPOINT: z.string().min(1).default('http://localhost:9000'),
   /** Browser-reachable signing origin; defaults to the endpoint in local dev. */
@@ -456,6 +476,14 @@ function assertExecutionProviderSafe(env: Env): void {
   if (env.EXECUTION_PROVIDER === 'worktree' && !env.EXECUTION_HARNESS_COMMAND) {
     problems.push(
       '  EXECUTION_HARNESS_COMMAND: required when EXECUTION_PROVIDER=worktree — the harness argv (JSON array), never a shell string',
+    );
+  }
+  if (env.EXECUTION_PROVIDER === 'worktree' && !env.EXECUTION_ALLOW_UNSANDBOXED) {
+    problems.push(
+      '  EXECUTION_ALLOW_UNSANDBOXED: must be "1" to select EXECUTION_PROVIDER=worktree — it runs an ' +
+        "arbitrary harness UNSANDBOXED on the server's own disk and is NOT a security boundary. Real " +
+        'containment is the sandbox BUY seam (sandbox.ts), not yet wired; the covenant guarantee for ' +
+        'real execution holds only under it. Use EXECUTION_PROVIDER=shim unless you accept that risk.',
     );
   }
   if (problems.length > 0) throw new Error(`invalid environment:\n${problems.join('\n')}`);

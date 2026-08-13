@@ -10,7 +10,7 @@ import { createAttachmentSigner } from './attachments.js';
 import { createCommandService } from './commands.js';
 import { loadEnv } from './env.js';
 import { createEventBus } from './event-bus.js';
-import { configureExecution } from './execution/configure.js';
+import { createExecutionProvider, wireExecutionCoordinator } from './execution/configure.js';
 import { createAcceptanceProvider } from './jobs/acceptance-provider.js';
 import { createGatewayProvider } from './jobs/provider.js';
 import { createLedger } from './ledger.js';
@@ -168,18 +168,6 @@ async function main(): Promise<void> {
     secretAccessKey: env.S3_SECRET_ACCESS_KEY,
   });
 
-  const baseCommands = createCommandService({
-    db: database.db,
-    ledger,
-    authorizer: createMembershipAuthorizer(database.db),
-    attachmentCapabilities: attachments,
-    projectionHooks: routing
-      ? {
-          onMessagePosted: ({ tx, roomId }) => queue.enqueueInterpretation(tx, roomId),
-        }
-      : {},
-  });
-
   /* ---------------------------------------------------------------------------
    * THE EXECUTION PROVIDER (#120), AND WHY IT IS DISABLED BY DEFAULT.
    *
@@ -191,12 +179,39 @@ async function main(): Promise<void> {
    * work off inbound traffic must be opted into out loud, exactly as the
    * interpretation worker is. A `draw_refused` never reaches the adapter — the
    * wrapper fires only on `draw.outcome === 'granted'` (#118).
+   *
+   * Phase 1 (the provider + the durable artifact repo + the artifact verifier)
+   * runs BEFORE the command service, so the verifier can be injected into it:
+   * a `settle_session` artifact is trusted only if it names a real object the
+   * provider pushed to its durable remote (#120 F2). Disabled, no verifier is
+   * wired and any caller-supplied artifact is dropped — the safe default.
    * ------------------------------------------------------------------------- */
-  const execution = await configureExecution({ env, commands: baseCommands, logger });
-  if (execution === null) {
+  const executionRuntime = await createExecutionProvider({ env, logger });
+  if (executionRuntime === null) {
     logger.info('execution is DISABLED — set EXECUTION_PROVIDER to run granted sessions', {});
   }
-  const commands = execution?.commands ?? baseCommands;
+
+  const baseCommands = createCommandService({
+    db: database.db,
+    ledger,
+    authorizer: createMembershipAuthorizer(database.db),
+    attachmentCapabilities: attachments,
+    verifyArtifact: executionRuntime?.verifyArtifact,
+    projectionHooks: routing
+      ? {
+          onMessagePosted: ({ tx, roomId }) => queue.enqueueInterpretation(tx, roomId),
+        }
+      : {},
+  });
+
+  const executionWiring = executionRuntime
+    ? wireExecutionCoordinator({
+        provider: executionRuntime.provider,
+        commands: baseCommands,
+        logger,
+      })
+    : null;
+  const commands = executionWiring?.commands ?? baseCommands;
 
   let ready = false;
   const realtime = createRealtimeServer({
@@ -250,7 +265,9 @@ async function main(): Promise<void> {
     try {
       await realtime.close();
       await queue.stop();
-      if (execution) await execution.dispose();
+      // Tears down the SCRATCH working repo only; the DURABLE artifact repo is
+      // left intact so settled receipts still resolve after shutdown (#120 F3).
+      if (executionRuntime) await executionRuntime.dispose();
       await database.close();
       logger.info('shutdown complete');
       process.exit(0);

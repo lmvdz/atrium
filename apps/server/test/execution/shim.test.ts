@@ -1,7 +1,13 @@
 import { randomUUID } from 'node:crypto';
+import { mkdtemp, rm } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import {
+  type ArtifactRepo,
+  artifactBranchCommit,
   branchCommit,
+  createArtifactRepo,
   createScratchRepo,
   disposeScratchRepo,
   mainCommit,
@@ -114,6 +120,42 @@ describe('the deterministic shim produces a real, verifiable artifact', () => {
     // NO artifact commit — it still points at the seed. A failed harness produced
     // no verifiable object at all.
     expect(await branchCommit(repo, sessionBranch(c.sessionId))).toBe(repo.seedCommit);
+  });
+
+  it('pushes to a DURABLE artifact repo that outlives the scratch repo (#120 F3)', async () => {
+    let artifactRepo: ArtifactRepo;
+    let durableDir: string;
+    // A durable repo on its OWN path, unrelated to the scratch working repo.
+    durableDir = await mkdtemp(join(tmpdir(), 'atrium-durable-'));
+    artifactRepo = await createArtifactRepo(durableDir);
+    try {
+      const provider = createDeterministicShimProvider({ repo, artifactRepo });
+      const c = ctx();
+      const workspace = await provider.resolve(c);
+      const report = await provider.run(workspace, c);
+      const artifact = report.receipt.artifact;
+
+      // The receipt points at the DURABLE remote, not the scratch working repo.
+      expect(artifact?.remote).toBe(durableDir);
+      expect(artifact?.branch).toBe(sessionBranch(c.sessionId));
+
+      // Dispose the checkout AND tear the whole scratch working repo down — as a
+      // shutdown would (`disposeScratchRepo`). The receipt must STILL resolve.
+      await workspace.dispose();
+      await disposeScratchRepo(repo);
+
+      const resolved = await artifactBranchCommit(artifactRepo, sessionBranch(c.sessionId));
+      expect(resolved).toBe(artifact?.commit);
+      // The scratch repo is gone; the durable object remains. Revert F3 (drop the
+      // push, point the artifact at the scratch repo) and this reds — the receipt
+      // names a branch in a repo that no longer exists.
+      expect(resolved).not.toBeNull();
+
+      // Re-seed `repo` so the afterEach dispose is a no-op-safe teardown.
+      repo = await createScratchRepo();
+    } finally {
+      await rm(durableDir, { recursive: true, force: true });
+    }
   });
 
   it('never moves trunk — no artifact lands itself (the covenant, in git)', async () => {

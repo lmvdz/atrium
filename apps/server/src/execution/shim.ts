@@ -1,8 +1,10 @@
 import { writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import {
+  type ArtifactRepo,
   addWorktree,
   commitWorktree,
+  pushArtifactBranch,
   removeWorktree,
   type ScratchRepo,
   type WorktreeCheckout,
@@ -41,8 +43,14 @@ export const EXECUTION_FAIL_DIRECTIVE = '__atrium_shim_fail__';
 export const SHIM_ARTIFACT_PATH = 'ARTIFACT.json';
 
 export interface DeterministicShimOptions {
-  /** The scratch repo the shim controls — where every artifact branch lands. */
+  /** The scratch repo the shim controls — where every per-session worktree lands. */
   repo: ScratchRepo;
+  /**
+   * The DURABLE artifact repo the session branch is pushed to (#120 F3). Present,
+   * the artifact's `remote` is this repo (survives shutdown); absent, it points
+   * at the scratch repo (test behaviour, not durable).
+   */
+  artifactRepo?: ArtifactRepo;
 }
 
 interface ShimWorkspace extends Workspace {
@@ -61,7 +69,7 @@ interface ShimWorkspace extends Workspace {
 export function createDeterministicShimProvider(
   options: DeterministicShimOptions,
 ): ExecutionProvider {
-  const { repo } = options;
+  const { repo, artifactRepo } = options;
 
   return {
     kind: 'shim',
@@ -72,7 +80,7 @@ export function createDeterministicShimProvider(
         sessionId: ctx.sessionId,
         dir: checkout.dir,
         branch: checkout.branch,
-        remote: repo.dir,
+        remote: artifactRepo?.dir ?? repo.dir,
         checkout,
         dispose: () => removeWorktree(checkout),
       };
@@ -122,13 +130,23 @@ export function createDeterministicShimProvider(
         };
       }
 
+      // Push the branch to the DURABLE artifact repo so the receipt resolves
+      // after shutdown (#120 F3); the reported commit is the one the durable ref
+      // points at. Absent a durable repo, the artifact stays on the scratch repo.
+      let remote = repo.dir;
+      let durableCommit = commit;
+      if (artifactRepo) {
+        durableCommit = await pushArtifactBranch(checkout, artifactRepo);
+        remote = artifactRepo.dir;
+      }
+
       return {
         terminal: { ok: true, exitCode: 0 },
         receipt: {
           exitSummary: `deterministic shim: session ${ctx.sessionId} settled on ${checkout.branch}`,
           spendMicros: 0,
           contextPct: null,
-          artifact: { branch: checkout.branch, commit, remote: repo.dir },
+          artifact: { branch: checkout.branch, commit: durableCommit, remote },
         },
       };
     },

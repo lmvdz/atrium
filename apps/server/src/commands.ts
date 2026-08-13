@@ -734,7 +734,28 @@ export interface CommandServiceOptions {
   projectionHooks?: ProjectionHooks;
   /** Verifies that each persisted metadata tuple came from this server's upload grant. */
   attachmentCapabilities?: Pick<import('./attachments.js').AttachmentSigner, 'verify'>;
+  /**
+   * Verifies a `settle_session` artifact against the execution provider's own
+   * durable remote (#120 F2). A `settle_session` carries a `{branch,commit,remote}`
+   * that a caller could FABRICATE — a member claiming `{branch:"main",
+   * commit:"…",remote:"/real/repo"}` would otherwise plant a false "verified
+   * artifact" pointer in the ledger. The verifier is closed over the provider's
+   * controlled remote and returns `true` ONLY when the artifact names a git
+   * object the provider actually produced (right session branch, right remote,
+   * commit resolves there). When it returns `false` — or is ABSENT, which is the
+   * state when execution is disabled and no artifact has a legitimate source —
+   * the artifact is dropped to `null` before the exit event is written. A settled
+   * session's artifact therefore always corresponds to a real provider object,
+   * never a caller assertion.
+   */
+  verifyArtifact?: ArtifactVerifier;
 }
+
+/** Confirms a settle artifact names a git object the execution provider produced (#120 F2). */
+export type ArtifactVerifier = (input: {
+  readonly sessionId: string;
+  readonly artifact: z.infer<typeof ExecutionArtifact>;
+}) => Promise<boolean>;
 
 export interface CommandService {
   execute: (session: Session, command: Command) => Promise<CommandResult>;
@@ -842,6 +863,7 @@ export function createCommandService({
   authorizer,
   projectionHooks = {},
   attachmentCapabilities,
+  verifyArtifact,
 }: CommandServiceOptions): CommandService {
   async function requireMembership(session: Session, roomId: string, runner?: Tx) {
     const membership = await authorizer.authorize(session, roomId, runner);
@@ -1605,7 +1627,21 @@ export function createCommandService({
         };
       }
 
-      case 'settle_session':
+      case 'settle_session': {
+        // THE ARTIFACT IS PROVIDER-VERIFIED, NOT A CALLER ASSERTION (#120 F2).
+        // The caller-supplied `{branch,commit,remote}` is trusted ONLY if the
+        // verifier — closed over the execution provider's own durable remote —
+        // confirms it names a git object the provider actually produced. Absent a
+        // verifier (execution disabled: no artifact has a legitimate source) or
+        // on a failed check (a fabricated ref), it is dropped to `null`. A
+        // settled session's artifact always corresponds to a real provider
+        // object; a member can no longer plant `{branch:"main",…}` in the ledger.
+        const verifiedArtifact =
+          command.artifact !== null &&
+          verifyArtifact !== undefined &&
+          (await verifyArtifact({ sessionId: command.sessionId, artifact: command.artifact }))
+            ? command.artifact
+            : null;
         return appendAndProject(session, command.roomId, ({ id, at }) => ({
           id,
           at,
@@ -1618,8 +1654,9 @@ export function createCommandService({
           exitSummary: command.exitSummary,
           spendMicros: command.spendMicros,
           contextPct: command.contextPct,
-          artifact: command.artifact,
+          artifact: verifiedArtifact,
         }));
+      }
 
       case 'raise_signal':
         return appendAndProject(session, command.roomId, ({ id, at }) => ({

@@ -198,4 +198,59 @@ describe('the coordinator enforces the budget guard (#118)', () => {
       expect(settle.artifact).toBeNull();
     }
   });
+
+  it('settles FAILED when resolve throws — the session is never left orphaned (#120 F5)', async () => {
+    const sessionId = randomUUID();
+    const commands = fakeCommands({
+      kind: 'appended',
+      roomId: 'r',
+      seq: 1,
+      roomSeq: 1,
+      actor: { kind: 'agent', userId: agent.userId },
+      event: {} as never,
+      issues: [],
+      draw: { outcome: 'granted', sessionId },
+    });
+
+    // A provider whose `resolve` throws — an unwired sandbox, a colliding ref, a
+    // wedged scratch repo. `run` must never be reached.
+    let ran = 0;
+    const throwingProvider: ExecutionProvider = {
+      kind: 'throws-on-resolve',
+      resolve: async () => {
+        throw new Error('resolve exploded (unwired sandbox)');
+      },
+      run: async () => {
+        ran++;
+        return settledReport;
+      },
+    };
+    const coordinator = createExecutionCoordinator({
+      commands,
+      provider: throwingProvider,
+      logger,
+    });
+
+    const outcome = await coordinator.openAndRun(agent, {
+      roomId: randomUUID(),
+      planId: randomUUID(),
+      harness: 'omp',
+      model: 'haiku',
+    });
+
+    // The granted session is SETTLED FAILED with no artifact — not left `open`
+    // with a spent draw and no receipt. `run` never happened. The vocabulary is
+    // still exactly {open_session, settle_session}. Revert F5 (hoist `resolve`
+    // above the try in coordinator.ts) and the throw escapes `openAndRun`: no
+    // settle command is issued and this reds.
+    expect(outcome.kind).toBe('failed');
+    if (outcome.kind === 'failed') expect(outcome.artifact).toBeNull();
+    expect(ran).toBe(0);
+    expect(commands.calls.map((c) => c.name)).toEqual(['open_session', 'settle_session']);
+    const settle = commands.calls[1];
+    if (settle?.name === 'settle_session') {
+      expect(settle.outcome).toBe('failed');
+      expect(settle.artifact).toBeNull();
+    }
+  });
 });
