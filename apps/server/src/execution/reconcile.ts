@@ -145,6 +145,13 @@ export async function reconcileWedgedSessions(
       roomId: sessions.roomId,
       openerId: coreEvents.actorId,
       principalKind: users.principalKind,
+      // The capability token minted at grant (#120 round-6). A leased (provider)
+      // session's terminal requires it; the reconciler is a trusted in-process
+      // holder — it reads the token off the row and presents it, exactly as the
+      // coordinator presents the token it got from `claim`. A room member never
+      // sees this value, so this is not a bypass of the capability, it is a holder
+      // of it settling a wedge the owner died before settling.
+      authority: sessions.executionAuthority,
     })
     .from(sessions)
     .leftJoin(coreEvents, eq(coreEvents.id, sessions.openedByEventId))
@@ -193,6 +200,10 @@ export async function reconcileWedgedSessions(
         // index — and a reconciler is the last place that should be minting a
         // claim about work nobody observed finish.
         artifact: null,
+        // The provider session's capability token, read off the row (#120 r6). A
+        // leased session is provider-mode, so its terminal is gated on this; the
+        // reconciler holds it legitimately (a wire client never sees it).
+        authority: row.authority,
       });
       if (settled.kind !== 'appended') throw new Error(`settle returned ${settled.kind}`);
       failed++;

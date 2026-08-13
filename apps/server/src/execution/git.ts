@@ -107,6 +107,18 @@ export interface WorktreeCheckout {
    * path that predates the capture — those fall back to `.git`-file discovery.
    */
   readonly gitDir?: string;
+  /**
+   * The ABSOLUTE common git dir (the shared object store + `refs/heads/*`),
+   * captured at resolve time alongside `gitDir` (#120 round-6, grok F2). Pinning
+   * only `GIT_DIR` left the per-worktree gitdir's OWN `commondir` and `HEAD` files
+   * writable by a same-UID harness: rewriting `$GIT_DIR/commondir` at a victim
+   * repo (and `$GIT_DIR/HEAD` at `refs/heads/main`) would send the adapter's own
+   * `commit`/`update-ref` into the victim's trunk. The adapter pins
+   * `GIT_COMMON_DIR` to THIS captured value, so a rewritten `commondir` file is
+   * ignored and refs resolve in the real scratch repo. `undefined` for older
+   * checkouts, which fall back to `commondir`-file discovery.
+   */
+  readonly commonDir?: string;
 }
 
 const GIT_ENV = {
@@ -302,19 +314,28 @@ export async function scrubbedGitBaseEnv(): Promise<NodeJS.ProcessEnv> {
 interface GitDirPin {
   readonly gitDir: string;
   readonly workTree: string;
+  /**
+   * The trusted common dir captured at resolve (#120 round-6 grok F2). When set,
+   * `GIT_COMMON_DIR` is pinned to it so a rewritten `$GIT_DIR/commondir` file
+   * cannot move where `refs/heads/*` resolve. `undefined` for older checkouts.
+   */
+  readonly commonDir?: string;
 }
 
 async function git(cwd: string, args: readonly string[], pin?: GitDirPin): Promise<string> {
   const base = await scrubbedGitBaseEnv();
-  // `GIT_DIR`/`GIT_WORK_TREE` are on `DANGEROUS_GIT_VARS` and were deleted from
-  // `base` — that scrub keeps an INHERITED retarget out. Here the adapter sets
-  // them ITSELF, to the trusted per-worktree git dir captured before the harness
-  // ran, so git reads/writes THIS checkout regardless of what the harness did to
-  // the worktree's `.git` file. Applied AFTER the spread so it wins.
+  // `GIT_DIR`/`GIT_WORK_TREE`/`GIT_COMMON_DIR` are on `DANGEROUS_GIT_VARS` and were
+  // deleted from `base` — that scrub keeps an INHERITED retarget out. Here the
+  // adapter sets them ITSELF, to the trusted per-worktree git dir and common dir
+  // captured before the harness ran, so git reads/writes THIS checkout and resolves
+  // refs in the REAL scratch repo regardless of what the harness did to the
+  // worktree's `.git` file or the gitdir's `commondir`. Applied AFTER the spread so
+  // they win.
   const env: NodeJS.ProcessEnv = { ...base, ...GIT_ENV };
   if (pin) {
     env.GIT_DIR = pin.gitDir;
     env.GIT_WORK_TREE = pin.workTree;
+    if (pin.commonDir !== undefined) env.GIT_COMMON_DIR = pin.commonDir;
   }
   // Repo-local hook / fsmonitor hardening (#120 round-4 F2) prepended before the
   // subcommand — `-c` only takes effect ahead of the git command it configures.
@@ -388,12 +409,15 @@ export async function addWorktree(repo: ScratchRepo, sessionId: string): Promise
     await rm(dir, { recursive: true, force: true }).catch(() => {});
     throw error;
   }
-  // Capture the ABSOLUTE per-worktree git dir NOW, while the `.git` file is still
-  // the trusted one git just wrote and no harness has run (#120 round-5 F5b). The
-  // adapter's own later commit/push pin GIT_DIR to this, so a harness rewriting
-  // `<dir>/.git` to point at a victim repo cannot redirect the adapter's own git.
+  // Capture the ABSOLUTE per-worktree git dir AND the shared common dir NOW, while
+  // the `.git` file (and the gitdir's `commondir`) are still the trusted ones git
+  // just wrote and no harness has run (#120 round-5 F5b + round-6 grok F2). The
+  // adapter's own later commit/push pin GIT_DIR/GIT_COMMON_DIR to these, so a
+  // harness rewriting `<dir>/.git` OR `$GIT_DIR/commondir`/`$GIT_DIR/HEAD` cannot
+  // redirect the adapter's own git off this checkout or onto a victim's trunk.
   const gitDir = await git(dir, ['rev-parse', '--absolute-git-dir']);
-  return { dir, branch, repoDir: repo.dir, gitDir };
+  const commonDir = await git(dir, ['rev-parse', '--path-format=absolute', '--git-common-dir']);
+  return { dir, branch, repoDir: repo.dir, gitDir, commonDir };
 }
 
 /**
@@ -416,6 +440,17 @@ export async function commitWorktree(
   await git(checkout.dir, ['add', '-A'], pin);
   const status = await git(checkout.dir, ['status', '--porcelain'], pin);
   if (status === '') return null;
+  // RE-ASSERT HEAD to this session's branch before the adapter's own commit (#120
+  // round-6 grok F2). With `GIT_COMMON_DIR` pinned, a rewritten `$GIT_DIR/commondir`
+  // can no longer move where refs resolve — but `git commit` still updates whatever
+  // `$GIT_DIR/HEAD` names, and a same-UID harness can rewrite that file to
+  // `ref: refs/heads/main`. Pointing HEAD back at the session branch here (the
+  // harness has already exited; this runs in the adapter's own synchronous
+  // sequence) means the commit lands on the session branch in the real scratch
+  // repo, never on a trunk. `symbolic-ref` writes `$GIT_DIR/HEAD` under the pin.
+  if (checkout.gitDir !== undefined) {
+    await git(checkout.dir, ['symbolic-ref', 'HEAD', `refs/heads/${checkout.branch}`], pin);
+  }
   // `--no-verify`: the harness owns this worktree and may have planted a
   // `.git/hooks/pre-commit` or `commit-msg`; the adapter's own commit must not run
   // it (#120 round-4 F2). Redundant with `hookGuardArgs`' hooksPath redirect, kept
@@ -432,7 +467,7 @@ export async function commitWorktree(
 function worktreePin(checkout: WorktreeCheckout): GitDirPin | undefined {
   return checkout.gitDir === undefined
     ? undefined
-    : { gitDir: checkout.gitDir, workTree: checkout.dir };
+    : { gitDir: checkout.gitDir, workTree: checkout.dir, commonDir: checkout.commonDir };
 }
 
 /** Reclaim the ephemeral checkout. The branch it produced is left intact. */

@@ -3,7 +3,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import type { Database } from '@atrium/db';
 import { sessions } from '@atrium/db/schema';
-import { and, eq, isNotNull, isNull, or } from 'drizzle-orm';
+import { and, eq, isNotNull, isNull } from 'drizzle-orm';
 import type { ArtifactVerifier, CommandResult, CommandService } from '../commands.js';
 import type { Env } from '../env.js';
 import type { Logger } from '../logger.js';
@@ -272,28 +272,44 @@ export function createExecutionOwnership(input: {
   return {
     instanceId,
     claim: async ({ sessionId, roomId }) => {
-      // Matches ONLY a session that exists, was GRANTED (a `session_opened` was
-      // projected — `opened_by_event_id IS NOT NULL`), is still `open`, and is not
-      // already owned by a DIFFERENT live instance. A "never-granted" id, an
-      // already-exited session, or one a peer owns matches zero rows → false, and
-      // the coordinator refuses to run it. On a match it stamps this instance and a
-      // fresh heartbeat in the SAME statement, so the guard and the lease are one
-      // atomic write with no window between them.
-      const claimed = await db
+      // THE ONCE-ONLY CLAIM (#120 round-6 F5). Matches ONLY a session that exists,
+      // was GRANTED (`opened_by_event_id IS NOT NULL`), is still `open`, is
+      // `provider`-mode (the authority was written at grant), is owned by THIS
+      // instance (the granting process; a peer's or a dead boot's is not this
+      // coordinator's to run), and is UNCLAIMED (`execution_claimed_at IS NULL`).
+      // On a match it stamps `execution_claimed_at` and a fresh heartbeat and
+      // RETURNS the row's stored context + capability token. The
+      // `execution_claimed_at IS NULL` guard makes the transition `unclaimed →
+      // running` happen exactly once: a re-entrant claim of an already-running
+      // session matches zero rows → `null`. A never-granted id, an external
+      // session, or one another instance owns likewise returns `null`.
+      const [claimed] = await db
         .update(sessions)
-        .set({ executionOwner: instanceId, executionHeartbeatAt: new Date() })
+        .set({ executionClaimedAt: new Date(), executionHeartbeatAt: new Date() })
         .where(
           and(
             eq(sessions.id, sessionId),
             eq(sessions.roomId, roomId),
             isNotNull(sessions.openedByEventId),
             eq(sessions.status, 'open'),
-            // Not already owned by a DIFFERENT instance — free, or ours to re-claim.
-            or(isNull(sessions.executionOwner), eq(sessions.executionOwner, instanceId)),
+            eq(sessions.executionMode, 'provider'),
+            eq(sessions.executionOwner, instanceId),
+            isNull(sessions.executionClaimedAt),
           ),
         )
-        .returning({ id: sessions.id });
-      return claimed.length > 0;
+        .returning({
+          planId: sessions.planId,
+          harness: sessions.harness,
+          model: sessions.model,
+          authority: sessions.executionAuthority,
+        });
+      if (!claimed || claimed.authority === null) return null;
+      return {
+        planId: claimed.planId,
+        harness: claimed.harness,
+        model: claimed.model,
+        authority: claimed.authority,
+      };
     },
     heartbeat: async () => {
       const bumped = await db
@@ -317,8 +333,8 @@ export function wireExecutionCoordinator(input: {
   provider: ExecutionProvider;
   commands: CommandService;
   logger: Logger;
-  /** The granted-draw guard + ownership lease (#120 round-5). Injected in production. */
-  ownership?: ExecutionOwnership;
+  /** The granted-draw guard + once-only claim (#120 round-6). MANDATORY — no bypass. */
+  ownership: ExecutionOwnership;
 }): {
   coordinator: ExecutionCoordinator;
   commands: CommandService;
@@ -423,21 +439,33 @@ export async function configureExecution(input: {
   commands: CommandService;
   logger: Logger;
   /**
-   * The database and this process's execution instance id, for the ownership
-   * lease (#120 round-5). When provided, the coordinator enforces the granted-draw
-   * guard and stamps ownership leases; absent (the pure-unit fixtures that pass a
-   * fake command service and no DB), the guard is inert.
+   * The database and this process's execution instance id, for the once-only claim
+   * (#120 round-6). Passing `db` builds the real ownership manager over it; a test
+   * may instead inject a fake `ownership` directly. One of the two is REQUIRED —
+   * the granted-draw guard is mandatory and cannot be omitted into silence (F4).
    */
   db?: Database;
   instanceId?: string;
+  /** A fake claim for tests that hold no DB. Production passes `db` instead. */
+  ownership?: ExecutionOwnership;
 }): Promise<ConfiguredExecution | null> {
   const { env, commands, logger, db, instanceId } = input;
   const runtime = await createExecutionProvider({ env, logger });
   if (runtime === null) return null;
   const ownership =
-    db !== undefined
+    input.ownership ??
+    (db !== undefined
       ? createExecutionOwnership({ db, instanceId: instanceId ?? randomUUID(), logger })
-      : undefined;
+      : undefined);
+  if (ownership === undefined) {
+    // F4: the guard is not optional. A provider was built, so refuse to wire a
+    // coordinator that would run WITHOUT the granted-draw/claim guard rather than
+    // fall through to a no-guard path.
+    throw new Error(
+      'configureExecution requires a `db` (to build the ownership claim) or an explicit ' +
+        '`ownership` — the granted-draw guard is mandatory on every wired path (#120 round-6 F4)',
+    );
+  }
   const wired = wireExecutionCoordinator({
     provider: runtime.provider,
     commands,

@@ -1,7 +1,10 @@
 import { randomUUID } from 'node:crypto';
 import { describe, expect, it, vi } from 'vitest';
 import type { Command, CommandResult } from '../../src/commands.js';
-import { createExecutionCoordinator } from '../../src/execution/coordinator.js';
+import {
+  type ClaimedSession,
+  createExecutionCoordinator,
+} from '../../src/execution/coordinator.js';
 import type {
   ExecutionProvider,
   ExecutionReport,
@@ -85,6 +88,25 @@ function spyProvider(report: ExecutionReport): ExecutionProvider & {
   };
 }
 
+/**
+ * An in-memory ownership whose `claim` succeeds, returning the stored context a
+ * real claim would read off the row (#120 round-6). `ownership` is MANDATORY on
+ * the coordinator now (F4), so every construction passes one — the guard can no
+ * longer be omitted into silence, only faked. `claimed` overrides the stored
+ * context so a test can prove the coordinator uses THIS, not its caller's payload.
+ */
+function okOwnership(claimed: Partial<ClaimedSession> = {}) {
+  const claim = vi.fn(
+    async (_input: { sessionId: string; roomId: string }): Promise<ClaimedSession | null> => ({
+      planId: claimed.planId ?? randomUUID(),
+      harness: claimed.harness ?? 'omp',
+      model: claimed.model ?? 'haiku',
+      authority: claimed.authority ?? 'test-authority',
+    }),
+  );
+  return { claim };
+}
+
 const settledReport: ExecutionReport = {
   terminal: { ok: true, exitCode: 0 },
   receipt: {
@@ -108,7 +130,12 @@ describe('the coordinator enforces the budget guard (#118)', () => {
       draw: { outcome: 'refused', reason: 'budget', slice: 3, authorizedDraws: 3 },
     });
     const provider = spyProvider(settledReport);
-    const coordinator = createExecutionCoordinator({ commands, provider, logger });
+    const coordinator = createExecutionCoordinator({
+      commands,
+      provider,
+      logger,
+      ownership: okOwnership(),
+    });
 
     const outcome = await coordinator.openAndRun(agent, {
       roomId: randomUUID(),
@@ -140,7 +167,12 @@ describe('the coordinator enforces the budget guard (#118)', () => {
       draw: { outcome: 'granted', sessionId },
     });
     const provider = spyProvider(settledReport);
-    const coordinator = createExecutionCoordinator({ commands, provider, logger });
+    const coordinator = createExecutionCoordinator({
+      commands,
+      provider,
+      logger,
+      ownership: okOwnership(),
+    });
 
     const outcome = await coordinator.openAndRun(agent, {
       roomId: randomUUID(),
@@ -182,7 +214,12 @@ describe('the coordinator enforces the budget guard (#118)', () => {
       draw: { outcome: 'granted', sessionId },
     });
     const provider = spyProvider(failReport);
-    const coordinator = createExecutionCoordinator({ commands, provider, logger });
+    const coordinator = createExecutionCoordinator({
+      commands,
+      provider,
+      logger,
+      ownership: okOwnership(),
+    });
 
     const outcome = await coordinator.openAndRun(agent, {
       roomId: randomUUID(),
@@ -229,6 +266,7 @@ describe('the coordinator enforces the budget guard (#118)', () => {
       commands,
       provider: throwingProvider,
       logger,
+      ownership: okOwnership(),
     });
 
     const outcome = await coordinator.openAndRun(agent, {
@@ -310,6 +348,7 @@ describe('a settle fault still drives the session terminal (#120 r3 F2)', () => 
       commands,
       provider: spyProvider(settledReport),
       logger,
+      ownership: okOwnership(),
     });
 
     // REVERT-REDS: hoist the settle back out of the try in coordinator.ts and
@@ -355,6 +394,7 @@ describe('a settle fault still drives the session terminal (#120 r3 F2)', () => 
       commands,
       provider: spyProvider(settledReport),
       logger,
+      ownership: okOwnership(),
     });
 
     // Nothing in-process can write a receipt when the ledger itself is gone. The
@@ -390,6 +430,7 @@ describe('a settle fault still drives the session terminal (#120 r3 F2)', () => 
       commands,
       provider: spyProvider(settledReport),
       logger,
+      ownership: okOwnership(),
     });
 
     const outcome = await coordinator.runGranted(agent, {
@@ -417,9 +458,11 @@ describe('runGranted refuses a session without a committed granted draw (#120 r5
       issues: [],
     });
     const provider = spyProvider(settledReport);
-    // The lease claim finds no granted+open session for this id — the "never-granted"
-    // case the round-4 gauntlet drove through `runGranted` (resolved=1, ran=1).
-    const claim = vi.fn(async () => false);
+    // The claim finds no granted+open+unclaimed provider session for this id — the
+    // "never-granted" (or re-entrant) case the round-4 gauntlet drove through
+    // `runGranted` (resolved=1, ran=1). A null claim means the provider is never
+    // reached.
+    const claim = vi.fn(async (): Promise<ClaimedSession | null> => null);
     const coordinator = createExecutionCoordinator({
       commands,
       provider,
@@ -458,7 +501,14 @@ describe('runGranted refuses a session without a committed granted draw (#120 r5
       issues: [],
     });
     const provider = spyProvider(settledReport);
-    const claim = vi.fn(async () => true);
+    const claim = vi.fn(
+      async (): Promise<ClaimedSession | null> => ({
+        planId: randomUUID(),
+        harness: 'omp',
+        model: 'haiku',
+        authority: 'test-authority',
+      }),
+    );
     const coordinator = createExecutionCoordinator({
       commands,
       provider,
@@ -478,5 +528,120 @@ describe('runGranted refuses a session without a committed granted draw (#120 r5
     expect(provider.resolved).toBe(1);
     expect(provider.ran).toBe(1);
     expect(commands.calls.filter((c) => c.name === 'settle_session')).toHaveLength(1);
+  });
+});
+
+describe('the run context is the STORED context, not the caller payload (#120 r6 F5)', () => {
+  it('resolves/runs with the claim-returned plan/harness/model and its authority', async () => {
+    const sessionId = randomUUID();
+    const commands = fakeCommands({
+      kind: 'appended',
+      roomId: 'r',
+      seq: 1,
+      roomSeq: 1,
+      actor: { kind: 'agent', userId: agent.userId },
+      event: {} as never,
+      issues: [],
+    });
+    // The provider records the ctx it was handed.
+    const seenCtx: SessionContext[] = [];
+    const provider: ExecutionProvider = {
+      kind: 'ctx-spy',
+      resolve: async (ctx) => {
+        seenCtx.push(ctx);
+        return {
+          sessionId: ctx.sessionId,
+          dir: '/tmp/none',
+          branch: `atrium/session/${ctx.sessionId}`,
+          remote: '/tmp/repo',
+          dispose: async () => {},
+        };
+      },
+      run: async () => settledReport,
+    };
+    // The STORED context differs from what the caller passes to runGranted — the
+    // coordinator must use the stored values, never the caller's.
+    const stored = { planId: randomUUID(), harness: 'stored-harness', model: 'stored-model' };
+    const coordinator = createExecutionCoordinator({
+      commands,
+      provider,
+      logger,
+      ownership: okOwnership({ ...stored, authority: 'cap-42' }),
+    });
+
+    await coordinator.runGranted(agent, {
+      sessionId,
+      roomId: randomUUID(),
+      // Caller-supplied values that MUST be ignored in favour of the stored ones.
+      planId: 'caller-plan',
+      harness: 'caller-harness',
+      model: 'caller-model',
+    });
+
+    // REVERT-REDS: build `ctx` from `granted.*` instead of `claimed.*` in
+    // coordinator.ts and these three reds — the caller's payload would flow to the
+    // provider.
+    const seen = seenCtx[0];
+    expect(seen).toBeDefined();
+    expect(seen?.planId).toBe(stored.planId);
+    expect(seen?.harness).toBe('stored-harness');
+    expect(seen?.model).toBe('stored-model');
+
+    // And the settle carries the claim's capability token, not the caller's.
+    const settle = commands.calls.find((c) => c.name === 'settle_session');
+    if (settle?.name === 'settle_session') expect(settle.authority).toBe('cap-42');
+  });
+});
+
+describe('a malformed provider report never leaves the session open (#120 r6 F7)', () => {
+  it('synthesizes a failed receipt when run() returns undefined', async () => {
+    const sessionId = randomUUID();
+    const commands = fakeCommands({
+      kind: 'appended',
+      roomId: 'r',
+      seq: 1,
+      roomSeq: 1,
+      actor: { kind: 'agent', userId: agent.userId },
+      event: {} as never,
+      issues: [],
+    });
+    // A provider that resolves a real workspace but returns a GARBAGE report — the
+    // interface is TS-only, so nothing stops it at compile time.
+    const provider: ExecutionProvider = {
+      kind: 'bad-report',
+      resolve: async (ctx) => ({
+        sessionId: ctx.sessionId,
+        dir: '/tmp/none',
+        branch: `atrium/session/${ctx.sessionId}`,
+        remote: '/tmp/repo',
+        dispose: async () => {},
+      }),
+      // Malformed: not an ExecutionReport at all.
+      run: async () => undefined as never,
+    };
+    const coordinator = createExecutionCoordinator({
+      commands,
+      provider,
+      logger,
+      ownership: okOwnership(),
+    });
+
+    // REVERT-REDS: drop the `ReportSchema.parse(...)` inside the try in
+    // coordinator.ts and reading `report.terminal.ok` throws OUTSIDE the boundary,
+    // escaping runGranted with NO settle — the session is left open. With the parse,
+    // the malformed report is caught and the session is driven to a failed receipt.
+    const outcome = await coordinator.runGranted(agent, {
+      sessionId,
+      roomId: randomUUID(),
+      planId: randomUUID(),
+      harness: 'omp',
+      model: 'haiku',
+    });
+
+    expect(outcome.kind).toBe('failed');
+    if (outcome.kind === 'failed') expect(outcome.artifact).toBeNull();
+    const settle = commands.calls.find((c) => c.name === 'settle_session');
+    expect(settle?.name).toBe('settle_session');
+    if (settle?.name === 'settle_session') expect(settle.outcome).toBe('failed');
   });
 });

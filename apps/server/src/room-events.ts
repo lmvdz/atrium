@@ -160,6 +160,20 @@ export const SessionOpened = z.object({
   planId: Id,
   harness: z.string().min(1).max(120),
   model: z.string().min(1).max(120),
+  /**
+   * THE EXECUTION-AUTHORITY RECORD, decided at grant (#120 round-6). `provider`
+   * means a wired ExecutionProvider owns this session's execution and its
+   * terminal; `external` means an outside member settles it (external-settle
+   * mode). `executionOwner` is the granting process's instance id for a provider
+   * session, NULL for external. Both ride the event so replay reconstructs the
+   * grant-time authority deterministically. The capability TOKEN does NOT ride
+   * here — it is minted row-only in the projection so it never reaches the wire
+   * (`toWire` broadcasts the whole event). Defaulted so a pre-round-6 event (or an
+   * in-process caller that predates the field) folds as an external session, which
+   * is exactly its historical behaviour.
+   */
+  executionMode: z.enum(['provider', 'external']).default('external'),
+  executionOwner: z.string().min(1).max(200).nullable().default(null),
 });
 export type SessionOpened = z.infer<typeof SessionOpened>;
 

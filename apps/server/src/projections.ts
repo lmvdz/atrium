@@ -1,3 +1,4 @@
+import { randomUUID } from 'node:crypto';
 import {
   type AcceptedObject,
   type Actor,
@@ -749,6 +750,28 @@ async function projectSessionOpened(
       `plan "${event.planId}" is ${parent.status}, not open — a session may open only under an open plan, and this plan's receipt has already closed`,
     );
   }
+  // ── THE EXECUTION-AUTHORITY RECORD, WRITTEN WITH THE DRAW (#120 round-6 F1) ──
+  //
+  // The session's whole execution authority is stamped in THIS transaction — the
+  // same append that inserts the row and increments `authorized_draws` — so a
+  // granted draw is born with determinate authority and there is no window in
+  // which a spent draw has none. Round 5's campaign-stopping F1 was exactly that
+  // window: the draw committed here, then `runGranted` claimed the lease
+  // separately, and a kill between the two left a spent, UNLEASED, never-
+  // reconciled session (reconciliation only touches leased sessions).
+  //
+  //   * `execution_mode`/`execution_owner` ride the EVENT (decided at grant by the
+  //     command service from whether a provider is wired), so replay reconstructs
+  //     grant-time authority deterministically.
+  //   * `execution_authority` — the capability token — is minted HERE, row-only:
+  //     it must never reach the wire (`toWire` broadcasts the whole event), and its
+  //     exact value need not survive replay (a replayed session is already terminal
+  //     or is a wedge the reconciler reads the row for). Minting it in the
+  //     projection is what keeps a secret off the event. `provider` only.
+  //   * `execution_heartbeat_at` is stamped at grant for a provider session, so an
+  //     unclaimed-but-granted session is reconcilable the moment its granting
+  //     process dies — closing the F1 wedge for real.
+  const providerOwned = event.executionMode === 'provider';
   await tx.insert(sessions).values({
     id: event.sessionId,
     roomId,
@@ -757,6 +780,11 @@ async function projectSessionOpened(
     model: event.model,
     status: 'open',
     openedByEventId: id,
+    executionMode: event.executionMode,
+    executionOwner: providerOwned ? event.executionOwner : null,
+    executionAuthority: providerOwned ? randomUUID() : null,
+    executionHeartbeatAt: providerOwned ? new Date(event.at) : null,
+    executionClaimedAt: null,
     createdAt: new Date(event.at),
     updatedAt: new Date(event.at),
   });

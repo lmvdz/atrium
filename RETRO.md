@@ -8,6 +8,85 @@ Standing record of what this project's process gets wrong and right, kept so fut
 
 ---
 
+## Execution authority (#120 round-6 design consolidation)
+
+Round 5 closed each execution finding with a separate mechanism — a lease claimed
+in `runGranted`, an artifact rule scoped to the boot's verifier, an owner check on
+settle, a report bounds-check in `commands.ts` — and the seams *between* those
+mechanisms became the round-5 defect cluster both foreign lineages converged on.
+This round replaces the scatter with ONE record and derives every guard from it.
+
+**THE RECORD.** A session's *execution authority* is four facts, written in the
+SAME ledger transaction as `session_opened` (`projectSessionOpened`), so a granted
+draw is BORN with determinate authority and no window exists where a spent draw
+has none:
+
+- `execution_mode` — `provider` (a wired ExecutionProvider owns this session's
+  execution and its terminal) or `external` (no provider this boot; an external
+  member settles it — the documented external-settle mode). Decided at grant from
+  whether execution is wired, carried in the `session_opened` event so replay is
+  deterministic.
+- `execution_owner` — the instance id of the granting process, stamped at grant
+  for a `provider` session (NULL for `external`). Also carried in the event.
+- `execution_authority` — an unforgeable capability token (a random UUID), minted
+  at grant for a `provider` session, ROW-ONLY: never in the event, never on the
+  wire (`toWire` broadcasts the whole event, so a secret in it would leak to every
+  room member). Its value need not survive replay — a replayed session is already
+  terminal or is a wedge the reconciler reads the row for — so minting it in the
+  projection is correct, and it is the same class of process-liveness bookkeeping
+  the lease columns already are.
+- `execution_heartbeat_at` — stamped at grant so an unclaimed-but-granted provider
+  session is reconcilable the moment its granting process dies.
+
+**WHAT THE CAPABILITY AUTHORIZES.** `execution_authority` is the capability to
+write a `provider` session's terminal — BOTH `settled` and `failed`. `settle_session`
+of a `provider`-mode session is refused unless the caller presents the matching
+token; a room member (opener included) never sees it, so cannot forge either
+outcome. The token is held only by in-process trusted components: the coordinator
+obtains it from `claim`, the reconciler reads it off the row. Neither is the wire.
+
+**THE CLAIM (F5).** `ExecutionOwnership.claim` is a single guarded UPDATE that
+transitions `unclaimed → running` EXACTLY ONCE (`execution_claimed_at IS NULL`
+guard) and RETURNS the session's STORED context (`plan_id/harness/model`) plus the
+authority token. The coordinator builds `SessionContext` from that return value,
+never from its caller's `GrantedSession` payload, so caller-supplied plan/harness/
+model can no longer override the row. A re-entrant claim matches zero rows.
+
+**HOW EACH FINDING IS CLOSED BY THE RECORD:**
+
+1. *Draw commits then leases separately → kill-between → spent, unleased,
+   never-reconciled (campaign-stopping).* The lease (owner + heartbeat + mode +
+   token) is written IN the `session_opened` transaction. There is no "between".
+2/3/6. *Opener preempts the provider with a fabricated `settled` OR `failed`;
+   artifact policy bound to the boot verifier not the session; a clean settle at
+   settle-time boot state.* A `provider` session's terminal requires the capability
+   token (covers both outcomes); a clean `settled` requires a provider-verified
+   artifact keyed on the ROW's `execution_mode`, not on `verifyArtifact !==
+   undefined` this boot.
+4. *Guard optional via omitting `db`/`ownership` at construction.* `ownership` is
+   REQUIRED on the coordinator; a test passes an in-memory fake, it can no longer
+   be omitted into silence. `configureExecution`/`index.ts` always wire it.
+5. *Re-entrant claim; caller data trusted over the row.* The claim is once-only and
+   returns stored context (above).
+7. *Malformed/`undefined` provider report leaves the session open.* The report is
+   parsed with a runtime schema INSIDE the coordinator's failure boundary; an
+   invalid or missing report synthesizes a failed receipt.
+8 (+3). *Reconciliation tied to the boot's provider config.* The stale-lease sweep
+   runs on a timer on EVERY boot regardless of whether execution is enabled; the
+   heartbeat is scoped to `status='open'` (never a completed run); reconcile throws
+   → `unreconciled` unless an exit actually appended.
+
+**git (grok F2, git.ts:315).** Pinning `GIT_DIR`/`GIT_WORK_TREE` alone left the
+per-worktree gitdir's `commondir` and `HEAD` FILES writable by a same-UID harness:
+rewriting `$GIT_DIR/commondir` at a victim repo and `$GIT_DIR/HEAD` at `refs/heads/
+main` redirected the adapter's OWN commit onto the victim's trunk. The adapter now
+also pins `GIT_COMMON_DIR` (captured at resolve) so a rewritten `commondir` is
+ignored, and re-asserts `HEAD` to the session branch before its own commit so a
+rewritten `HEAD` cannot move a victim's `main`. Occupancy-not-provenance in
+worktree mode stays a documented known boundary (needs the BUY sandbox).
+
+---
+
 ## Campaign to date — day-one retrospective (2026-08-01)
 
 **Shape of the campaign so far**: 1 research pre-map (design corpus, 6 prototype versions mined) → map #1 charted with 17 decision tickets → 15 decisions + 3 research tickets resolved in ~one day → 9 build tickets graduated → 3 gauntlets run, all FAIL on round 1, all producing fix rounds that made the work *more architectural*, not more patched.

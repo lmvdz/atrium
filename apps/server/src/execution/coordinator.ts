@@ -1,7 +1,44 @@
+import { z } from 'zod';
 import type { Command, CommandResult } from '../commands.js';
 import type { Logger } from '../logger.js';
 import type { Session } from '../session.js';
-import type { ExecutionArtifact, ExecutionProvider, SessionContext } from './provider.js';
+import type {
+  ExecutionArtifact,
+  ExecutionProvider,
+  ExecutionReport,
+  SessionContext,
+} from './provider.js';
+
+/**
+ * THE PROVIDER REPORT, VALIDATED AT RUNTIME (#120 round-6 F7).
+ *
+ * `ExecutionProvider.run` returns an `ExecutionReport` — a TS interface with NO
+ * runtime guarantee. A provider that returns `undefined`, or a malformed object,
+ * used to sail past the coordinator until `report.terminal.ok` was read OUTSIDE
+ * the failure boundary, where a `TypeError` escaped `runGranted` into the
+ * fire-and-forget catch and left the granted session `open` with its draw spent.
+ * This schema is parsed INSIDE the boundary, so a missing or malformed report
+ * throws where the catch turns it into a synthesized failed receipt instead.
+ */
+const ReportSchema = z.object({
+  terminal: z.object({
+    ok: z.boolean(),
+    exitCode: z.number().int().nullable(),
+    detail: z.string().optional(),
+  }),
+  receipt: z.object({
+    exitSummary: z.string(),
+    spendMicros: z.number().nullable(),
+    contextPct: z.number().nullable(),
+    artifact: z
+      .object({
+        branch: z.string(),
+        commit: z.string(),
+        remote: z.string(),
+      })
+      .nullable(),
+  }),
+});
 
 /**
  * The coordinator (#120) — the wiring between a session's lifecycle and the
@@ -29,35 +66,49 @@ export interface SessionCommandRunner {
 }
 
 /**
- * THE EXECUTION-OWNERSHIP CLAIM (#120 round-5 F1 + F4).
+ * The session's STORED execution context, returned by a successful `claim` (#120
+ * round-6 F5). The coordinator builds its `SessionContext` from THIS — the values
+ * the `session_opened` projection wrote to the row — never from the caller's
+ * `GrantedSession` payload, so caller-supplied plan/harness/model can no longer
+ * override what the session actually is. `authority` is the capability token the
+ * settle must present to write this provider session's terminal.
+ */
+export interface ClaimedSession {
+  readonly planId: string;
+  readonly harness: string;
+  readonly model: string;
+  readonly authority: string;
+}
+
+/**
+ * THE EXECUTION-OWNERSHIP CLAIM (#120 round-5 F1/F4, consolidated round-6 F5).
  *
- * `claim` does two things atomically, in one guarded UPDATE:
+ * `claim` is a single guarded UPDATE that transitions a granted provider session
+ * `unclaimed → running` EXACTLY ONCE and returns its stored context. It matches a
+ * session only if it exists, records an opener (`opened_by_event_id IS NOT NULL` —
+ * a `session_opened` a GRANTED draw produced), is still `open`, is `provider`-mode
+ * and owned by THIS instance, and is not already claimed
+ * (`execution_claimed_at IS NULL`). On a match it stamps `execution_claimed_at`
+ * and a fresh heartbeat and RETURNS the row's `plan_id/harness/model` and
+ * capability token; a never-granted id, an already-claimed session, or one this
+ * instance does not own matches zero rows and returns `null`, so the coordinator
+ * refuses to resolve a workspace or run a harness for it.
  *
- *  1. **Proves the granted draw is committed (F1).** It matches a session only if
- *     it exists, records an opener (`opened_by_event_id IS NOT NULL` — a
- *     `session_opened` was projected, which only a GRANTED draw produces), and is
- *     still `open`. A "never-granted" session id matches zero rows and `claim`
- *     returns false, so the coordinator refuses to resolve a workspace or run a
- *     harness for a draw Atrium never authorized — the exact adjacent-path bypass
- *     the round-4 gauntlet drove through `runGranted`, which trusted its caller.
- *  2. **Records the ownership lease (F4).** On a match it stamps this process's
- *     instance id and a fresh heartbeat, so startup/periodic reconciliation can
- *     later tell this session's execution apart from an external-settle session.
- *
- * Optional on the coordinator: the unit tests construct a coordinator with no DB,
- * and there the claim is skipped (defense-in-depth is inert without a ledger to
- * check against). EVERY wired path injects it — see `configure.ts`.
+ * REQUIRED on the coordinator (#120 round-6 F4). Round 5 made it optional and a
+ * coordinator built without it silently ran with NO granted-draw guard; the guard
+ * can no longer be omitted into silence. Tests pass an in-memory fake, never
+ * nothing.
  */
 export interface ExecutionOwnership {
-  claim(input: { sessionId: string; roomId: string }): Promise<boolean>;
+  claim(input: { sessionId: string; roomId: string }): Promise<ClaimedSession | null>;
 }
 
 export interface ExecutionCoordinatorOptions {
   commands: SessionCommandRunner;
   provider: ExecutionProvider;
   logger: Logger;
-  /** The granted-draw guard + ownership lease (#120 round-5). Wired in production. */
-  ownership?: ExecutionOwnership;
+  /** The granted-draw guard + ownership claim (#120 round-6). MANDATORY — no bypass. */
+  ownership: ExecutionOwnership;
 }
 
 /** What the coordinator is asked to open and run. */
@@ -127,6 +178,7 @@ export function createExecutionCoordinator(
   async function settleOrThrow(
     session: Session,
     granted: GrantedSession,
+    authority: string,
     outcome: 'settled' | 'failed',
     receipt: {
       exitSummary: string | null;
@@ -144,6 +196,11 @@ export function createExecutionCoordinator(
       spendMicros: receipt.spendMicros,
       contextPct: receipt.contextPct,
       artifact: receipt.artifact,
+      // The capability the settle handler checks for a provider session (#120
+      // round-6). Obtained from `claim` — the coordinator is the only in-process
+      // holder — so this settle is honored where a room member's manual one is
+      // refused.
+      authority,
     });
     if (settle.kind !== 'appended') {
       throw new Error(
@@ -153,43 +210,46 @@ export function createExecutionCoordinator(
   }
 
   async function runGranted(session: Session, granted: GrantedSession): Promise<ExecutionOutcome> {
-    // ── THE GRANTED-DRAW GUARD LIVES ON `runGranted` ITSELF (#120 round-5 F1) ──
+    // ── THE ONCE-ONLY CLAIM IS THE GRANTED-DRAW GUARD (#120 round-6 F1/F4/F5) ──
     //
     // `runGranted` is wire-reachable — `wireExecutionCoordinator`'s command wrapper
     // calls it directly on a granted `session_opened`. Its `GrantedSession`
-    // argument is just DATA; before round 5 it trusted that data and resolved a
-    // workspace for ANY session id, so a caller (or a wired path that forgot the
-    // upstream check) could run a "never-granted" session — `resolved=1, ran=1` on
-    // a session the budget never authorized. The budget guard on `openAndRun` did
-    // not cover this adjacent entry point. So the check is duplicated HERE, on the
-    // one call every path funnels through, and it refuses BEFORE touching the
-    // provider. Revert this and a fabricated session id resolves and runs.
-    if (ownership) {
-      const owned = await ownership.claim({
+    // argument is just DATA. The claim is what proves this is a real, unclaimed,
+    // this-instance-owned provider session and, in the SAME guarded UPDATE, both
+    // transitions it `unclaimed → running` exactly once and returns its STORED
+    // context. So a fabricated/never-granted id, an already-claimed (re-entrant)
+    // run, or a session another instance owns all return `null` here and the
+    // provider is never reached. `ownership` is MANDATORY (F4) — there is no
+    // no-guard path to fall through. Revert the claim guard and a fabricated
+    // session id resolves and runs.
+    const claimed = await ownership.claim({
+      sessionId: granted.sessionId,
+      roomId: granted.roomId,
+    });
+    if (!claimed) {
+      logger.error('refusing to run a session without a committed, unclaimed granted draw', {
         sessionId: granted.sessionId,
         roomId: granted.roomId,
+        provider: provider.kind,
       });
-      if (!owned) {
-        logger.error('refusing to run a session without a committed granted draw', {
-          sessionId: granted.sessionId,
-          roomId: granted.roomId,
-          provider: provider.kind,
-        });
-        // Nothing was resolved, run, or settled — there is no `open` granted
-        // session here to write a receipt for. Report failed so the caller sees
-        // the run did not happen, without fabricating an exit for a session that
-        // was never Atrium's to run.
-        return { kind: 'failed', sessionId: granted.sessionId, artifact: null };
-      }
+      // Nothing was resolved, run, or settled — there is no runnable granted
+      // session here to write a receipt for. Report failed so the caller sees the
+      // run did not happen, without fabricating an exit for a session that was
+      // never this coordinator's to run.
+      return { kind: 'failed', sessionId: granted.sessionId, artifact: null };
     }
 
+    // THE CONTEXT IS THE STORED CONTEXT (#120 round-6 F5). plan/harness/model come
+    // from the row the claim returned, never from the caller's `granted` payload —
+    // only `sessionId`/`roomId` (the keys the claim matched on) are taken from it.
     const ctx: SessionContext = {
       sessionId: granted.sessionId,
       roomId: granted.roomId,
-      planId: granted.planId,
-      harness: granted.harness,
-      model: granted.model,
+      planId: claimed.planId,
+      harness: claimed.harness,
+      model: claimed.model,
     };
+    const authority = claimed.authority;
 
     // RESOLVE → RUN → REPORT, disposing the ephemeral workspace no matter what.
     //
@@ -201,11 +261,15 @@ export function createExecutionCoordinator(
     // null) and disposes whatever workspace resolve managed to create. Revert
     // this — hoist `resolve` back above the try — and a resolve-throw orphans the
     // session (the F5 red-on-revert guard in coordinator.test.ts).
+    //
+    // The report is PARSED inside this boundary too (#120 round-6 F7): a provider
+    // that returns `undefined` or a malformed report throws here and is caught,
+    // synthesizing a failed receipt — never escaping to leave the session open.
     let workspace: Awaited<ReturnType<ExecutionProvider['resolve']>> | null = null;
-    let report: Awaited<ReturnType<ExecutionProvider['run']>>;
+    let report: ExecutionReport;
     try {
       workspace = await provider.resolve(ctx);
-      report = await provider.run(workspace, ctx);
+      report = ReportSchema.parse(await provider.run(workspace, ctx)) as ExecutionReport;
     } catch (error) {
       // The provider threw before a clean terminal could be observed. That is a
       // failure owed triage, not a settle. Report it, then settle failed with no
@@ -268,7 +332,7 @@ export function createExecutionCoordinator(
     // reds immediately.
     let terminal: 'settled' | 'failed' = outcome;
     try {
-      await settleOrThrow(session, granted, outcome, report.receipt);
+      await settleOrThrow(session, granted, authority, outcome, report.receipt);
     } catch (error) {
       logger.error('settling an executed session threw — retrying as failed', {
         sessionId: granted.sessionId,
@@ -277,7 +341,7 @@ export function createExecutionCoordinator(
       });
       terminal = 'failed';
       try {
-        await settleOrThrow(session, granted, 'failed', {
+        await settleOrThrow(session, granted, authority, 'failed', {
           exitSummary:
             `execution completed (${outcome}) but the settle failed: ` +
             (error instanceof Error ? error.message : String(error)).slice(0, 500),

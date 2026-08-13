@@ -374,6 +374,22 @@ export const Command = z.discriminatedUnion('name', [
      * payload and is the durable, receipt-indexed pointer to the session's work.
      */
     artifact: ExecutionArtifact.nullable().default(null),
+    /**
+     * THE SETTLEMENT CAPABILITY (#120 round-6), or `null`. A `provider`-mode
+     * session's terminal — settled OR failed — may be written only by a caller
+     * presenting this session's `execution_authority` token. It is minted row-only
+     * at grant and never broadcast, so a wire client cannot guess it: an inbound
+     * `settle_session` may carry this field, but it will not match unless the
+     * caller is the in-process coordinator (which got it from `claim`) or the
+     * reconciler (which read it off the row). Ignored for an `external` session,
+     * whose settle is governed by the opener check alone.
+     *
+     * `.nullish()` (optional), so the overwhelmingly common settle — an external
+     * session, or any caller holding no token — omits it entirely; only the
+     * coordinator and reconciler set it. A provider session settled with no/
+     * `undefined` authority simply fails the capability check.
+     */
+    authority: z.string().min(1).max(200).nullish(),
   }),
   z.object({
     name: z.literal('raise_signal'),
@@ -589,6 +605,18 @@ export function sessionSettleRefusal(sessionId: string): string {
 }
 
 /**
+ * What a member is told when they try to settle a PROVIDER-owned session without
+ * its capability token (#120 round-6 F2/F6). A provider session's terminal — of
+ * either spelling — comes from the ExecutionProvider that owns it, reported
+ * through the coordinator on the session's minted authority; a room member never
+ * holds that token, so a manual settle of either outcome is refused rather than
+ * being allowed to race the provider's real report.
+ */
+export function providerSettleCapabilityRefusal(sessionId: string): string {
+  return `"settle_session" of session "${sessionId}" is owned by its execution provider — its terminal (settled or failed) comes from the provider's verified report, carried on a capability minted for the session that a room member does not hold. Nothing was appended. A wedged provider session is driven to a receipt by reconciliation, not settled from the outside`;
+}
+
+/**
  * #102 finding 1 — the refusal a self-verifying source author gets.
  *
  * Names the *act* (verifying a claim drawn from your own message) and the route
@@ -785,6 +813,18 @@ export interface CommandServiceOptions {
    * never a caller assertion.
    */
   verifyArtifact?: ArtifactVerifier;
+  /**
+   * This process's execution instance id (#120 round-6). PRESENT iff a provider is
+   * wired this boot — it is the single switch that makes an `open_session` grant a
+   * `provider`-mode session (owner = this id, a capability token minted in the
+   * projection) rather than an `external`-mode one. It rides the `session_opened`
+   * event as `executionOwner`, so the authority is written atomically with the
+   * draw. Absent, every session is `external` (the documented external-settle
+   * mode), and no capability token gates its settle. It comes in with
+   * `verifyArtifact` — both are the wired-provider's fingerprint — and they are the
+   * two halves of the same "execution is enabled" fact.
+   */
+  executionInstanceId?: string;
 }
 
 /** Confirms a settle artifact names a git object the execution provider produced (#120 F2). */
@@ -900,6 +940,7 @@ export function createCommandService({
   projectionHooks = {},
   attachmentCapabilities,
   verifyArtifact,
+  executionInstanceId,
 }: CommandServiceOptions): CommandService {
   async function requireMembership(session: Session, roomId: string, runner?: Tx) {
     const membership = await authorizer.authorize(session, roomId, runner);
@@ -1629,6 +1670,15 @@ export function createCommandService({
                   planId: command.planId,
                   harness: command.harness,
                   model: command.model,
+                  // THE EXECUTION-AUTHORITY MODE, decided at grant (#120 round-6).
+                  // A provider is wired iff this process has an execution instance
+                  // id: that session is `provider`-owned (its terminal needs the
+                  // capability token) and stamps this instance as its lease owner;
+                  // otherwise it is `external` (external-settle mode). The token
+                  // itself is minted row-only in `projectSessionOpened` so it never
+                  // rides the event onto the wire.
+                  executionMode: executionInstanceId !== undefined ? 'provider' : 'external',
+                  executionOwner: executionInstanceId ?? null,
                 },
           project: (context) => projectRoomEvent(context, projectionHooks),
         });
@@ -1745,6 +1795,11 @@ export function createCommandService({
                 status: sessions.status,
                 openerId: coreEvents.actorId,
                 openedByEventId: sessions.openedByEventId,
+                // The execution-authority record, read under the same lock (#120
+                // round-6): the mode decides whether a capability token is required,
+                // and the token is the value it is checked against.
+                executionMode: sessions.executionMode,
+                executionAuthority: sessions.executionAuthority,
               })
               .from(sessions)
               .leftJoin(coreEvents, eq(coreEvents.id, sessions.openedByEventId))
@@ -1766,6 +1821,35 @@ export function createCommandService({
             }
             if (owned.openerId !== session.userId) {
               throw new CommandError('invalid', sessionSettleRefusal(command.sessionId));
+            }
+
+            // ── THE SETTLEMENT CAPABILITY GATES A PROVIDER SESSION (#120 r6 F2/F6) ──
+            //
+            // A `provider`-mode session's terminal — settled OR failed — belongs to
+            // the ExecutionProvider that owns it, reported through the coordinator.
+            // Round 5 closed only the fabricated-CLEAN-exit half (a settle needed a
+            // verified artifact); a bystanding opener could still fabricate a
+            // `failed` exit and win the one-exit race, force-failing a running
+            // provider session from the outside. The fix is one capability that
+            // covers both outcomes: a provider session may be settled only by a
+            // caller presenting its `execution_authority` token. That token is
+            // minted row-only at grant and never leaves the process — the
+            // coordinator gets it from `claim`, the reconciler reads it off the row
+            // — so a room member (the opener included) cannot present it, and their
+            // manual settle of either spelling is refused. `external` sessions carry
+            // no token and are governed by the opener check alone (external-settle
+            // mode). Revert this and a room member's fabricated `failed` (or, with
+            // the F2 revert, `settled`) terminates a provider session mid-run.
+            if (owned.executionMode === 'provider') {
+              if (
+                owned.executionAuthority === null ||
+                command.authority !== owned.executionAuthority
+              ) {
+                throw new CommandError(
+                  'invalid',
+                  providerSettleCapabilityRefusal(command.sessionId),
+                );
+              }
             }
 
             // ── THE VERIFIED TUPLE IS THE APPENDED TUPLE (#120 round-3 F4) ────
@@ -1798,31 +1882,28 @@ export function createCommandService({
                 ? command.artifact
                 : null;
 
-            // ── A CLEAN SETTLE MUST CARRY PROVIDER EVIDENCE (#120 round-5 F2) ──
+            // ── A CLEAN SETTLE MUST CARRY PROVIDER EVIDENCE (#120 round-5 F2, r6) ──
             //
             // `settled` is the covenant-visible spelling: a session that reached a
-            // clean terminal with a branch a human can land. The opener chose that
-            // spelling from a free enum, so a bystander-or-machine opener could
-            // append `{outcome:'settled', artifact:null}` on a session STILL
-            // RUNNING and win the one-exit race in `projectSessionExit` — a false
-            // green with no provider evidence, the real settle then throwing on a
-            // session that already exited. So a clean settle is refused unless a
-            // provider-VERIFIED artifact survived the check above.
+            // clean terminal with a branch a human can land. So a clean settle is
+            // refused unless a provider-VERIFIED artifact survived the check above.
             //
-            // SCOPED TO WHEN A PROVIDER IS WIRED (`verifyArtifact` present). That is
-            // exactly the execution-enabled deployment, where the provider IS the
-            // source of a session's terminal and a clean exit with no artifact is a
-            // false green. When execution is DISABLED (no verifier), a session is
-            // settled by an EXTERNAL settler the covenant trusts to choose the
-            // terminal — the documented external-settle mode — and a clean settle
-            // with no artifact is legitimate there. The owner check (F3) still gates
-            // WHO may settle in both modes; this adds "and not a fabricated clean
-            // exit" only where a provider could have produced a real one. A `failed`
-            // exit always carries null (a killed run produced nothing to land).
-            // Revert this and a manual `settled`+null on a running session, on a
-            // server that runs execution, appends a fabricated clean exit.
+            // ROUND 6 binds this to the SESSION's persisted `execution_mode`, not to
+            // whether a verifier is wired THIS boot. Round 5 keyed it on
+            // `verifyArtifact !== undefined`, a boot-state proxy: a `provider`
+            // session opened on an execution-enabled boot but reaching this settle on
+            // a boot where execution was since DISABLED would have `verifyArtifact`
+            // undefined and could take a clean+null settle it must never get. The
+            // policy was decided at grant, so it is read from the grant: a `provider`
+            // session's clean exit needs a real artifact regardless of the current
+            // boot. An `external` session (mode !== 'provider') is settled by an
+            // outside settler the covenant trusts to choose the terminal, and a
+            // clean+null settle is legitimate there. A `failed` exit always carries
+            // null (a killed run produced nothing to land). Revert this and a manual
+            // `settled`+null on a running provider session appends a fabricated clean
+            // exit.
             if (
-              verifyArtifact !== undefined &&
+              owned.executionMode === 'provider' &&
               command.outcome === 'settled' &&
               verifiedArtifact === null
             ) {

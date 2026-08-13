@@ -6,8 +6,24 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { Command, CommandResult, CommandService } from '../../src/commands.js';
 import type { Env } from '../../src/env.js';
 import { configureExecution, parseArgv } from '../../src/execution/configure.js';
+import type { ExecutionOwnership } from '../../src/execution/coordinator.js';
 import { createLogger } from '../../src/logger.js';
 import type { Session } from '../../src/session.js';
+
+/**
+ * A fake ownership for the composer tests (#120 round-6). These fixtures pass a
+ * fake command service and hold no DB, so they inject the claim directly — the
+ * guard is MANDATORY (F4), it just cannot be a real one here. `claim` always
+ * succeeds, returning stored context, so the fire-and-forget run proceeds.
+ */
+const fakeOwnership: ExecutionOwnership = {
+  claim: async () => ({
+    planId: randomUUID(),
+    harness: 'omp',
+    model: 'haiku',
+    authority: 'test-authority',
+  }),
+};
 
 /**
  * The live-server wiring (`index.ts`'s path): a granted `session_opened` fires
@@ -87,7 +103,12 @@ describe('configureExecution wires the provider to the session lifecycle', () =>
   it('fires the coordinator on a granted session_opened', async () => {
     const sessionId = randomUUID();
     const { service, settled, settlePromise } = baseService({ outcome: 'granted', sessionId });
-    const configured = await configureExecution({ env: env({}), commands: service, logger });
+    const configured = await configureExecution({
+      env: env({}),
+      commands: service,
+      logger,
+      ownership: fakeOwnership,
+    });
     expect(configured).not.toBeNull();
 
     await configured?.commands.execute(agent, openSession);
@@ -111,7 +132,12 @@ describe('configureExecution wires the provider to the session lifecycle', () =>
       slice: 0,
       authorizedDraws: 0,
     });
-    const configured = await configureExecution({ env: env({}), commands: service, logger });
+    const configured = await configureExecution({
+      env: env({}),
+      commands: service,
+      logger,
+      ownership: fakeOwnership,
+    });
 
     await configured?.commands.execute(agent, openSession);
     // Give any (erroneous) fire-and-forget run a chance to happen, then assert

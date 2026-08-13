@@ -197,12 +197,25 @@ async function main(): Promise<void> {
     logger.info('execution is DISABLED — set EXECUTION_PROVIDER to run granted sessions', {});
   }
 
+  // This process's execution instance id — the value stamped as a granted provider
+  // session's lease OWNER at grant, and the id the coordinator's claim matches on
+  // (#120 round-6). Reused from the bus so logs correlate, or a fresh id when there
+  // is no bus; either way it is unique per boot, so a prior boot's leases carry a
+  // DIFFERENT id and its heartbeats stop, which is what lets reconciliation tell a
+  // dead owner's session from this process's live one.
+  const executionInstanceId = bus.instanceId ?? randomUUID();
+
   const baseCommands = createCommandService({
     db: database.db,
     ledger,
     authorizer: createMembershipAuthorizer(database.db),
     attachmentCapabilities: attachments,
     verifyArtifact: executionRuntime?.verifyArtifact,
+    // Present iff a provider is wired: a granted `open_session` then records a
+    // `provider`-mode execution-authority record (owner = this instance, a
+    // capability token) in the SAME transaction as the draw (#120 round-6 F1).
+    // Absent, every session is `external` (external-settle mode).
+    executionInstanceId: executionRuntime ? executionInstanceId : undefined,
     projectionHooks: routing
       ? {
           onMessagePosted: ({ tx, roomId }) => queue.enqueueInterpretation(tx, roomId),
@@ -210,23 +223,18 @@ async function main(): Promise<void> {
       : {},
   });
 
-  // This process's execution instance id — the value stamped on every ownership
-  // lease it claims (#120 round-5 F4). Reused from the bus so logs correlate, or a
-  // fresh id when there is no bus; either way it is unique per boot, so a prior
-  // boot's leases carry a DIFFERENT id and its heartbeats stop, which is what lets
-  // reconciliation tell a dead owner's session from this process's live one.
-  const executionInstanceId = bus.instanceId ?? randomUUID();
   const executionOwnership = executionRuntime
     ? createExecutionOwnership({ db: database.db, instanceId: executionInstanceId, logger })
     : null;
-  const executionWiring = executionRuntime
-    ? wireExecutionCoordinator({
-        provider: executionRuntime.provider,
-        commands: baseCommands,
-        logger,
-        ownership: executionOwnership ?? undefined,
-      })
-    : null;
+  const executionWiring =
+    executionRuntime && executionOwnership
+      ? wireExecutionCoordinator({
+          provider: executionRuntime.provider,
+          commands: baseCommands,
+          logger,
+          ownership: executionOwnership,
+        })
+      : null;
   const commands = executionWiring?.commands ?? baseCommands;
 
   /**
@@ -288,41 +296,48 @@ async function main(): Promise<void> {
   }
 
   /* ---------------------------------------------------------------------------
-   * THE OWNERSHIP HEARTBEAT + PERIODIC SWEEP (#120 round-5 F4).
+   * THE OWNERSHIP HEARTBEAT + PERIODIC SWEEP (#120 round-5 F4, round-6 F8).
    *
-   * While execution is enabled, this process keeps its own leases warm and, in the
-   * same beat, reconciles any lease that has since gone stale — a crash-and-restart
-   * faster than the stale window, or a peer that died mid-run. Heartbeat FIRST so
-   * this process's live leases are fresh before the sweep reads them, then sweep.
+   * Two jobs, deliberately split by which boots they run on:
+   *
+   *   * The HEARTBEAT keeps THIS process's own leases warm, and only a boot that
+   *     runs execution owns any — so it fires only when `executionOwnership` is
+   *     present. Heartbeat FIRST, so this process's live leases are fresh before
+   *     the sweep reads them.
+   *   * The SWEEP reconciles any lease that has gone stale — a dead owner's wedge.
+   *     It runs on EVERY boot regardless of whether execution is enabled this boot
+   *     (#120 round-6 F8): a DISABLED boot must still be able to clear a prior
+   *     ENABLED boot's crash wedge, because "stale lease" is the whole predicate
+   *     and reconciliation settles through the ordinary command path. Gating the
+   *     sweep on the provider being wired would leave a wedge un-cleared for as
+   *     long as the operator ran with execution off.
+   *
    * Both are best-effort: a failure is logged and the next beat retries, never
    * takes the process down.
    * ------------------------------------------------------------------------- */
-  let executionHeartbeatTimer: NodeJS.Timeout | undefined;
-  if (executionOwnership) {
-    executionHeartbeatTimer = setInterval(() => {
-      void (async () => {
-        try {
-          await executionOwnership.heartbeat();
-          const swept = await reconcileWedgedSessions({
-            db: database.db,
-            commands: baseCommands,
-            logger,
-            staleAfterMs: EXECUTION_LEASE_STALE_MS,
+  const executionSweepTimer: NodeJS.Timeout = setInterval(() => {
+    void (async () => {
+      try {
+        if (executionOwnership) await executionOwnership.heartbeat();
+        const swept = await reconcileWedgedSessions({
+          db: database.db,
+          commands: baseCommands,
+          logger,
+          staleAfterMs: EXECUTION_LEASE_STALE_MS,
+        });
+        if (swept.found > 0) {
+          logger.warn('periodic sweep reconciled sessions with a dead execution owner', {
+            found: swept.found,
+            failed: swept.failed,
+            unreconciled: swept.unreconciled,
           });
-          if (swept.found > 0) {
-            logger.warn('periodic sweep reconciled sessions with a dead execution owner', {
-              found: swept.found,
-              failed: swept.failed,
-              unreconciled: swept.unreconciled,
-            });
-          }
-        } catch (error) {
-          logSafely('execution heartbeat/sweep failed', () => ({ error: describeUnknown(error) }));
         }
-      })();
-    }, EXECUTION_HEARTBEAT_MS);
-    executionHeartbeatTimer.unref();
-  }
+      } catch (error) {
+        logSafely('execution heartbeat/sweep failed', () => ({ error: describeUnknown(error) }));
+      }
+    })();
+  }, EXECUTION_HEARTBEAT_MS);
+  executionSweepTimer.unref();
 
   let ready = false;
   const realtime = createRealtimeServer({
@@ -376,7 +391,7 @@ async function main(): Promise<void> {
     forced.unref();
 
     try {
-      if (executionHeartbeatTimer) clearInterval(executionHeartbeatTimer);
+      clearInterval(executionSweepTimer);
       await realtime.close();
       await queue.stop();
       // In-flight executions get a BOUNDED grace before anything they depend on

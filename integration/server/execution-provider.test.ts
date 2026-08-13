@@ -90,17 +90,48 @@ function makeVerifier(ar: ArtifactRepo): ArtifactVerifier {
   return createArtifactVerifier(ar, logger);
 }
 
+/** This test process's execution instance id — stamped on leases the coordinator claims. */
+const TEST_INSTANCE_ID = 'test-instance';
+
+/**
+ * The execution-ENABLED command service (#120 round-6): `executionInstanceId` set,
+ * so a granted `open_session` records a `provider`-mode execution-authority record
+ * (owner = this instance, a capability token) in the same transaction as the draw.
+ * This is what makes the capability, clean-settle, and lease-at-grant rules apply.
+ */
 function commandService(verifyArtifact: ArtifactVerifier | undefined = makeVerifier(artifactRepo)) {
   return createCommandService({
     db: handle.db,
     ledger,
     authorizer: createMembershipAuthorizer(handle.db),
     verifyArtifact,
+    executionInstanceId: TEST_INSTANCE_ID,
   });
 }
 
-/** This test process's execution instance id — stamped on leases the coordinator claims. */
-const TEST_INSTANCE_ID = 'test-instance';
+/**
+ * The execution-DISABLED command service — no `executionInstanceId`, no verifier —
+ * so a granted session is `external`-mode (unleased, external-settle). Used where a
+ * test needs the pre-provider mode (e.g. the unleased-external reconcile case).
+ */
+function externalCommandService() {
+  return createCommandService({
+    db: handle.db,
+    ledger,
+    authorizer: createMembershipAuthorizer(handle.db),
+  });
+}
+
+/** The capability token a provider session was minted at grant — read off the row. */
+async function sessionAuthority(sessionId: string): Promise<string> {
+  const [row] = await handle.db
+    .select({ authority: sessions.executionAuthority })
+    .from(sessions)
+    .where(eq(sessions.id, sessionId));
+  const authority = row?.authority;
+  if (!authority) throw new Error(`session ${sessionId} has no execution_authority`);
+  return authority;
+}
 
 function ownership(instanceId = TEST_INSTANCE_ID) {
   return createExecutionOwnership({ db: handle.db, instanceId, logger });
@@ -303,11 +334,11 @@ describe('the artifact is PROVIDER-VERIFIED, not a caller assertion (#120 F2, re
       remote: '/some/real/repo',
     };
     // The forged artifact fails verification → drops to null → and a CLEAN settle
-    // with no provider-verified artifact is now REFUSED outright (#120 r5 F2),
-    // rather than appended-with-null. Either way the ledger indexes no forged
-    // pointer; refusing is the stronger shape — a bystander cannot fabricate a
-    // clean exit for a running session at all. Revert F2 and the forged
-    // `{branch:"main",…}` lands in the ledger as a "verified artifact" it never was.
+    // with no provider-verified artifact is REFUSED outright (#120 r5 F2). The
+    // caller presents the session's real capability token (round 6) so it clears
+    // the provider-capability gate and reaches the ARTIFACT rule under test — a
+    // hostile wire caller could not, but that is what the capability test proves
+    // separately; here the artifact rule itself is exercised.
     await expect(
       commands.execute(agentSession, {
         name: 'settle_session',
@@ -318,6 +349,7 @@ describe('the artifact is PROVIDER-VERIFIED, not a caller assertion (#120 F2, re
         spendMicros: null,
         contextPct: null,
         artifact: forged,
+        authority: await sessionAuthority(sessionId),
       }),
     ).rejects.toThrow(/provider-verified artifact/);
 
@@ -368,6 +400,7 @@ async function resetSecondSession(planId: string): Promise<void> {
       spendMicros: null,
       contextPct: null,
       artifact: plausible,
+      authority: await sessionAuthority(sessionId),
     }),
   ).rejects.toThrow(/provider-verified artifact/);
   expect(await settledEventCount(sessionId)).toBe(0);
@@ -478,6 +511,7 @@ describe('the INHERITED-env retarget vector is closed (#120 F1/F4, red-on-revert
         commands: commandService(),
         provider,
         logger,
+        ownership: ownership(),
       }).openAndRun(agentSession, {
         roomId: room.roomId,
         planId,
@@ -611,9 +645,9 @@ describe("a session's exit is its OPENER's to write (#120 r3 F3, red-on-revert)"
 
     // And the OWNER can still settle it — the gate narrows who may write the
     // receipt, it does not make the session unsettleable. Settled as `failed`
-    // (artifact null): a clean `settled` now requires a provider-verified artifact
-    // (#120 r5 F2), which this hand-driven settle has none of, and the owner check
-    // is what is under test here.
+    // (artifact null). This is a provider session, so the settle also carries its
+    // capability token (round 6) — the coordinator/reconciler hold it; a hand-
+    // driven settle here presents the row's token to stand in for that holder.
     const settled = await commands.execute(agentSession, {
       name: 'settle_session',
       roomId: room.roomId,
@@ -623,6 +657,7 @@ describe("a session's exit is its OPENER's to write (#120 r3 F3, red-on-revert)"
       spendMicros: null,
       contextPct: null,
       artifact: null,
+      authority: await sessionAuthority(sessionId),
     });
     expect(settled.kind).toBe('appended');
     const [after] = await handle.db.select().from(sessions).where(eq(sessions.id, sessionId));
@@ -807,6 +842,7 @@ describe('a SETTLED artifact survives teardown and GC (#120 r3 F4, red-on-revert
           commit: 'cafebabecafebabecafebabecafebabecafebabe',
           remote: artifactRepo.dir,
         },
+        authority: await sessionAuthority(sessionId),
       }),
     ).rejects.toThrow(/provider-verified artifact/);
     expect(await settledEventCount(sessionId)).toBe(0);
@@ -821,10 +857,11 @@ describe('a clean settle needs provider evidence (#120 r5 F2, red-on-revert)', (
     const sessionId = await openGrantedSession(planId, agentSession);
     const commands = commandService();
 
-    // The opener itself (owner check passes) tries to declare a clean exit with NO
-    // provider artifact, mid-run. REVERT-REDS: remove the "settled needs a verified
+    // The opener (owner + token) tries to declare a clean exit with NO provider
+    // artifact, mid-run. REVERT-REDS: remove the "settled needs a verified
     // artifact" refusal and this appends a fabricated clean exit that wins the
-    // one-exit race with no provider evidence.
+    // one-exit race with no provider evidence. The token is presented so the check
+    // under test is the artifact rule, not the capability gate.
     await expect(
       commands.execute(agentSession, {
         name: 'settle_session',
@@ -835,6 +872,7 @@ describe('a clean settle needs provider evidence (#120 r5 F2, red-on-revert)', (
         spendMicros: null,
         contextPct: null,
         artifact: null,
+        authority: await sessionAuthority(sessionId),
       }),
     ).rejects.toThrow(/provider-verified artifact/);
 
@@ -985,7 +1023,10 @@ describe('reconciliation acts on a dead OWNER, told from the lease (#120 r5 F4, 
   it('NEVER reconciles an UNLEASED external-settle session, however stale the clock', async () => {
     const planId = await openPlan();
     await fundPlan(planId);
-    const sessionId = await openGrantedSession(planId, agentSession);
+    // Opened through the execution-DISABLED command service, so the session is
+    // `external`-mode and holds NO lease at grant (owner NULL) — the documented
+    // external-settle mode. A later boot WITH a provider must never touch it.
+    const sessionId = await openGrantedSession(planId, agentSession, externalCommandService());
     // No lease is stamped — this is the external-settle mode.
 
     const result = await reconcile(new Date(T0.getTime() + 100 * STALE_MS));
@@ -1062,8 +1103,151 @@ describe('the ownership lease is claimed atomically as the granted-draw guard (#
     expect(outcome.kind).toBe('settled');
     if (outcome.kind !== 'settled') return;
     const [row] = await handle.db.select().from(sessions).where(eq(sessions.id, outcome.sessionId));
-    // The lease was stamped by this process as part of running the session.
+    // Owner was stamped at GRANT and the claim marked it running (round 6).
     expect(row?.executionOwner).toBe(TEST_INSTANCE_ID);
     expect(row?.executionHeartbeatAt).not.toBeNull();
+    expect(row?.executionClaimedAt).not.toBeNull();
+  });
+});
+
+/* ═══════════════════════════════════════════════════════════════════════════
+ * ROUND 6 — the execution-authority record, consolidated.
+ * ═══════════════════════════════════════════════════════════════════════════ */
+
+describe('a granted draw is BORN with its execution authority (#120 r6 F1, red-on-revert)', () => {
+  it('leases a provider session AT GRANT, so it is reconcilable before it is ever claimed', async () => {
+    const planId = await openPlan();
+    await fundPlan(planId);
+    // Open a granted provider session and DO NOT run/claim it — the SIGTERM-between-
+    // open-and-claim window that round 5 left as a spent, unleased, never-reconciled
+    // wedge. Round 6 writes the whole authority record in the session_opened
+    // transaction, so the row is already leased here.
+    const sessionId = await openGrantedSession(planId, agentSession);
+    const [born] = await handle.db.select().from(sessions).where(eq(sessions.id, sessionId));
+    // REVERT-REDS: drop the executionOwner/heartbeat/authority writes from
+    // `projectSessionOpened` and these are all null — the session is unleased, and
+    // (below) reconciliation never touches it: the exact F1 wedge.
+    expect(born?.executionMode).toBe('provider');
+    expect(born?.executionOwner).toBe(TEST_INSTANCE_ID);
+    expect(born?.executionHeartbeatAt).not.toBeNull();
+    expect(born?.executionAuthority).toBeTruthy();
+    expect(born?.executionClaimedAt).toBeNull(); // granted but not yet claimed
+
+    // Its owning process dies before claiming: the heartbeat freezes and goes
+    // stale. Because it was leased AT GRANT, reconciliation CAN see it and drive it
+    // to a receipt — the F1 wedge is recovered rather than orphaned forever.
+    const T0 = new Date('2026-01-01T00:00:00.000Z');
+    await handle.db.execute(
+      sql`UPDATE sessions SET execution_heartbeat_at = ${T0.toISOString()}::timestamptz
+          WHERE id = ${sessionId} AND room_id = ${room.roomId}`,
+    );
+    const result = await reconcileWedgedSessions({
+      db: handle.db,
+      commands: commandService(),
+      logger,
+      staleAfterMs: 30_000,
+      now: new Date(T0.getTime() + 31_000),
+    });
+    expect(result).toEqual({ found: 1, failed: 1, unreconciled: 0 });
+    const [after] = await handle.db.select().from(sessions).where(eq(sessions.id, sessionId));
+    expect(after?.status).toBe('failed');
+  });
+});
+
+describe('a provider session terminal needs the capability, both spellings (#120 r6 F2/F6, red-on-revert)', () => {
+  for (const outcome of ['settled', 'failed'] as const) {
+    it(`REFUSES a room member's fabricated ${outcome} on a running provider session`, async () => {
+      const planId = await openPlan();
+      await fundPlan(planId);
+      // A real granted provider session, still running. The OPENER itself tries to
+      // write its terminal WITHOUT the capability token — the token is minted
+      // row-only and a wire caller never holds it. REVERT-REDS: drop the
+      // provider-capability gate in `settle_session` and the fabricated `failed`
+      // (previously swallowed) or `settled` wins the one-exit race mid-run.
+      const sessionId = await openGrantedSession(planId, agentSession);
+      await expect(
+        commandService().execute(agentSession, {
+          name: 'settle_session',
+          roomId: room.roomId,
+          sessionId,
+          outcome,
+          exitSummary: 'I declare this done',
+          spendMicros: null,
+          contextPct: null,
+          artifact: null,
+          // No authority — the room member does not hold the token.
+        }),
+      ).rejects.toThrow(/owned by its execution provider/);
+
+      // Nothing was written; the session is still open.
+      const [row] = await handle.db.select().from(sessions).where(eq(sessions.id, sessionId));
+      expect(row?.status).toBe('open');
+      const [{ exits } = { exits: 0 }] = await handle.db
+        .select({ exits: sql<number>`count(*)::int` })
+        .from(coreEvents)
+        .where(
+          and(
+            eq(coreEvents.roomId, room.roomId),
+            sql`payload->>'sessionId' = ${sessionId}`,
+            sql`${coreEvents.type} IN ('session_settled','session_failed')`,
+          ),
+        );
+      expect(exits).toBe(0);
+    });
+  }
+
+  it('HONORS a settle that presents the session capability token', async () => {
+    const planId = await openPlan();
+    await fundPlan(planId);
+    const sessionId = await openGrantedSession(planId, agentSession);
+    // The same opener, now presenting the row's real token (as the coordinator or
+    // reconciler would): the capability is satisfied and the failed terminal lands.
+    const settled = await commandService().execute(agentSession, {
+      name: 'settle_session',
+      roomId: room.roomId,
+      sessionId,
+      outcome: 'failed',
+      exitSummary: 'the run finished',
+      spendMicros: null,
+      contextPct: null,
+      artifact: null,
+      authority: await sessionAuthority(sessionId),
+    });
+    expect(settled.kind).toBe('appended');
+    const [row] = await handle.db.select().from(sessions).where(eq(sessions.id, sessionId));
+    expect(row?.status).toBe('failed');
+  });
+});
+
+describe('the claim is once-only and returns stored context (#120 r6 F5, red-on-revert)', () => {
+  it('claims a granted session exactly once, returning its stored plan/harness/model', async () => {
+    const planId = await openPlan();
+    await fundPlan(planId);
+    const sessionId = await openGrantedSession(planId, agentSession);
+    const owns = ownership();
+
+    const first = await owns.claim({ sessionId, roomId: room.roomId });
+    // The STORED context, read off the row — never caller-supplied.
+    expect(first).not.toBeNull();
+    expect(first?.planId).toBe(planId);
+    expect(first?.harness).toBe('omp');
+    expect(first?.model).toBe('haiku');
+    expect(first?.authority).toBeTruthy();
+
+    // REVERT-REDS: drop the `execution_claimed_at IS NULL` guard from `claim` and a
+    // second claim succeeds again — the re-entrant claim round 5 allowed. Once-only
+    // returns null the second time.
+    const second = await owns.claim({ sessionId, roomId: room.roomId });
+    expect(second).toBeNull();
+  });
+
+  it('does not claim a session owned by a DIFFERENT instance', async () => {
+    const planId = await openPlan();
+    await fundPlan(planId);
+    const sessionId = await openGrantedSession(planId, agentSession);
+    // A peer instance's ownership manager cannot claim THIS instance's granted
+    // session (owner mismatch) — the guard that stops two boots racing a run.
+    const peer = ownership('peer-instance');
+    expect(await peer.claim({ sessionId, roomId: room.roomId })).toBeNull();
   });
 });
