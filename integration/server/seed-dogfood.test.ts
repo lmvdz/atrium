@@ -17,7 +17,7 @@ import {
   workspaceMembers,
   workspaces,
 } from '@atrium/db';
-import { asc } from 'drizzle-orm';
+import { and, asc, eq } from 'drizzle-orm';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { createLogger } from '../../apps/server/src/logger.js';
 import { createUpgradeAuthenticator } from '../../apps/server/src/ws-auth.js';
@@ -209,5 +209,74 @@ describe('the minimal dogfood seed', () => {
       /DOGFOOD_AGENT_NAME/,
     );
     expect(JSON.stringify(await snapshotDatabase())).toBe(JSON.stringify(beforeFlip));
+
+    // DOGFOOD_AGENT_NAME is the one input checked before anything is written, so
+    // the assertion above holds even for a seed with no transaction at all — it
+    // pins the ordering rather than the guarantee. Flip an input the seed WRITES
+    // from instead: a new workspace slug is inserted (no conflict), a new room is
+    // inserted under it, and only then does the agent's existing config
+    // contradict its new channel. Round 1 refused here having already committed
+    // an orphan workspace and an orphan room.
+    await expect(
+      runSeed(cookieFile, { DOGFOOD_WORKSPACE_SLUG: 'dogfood-elsewhere' }),
+    ).rejects.toThrow(/already has different config/);
+    expect(JSON.stringify(await snapshotDatabase())).toBe(JSON.stringify(beforeFlip));
+
+    // And the far end of the same run: a seed that would legitimately provision
+    // a whole second agent — new workspace, room, identity, config, four
+    // memberships — and then fails at the very last step, the cookie mint. A
+    // too-short BETTER_AUTH_SECRET is a real configuration fault that throws
+    // exactly there, from `resolveAuthSecret` inside `createAtriumAuth`, with
+    // every row already inserted. Zero of them may survive.
+    await expect(
+      runSeed(cookieFile, {
+        DOGFOOD_WORKSPACE_SLUG: 'dogfood-aborted',
+        DOGFOOD_WORKSPACE_NAME: 'Atrium dogfood (aborted)',
+        DOGFOOD_ROOM_SLUG: 'aborted-agent',
+        DOGFOOD_ROOM_NAME: 'aborted-agent',
+        DOGFOOD_AGENT_EMAIL: 'aborted-agent@agents.atrium.invalid',
+        DOGFOOD_AGENT_NAME: 'aborted-agent',
+        BETTER_AUTH_SECRET: 'too-short',
+      }),
+    ).rejects.toThrow(/BETTER_AUTH_SECRET/);
+    expect(JSON.stringify(await snapshotDatabase())).toBe(JSON.stringify(beforeFlip));
+
+    // The two environment variables the header now names are the two whose
+    // defaults are not defaults: one signs the cookie, the other decides its
+    // name. A production run that leaves both unset says so before it touches
+    // the database — and then refuses outright further down, because an
+    // http:// origin is not a production origin, writing nothing on the way.
+    const productionRun = await runSeed(cookieFile, {
+      NODE_ENV: 'production',
+      BETTER_AUTH_SECRET: '',
+      APP_URL: '',
+    }).catch((error: unknown) => error as { stderr?: string });
+    expect(productionRun.stderr ?? '').toMatch(
+      /NODE_ENV=production and BETTER_AUTH_SECRET and APP_URL are not set/,
+    );
+    expect(JSON.stringify(await snapshotDatabase())).toBe(JSON.stringify(beforeFlip));
+
+    // Byte-idempotence has a clock in it. The reuse branch matches only a session
+    // that has not lapsed, so a run past day 30 mints a second one — and without
+    // the sweep the first row stays, and "run it twice, get the same bytes"
+    // quietly becomes "run it twice a month apart, get two credentials". Expire
+    // the agent's session by hand and re-run: exactly one row, a different token.
+    const [live] = second.rows.authSessions;
+    expect(live).toBeDefined();
+    await handle.db
+      .update(authSessions)
+      .set({ expiresAt: new Date(Date.now() - 60_000) })
+      .where(
+        and(
+          eq(authSessions.userId, agentUser?.id as string),
+          eq(authSessions.id, live?.id as string),
+        ),
+      );
+
+    await runSeed(cookieFile);
+    const afterExpiry = await snapshotDatabase();
+    expect(afterExpiry.counts.authSessions).toBe(1);
+    expect(afterExpiry.rows.authSessions[0]?.token).not.toBe(live?.token);
+    expect((await readFile(cookieFile, 'utf8')).trim()).toMatch(/^better-auth\.session_token=/);
   }, 60_000);
 });
