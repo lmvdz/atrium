@@ -187,10 +187,24 @@ export interface ScratchRepo {
  */
 const authenticScratchRepos = new WeakSet<ScratchRepo>();
 
-/** Brand a factory-minted ScratchRepo as authentic and return it. */
+/**
+ * Brand a factory-minted ScratchRepo as authentic, FREEZE it, and return it.
+ *
+ * FREEZE (#141 r6, FINDING A — both critics): the `readonly` fields are a
+ * COMPILE-time promise only; at runtime a caller keeps a genuinely-branded object
+ * and reassigns `repo.dir = <upstream>` or `repo.upstream = undefined`, sailing
+ * past the brand check (same object, still in the WeakSet) with swapped fields —
+ * `addWorktree` then runs `git worktree add` in the reassigned `dir`, writing
+ * worktree admin state into the upstream. `Object.freeze` makes the fields
+ * runtime-immutable, so a reassignment throws in strict mode (a no-op otherwise)
+ * and the branded object a guard trusts is the branded object a git-write uses.
+ * The nested `upstream` handle is frozen too — else `repo.upstream.url` stays
+ * mutable and could re-point the overlap decisions that read it.
+ */
 function brandScratchRepo(repo: ScratchRepo): ScratchRepo {
+  if (repo.upstream !== undefined) Object.freeze(repo.upstream);
   authenticScratchRepos.add(repo);
-  return repo;
+  return Object.freeze(repo);
 }
 
 /**
@@ -228,6 +242,46 @@ export interface WorktreeCheckout {
    * checkouts, which fall back to `commondir`-file discovery.
    */
   readonly commonDir?: string;
+}
+
+/**
+ * ═══════════════════════════════════════════════════════════════════════════
+ *  RUNTIME-UNFORGEABLE PROVENANCE (#141 r6) — a WorktreeCheckout cannot be forged.
+ * ═══════════════════════════════════════════════════════════════════════════
+ *
+ * The THIRD forgeable handle, closed for the same reason as ScratchRepo and
+ * ArtifactRepo (#141 r5). `WorktreeCheckout` is a plain structural object whose
+ * `dir`/`gitDir`/`commonDir`/`repoDir` fields are what the adapter's own git-writes
+ * are POINTED AT: `commitWorktree` pins `GIT_DIR`/`GIT_WORK_TREE` to `gitDir`/`dir`
+ * and runs `git commit`; `removeWorktree` runs `git worktree remove` in `repoDir`
+ * and `rm -rf`s `dir`. A caller with the opt-in who hand-builds `{ dir, branch,
+ * repoDir, gitDir: '<upstream>/.git', commonDir: '<upstream>/.git' }` drives the
+ * adapter's own commit straight into the upstream's HEAD, or deletes the upstream —
+ * the git-retarget PIN does not defend against this, because the pin USES the
+ * forged `gitDir`. (Both round-5 critics enumerated ScratchRepo and ArtifactRepo;
+ * this round's "verify there are no OTHERS" step found the checkout is the same
+ * class, so it is closed the same way rather than deferred.)
+ *
+ * Authenticity is minted by `addWorktree` (a module-private `WeakSet`) and verified
+ * by every consumer that reaches a git-write through a checkout. A hand-built
+ * checkout is not in the set, so it is refused before its fields point a write.
+ */
+const authenticWorktreeCheckouts = new WeakSet<WorktreeCheckout>();
+
+/** Brand a factory-minted WorktreeCheckout as authentic, FREEZE it, and return it. */
+function brandWorktreeCheckout(checkout: WorktreeCheckout): WorktreeCheckout {
+  authenticWorktreeCheckouts.add(checkout);
+  return Object.freeze(checkout);
+}
+
+/**
+ * Was this WorktreeCheckout minted by `addWorktree`? The git-write consumers
+ * (`commitWorktree`, `removeWorktree`, `pushArtifactBranch`) verify this and refuse
+ * any handle that is not — a hand-built `{ dir, gitDir, … }` is not in the set, so
+ * its fields never get to point the adapter's own commit/remove/push (#141 r6).
+ */
+export function isAuthenticWorktreeCheckout(checkout: WorktreeCheckout): boolean {
+  return authenticWorktreeCheckouts.has(checkout);
 }
 
 const GIT_ENV = {
@@ -598,12 +652,37 @@ export async function createScratchRepo(
 }
 
 /**
+ * REFUSAL 8 — a worktree is only ever added in a FACTORY-MINTED scratch repo (#141
+ * r6, FINDING B — both critics).
+ *
+ * `addWorktree` runs `git worktree add` in `repo.dir`, which writes worktree admin
+ * state (`.git/worktrees/<id>`, a new ref) INTO that repo. It is reached by both
+ * providers' `resolve` AND by direct callers of this exported function. Round 5
+ * branded the scratch repo and checked the brand at `createWorktreeCommandProvider`
+ * — but NOT here, so a hand-built `{ dir: '<upstream>', seedCommit }` handed
+ * straight to `addWorktree` registered a worktree inside the upstream with no gate.
+ * So the brand is verified at the WRITE, not only at provider construction.
+ */
+export const ADD_WORKTREE_NOT_AUTHENTIC_REFUSAL =
+  'refusing to add a per-session worktree in a scratch repo that is not a factory-minted handle ' +
+  '(#141 r6) — `git worktree add` writes worktree admin state into the repo it is given, so a ' +
+  'hand-built handle aimed at the upstream would register a worktree inside a repository the ' +
+  'provider does not own; only a factory-branded scratch repo may host a worktree';
+
+/**
  * RESOLVE an isolated workspace: a git worktree on a fresh per-session branch,
  * forked from trunk. Two sessions get two directories, two branches, one shared
  * object store — the isolation the ticket's "per-session workspace keyed on
  * session id" names.
  */
 export async function addWorktree(repo: ScratchRepo, sessionId: string): Promise<WorktreeCheckout> {
+  // BRAND GATE (#141 r6, FINDING B): the scratch repo must be factory-minted before
+  // `git worktree add` writes into it. Verified HERE, at the write, so a direct
+  // caller who never passed through `createWorktreeCommandProvider` cannot point
+  // this at the upstream with a forged handle.
+  if (!isAuthenticScratchRepo(repo)) {
+    throw new Error(ADD_WORKTREE_NOT_AUTHENTIC_REFUSAL);
+  }
   const branch = sessionBranch(sessionId);
   const dir = await mkdtemp(join(tmpdir(), `atrium-wt-${short(sessionId)}-`));
   // `worktree add -b <branch> <dir> main`: a new branch off trunk, checked out
@@ -627,8 +706,30 @@ export async function addWorktree(repo: ScratchRepo, sessionId: string): Promise
   // redirect the adapter's own git off this checkout or onto a victim's trunk.
   const gitDir = await git(dir, ['rev-parse', '--absolute-git-dir']);
   const commonDir = await git(dir, ['rev-parse', '--path-format=absolute', '--git-common-dir']);
-  return { dir, branch, repoDir: repo.dir, gitDir, commonDir };
+  // BRAND + FREEZE (#141 r6): this checkout is the authentic product of a factory
+  // scratch repo. The git-write consumers verify the brand, so a hand-built checkout
+  // (which cannot reach this mint) is refused before its fields point a write.
+  return brandWorktreeCheckout({ dir, branch, repoDir: repo.dir, gitDir, commonDir });
 }
+
+/**
+ * REFUSAL 9 — a git-write is only ever driven through a FACTORY-MINTED checkout
+ * (#141 r6, the "no OTHERS" closure).
+ *
+ * `commitWorktree` pins `GIT_DIR`/`GIT_WORK_TREE` to the checkout's own
+ * `gitDir`/`dir` and commits; `removeWorktree` runs `git worktree remove` in
+ * `repoDir` and `rm -rf`s `dir`; `pushArtifactBranch` resolves the push source
+ * through the checkout's pinned gitDir. Every one of those is pointed by
+ * checkout-supplied fields, so a hand-built checkout aimed at the upstream drives
+ * the adapter's own commit/remove into it. The git-retarget pin does NOT stop
+ * this — it USES the (forged) gitDir. So the checkout's authenticity is verified
+ * before its fields point any write.
+ */
+export const WORKTREE_CHECKOUT_NOT_AUTHENTIC_REFUSAL =
+  'refusing to drive a git write through a worktree checkout that addWorktree did not mint ' +
+  "(#141 r6) — a checkout's own gitDir/workTree/repoDir are what the adapter's commit, push and " +
+  'remove are pinned to, so a hand-built checkout aimed at the upstream would send those writes ' +
+  'straight into it; only a factory-branded worktree checkout is trusted to point a git write';
 
 /**
  * Commit whatever the harness left in the worktree, onto its branch. Returns the
@@ -640,6 +741,12 @@ export async function commitWorktree(
   checkout: WorktreeCheckout,
   message: string,
 ): Promise<string | null> {
+  // BRAND GATE (#141 r6): the checkout must be factory-minted before its gitDir/dir
+  // pin points the adapter's own `add`/`commit`. A forged checkout aimed at the
+  // upstream is refused here, before the pin is built.
+  if (!isAuthenticWorktreeCheckout(checkout)) {
+    throw new Error(WORKTREE_CHECKOUT_NOT_AUTHENTIC_REFUSAL);
+  }
   // Pin GIT_DIR/GIT_WORK_TREE to the trusted per-worktree git dir captured at
   // resolve time (#120 round-5 F5b). Without this, a harness that rewrote
   // `<checkout>/.git` to `gitdir: <victim>/.git` would redirect the ADAPTER'S OWN
@@ -682,6 +789,13 @@ function worktreePin(checkout: WorktreeCheckout): GitDirPin | undefined {
 
 /** Reclaim the ephemeral checkout. The branch it produced is left intact. */
 export async function removeWorktree(checkout: WorktreeCheckout): Promise<void> {
+  // BRAND GATE (#141 r6): a forged checkout would `git worktree remove` in an
+  // arbitrary `repoDir` and `rm -rf` an arbitrary `dir` — aim it at the upstream
+  // and this deletes it. The reclaim is best-effort AFTER this point, but the gate
+  // is not: an unbranded handle is refused before any destructive call.
+  if (!isAuthenticWorktreeCheckout(checkout)) {
+    throw new Error(WORKTREE_CHECKOUT_NOT_AUTHENTIC_REFUSAL);
+  }
   // Remove git's worktree registration first, then the directory. `--force`
   // because a committed-but-then-dirtied checkout would otherwise refuse.
   await git(checkout.repoDir, ['worktree', 'remove', '--force', checkout.dir]).catch(() => {});
@@ -781,10 +895,21 @@ export interface ArtifactRepo {
  */
 const authenticArtifactRepos = new WeakSet<ArtifactRepo>();
 
-/** Brand a factory-minted ArtifactRepo as authentic and return it. */
+/**
+ * Brand a factory-minted ArtifactRepo as authentic, FREEZE it, and return it.
+ *
+ * FREEZE (#141 r6, FINDING A — both critics): as with `brandScratchRepo`, the
+ * `readonly` fields are compile-time only. A caller keeps a genuinely-branded
+ * artifact repo (brand check passes) and reassigns `repo.dir = <upstream>` and
+ * `repo.upstreamPath = null` — the `null` reads as "nothing to overlap", the
+ * overlap re-check is skipped, and `pushArtifactBranch`/`pinSettledArtifact` write
+ * a ref straight into the upstream. `Object.freeze` makes both fields
+ * runtime-immutable, so the swap throws (strict mode) or is a no-op, and the
+ * fields a guard reads cannot diverge from the fields a git-write uses.
+ */
 function brandArtifactRepo(repo: ArtifactRepo): ArtifactRepo {
   authenticArtifactRepos.add(repo);
-  return repo;
+  return Object.freeze(repo);
 }
 
 /**
@@ -909,6 +1034,16 @@ export async function pushArtifactBranch(
   checkout: WorktreeCheckout,
   artifact: ArtifactRepo,
 ): Promise<string> {
+  // CHECKOUT BRAND GATE (#141 r6): the push SOURCE is resolved through the
+  // checkout's pinned gitDir, so a forged checkout could feed a victim repo's
+  // objects into the durable artifact repo. The write DESTINATION is the branded
+  // artifact (gated below), so this is defense-in-depth for the source — but it
+  // keeps all three checkout consumers uniformly self-defending. Checked first so
+  // an authentic checkout (the only kind a real run produces) passes straight to
+  // the artifact gates below.
+  if (!isAuthenticWorktreeCheckout(checkout)) {
+    throw new Error(WORKTREE_CHECKOUT_NOT_AUTHENTIC_REFUSAL);
+  }
   // PRIMARY GATE (#141 r5, F2): the push destination must be a FACTORY-MINTED
   // artifact repo. `ArtifactRepo` is a plain object any caller can assemble, and the
   // r4 "the field cannot be OMITTED" did not stop a caller from forging a required
@@ -969,6 +1104,21 @@ export function settledArtifactRef(sessionId: string): string {
 }
 
 /**
+ * REFUSAL 10 — a settled pin is only ever written into a FACTORY-MINTED artifact
+ * repo (#141 r6, FINDING B — both critics).
+ *
+ * The sibling of `ARTIFACT_REPO_NOT_AUTHENTIC_REFUSAL`, for the OTHER git-write that
+ * trusts a caller-supplied `artifact.dir`: `pinSettledArtifact`'s `git update-ref`.
+ * Round 5 gated the push; this gates the pin, so both writes into the durable repo
+ * verify the brand rather than just the push somebody remembered.
+ */
+export const PIN_ARTIFACT_NOT_AUTHENTIC_REFUSAL =
+  'refusing to pin a settled artifact in an artifact repo that is not a factory-minted handle ' +
+  '(#141 r6) — `git update-ref` writes a ref into the repo it is given, so a hand-built handle ' +
+  'aimed at the upstream would create a settled ref inside a repository the provider does not own; ' +
+  'only a factory-branded artifact repo may be pinned into';
+
+/**
  * PIN a settled commit so the receipt that indexes it never dangles (#120 r3 F4).
  *
  * A branch ref is MUTABLE. `pushArtifactBranch` is force-free, so the provider
@@ -1007,6 +1157,14 @@ export async function pinSettledArtifact(
   sessionId: string,
   commit: string,
 ): Promise<void> {
+  // BRAND GATE (#141 r6, FINDING B): `git update-ref` writes a ref into
+  // `artifact.dir`, so a hand-built handle aimed at the upstream would create
+  // `refs/atrium/settled/*` inside it. Round 5 branded the artifact repo and
+  // checked it at `pushArtifactBranch` but NOT here — the second git-write that
+  // trusts a caller-supplied artifact dir. Verified before the write.
+  if (!isAuthenticArtifactRepo(artifact)) {
+    throw new Error(PIN_ARTIFACT_NOT_AUTHENTIC_REFUSAL);
+  }
   const ref = settledArtifactRef(sessionId);
   const existing = await git(artifact.dir, ['rev-parse', '--verify', '-q', ref]).catch(() => null);
   if (existing !== null) {

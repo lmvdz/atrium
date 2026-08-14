@@ -7,6 +7,7 @@ import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { loadEnv } from '../../src/env.js';
 import { executionUpstream } from '../../src/execution/configure.js';
 import {
+  ADD_WORKTREE_NOT_AUTHENTIC_REFUSAL,
   ARTIFACT_REPO_AT_UPSTREAM_REFUSAL,
   ARTIFACT_REPO_NOT_AUTHENTIC_REFUSAL,
   type ArtifactRepo,
@@ -16,12 +17,16 @@ import {
   createScratchRepo,
   disposeScratchRepo,
   mainCommit,
+  PIN_ARTIFACT_NOT_AUTHENTIC_REFUSAL,
   PUSH_INTO_UPSTREAM_REFUSAL,
+  pinSettledArtifact,
   pushArtifactBranch,
   removeWorktree,
   SCRATCH_REPO_AT_UPSTREAM_REFUSAL,
   type ScratchRepo,
   UPSTREAM_ARTIFACT_REMOTE_REFUSAL,
+  WORKTREE_CHECKOUT_NOT_AUTHENTIC_REFUSAL,
+  type WorktreeCheckout,
 } from '../../src/execution/git.js';
 import { createDeterministicShimProvider } from '../../src/execution/shim.js';
 import {
@@ -189,6 +194,29 @@ const GUARDS: readonly Guard[] = [
     layer: 'plumbing',
     probe: /createArtifactRepo did not mint/,
   },
+  // ── Round 6 (#141 r6): the brand verified at the WRITE, not only at construction ─
+  {
+    // FINDING B: `addWorktree`'s `git worktree add` verifies the scratch brand, so a
+    // forged handle aimed at the upstream cannot register a worktree inside it.
+    id: 'plumbing/add-worktree-not-authentic',
+    layer: 'plumbing',
+    probe: /only a factory-branded scratch repo may host a worktree/,
+  },
+  {
+    // FINDING B: `pinSettledArtifact`'s `git update-ref` verifies the artifact brand —
+    // the SECOND durable-repo write, gated like the push round 5 already covered.
+    id: 'plumbing/pin-artifact-not-authentic',
+    layer: 'plumbing',
+    probe: /only a factory-branded artifact repo may be pinned into/,
+  },
+  {
+    // The "no OTHERS" closure: `commitWorktree`/`removeWorktree`/`pushArtifactBranch`
+    // verify the WorktreeCheckout brand, so a hand-built checkout cannot point the
+    // adapter's own commit/remove at the upstream via forged gitDir/dir/repoDir.
+    id: 'plumbing/worktree-checkout-not-authentic',
+    layer: 'plumbing',
+    probe: /addWorktree did not mint/,
+  },
 ];
 
 /**
@@ -214,6 +242,9 @@ describe('#141 refusal sentences are pairwise disjoint', () => {
       ['provider/worktree-upstream-seed', WORKTREE_UPSTREAM_SEED_REFUSAL],
       ['provider/scratch-not-authentic', SCRATCH_REPO_NOT_AUTHENTIC_REFUSAL],
       ['plumbing/artifact-not-authentic', ARTIFACT_REPO_NOT_AUTHENTIC_REFUSAL],
+      ['plumbing/add-worktree-not-authentic', ADD_WORKTREE_NOT_AUTHENTIC_REFUSAL],
+      ['plumbing/pin-artifact-not-authentic', PIN_ARTIFACT_NOT_AUTHENTIC_REFUSAL],
+      ['plumbing/worktree-checkout-not-authentic', WORKTREE_CHECKOUT_NOT_AUTHENTIC_REFUSAL],
     ];
     for (const [id, sentence] of shipped) expectExactlyGuard(sentence, id);
     // And no two shipped sentences are the same string, which is the trap in its
@@ -793,6 +824,220 @@ describe('THE UPSTREAM IS NEVER WRITTEN — git plumbing (#141, red-on-revert)',
     expectExactlyGuard(message as string, 'plumbing/push-into-upstream');
     expect(await fingerprint(upstream.dir)).toBe(before);
 
+    await removeWorktree(checkout);
+    await disposeScratchRepo(scratch);
+  });
+
+  /* ── Round 6 (#141 r6): FINDING A — the brand is FROZEN, not just tagged ────
+   *
+   * Round 5 proved a forged (never-minted) handle is rejected. Both critics then
+   * showed the branded object is itself MUTABLE: `readonly` is compile-time only, so
+   * a caller keeps a genuinely-branded object — brand check passes, same WeakSet
+   * member — and reassigns its `dir`/`upstreamPath` fields to point a later git-write
+   * at the upstream. `Object.freeze` at mint makes the fields runtime-immutable, so
+   * the fields a guard reads cannot diverge from the fields a write uses.
+   */
+
+  it('FINDING A (#141 r6): a branded ScratchRepo is FROZEN — a swapped dir cannot redirect the worktree write', async () => {
+    // An AUTHENTIC empty-trunk scratch repo: branded AND (round 6) frozen.
+    const scratch = await createScratchRepo();
+    trash.push(scratch.dir);
+    expect(Object.isFrozen(scratch), 'a minted ScratchRepo must be frozen').toBe(true);
+    const realDir = scratch.dir;
+    const before = await fingerprint(upstream.dir);
+    // THE MUTABLE-BRAND ATTACK: keep the genuinely-branded object, swap its `dir` at
+    // the upstream. The brand check in `addWorktree` still passes (same object), so
+    // only the FREEZE stands between the swap and `git worktree add` writing INTO the
+    // upstream. Strict-mode reassignment of a frozen field throws; catch it and prove
+    // the field is unchanged either way.
+    // REVERT-REDS: drop `Object.freeze` from `brandScratchRepo` and the assignment
+    // STICKS — `scratch.dir` becomes the upstream and this `expect` reds; unreverted,
+    // `addWorktree` would then register a worktree inside the human's repository.
+    try {
+      (scratch as { dir: string }).dir = upstream.dir;
+    } catch {
+      /* frozen reassignment throws in strict mode — the other half of "throws / no-op" */
+    }
+    expect(scratch.dir, 'a frozen ScratchRepo.dir must not be reassignable').toBe(realDir);
+    // The write still lands in the real scratch repo; the upstream is byte-identical.
+    const checkout = await addWorktree(scratch, 'freeze-scratch');
+    await removeWorktree(checkout);
+    expect(await fingerprint(upstream.dir)).toBe(before);
+  });
+
+  it('FINDING A (#141 r6): a branded ArtifactRepo is FROZEN — a swapped dir/upstreamPath cannot redirect the push', async () => {
+    const scratch = await createScratchRepo(undefined, { url: upstream.dir, ref: 'main' });
+    trash.push(scratch.dir);
+    const checkout = await addWorktree(scratch, 'freeze-artifact');
+    await writeFile(join(checkout.dir, 'session.txt'), 'work\n');
+    await commitWorktree(checkout, 'session work');
+
+    const artDir = await mkdtemp(join(tmpdir(), 'atrium-141-freeze-art-'));
+    trash.push(artDir);
+    const artifact = await createArtifactRepo(artDir, { url: upstream.dir, ref: 'main' });
+    expect(Object.isFrozen(artifact), 'a minted ArtifactRepo must be frozen').toBe(true);
+    const before = await fingerprint(upstream.dir);
+    // THE MUTABLE-BRAND ATTACK (F2's sequel): swap `dir` at the upstream AND
+    // `upstreamPath` to `null` so the retained overlap re-check is skipped. The brand
+    // passes (same object); only the FREEZE stops the swap.
+    // REVERT-REDS: drop `Object.freeze` from `brandArtifactRepo` and both assignments
+    // STICK — these `expect`s red, and unreverted the push would land a session ref in
+    // the upstream (null upstreamPath skips the overlap check).
+    try {
+      (artifact as { dir: string }).dir = upstream.dir;
+    } catch {
+      /* frozen */
+    }
+    try {
+      (artifact as { upstreamPath: string | null }).upstreamPath = null;
+    } catch {
+      /* frozen */
+    }
+    expect(artifact.dir, 'a frozen ArtifactRepo.dir must not be reassignable').toBe(artDir);
+    expect(
+      artifact.upstreamPath,
+      'a frozen ArtifactRepo.upstreamPath must not be reassignable',
+    ).toBe(upstream.dir);
+    // Push still targets the real artifact repo; the upstream is untouched.
+    await pushArtifactBranch(checkout, artifact);
+    expect(await fingerprint(upstream.dir)).toBe(before);
+    await removeWorktree(checkout);
+    await disposeScratchRepo(scratch);
+  });
+
+  /* ── Round 6 (#141 r6): FINDING B — the brand verified at the WRITE ─────────
+   *
+   * Round 5 branded the scratch/artifact repos but checked the brand only at
+   * provider construction (`createWorktreeCommandProvider`) and at the push
+   * (`pushArtifactBranch`). Two git-writes still trusted a caller-supplied dir with
+   * no brand check: `addWorktree`'s `git worktree add` and `pinSettledArtifact`'s
+   * `git update-ref`. A direct caller reaches both without a provider.
+   */
+
+  it('FINDING B (#141 r6): addWorktree refuses a FORGED scratch repo aimed at the upstream', async () => {
+    // A hand-built handle pointed straight at the upstream — never minted, so not in
+    // the authenticity WeakSet.
+    const forged: ScratchRepo = { dir: upstream.dir, seedCommit: upstream.commit };
+    const before = await fingerprint(upstream.dir);
+    // REVERT-REDS: delete the `!isAuthenticScratchRepo` gate from `addWorktree` and
+    // `git worktree add` registers `atrium/session/*` INSIDE the upstream (a new ref +
+    // `.git/worktrees/*`), moving the fingerprint.
+    const message = await addWorktree(forged, 'forged-scratch').then(
+      () => null,
+      (e: Error) => e.message,
+    );
+    expect(message, 'expected addWorktree to refuse a forged scratch repo').not.toBeNull();
+    expectExactlyGuard(message as string, 'plumbing/add-worktree-not-authentic');
+    expect(await fingerprint(upstream.dir)).toBe(before);
+  });
+
+  it('FINDING B (#141 r6): pinSettledArtifact refuses a FORGED artifact repo aimed at the upstream', async () => {
+    // The SECOND durable-repo write. A forged handle pointed at the upstream.
+    const forged: ArtifactRepo = { dir: upstream.dir, upstreamPath: null };
+    const before = await fingerprint(upstream.dir);
+    // REVERT-REDS: delete the `!isAuthenticArtifactRepo` gate from `pinSettledArtifact`
+    // and `git update-ref refs/atrium/settled/*` writes a ref INTO the upstream (the
+    // upstream commit resolves there, so the create-only update succeeds) — fingerprint moves.
+    const message = await pinSettledArtifact(forged, 'forged-pin', upstream.commit).then(
+      () => null,
+      (e: Error) => e.message,
+    );
+    expect(message, 'expected pinSettledArtifact to refuse a forged artifact repo').not.toBeNull();
+    expectExactlyGuard(message as string, 'plumbing/pin-artifact-not-authentic');
+    expect(await fingerprint(upstream.dir)).toBe(before);
+  });
+
+  /* ── Round 6 (#141 r6): the "no OTHERS" closure — WorktreeCheckout ──────────
+   *
+   * The enumeration's third forgeable handle. `commitWorktree`/`removeWorktree`
+   * point git-writes through checkout-supplied `gitDir`/`dir`/`repoDir`; the
+   * git-retarget PIN does not defend a FORGED checkout because the pin USES those
+   * fields. So the checkout is branded at `addWorktree` and verified — and frozen,
+   * against the mutated-branded variant.
+   */
+
+  it('the "no OTHERS" closure (#141 r6): commitWorktree refuses a FORGED checkout aimed at the upstream', async () => {
+    const upstreamGitDir = join(upstream.dir, '.git');
+    // A hand-built checkout whose pin points GIT_DIR/GIT_WORK_TREE at the upstream and
+    // whose branch is the upstream's own trunk — never produced by `addWorktree`.
+    const forged: WorktreeCheckout = {
+      dir: upstream.dir,
+      branch: 'main',
+      repoDir: upstream.dir,
+      gitDir: upstreamGitDir,
+      commonDir: upstreamGitDir,
+    };
+    // Dirty the upstream worktree so a commit WOULD land if the gate were gone — an
+    // untracked file the forged `add -A`/`commit` would sweep onto `main`.
+    await writeFile(
+      join(upstream.dir, 'planted.txt'),
+      'harness output the adapter must not commit\n',
+    );
+    const before = await fingerprint(upstream.dir);
+    // REVERT-REDS: delete the `!isAuthenticWorktreeCheckout` gate from `commitWorktree`
+    // and the pin drives `git add`/`commit` on the upstream — `planted.txt` lands on
+    // `main` as a new commit, moving both the ref and the object store.
+    const message = await commitWorktree(forged, 'forged commit').then(
+      () => null,
+      (e: Error) => e.message,
+    );
+    expect(message, 'expected commitWorktree to refuse a forged checkout').not.toBeNull();
+    expectExactlyGuard(message as string, 'plumbing/worktree-checkout-not-authentic');
+    expect(await fingerprint(upstream.dir)).toBe(before);
+  });
+
+  it('the "no OTHERS" closure (#141 r6): removeWorktree refuses a FORGED checkout — it will not rm the upstream', async () => {
+    const upstreamGitDir = join(upstream.dir, '.git');
+    const forged: WorktreeCheckout = {
+      dir: upstream.dir,
+      branch: 'main',
+      repoDir: upstream.dir,
+      gitDir: upstreamGitDir,
+      commonDir: upstreamGitDir,
+    };
+    const before = await fingerprint(upstream.dir);
+    // REVERT-REDS: delete the brand gate from `removeWorktree` and it `rm -rf`s the
+    // upstream (`checkout.dir`) — the directory is destroyed, so `fingerprint` moves
+    // or throws. The gate refuses BEFORE any destructive call.
+    const message = await removeWorktree(forged).then(
+      () => null,
+      (e: Error) => e.message,
+    );
+    expect(message, 'expected removeWorktree to refuse a forged checkout').not.toBeNull();
+    expectExactlyGuard(message as string, 'plumbing/worktree-checkout-not-authentic');
+    expect(await fingerprint(upstream.dir)).toBe(before);
+  });
+
+  it('the "no OTHERS" closure (#141 r6): a branded checkout is FROZEN — a swapped gitDir cannot redirect the commit', async () => {
+    const scratch = await createScratchRepo();
+    trash.push(scratch.dir);
+    const checkout = await addWorktree(scratch, 'freeze-checkout');
+    expect(Object.isFrozen(checkout), 'a minted WorktreeCheckout must be frozen').toBe(true);
+    const realGitDir = checkout.gitDir;
+    await writeFile(join(upstream.dir, 'planted.txt'), 'x\n');
+    const before = await fingerprint(upstream.dir);
+    // THE MUTATED-BRANDED ATTACK: keep the genuinely-branded checkout, swap its pin at
+    // the upstream. The brand passes (same object); only the FREEZE stops the swap.
+    // REVERT-REDS: drop `Object.freeze` from `brandWorktreeCheckout` and these
+    // assignments STICK — `checkout.gitDir` becomes the upstream and this `expect` reds;
+    // unreverted, `commitWorktree` would then commit onto the upstream's `main`.
+    try {
+      (checkout as { gitDir?: string }).gitDir = join(upstream.dir, '.git');
+    } catch {
+      /* frozen */
+    }
+    try {
+      (checkout as { dir: string }).dir = upstream.dir;
+    } catch {
+      /* frozen */
+    }
+    expect(checkout.gitDir, 'a frozen WorktreeCheckout.gitDir must not be reassignable').toBe(
+      realGitDir,
+    );
+    // The commit still lands in the real scratch repo; the upstream is untouched.
+    await writeFile(join(checkout.dir, 'session.txt'), 'work\n');
+    await commitWorktree(checkout, 'session work');
+    expect(await fingerprint(upstream.dir)).toBe(before);
     await removeWorktree(checkout);
     await disposeScratchRepo(scratch);
   });
