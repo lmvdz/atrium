@@ -1362,3 +1362,26 @@ Closed after 8 dual-lineage rounds + a page-driving browser critic that verified
 **Lesson (fresh instance of the standing semantic-merge rule) — two seams can agree to break the data path with zero conflict, and the *existing* suites will pass both ways.** #120 wrote the produced artifact onto the ledger *event*; #121's certify read the `sessions.artifact` *column*. Merged, the artifact reached the event but never the column → certify always saw `no_artifact`, with not one git conflict. The kicker: the full suite passed **with and without** the fix, because certify tests seed the column directly and execution tests assert only the event — *nothing had ever composed the seam*. The composition test that reds-on-revert had to be written for the merge. **When two lanes are a producer and its consumer of the same fact, a passing suite on each is no evidence they compose; write the test that exercises the join, on the merged tree.**
 
 **Process lesson — verify a builder's actual branch state, never its final message.** Two builder/tooling failures this campaign were recovered only by checking real state: one builder ended on "I'll wait for the e2e Monitor" without committing (its complete work sat uncommitted in the worktree — salvaged, verified, pushed); and the load-hazard of a finished agent's orphaned headless-chrome pinning ~3 cores for over an hour. Reap on every completion; a task-notification is not proof of a clean finish.
+
+## #122 — the session→proposal provenance edge (closed 2026-08-13, 2 rounds)
+
+Built by codex gpt-5.6-sol via the lane script (first codex-built lane of this campaign);
+gauntleted by grok-4.5 + a fresh executing opus (builder lineage changed, so the critic set
+changed to keep three lineages honest). Round 1 caught: three guard clauses with no witness
+(delete any, both suites stay green) and no DB backstop on session liveness — a settled
+session accepted a direct-insert proposal; the interpret worker still writing the old
+envelope, unpinned; and "un-spoofably" overclaiming what is enforced (cross-agent, not
+intra-agent — #132 owns the execution-authority binding). Round 2: one red-on-revert test
+per clause with a DISTINCT witness — the refusal message, not the nack, is the assertion,
+because downstream backstops also nack; 0044 replaces 0043's function (append-only) to
+require the session be open; the omitted-key test pins .optional() replay compatibility.
+
+Process lessons: (1) a guard of N conjunctive clauses needs N witnesses — a shared nack
+assertion tests the disjunction, not the clauses; the message text is what separates "this
+clause did its job" from "something downstream caught it". (2) The codex sandbox cannot run
+docker, and said so — "0 tests executed" reported honestly is the lane working, not failing;
+the orchestrator owns the integration verification it cannot perform. (3) The enriched
+ticket decayed in three places (journal number, already-landed DDL, line ranges) and the
+builder caught all three because the dispatch said verify-don't-inherit; and the fix brief
+itself carried an impossible fixture (two agents' plans in one room) that the tree's own
+trigger refused — the builder re-derived the constructible form instead of forcing it.
