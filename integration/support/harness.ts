@@ -61,6 +61,13 @@ const APP_TABLES = [
   'messages',
   'memberships',
   'rooms',
+  // The workspace layer (#142's smoke test was the first to assert absolute
+  // counts here, and found 640 accumulated workspaces). Named for the same
+  // reason as the projections above: nothing cascades these from `users`, so
+  // every suite before this one leaked its workspaces through the reset — the
+  // reset's contract is that every app table is emptied.
+  'workspace_members',
+  'workspaces',
   'users',
 ] as const;
 
