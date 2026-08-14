@@ -23,60 +23,55 @@ import {
   sessionBranch,
 } from '../../apps/server/src/execution/git.js';
 import type { ExecutionArtifact } from '../../apps/server/src/execution/provider.js';
-import { createWorktreeCommandProvider } from '../../apps/server/src/execution/worktree-provider.js';
+import {
+  createDeterministicShimProvider,
+  SHIM_ARTIFACT_PATH,
+} from '../../apps/server/src/execution/shim.js';
+import {
+  createWorktreeCommandProvider,
+  WORKTREE_UPSTREAM_SEED_REFUSAL,
+} from '../../apps/server/src/execution/worktree-provider.js';
 import { createLedger, type Ledger } from '../../apps/server/src/ledger.js';
 import { createLogger } from '../../apps/server/src/logger.js';
 import { createMembershipAuthorizer, type Session } from '../../apps/server/src/session.js';
 import { openDatabase, resetDatabase, type SeededRoom, seedRoom } from '../support/harness.js';
 
 /**
- * REAL-REPO EXECUTION MODE — THE ACCEPTANCE TEST (#141).
+ * REAL-REPO EXECUTION MODE — THE ACCEPTANCE TEST (#141, rewritten for r4).
  *
- * The ticket's ask, executed end to end and nothing simulated: with execution
- * pointed at a fixture repo containing a known file, a session whose harness
- * DELETES that file settles with an artifact whose branch, FETCHED FROM THE
- * ARTIFACT REPO by a party that has never seen the scratch checkout, shows
- * EXACTLY that deletion against the upstream ref.
+ * Round 4 REMOVED the capability to run a seeded upstream on the unsandboxed
+ * worktree provider (it was gated behind a `containedUpstreamSeed` boolean that
+ * was not containment — any direct caller could flip it and build the forbidden
+ * provider, whose harness then redirects the push into the upstream). Real-repo
+ * EXECUTION — running an arbitrary harness against a real repo — moves to the
+ * #138 sandbox provider, which contains the harness. So this file no longer
+ * constructs a worktree provider over a seeded upstream; it asserts the REMOVAL.
  *
- * Three things are proven together, because any one alone is satisfiable by a
- * seam that does not work:
+ * What it proves, end to end and nothing simulated:
  *
- *  1. **The diff is real.** `git diff <upstream ref> <fetched branch>` is
- *     exactly `D KEEP.txt` — one path, one status. Against the shipped
- *     empty-trunk seam this diff is the whole repository appearing from nothing.
- *  2. **A human can reach it.** The fetch is done from a THIRD repository,
- *     against the artifact `remote` the receipt names, AFTER the scratch repo is
- *     disposed — the manual-merge path the covenant leaves for the human `✓`.
- *  3. **THE UPSTREAM IS NEVER WRITTEN.** Every file in the fixture repo is
- *     hashed before and after the whole run and must be byte-identical, and its
- *     ref set must be unchanged. This is the headline invariant measured at the
- *     only place it can be measured honestly: the upstream itself, after a real
- *     session really ran.
+ *  1. **The worktree provider REFUSES a seeded upstream — there is no seam.**
+ *     `createWorktreeCommandProvider({ repo: seeded, … })` throws, unconditionally.
+ *     This is the red-on-revert witness for the removed capability: re-add any
+ *     bypass and this test builds a live provider instead of throwing.
+ *  2. **The seeded-trunk MECHANISM still works — on the SHIM, the safe provider
+ *     that survives.** The shim runs no harness (nothing can rewrite a push
+ *     config), so real-repo mode is legitimate on it and stays. Pointed at a
+ *     fixture repo, a shim session settles with an artifact whose branch —
+ *     FETCHED FROM THE ARTIFACT REPO by a party that never saw the scratch
+ *     checkout, AFTER that scratch repo is disposed — forks the real upstream
+ *     commit (its parent IS the upstream commit) and carries a real diff against
+ *     the upstream ref. This is the seeded-trunk plumbing #138 will reuse, kept
+ *     under an acceptance test through its one surviving live caller.
+ *  3. **THE UPSTREAM IS NEVER WRITTEN.** Every file in the fixture repo is hashed
+ *     before and after the whole run and must be byte-identical, and its ref set
+ *     must be unchanged — measured at the only place it can be measured honestly.
  *
- * The FLIP is here too: the same coordinator, same provider, same harness, with
- * NO upstream configured, and the empty-trunk behaviour is byte-for-byte what
- * #120 shipped.
+ * The FLIP is here too: the empty-trunk WORKTREE path (no upstream configured) is
+ * byte-for-byte what #120 shipped — the worktree provider is now empty-trunk only.
  *
- * ## Why this wires the provider BY HAND (#141 r2)
- *
- * `env.ts` now refuses to boot real-repo mode under `EXECUTION_PROVIDER=worktree`
- * — the honest boundary: that provider's harness is unsandboxed and can rewrite
- * a push destination through git config, which no path guard can see. See
- * `docs/real-repo-execution.md`.
- *
- * This file constructs the provider directly, which is not a path an operator
- * can configure, and does so deliberately: the mechanics under test — the seeded
- * trunk, the real diff, the fetchable branch, the byte-identical upstream — are
- * exactly what the #138 sandbox provider will inherit, and they are worth
- * measuring against a real harness now rather than being unmeasured until then.
- * The harness here is `rm <known file>`, written by this test, not arbitrary
- * code. The boot refusal itself has its own witness, at the config layer, in
- * `apps/server/test/execution/upstream-guards.test.ts`.
- *
- * Since #141 r3 (FIX 3) the worktree factory ALSO refuses a seeded upstream by
- * construction, so a direct caller cannot bypass the boot refusal. This test
- * passes `containedUpstreamSeed: true` — the same documented containment seam the
- * #138 sandbox provider will use — because its harness is trusted and fixed.
+ * The boot refusal of `EXECUTION_PROVIDER=worktree` + upstream has its own witness
+ * at the config layer in `apps/server/test/execution/upstream-guards.test.ts`; the
+ * factory refusal is witnessed both there and here.
  */
 
 const run = promisify(execFile);
@@ -236,8 +231,45 @@ afterAll(async () => {
   await handle?.close();
 });
 
-describe('a session against a seeded UPSTREAM produces a real, fetchable diff (#141)', () => {
-  it("settles with a branch whose diff vs the upstream ref is EXACTLY the harness's deletion", async () => {
+describe('real-repo mode: removed from the worktree provider, alive on the shim (#141 r4)', () => {
+  it('the worktree provider REFUSES a seeded upstream — the removed capability, no seam through', async () => {
+    // THE REMOVAL WITNESS. Round 3 let a direct caller build this provider over a
+    // seeded upstream by passing `containedUpstreamSeed: true`; round 4 deleted
+    // that boolean. A seeded scratch repo handed to the worktree factory now
+    // throws, unconditionally — there is nothing to opt into.
+    //
+    // REVERT-REDS: re-introduce any bypass (the `containedUpstreamSeed` seam, or
+    // weaken the `repo.upstream !== undefined` refusal) and this constructs a LIVE
+    // provider that would run an arbitrary harness against a real upstream — the
+    // `expect.unreachable` fires instead of the throw.
+    const upstream = await makeUpstream();
+    cleanup.push(upstream.dir);
+    const seed = { url: upstream.dir, ref: 'main' };
+    scratch = await createScratchRepo(undefined, seed);
+    const artifactDir = await mkdtemp(join(tmpdir(), 'atrium-141-artifacts-'));
+    cleanup.push(artifactDir);
+    const artifactRepo = await createArtifactRepo(artifactDir, seed);
+
+    let message = '';
+    try {
+      createWorktreeCommandProvider({
+        repo: scratch,
+        artifactRepo,
+        command: ['bash', '-lc', `rm ${KNOWN_FILE}`],
+      });
+      expect.unreachable('the worktree provider must refuse a seeded upstream');
+    } catch (error) {
+      message = (error as Error).message;
+    }
+    expect(message).toBe(WORKTREE_UPSTREAM_SEED_REFUSAL);
+    expect(message).toContain('#138');
+  });
+
+  it('the SHIM settles a branch that forks the real upstream and leaves it byte-identical', async () => {
+    // THE SEEDED-TRUNK MECHANISM, exercised through its one surviving live caller.
+    // The shim runs no harness, so real-repo mode is safe on it (nothing can
+    // rewrite a push config) — and the seeded-trunk plumbing #138 will reuse is
+    // kept honest by an end-to-end acceptance run here.
     const upstream = await makeUpstream();
     cleanup.push(upstream.dir);
     const upstreamBytes = await fingerprint(upstream.dir);
@@ -248,6 +280,9 @@ describe('a session against a seeded UPSTREAM produces a real, fetchable diff (#
     const artifactDir = await mkdtemp(join(tmpdir(), 'atrium-141-artifacts-'));
     cleanup.push(artifactDir);
     const artifactRepo = await createArtifactRepo(artifactDir, seed);
+    // The artifact repo STATES its provenance (#141 r4): a local upstream path,
+    // never an absent field. `pushArtifactBranch`'s guard reads this at the write.
+    expect(artifactRepo.upstreamPath).toBe(upstream.dir);
 
     // THE SEEDED TRUNK: `main` in the scratch repo IS the upstream commit, so a
     // worktree forks the real tree rather than an empty README.
@@ -258,22 +293,7 @@ describe('a session against a seeded UPSTREAM produces a real, fetchable diff (#
     const planId = await openPlan(commands);
     const censusBefore = await census();
 
-    // THE HARNESS: it deletes the known file. Nothing else.
-    //
-    // `containedUpstreamSeed: true` is the documented containment seam (#141 r3,
-    // FIX 3): the worktree factory refuses a seeded upstream by construction,
-    // because a real harness could rewrite its own push destination via git
-    // config. This test is allowed through the same narrow seam the #138 sandbox
-    // provider will use — its harness is a fixed `rm`, written here, not attacker
-    // code, and the mechanics under test are exactly what #138 inherits. The
-    // operator-facing path stays refused at boot (env.ts); its witness is at the
-    // config layer in apps/server/test/execution/upstream-guards.test.ts.
-    const provider = createWorktreeCommandProvider({
-      repo: scratch,
-      artifactRepo,
-      command: ['bash', '-lc', `rm ${KNOWN_FILE}`],
-      containedUpstreamSeed: true,
-    });
+    const provider = createDeterministicShimProvider({ repo: scratch, artifactRepo });
     const outcome = await createExecutionCoordinator({
       commands,
       provider,
@@ -307,14 +327,18 @@ describe('a session against a seeded UPSTREAM produces a real, fetchable diff (#
     await gitIn(human, ['fetch', '--no-tags', '-q', '--', artifact.remote, artifact.branch]);
     expect(await gitIn(human, ['rev-parse', 'FETCH_HEAD'])).toBe(artifact.commit);
 
-    // THE DIFF, against the UPSTREAM REF — exactly one path, exactly a deletion.
-    // REVERT-REDS: drop the seeding from `createScratchRepo` and this diff
-    // becomes "every file in the branch, added from nothing" — the shipped
-    // empty-trunk behaviour the ticket calls out.
+    // THE DIFF, against the UPSTREAM REF — the shim's artifact, added atop the
+    // REAL tree. REVERT-REDS: drop the seeding from `createScratchRepo` and this
+    // diff becomes "every file in the branch, added from nothing" — the shipped
+    // empty-trunk behaviour the ticket calls out — plus the parent check below
+    // stops resolving to the upstream commit.
     const diff = await gitIn(human, ['diff', '--name-status', upstream.commit, 'FETCH_HEAD']);
-    expect(diff).toBe(`D\t${KNOWN_FILE}`);
-    // The other upstream file survived — the branch is the real tree minus one
-    // path, not a fresh commit that happens to lack the file.
+    expect(diff).toBe(`A\t${SHIM_ARTIFACT_PATH}`);
+    // The upstream's own files survived untouched — the branch is the real tree
+    // plus the shim's artifact, not a fresh commit that merely resembles it.
+    expect(await gitIn(human, ['show', `FETCH_HEAD:${KNOWN_FILE}`])).toBe(
+      'the known file the harness deletes',
+    );
     expect(await gitIn(human, ['show', 'FETCH_HEAD:untouched.txt'])).toBe('not part of the diff');
     // And the artifact commit's PARENT is the upstream commit: the branch is
     // genuinely forked from the upstream ref, not merely similar to it.
@@ -345,13 +369,15 @@ describe('a session against a seeded UPSTREAM produces a real, fetchable diff (#
     expect(row?.stored).toEqual({ branch: artifact.branch, commit: artifact.commit });
   });
 
-  it('THE FLIP — with no upstream configured, the empty-trunk seam is unchanged', async () => {
+  it('THE FLIP — with no upstream configured, the empty-trunk WORKTREE seam is unchanged', async () => {
     scratch = await createScratchRepo();
     const artifactDir = await mkdtemp(join(tmpdir(), 'atrium-141-artifacts-'));
     cleanup.push(artifactDir);
     const artifactRepo = await createArtifactRepo(artifactDir);
     expect(scratch.upstream).toBeUndefined();
-    expect(artifactRepo.upstreamPath).toBeUndefined();
+    // The mandatory provenance field is present and explicitly `null` — "no local
+    // upstream", stated, not communicated by absence (#141 r4).
+    expect(artifactRepo.upstreamPath).toBeNull();
 
     const commands = commandService(artifactRepo);
     const planId = await openPlan(commands);

@@ -11,6 +11,14 @@ a ref, and the scratch trunk is **fetched** from it; worktrees fork *that*, and
 the settled artifact branch — pushed to the durable artifact repo — is a genuine
 diff against the ref you named, fetchable by a human for a manual merge.
 
+> **Where real-repo *execution* lives (#141 r4).** Real-repo mode — a seeded trunk
+> — is available on the `shim` provider, which runs no harness and so cannot rewrite
+> a push destination. Running an **arbitrary harness** against a real repository is a
+> **#138 sandbox deliverable**, not something the unsandboxed `worktree` provider can
+> do: that capability was removed, not gated. The worktree provider is **empty-trunk
+> only** — handed a seeded upstream it refuses to build, unconditionally, with no
+> opt-in to pass. See [the honest boundary](#the-honest-boundary).
+
 ## Configuring it
 
 ```
@@ -27,7 +35,7 @@ EXECUTION_UPSTREAM_REF=main
 | Provider | Real-repo mode | Why |
 | --- | --- | --- |
 | `shim` | **available** | runs no harness command, so nothing but Atrium's own code touches git |
-| `worktree` | **refused at boot** | its harness is arbitrary unsandboxed code and can redirect a push — see [the honest boundary](#the-honest-boundary) |
+| `worktree` | **refused at boot and at the factory** | its harness is arbitrary unsandboxed code and can redirect a push — the capability is removed, not gated; see [the honest boundary](#the-honest-boundary) |
 | `sandbox` (#138) | not built | the seam that will make it available on a real harness |
 
 Setting `EXECUTION_UPSTREAM_URL` with `EXECUTION_PROVIDER=worktree` is a boot
@@ -35,10 +43,14 @@ failure that names #138 as the unblock. That is not a lint: it is the difference
 between a guarantee and a hope, and it is stated below rather than guarded around.
 The refusal is **not env-only**: the `createWorktreeCommandProvider` factory
 itself refuses a seeded-upstream scratch repo, so a direct caller that never loads
-an `Env` cannot bypass the boot gate. The one way through is a documented
-containment seam (`containedUpstreamSeed`) that the #138 sandbox provider will use
-— and that the acceptance test uses, because its harness is a fixed `rm`, not
-arbitrary code.
+an `Env` cannot bypass the boot gate. **There is no way through** — the factory
+refusal is unconditional (#141 r4). An earlier round gated it behind a
+`containedUpstreamSeed` boolean the acceptance test flipped; that boolean was not
+containment (any direct caller sets it and builds the forbidden provider, whose
+harness then redirects the push into the upstream through git config), so it was
+removed. Real-repo execution against an arbitrary harness is a #138 sandbox
+deliverable; the seeded-trunk *mechanism* is exercised on the `shim` provider,
+which is safe.
 
 Both upstream variables are required together. The ref has **no default**: which
 commit the work is a diff *against* is the one fact this mode exists to state,
@@ -188,7 +200,7 @@ campaign keeps meeting:
 | Plumbing | `git.ts` · `createScratchRepo` | **creating** the scratch repo at or inside the upstream. `mkdir` + `git init` + worktrees would write it — re-checked at the operation, the scratch counterpart to the artifact recheck |
 | Plumbing | `git.ts` · `pushArtifactBranch` | pushing a session branch into a destination overlapping the upstream. Re-checked at the write because an `ArtifactRepo` is a plain object a caller can assemble without passing the boot gate |
 | Provider | `shim.ts` · `worktree-provider.ts` | building an upstream-seeded provider with no durable artifact remote, or one that is the upstream. Without a durable remote the artifact `remote` falls back to the scratch repo, which teardown deletes — a receipt naming a remote nobody can fetch from |
-| Provider | `worktree-provider.ts` · `createWorktreeCommandProvider` | building the **unsandboxed worktree provider against a seeded upstream at all** — real-repo mode is unavailable on it (its harness can rewrite the push destination), refused at the factory as well as at boot, past-able only through the `containedUpstreamSeed` containment seam (#138) |
+| Provider | `worktree-provider.ts` · `createWorktreeCommandProvider` | building the **unsandboxed worktree provider against a seeded upstream at all** — real-repo mode is unavailable on it (its harness can rewrite the push destination), refused at the factory as well as at boot, **unconditionally**: the round-3 `containedUpstreamSeed` opt-in was removed (#141 r4), so there is no seam through and no boolean to set |
 
 "Overlap" is containment in both directions — an artifact repo at
 `<upstream>/.git/atrium` is not *equal* to the upstream and would still be
@@ -197,11 +209,14 @@ written inside it — resolved, dereferenced and case-folded as described above.
 The witnesses live in `apps/server/test/execution/upstream-guards.test.ts`
 (every refusal, plus a table asserting the sentences are pairwise disjoint — a
 shared refusal string is how a witness ends up passing with its own guard
-reverted) and `integration/server/execution-upstream.test.ts`, which runs a real
-session whose harness deletes a known file and asserts the fetched branch's diff
-against the upstream ref is exactly that deletion, the commit's parent is the
-upstream commit, and the upstream is **byte-identical** — every file hashed
-before and after — with its ref set unchanged.
+reverted) and `integration/server/execution-upstream.test.ts`, which (1) asserts
+the worktree provider **refuses** a seeded upstream — the removed capability, no
+seam through — and (2) runs a real `shim` session against a fixture upstream and
+asserts the fetched branch forks the **real upstream commit** (its parent IS that
+commit), carries a genuine diff against the upstream ref, and leaves the upstream
+**byte-identical** — every file hashed before and after — with its ref set
+unchanged. The shim is the surviving live caller of the seeded-trunk mechanism the
+#138 sandbox provider will reuse.
 
 ## What this does not change
 

@@ -719,6 +719,36 @@ describe('THE UPSTREAM IS NEVER WRITTEN — git plumbing (#141, red-on-revert)',
     await disposeScratchRepo(scratch);
   });
 
+  it('an ArtifactRepo STATES its provenance — the field is mandatory, never omitted (#141 r4)', async () => {
+    // The push guard reads `artifact.upstreamPath`. Round 3 made it optional
+    // (`upstreamPath?: string`), so a hand-assembled repo that simply OMITTED it
+    // slid past the `!== undefined` check — a fail-open on the exact adjacent path
+    // this seam exists to close. Round 4 made it a MANDATORY `string | null`: a
+    // repo either names a local upstream path or says `null` (none), but it cannot
+    // stay silent.
+
+    // `createArtifactRepo` always POPULATES the field — present, not absent.
+    const seeded = await createArtifactRepo(await mkdtemp(join(tmpdir(), 'atrium-prov-seeded-')), {
+      url: upstream.dir,
+      ref: 'main',
+    });
+    const plain = await createArtifactRepo(await mkdtemp(join(tmpdir(), 'atrium-prov-plain-')));
+    trash.push(seeded.dir, plain.dir);
+    expect('upstreamPath' in seeded).toBe(true);
+    expect('upstreamPath' in plain).toBe(true);
+    expect(seeded.upstreamPath).toBe(upstream.dir);
+    // No upstream ⇒ explicit `null`, never `undefined`/absent — the guard reads it
+    // as "nothing to overlap", stated rather than inferred from a missing key.
+    expect(plain.upstreamPath).toBeNull();
+
+    // And the TYPE forbids omission. REVERT-REDS: restore `upstreamPath?: string`
+    // and this `@ts-expect-error` becomes an unused directive → typecheck reds.
+    // @ts-expect-error — `upstreamPath` is a required field; a repo cannot omit its
+    // provenance into `pushArtifactBranch`'s guard.
+    const omitted: ArtifactRepo = { dir: plain.dir };
+    expect(omitted.dir).toBe(plain.dir);
+  });
+
   it('seeds trunk FROM the upstream and leaves it byte-identical', async () => {
     const before = await fingerprint(upstream.dir);
     const scratch = await createScratchRepo(undefined, { url: upstream.dir, ref: 'main' });
@@ -1032,25 +1062,18 @@ describe('THE UPSTREAM IS NEVER WRITTEN — provider wiring (#141, red-on-revert
   });
 
   /**
-   * BOTH providers, because the obligation belongs to the SCRATCH REPO, not to
-   * one adapter. A guard wired into `worktree` alone would leave `shim` — the
-   * DEFAULT provider — building the exact configuration it forbids.
+   * The SHIM only, now (#141 r4). The artifact-remote guard
+   * (`assertArtifactRemoteIsNotUpstream`) fires only for a provider built over a
+   * SEEDED repo — and after round 4 the worktree provider REFUSES a seeded repo
+   * outright, before it ever reaches that guard, so it cannot exercise these cases
+   * at all. The shim is the only provider that legitimately runs a seeded upstream
+   * (it runs no harness), so it is where the artifact-remote obligation is proven.
+   * The worktree provider's total refusal of a seeded repo is witnessed separately
+   * below — a strictly stronger guarantee than the artifact-remote guard the shim
+   * carries.
    */
   const factories: Array<[string, (repo: ScratchRepo, ar?: ArtifactRepo) => unknown]> = [
     ['shim', (repo, ar) => createDeterministicShimProvider({ repo, artifactRepo: ar })],
-    [
-      'worktree',
-      // `containedUpstreamSeed: true` gets PAST the FIX-3 seeded-upstream refusal
-      // so these cases exercise the artifact-remote guard itself. The FIX-3
-      // refusal (no opt-in) has its own witness below.
-      (repo, ar) =>
-        createWorktreeCommandProvider({
-          repo,
-          artifactRepo: ar,
-          command: ['true'],
-          containedUpstreamSeed: true,
-        }),
-    ],
   ];
 
   for (const [kind, build] of factories) {
@@ -1115,27 +1138,31 @@ describe('THE UPSTREAM IS NEVER WRITTEN — provider wiring (#141, red-on-revert
     });
   }
 
-  /* ── FIX 3 (#141 r3): the worktree factory refuses a seeded upstream ──────
+  /* ── r4 (#141): the worktree factory refuses a seeded upstream, PERIOD ────
    *
    * env.ts refuses `EXECUTION_PROVIDER=worktree` + an upstream at boot, but the
    * factory is reachable by a direct caller that never loads an `Env` — the #89
    * adjacent-path-bypass class. So the constructor itself refuses a seeded
-   * scratch repo unless the caller opts into the documented containment seam
-   * (`containedUpstreamSeed`) the #138 sandbox provider will use. This is
-   * worktree-only: the shim runs no harness, so a seeded shim is safe and stays
-   * bootable (asserted by the factories loop above).
+   * scratch repo, UNCONDITIONALLY.
+   *
+   * Round 3 gated this behind a `containedUpstreamSeed` boolean the acceptance
+   * test flipped. That boolean was not containment: any direct caller sets it and
+   * builds the forbidden provider, whose harness redirects the push into the
+   * upstream. Round 4 REMOVED the seam — there is no opt-in, and real-repo
+   * execution moves to the #138 sandbox provider. This is worktree-only: the shim
+   * runs no harness, so a seeded shim is safe and stays bootable (below).
    */
 
-  it('the worktree factory REFUSES a seeded upstream without the containment opt-in', () => {
+  it('the worktree factory REFUSES a seeded upstream — the capability is removed, no seam', () => {
     // A VALID, distinct artifact remote — so this is not the artifact-remote
-    // guard firing; it is the FIX-3 factory refusal, which is about the MODE not
-    // the wiring. REVERT-REDS: delete the `repo.upstream !== undefined && ...`
-    // refusal from `createWorktreeCommandProvider` and this BUILDS, and a direct
+    // guard firing; it is the r4 factory refusal, which is about the MODE not the
+    // wiring. REVERT-REDS: re-introduce the `containedUpstreamSeed` seam (or weaken
+    // the `repo.upstream !== undefined` refusal) and this BUILDS, and a direct
     // caller then runs a real harness against a real upstream with no boot gate.
     let message = '';
     try {
       createWorktreeCommandProvider({ repo: seeded, artifactRepo, command: ['true'] });
-      expect.unreachable('worktree must refuse a seeded upstream without the containment opt-in');
+      expect.unreachable('worktree must refuse a seeded upstream — the capability is removed');
     } catch (error) {
       message = (error as Error).message;
     }
@@ -1143,22 +1170,27 @@ describe('THE UPSTREAM IS NEVER WRITTEN — provider wiring (#141, red-on-revert
     expect(message).toContain('#138');
   });
 
-  it('the worktree factory ALLOWS a seeded upstream through the containment seam — the flip', () => {
-    // The #138 sandbox provider and the acceptance test reach real-repo mode
-    // through exactly this seam; with a distinct durable remote it builds.
+  it('there is NO worktree option that builds a seeded upstream (the removed seam)', () => {
+    // The round-3 escape hatch is gone at the TYPE level: `WorktreeCommandOptions`
+    // no longer has a `containedUpstreamSeed` field, so a caller cannot even spell
+    // the bypass. REVERT-REDS: re-add the optional boolean and this `@ts-expect-error`
+    // becomes an unused directive — typecheck reds.
     expect(() =>
       createWorktreeCommandProvider({
         repo: seeded,
         artifactRepo,
         command: ['true'],
+        // @ts-expect-error — the containment seam was removed in #141 r4; there is
+        // no property by which the worktree provider runs a seeded upstream.
         containedUpstreamSeed: true,
       }),
-    ).not.toThrow();
+    ).toThrow(WORKTREE_UPSTREAM_SEED_REFUSAL);
   });
 
-  it('the shim factory NEEDS no opt-in for a seeded upstream — it runs no harness', () => {
-    // FIX 3 is worktree-only. The shim has no config-rewrite reach, so a seeded
-    // shim with a distinct remote builds with no containment seam at all.
+  it('the shim NEEDS no opt-in for a seeded upstream — it runs no harness', () => {
+    // r4 removal is worktree-only. The shim has no config-rewrite reach, so a
+    // seeded shim with a distinct remote builds — this is the live caller that
+    // keeps the seed plumbing reachable and tested.
     expect(() => createDeterministicShimProvider({ repo: seeded, artifactRepo })).not.toThrow();
   });
 });

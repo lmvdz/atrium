@@ -130,29 +130,6 @@ export interface WorktreeCommandOptions {
   command: readonly string[];
   /** How long the command may run before it is killed and the run fails. */
   timeoutMs?: number;
-  /**
-   * THE REAL-REPO CONTAINMENT SEAM (#141 r3, FIX 3) — the ONLY way to build this
-   * provider over a seeded-upstream scratch repo.
-   *
-   * A seeded upstream under THIS provider is refused by construction (see
-   * `WORKTREE_UPSTREAM_SEED_REFUSAL`): the harness is arbitrary code that can
-   * rewrite the adapter's own push destination through git config, which no path
-   * guard can see. `env.ts` refuses `worktree` + upstream at boot, but this
-   * factory is reachable by a DIRECT caller that never loads an `Env`, so the
-   * refusal binds here too.
-   *
-   * Set this ONLY when the caller supplies its OWN containment or a trusted,
-   * fixed harness — NOT reachable from any operator config path:
-   *  - the #138 sandbox provider (docker/gVisor), which contains the harness so
-   *    the config-rewrite reach no longer exists — this is the seam it will use;
-   *  - the acceptance integration test, whose harness is a fixed `rm <file>`
-   *    written by the test, not attacker code (see execution-upstream.test.ts).
-   *
-   * It is a NAMED seam, not a `spelling`: the operator-facing path stays refused
-   * regardless (env.ts fails boot), and the two callers that set it each document
-   * why the containment assumption holds for them.
-   */
-  containedUpstreamSeed?: boolean;
 }
 
 /**
@@ -218,23 +195,28 @@ export const UNSANDBOXED_REFUSAL =
 
 /**
  * REFUSAL — real-repo mode does not build on the unsandboxed worktree provider,
- * at the FACTORY, not only at env (#141 r3, FIX 3).
+ * at the FACTORY, not only at env (#141 r4 — the capability is REMOVED, not gated).
  *
  * `env.ts` refuses `EXECUTION_PROVIDER=worktree` + an upstream at boot. But an
  * `ExecutionProvider` is built by a plain function call, and a direct caller (a
  * test, a future daemon) reaches this factory without ever loading an `Env` — the
  * #89 adjacent-path-bypass class. So the constructor itself refuses a seeded
- * scratch repo, unless the caller opts into the containment seam
- * (`containedUpstreamSeed`) the #138 sandbox provider will use. A guarantee that
- * lives only in the config layer is not a guarantee against the caller who skips
- * the config layer.
+ * scratch repo, UNCONDITIONALLY.
+ *
+ * Round 3 gated this behind a `containedUpstreamSeed` boolean seam. That was not
+ * containment: any direct caller could flip the flag and build the forbidden
+ * provider, whose harness then redirects the push into the upstream through git
+ * config. Round 4 removes the seam entirely — there is no boolean to set, no path
+ * by which this provider runs a seeded upstream. Real-repo execution belongs to
+ * the #138 sandbox provider, which contains the harness so the config-rewrite
+ * reach no longer exists; the worktree provider is EMPTY-TRUNK ONLY.
  */
 export const WORKTREE_UPSTREAM_SEED_REFUSAL =
   'refusing to build the UNSANDBOXED worktree provider against a seeded execution upstream ' +
   '(#141) — a real harness here can rewrite its own push destination through git config, so ' +
-  'real-repo mode is unavailable on this provider until the sandbox seam (#138) contains it; ' +
-  'the boot gate refuses this configuration and the factory refuses the direct caller who never ' +
-  'loaded it';
+  'real-repo mode is not available on this provider at all; it belongs to the sandbox provider ' +
+  '(#138, docker/gVisor). The boot gate refuses this configuration and the factory refuses the ' +
+  'direct caller who never loaded it — there is no seam through';
 
 /**
  * THE GATE IS HERE, NOT ONLY UPSTREAM (#120 round-3 F6).
@@ -255,16 +237,20 @@ export function createWorktreeCommandProvider(options: WorktreeCommandOptions): 
   if (!unsandboxedExecutionAllowed()) throw new Error(UNSANDBOXED_REFUSAL);
   const { repo, artifactRepo, command, timeoutMs = 10 * 60_000 } = options;
   // REAL-REPO MODE IS NOT AVAILABLE ON THIS PROVIDER, refused at the FACTORY (#141
-  // r3, FIX 3). A seeded scratch repo means real-repo mode, and this provider's
-  // harness can rewrite its own push destination via git config — so the boundary
-  // env.ts states at boot is restated here, where a direct caller lands. The only
-  // way through is the documented containment seam the #138 sandbox provider uses.
-  if (repo.upstream !== undefined && options.containedUpstreamSeed !== true) {
+  // r4 — REMOVED, not gated). A seeded scratch repo means real-repo mode, and this
+  // provider's harness can rewrite its own push destination via git config — so the
+  // boundary env.ts states at boot is restated here, where a direct caller lands.
+  // There is NO opt-in: the round-3 `containedUpstreamSeed` boolean was not
+  // containment (any caller flips it), so it is gone and this refusal is absolute.
+  if (repo.upstream !== undefined) {
     throw new Error(WORKTREE_UPSTREAM_SEED_REFUSAL);
   }
-  // THE UPSTREAM IS NEVER WRITTEN, provider layer (#141). A real-repo session is
-  // the whole reason this provider exists, so the wiring that would publish its
-  // branch nowhere — or into the upstream itself — is refused at construction.
+  // THE UPSTREAM IS NEVER WRITTEN, provider layer (#141). Defense in depth: with a
+  // seeded repo already refused above, `repo.upstream` is undefined here and this
+  // is a no-op on the worktree path — but it is the shared invariant every provider
+  // factory asserts, kept so a future weakening of the refusal above cannot silently
+  // wire an artifact remote onto the upstream. (It is LIVE on the shim, which does
+  // run real-repo mode.)
   assertArtifactRemoteIsNotUpstream(repo, artifactRepo);
   if (command.length === 0) {
     throw new Error('worktree provider requires a non-empty command argv');

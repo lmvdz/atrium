@@ -698,12 +698,20 @@ export interface ArtifactRepo {
   /** Absolute path to the durable bare repo. This is the `remote` on the artifact. */
   readonly dir: string;
   /**
-   * The LOCAL path of the configured execution upstream (#141), when there is
-   * one and it is local. Carried so `pushArtifactBranch` can re-assert THE
-   * UPSTREAM IS NEVER WRITTEN at the moment of the write, not only at the moment
-   * of the open. `undefined` when no upstream is configured or it is remote.
+   * The LOCAL path of the configured execution upstream (#141), when there is one
+   * and it is local; `null` when no upstream is configured or it is remote.
+   * Carried so `pushArtifactBranch` can re-assert THE UPSTREAM IS NEVER WRITTEN at
+   * the moment of the write, not only at the moment of the open.
+   *
+   * MANDATORY, not optional (#141 r4). It was `upstreamPath?: string`, and an
+   * optional field is a fail-open: a hand-assembled `ArtifactRepo` that simply
+   * OMITTED it slipped past `pushArtifactBranch`'s `!== undefined` guard silently —
+   * the exact "the gap is on the path nobody thought of" class. As a required
+   * `string | null` the type forces every constructor to STATE provenance: a path,
+   * or an explicit `null` meaning "no local upstream". Omitting it is now a compile
+   * error, witnessed by a `@ts-expect-error` in the guard tests.
    */
-  readonly upstreamPath?: string;
+  readonly upstreamPath: string | null;
 }
 
 /**
@@ -783,7 +791,11 @@ export async function createArtifactRepo(
   // every open, so a repo created by an older boot is upgraded in place.
   await git(dir, ['config', 'core.hooksPath', await emptyHooksDir()]);
   await git(dir, ['config', 'core.fsmonitor', 'false']);
-  return upstreamPath === null ? { dir } : { dir, upstreamPath };
+  // Always carry `upstreamPath` — a path when the upstream is local, else `null`.
+  // The field is mandatory (#141 r4): a repo that means "no upstream" says so with
+  // `null`, it does not communicate it by absence, so no caller can omit provenance
+  // into `pushArtifactBranch`'s fail-open.
+  return { dir, upstreamPath };
 }
 
 /**
@@ -799,7 +811,10 @@ export async function pushArtifactBranch(
   // THE UPSTREAM IS NEVER WRITTEN, re-asserted at the write (#141). Checked here
   // and not only at `createArtifactRepo` because this function's argument is a
   // plain object any caller can assemble — the boot gate is not on this path.
-  if (artifact.upstreamPath !== undefined && pathsOverlap(artifact.dir, artifact.upstreamPath)) {
+  // `upstreamPath` is a MANDATORY `string | null` (#141 r4): `null` is "no local
+  // upstream, nothing to overlap"; a path is checked. A caller can no longer OMIT
+  // the field to skip this guard — that omission is now a compile error.
+  if (artifact.upstreamPath !== null && pathsOverlap(artifact.dir, artifact.upstreamPath)) {
     throw new Error(
       `${PUSH_INTO_UPSTREAM_REFUSAL}: ${artifact.dir} overlaps ${artifact.upstreamPath}`,
     );
