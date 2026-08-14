@@ -161,6 +161,47 @@ export interface ScratchRepo {
   readonly upstream?: UpstreamSeed & { readonly commit: string };
 }
 
+/**
+ * ═══════════════════════════════════════════════════════════════════════════
+ *  RUNTIME-UNFORGEABLE PROVENANCE (#141 r5) — a ScratchRepo cannot be forged.
+ * ═══════════════════════════════════════════════════════════════════════════
+ *
+ * `ScratchRepo` is a plain STRUCTURAL object, and its OWN FIELDS describe its
+ * provenance: `upstream` says "this trunk was seeded from a real repository". The
+ * type system enforces that shape at COMPILE time only. A caller with the
+ * unsandboxed opt-in can therefore hand-build a plain object — `{ dir, seedCommit }`
+ * with NO `upstream` field — that points at a genuinely seeded scratch repo on
+ * disk yet reads, structurally, as an innocent empty-trunk repo. Both foreign
+ * lineages EXECUTED exactly this (F1): the forged handle sails past
+ * `createWorktreeCommandProvider`'s `repo.upstream !== undefined` refusal, the
+ * provider builds a real harness over a seeded repo, and that harness installs
+ * `url.<upstream>.pushInsteadOf` to redirect Atrium's own push into the upstream.
+ *
+ * The fix closes the whole forgeable-object class, not the one field: authenticity
+ * is a runtime CAPABILITY only the factory can mint. A module-private `WeakSet`
+ * holds every ScratchRepo `createScratchRepo` returns; a hand-built object is not
+ * in the set, however faithfully it copies the fields. The brand lives in a closure
+ * no caller can reach, so it cannot be copied onto a forgery. `WeakSet` (not a
+ * symbol property) keeps the interface structurally unchanged — no brand field to
+ * type around — and lets a discarded repo be garbage-collected.
+ */
+const authenticScratchRepos = new WeakSet<ScratchRepo>();
+
+/** Brand a factory-minted ScratchRepo as authentic and return it. */
+function brandScratchRepo(repo: ScratchRepo): ScratchRepo {
+  authenticScratchRepos.add(repo);
+  return repo;
+}
+
+/**
+ * Was this ScratchRepo minted by `createScratchRepo`? The trust-boundary consumer
+ * (`createWorktreeCommandProvider`) verifies this and REJECTS any handle that is
+ * not authentic — a forged `{ dir, seedCommit }` is not in the set (#141 r5, F1).
+ */
+export function isAuthenticScratchRepo(repo: ScratchRepo): boolean {
+  return authenticScratchRepos.has(repo);
+}
+
 /** One resolved worktree — an isolated checkout on a fresh per-session branch. */
 export interface WorktreeCheckout {
   readonly dir: string;
@@ -537,7 +578,10 @@ export async function createScratchRepo(
     // above lands in `FETCH_HEAD` rather than fetching straight into it (git
     // refuses: "refusing to fetch into branch … checked out at").
     await git(dir, ['update-ref', 'refs/heads/main', commit]);
-    return { dir, seedCommit: commit, upstream: { ...seed, commit } };
+    // BRAND this as a factory-minted repo (#141 r5): the trust-boundary consumer
+    // verifies the brand, so a hand-built `{ dir, seedCommit }` copy — which cannot
+    // reach this closure — is rejected there even when it points at THIS repo.
+    return brandScratchRepo({ dir, seedCommit: commit, upstream: { ...seed, commit } });
   }
 
   await writeFile(
@@ -550,7 +594,7 @@ export async function createScratchRepo(
   // this is the belt to that suspenders and states the intent at the commit.
   await git(dir, ['commit', '-q', '--no-verify', '-m', 'seed: atrium execution scratch']);
   const seedCommit = await git(dir, ['rev-parse', 'HEAD']);
-  return { dir, seedCommit };
+  return brandScratchRepo({ dir, seedCommit });
 }
 
 /**
@@ -715,6 +759,61 @@ export interface ArtifactRepo {
 }
 
 /**
+ * ═══════════════════════════════════════════════════════════════════════════
+ *  RUNTIME-UNFORGEABLE PROVENANCE (#141 r5) — an ArtifactRepo cannot be forged.
+ * ═══════════════════════════════════════════════════════════════════════════
+ *
+ * `ArtifactRepo` is a plain STRUCTURAL object whose own `upstreamPath` field is the
+ * thing `pushArtifactBranch` trusts to decide the overlap. Round 4 made the field
+ * MANDATORY so it could not be OMITTED — but a required field can still LIE.
+ * Both foreign lineages EXECUTED this (F2): `pushArtifactBranch({ dir: upstream.dir,
+ * upstreamPath: null })` — a hand-built handle pointed AT the upstream that falsely
+ * declares `null` ("no local upstream, nothing to overlap"). The `!== null` guard
+ * reads the lie at face value, skips the overlap check, and pushes a session branch
+ * straight into the human's repository.
+ *
+ * A guard can only be as honest as the fields it reads, and a caller who builds the
+ * object writes the fields. So authenticity is minted, not declared: a module-private
+ * `WeakSet` holds every ArtifactRepo `createArtifactRepo` returns, and
+ * `pushArtifactBranch` rejects any handle not in it BEFORE reading `upstreamPath`.
+ * The overlap decision is then made against a `upstreamPath` the FACTORY recorded
+ * from the configured upstream, never one a caller supplied.
+ */
+const authenticArtifactRepos = new WeakSet<ArtifactRepo>();
+
+/** Brand a factory-minted ArtifactRepo as authentic and return it. */
+function brandArtifactRepo(repo: ArtifactRepo): ArtifactRepo {
+  authenticArtifactRepos.add(repo);
+  return repo;
+}
+
+/**
+ * Was this ArtifactRepo minted by `createArtifactRepo`? `pushArtifactBranch`
+ * verifies this and refuses any handle that is not — a forged `{ dir, upstreamPath }`
+ * is not in the set, so its lying `upstreamPath` never gets to decide the overlap.
+ */
+export function isAuthenticArtifactRepo(repo: ArtifactRepo): boolean {
+  return authenticArtifactRepos.has(repo);
+}
+
+/**
+ * REFUSAL 6 — the push destination must be a FACTORY-MINTED artifact repo (#141 r5).
+ *
+ * The primary gate that closes F2. A forged `ArtifactRepo` — whatever it claims in
+ * `upstreamPath` — is not in the authenticity `WeakSet`, so it is refused before the
+ * overlap check ever reads a caller-controlled field. `pushArtifactBranch` then makes
+ * its overlap decision only against a factory-recorded `upstreamPath`. The overlap
+ * check itself is RETAINED as defense-in-depth (a branded repo whose on-disk realpath
+ * comes to overlap the upstream after creation — a TOCTOU symlink swap — is still
+ * caught), but a hand-built handle no longer reaches it at all.
+ */
+export const ARTIFACT_REPO_NOT_AUTHENTIC_REFUSAL =
+  'refusing to push a session branch through an ArtifactRepo that createArtifactRepo did not mint ' +
+  '(#141 r5) — a hand-built handle can declare any upstreamPath it likes (a forged `null` reads as ' +
+  '"nothing to overlap" and slips the guard), so only a factory-branded artifact repo is trusted ' +
+  'to decide where the push may land';
+
+/**
  * REFUSAL 3 — the durable artifact repo is never opened AT the upstream (#141).
  *
  * `createArtifactRepo` runs `init --bare` and two `config` writes. Pointed at a
@@ -794,8 +893,10 @@ export async function createArtifactRepo(
   // Always carry `upstreamPath` — a path when the upstream is local, else `null`.
   // The field is mandatory (#141 r4): a repo that means "no upstream" says so with
   // `null`, it does not communicate it by absence, so no caller can omit provenance
-  // into `pushArtifactBranch`'s fail-open.
-  return { dir, upstreamPath };
+  // into `pushArtifactBranch`'s fail-open. BRANDED as factory-minted (#141 r5) so the
+  // push can reject a hand-built handle whose `upstreamPath` lies — the r4 "cannot be
+  // omitted" is now also "cannot be forged".
+  return brandArtifactRepo({ dir, upstreamPath });
 }
 
 /**
@@ -808,12 +909,22 @@ export async function pushArtifactBranch(
   checkout: WorktreeCheckout,
   artifact: ArtifactRepo,
 ): Promise<string> {
-  // THE UPSTREAM IS NEVER WRITTEN, re-asserted at the write (#141). Checked here
-  // and not only at `createArtifactRepo` because this function's argument is a
-  // plain object any caller can assemble — the boot gate is not on this path.
-  // `upstreamPath` is a MANDATORY `string | null` (#141 r4): `null` is "no local
-  // upstream, nothing to overlap"; a path is checked. A caller can no longer OMIT
-  // the field to skip this guard — that omission is now a compile error.
+  // PRIMARY GATE (#141 r5, F2): the push destination must be a FACTORY-MINTED
+  // artifact repo. `ArtifactRepo` is a plain object any caller can assemble, and the
+  // r4 "the field cannot be OMITTED" did not stop a caller from forging a required
+  // field that LIES — `{ dir: upstream.dir, upstreamPath: null }` declared "nothing
+  // to overlap" and reached the push. Authenticity is a runtime brand only
+  // `createArtifactRepo` can mint (a `WeakSet` in a closure), so a hand-built handle
+  // is refused HERE, before the overlap check reads any caller-controlled field.
+  if (!isAuthenticArtifactRepo(artifact)) {
+    throw new Error(ARTIFACT_REPO_NOT_AUTHENTIC_REFUSAL);
+  }
+  // THE UPSTREAM IS NEVER WRITTEN, re-asserted at the write (#141) — now DEFENSE IN
+  // DEPTH behind the brand. `upstreamPath` is a MANDATORY `string | null` (#141 r4)
+  // the FACTORY recorded (#141 r5), never a caller's: `null` is "no local upstream";
+  // a path is checked. `pathsOverlap` canonicalises both sides, so this is also the
+  // on-disk realpath RE-CHECK that catches a branded repo whose `dir` or upstream was
+  // symlink-swapped to overlap AFTER creation (the TOCTOU the brand alone cannot see).
   if (artifact.upstreamPath !== null && pathsOverlap(artifact.dir, artifact.upstreamPath)) {
     throw new Error(
       `${PUSH_INTO_UPSTREAM_REFUSAL}: ${artifact.dir} overlaps ${artifact.upstreamPath}`,

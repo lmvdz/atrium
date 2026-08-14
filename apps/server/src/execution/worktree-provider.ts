@@ -6,6 +6,7 @@ import {
   cleanHome,
   commitWorktree,
   DANGEROUS_GIT_VARS,
+  isAuthenticScratchRepo,
   pushArtifactBranch,
   removeWorktree,
   type ScratchRepo,
@@ -219,6 +220,31 @@ export const WORKTREE_UPSTREAM_SEED_REFUSAL =
   'direct caller who never loaded it — there is no seam through';
 
 /**
+ * REFUSAL (#141 r5, F1) — the scratch repo must be a FACTORY-MINTED handle.
+ *
+ * The `repo.upstream !== undefined` refusal below reads a STRUCTURAL field, and a
+ * caller with the opt-in writes that field. Both foreign lineages executed the
+ * dodge: `createScratchRepo(…, seed)` produces a real seeded repo on disk, then a
+ * hand-built `{ dir: scratch.dir, seedCommit: scratch.seedCommit }` — with the
+ * `upstream` field simply LEFT OFF — is passed here. Structurally it is an
+ * innocent empty-trunk repo, so it slips the upstream refusal; but it points at a
+ * seeded repo, so the harness this factory builds runs against a real upstream and
+ * rewrites its own push destination through git config.
+ *
+ * So provenance is verified as a runtime CAPABILITY, not read from a forgeable
+ * field: only `createScratchRepo` can mint an authentic ScratchRepo (a
+ * module-private `WeakSet` in `git.ts`), and this factory refuses any handle that
+ * is not one. The forged `{ dir, seedCommit }` is not in the set — it is rejected
+ * whether or not it carries an `upstream` field, closing the class the structural
+ * refusal alone left open.
+ */
+export const SCRATCH_REPO_NOT_AUTHENTIC_REFUSAL =
+  'refusing to build an execution provider over a ScratchRepo that createScratchRepo did not mint ' +
+  '(#141 r5) — a hand-built handle can omit its `upstream` field to read as an innocent empty-trunk ' +
+  'repo while pointing at a seeded one, so only a factory-branded scratch repo is trusted to build a ' +
+  'harness here';
+
+/**
  * THE GATE IS HERE, NOT ONLY UPSTREAM (#120 round-3 F6).
  *
  * `env.ts` (`assertExecutionProviderSafe`) and `configure.ts` both refuse to
@@ -236,6 +262,14 @@ export const WORKTREE_UPSTREAM_SEED_REFUSAL =
 export function createWorktreeCommandProvider(options: WorktreeCommandOptions): ExecutionProvider {
   if (!unsandboxedExecutionAllowed()) throw new Error(UNSANDBOXED_REFUSAL);
   const { repo, artifactRepo, command, timeoutMs = 10 * 60_000 } = options;
+  // PRIMARY GATE (#141 r5, F1): the scratch repo must be a FACTORY-MINTED handle.
+  // A forged `{ dir, seedCommit }` that omits `upstream` slips the structural
+  // refusal below while pointing at a real seeded repo; it is not in the
+  // authenticity WeakSet, so it is rejected HERE, before any field is read. This
+  // catches the forgery whether or not it carries an `upstream` field.
+  if (!isAuthenticScratchRepo(repo)) {
+    throw new Error(SCRATCH_REPO_NOT_AUTHENTIC_REFUSAL);
+  }
   // REAL-REPO MODE IS NOT AVAILABLE ON THIS PROVIDER, refused at the FACTORY (#141
   // r4 — REMOVED, not gated). A seeded scratch repo means real-repo mode, and this
   // provider's harness can rewrite its own push destination via git config — so the

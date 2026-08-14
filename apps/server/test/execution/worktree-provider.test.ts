@@ -1,10 +1,11 @@
 import { readFile } from 'node:fs/promises';
 import { join } from 'node:path';
-import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it } from 'vitest';
 import {
   createScratchRepo,
   DANGEROUS_GIT_VARS,
   disposeScratchRepo,
+  type ScratchRepo,
 } from '../../src/execution/git.js';
 import type { SessionContext } from '../../src/execution/provider.js';
 import {
@@ -87,7 +88,19 @@ describe('harnessEnv is a strict allowlist (#120 F4)', () => {
  * every route except the one nobody enumerated.
  */
 describe('the unsandboxed provider cannot be constructed without the opt-in (#120 r3 F6)', () => {
-  const repo = { dir: '/tmp/nonexistent-repo', seedCommit: 'deadbeef' };
+  // A FACTORY-MINTED, authentic empty-trunk repo (#141 r5). The scratch-repo brand
+  // is now verified at the factory, so this suite — which exercises the ORTHOGONAL
+  // opt-in gate — must pass an authentic handle, or it would red on the brand refusal
+  // and never reach the opt-in behaviour it is here to prove. (The opt-in check runs
+  // BEFORE the brand check, so the two "throws" cases would pass regardless; using an
+  // authentic repo is what lets the "builds" case actually build.)
+  let repo: ScratchRepo;
+  beforeAll(async () => {
+    repo = await createScratchRepo();
+  });
+  afterAll(async () => {
+    await disposeScratchRepo(repo);
+  });
   const build = () => createWorktreeCommandProvider({ repo, command: ['true'] });
 
   let savedOptIn: string | undefined;

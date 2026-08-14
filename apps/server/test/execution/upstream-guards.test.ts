@@ -8,6 +8,7 @@ import { loadEnv } from '../../src/env.js';
 import { executionUpstream } from '../../src/execution/configure.js';
 import {
   ARTIFACT_REPO_AT_UPSTREAM_REFUSAL,
+  ARTIFACT_REPO_NOT_AUTHENTIC_REFUSAL,
   type ArtifactRepo,
   addWorktree,
   commitWorktree,
@@ -33,6 +34,7 @@ import {
 } from '../../src/execution/upstream.js';
 import {
   createWorktreeCommandProvider,
+  SCRATCH_REPO_NOT_AUTHENTIC_REFUSAL,
   WORKTREE_UPSTREAM_SEED_REFUSAL,
 } from '../../src/execution/worktree-provider.js';
 
@@ -170,6 +172,23 @@ const GUARDS: readonly Guard[] = [
     layer: 'provider',
     probe: /a real harness here can rewrite its own push destination/,
   },
+  // ── Round 5 (#141 r5): runtime-unforgeable provenance ─────────────────────
+  {
+    // F1: the worktree factory verifies the scratch repo's factory BRAND, so a
+    // hand-built `{ dir, seedCommit }` that omits `upstream` (and so slips the
+    // structural refusal) is rejected as not-a-factory-instance.
+    id: 'provider/scratch-not-authentic',
+    layer: 'provider',
+    probe: /createScratchRepo did not mint/,
+  },
+  {
+    // F2: `pushArtifactBranch` verifies the artifact repo's factory BRAND, so a
+    // forged `{ dir, upstreamPath: null }` whose lying field would skip the overlap
+    // check is rejected before that field is ever read.
+    id: 'plumbing/artifact-not-authentic',
+    layer: 'plumbing',
+    probe: /createArtifactRepo did not mint/,
+  },
 ];
 
 /**
@@ -193,6 +212,8 @@ describe('#141 refusal sentences are pairwise disjoint', () => {
       ['plumbing/unparseable-url', UPSTREAM_UNPARSEABLE_URL_REFUSAL],
       ['plumbing/scratch-repo-at-upstream', SCRATCH_REPO_AT_UPSTREAM_REFUSAL],
       ['provider/worktree-upstream-seed', WORKTREE_UPSTREAM_SEED_REFUSAL],
+      ['provider/scratch-not-authentic', SCRATCH_REPO_NOT_AUTHENTIC_REFUSAL],
+      ['plumbing/artifact-not-authentic', ARTIFACT_REPO_NOT_AUTHENTIC_REFUSAL],
     ];
     for (const [id, sentence] of shipped) expectExactlyGuard(sentence, id);
     // And no two shipped sentences are the same string, which is the trap in its
@@ -693,10 +714,14 @@ describe('THE UPSTREAM IS NEVER WRITTEN — git plumbing (#141, red-on-revert)',
     expect(await fingerprint(upstream.dir)).toBe(before);
   });
 
-  it('refuses to push a session branch into the upstream, even from a hand-built repo', async () => {
-    // `createArtifactRepo` already refuses to BUILD such a repo — which is
-    // exactly why the push re-checks. `ArtifactRepo` is a plain object; this is
-    // the adjacent path a caller reaches without passing any boot gate.
+  it('F2 (#141 r5): refuses to push through a FORGED ArtifactRepo whose upstreamPath lies', async () => {
+    // The exact bypass BOTH foreign lineages executed. `ArtifactRepo` is a plain
+    // object; a caller with the opt-in hand-builds one pointed AT the upstream that
+    // declares `upstreamPath: null` — "no local upstream, nothing to overlap". Round
+    // 4's mandatory field did not stop this: a required field can still LIE. The
+    // `null` reads as "skip the overlap check" and the branch lands in the human's
+    // repository. Round 5 refuses the handle FIRST, because it was not minted by
+    // `createArtifactRepo` — before its lying field is ever read.
     const scratch = await createScratchRepo(undefined, { url: upstream.dir, ref: 'main' });
     trash.push(scratch.dir);
     const checkout = await addWorktree(scratch, 'push-into-upstream');
@@ -704,14 +729,67 @@ describe('THE UPSTREAM IS NEVER WRITTEN — git plumbing (#141, red-on-revert)',
     await commitWorktree(checkout, 'session work');
 
     const before = await fingerprint(upstream.dir);
-    const forged: ArtifactRepo = { dir: upstream.dir, upstreamPath: upstream.dir };
-    // REVERT-REDS: remove the overlap check from `pushArtifactBranch` and this
-    // push SUCCEEDS — `refs/heads/atrium/session/push-into-upstream` appears in
-    // the human's repository and the fingerprint moves.
-    await expect(pushArtifactBranch(checkout, forged)).rejects.toThrow(
-      /a human FETCHES from the provider-owned repo/,
+    // THE EXACT F2 FORGERY: a null provenance that would skip the overlap check.
+    const forgedNull: ArtifactRepo = { dir: upstream.dir, upstreamPath: null };
+    // And the sibling forgery that instead states its overlap truthfully — also a
+    // hand-built handle, also refused by the brand rather than by the overlap check.
+    const forgedTruthful: ArtifactRepo = { dir: upstream.dir, upstreamPath: upstream.dir };
+    // REVERT-REDS: delete the `!isAuthenticArtifactRepo` gate from
+    // `pushArtifactBranch` and `forgedNull` is ACCEPTED — its `null` skips the
+    // overlap check and the push lands `refs/heads/atrium/session/push-into-upstream`
+    // in the upstream, moving the fingerprint below.
+    for (const forged of [forgedNull, forgedTruthful]) {
+      const message = await pushArtifactBranch(checkout, forged).then(
+        () => null,
+        (e: Error) => e.message,
+      );
+      expect(message, 'expected pushArtifactBranch to refuse a forged handle').not.toBeNull();
+      expectExactlyGuard(message as string, 'plumbing/artifact-not-authentic');
+    }
+    // Nothing was written into the upstream on the way to refusing either forgery.
+    expect(await fingerprint(upstream.dir)).toBe(before);
+
+    await removeWorktree(checkout);
+    await disposeScratchRepo(scratch);
+  });
+
+  it('DEFENSE IN DEPTH (#141 r5): the overlap re-check still catches a branded repo symlink-swapped onto the upstream', async () => {
+    // The brand is the primary gate; the overlap check is RETAINED behind it and is
+    // NOT dead code. A FACTORY-MINTED artifact repo is created at a symlinked path
+    // that does not overlap the upstream — so `createArtifactRepo`'s own creation-time
+    // check passes and the repo is branded — and only THEN is the symlink swapped to
+    // point at the upstream (a TOCTOU the brand alone cannot see, because the object
+    // is genuinely authentic). `pushArtifactBranch` canonicalises `dir` at push time,
+    // so the now-overlapping realpath is caught by the overlap check.
+    const scratch = await createScratchRepo(undefined, { url: upstream.dir, ref: 'main' });
+    trash.push(scratch.dir);
+    const checkout = await addWorktree(scratch, 'toctou-overlap');
+    await writeFile(join(checkout.dir, 'session.txt'), 'work\n');
+    await commitWorktree(checkout, 'session work');
+
+    const root = await mkdtemp(join(tmpdir(), 'atrium-141-toctou-'));
+    trash.push(root);
+    const realArtifact = join(root, 'real-artifact');
+    await mkdir(realArtifact, { recursive: true });
+    const link = join(root, 'artifact-link');
+    await symlink(realArtifact, link, 'dir'); // points somewhere harmless at creation
+    // Branded, real, non-overlapping at creation — the creation-time overlap check
+    // passes and the repo goes into the authenticity WeakSet.
+    const branded = await createArtifactRepo(link, { url: upstream.dir, ref: 'main' });
+    // Now swap the link so `branded.dir` (the string `link`) canonicalises onto the
+    // upstream — the push would otherwise write refs straight into it.
+    await rm(link, { force: true });
+    await symlink(upstream.dir, link, 'dir');
+
+    const before = await fingerprint(upstream.dir);
+    // REVERT-REDS: delete the retained `pathsOverlap` check from `pushArtifactBranch`
+    // (leaving only the brand) and this authentic-but-swapped repo pushes a session
+    // ref INTO the upstream — the fingerprint moves.
+    const message = await pushArtifactBranch(checkout, branded).then(
+      () => null,
+      (e: Error) => e.message,
     );
-    const message = await pushArtifactBranch(checkout, forged).catch((e: Error) => e.message);
+    expect(message, 'expected the overlap re-check to refuse the swapped path').not.toBeNull();
     expectExactlyGuard(message as string, 'plumbing/push-into-upstream');
     expect(await fingerprint(upstream.dir)).toBe(before);
 
@@ -1168,6 +1246,40 @@ describe('THE UPSTREAM IS NEVER WRITTEN — provider wiring (#141, red-on-revert
     }
     expectExactlyGuard(message, 'provider/worktree-upstream-seed');
     expect(message).toContain('#138');
+  });
+
+  it('F1 (#141 r5): the worktree factory refuses a FORGED scratch repo that omits its upstream field', () => {
+    // The exact bypass BOTH foreign lineages executed. `seeded` is a real,
+    // factory-seeded scratch repo; a hand-built `{ dir, seedCommit }` copy that LEAVES
+    // OFF the `upstream` field reads, structurally, as an innocent empty-trunk repo —
+    // so it slips the `repo.upstream !== undefined` refusal (round 4). But `dir` still
+    // points at the seeded repo, so the harness this factory builds runs against the
+    // real upstream and can rewrite its own push destination. Round 5 refuses it
+    // because the handle was not minted by `createScratchRepo` — its provenance is a
+    // runtime brand, not a forgeable field.
+    const forged: ScratchRepo = { dir: seeded.dir, seedCommit: seeded.seedCommit };
+    // The forgery is structurally an empty-trunk repo — no `upstream` — so the older
+    // refusal cannot see it. The brand can.
+    expect('upstream' in forged).toBe(false);
+    let message = '';
+    try {
+      createWorktreeCommandProvider({ repo: forged, artifactRepo, command: ['true'] });
+      expect.unreachable('worktree must refuse a forged, unbranded scratch repo');
+    } catch (error) {
+      message = (error as Error).message;
+    }
+    // REVERT-REDS: delete the `!isAuthenticScratchRepo` gate from the factory and this
+    // BUILDS — the forged handle omits `upstream`, the structural refusal never fires,
+    // and a real harness runs against the seeded upstream with no gate anywhere.
+    expectExactlyGuard(message, 'provider/scratch-not-authentic');
+  });
+
+  it('the worktree factory still builds normally over a factory-minted UNSEEDED repo — the flip', () => {
+    // Branding is not banning: an authentic empty-trunk repo (the #120 seam) passes
+    // the brand check and, with no `upstream`, the seed refusal too.
+    expect(() =>
+      createWorktreeCommandProvider({ repo: plain, command: ['bash', '-lc', 'true'] }),
+    ).not.toThrow();
   });
 
   it('there is NO worktree option that builds a seeded upstream (the removed seam)', () => {
