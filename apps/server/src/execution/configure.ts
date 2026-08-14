@@ -27,6 +27,7 @@ import {
 import type { ExecutionProvider } from './provider.js';
 import { createSandboxProvider } from './sandbox.js';
 import { createDeterministicShimProvider } from './shim.js';
+import { setConfiguredExecutionUpstream } from './upstream.js';
 import { createWorktreeCommandProvider } from './worktree-provider.js';
 
 /**
@@ -104,6 +105,12 @@ export async function createExecutionProvider(input: {
   // the durable repo anywhere that overlaps it — THE UPSTREAM IS NEVER WRITTEN,
   // asserted at the plumbing as well as at the boot gate in `env.ts`.
   const upstream = executionUpstream(env);
+  // CONSTRUCTION-TIME INVARIANT (#141 r7): record the configured upstream as a
+  // process-wide fact BEFORE any repo handle is minted, so `createArtifactRepo` /
+  // `createScratchRepo` refuse — unconditionally, from a value no factory caller can
+  // write — to brand+return a handle naming the upstream (Finding A). This is the
+  // trust boundary that knows the upstream: it reads the same env the boot gate does.
+  setConfiguredExecutionUpstream(upstream?.url);
   const artifactRepo = await createArtifactRepo(artifactDir, upstream);
   if (upstream) {
     logger.info('execution runs against a real upstream (#141)', {

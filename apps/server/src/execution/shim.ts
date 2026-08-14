@@ -4,6 +4,7 @@ import {
   type ArtifactRepo,
   addWorktree,
   assertArtifactRemoteIsNotUpstream,
+  assertAuthenticRunCheckout,
   commitWorktree,
   pushArtifactBranch,
   removeWorktree,
@@ -94,6 +95,11 @@ export function createDeterministicShimProvider(
 
     async run(workspace: Workspace, ctx: SessionContext): Promise<ExecutionReport> {
       const checkout = (workspace as ShimWorkspace).checkout;
+      // BRAND GATE (#141 r7): the write below is `writeFile(checkout.dir, …)`, a
+      // filesystem mutation that runs before `commitWorktree`'s own brand gate. A
+      // forged workspace whose checkout.dir is the upstream would drop ARTIFACT.json
+      // into it. Verified here, before checkout.dir points a write.
+      assertAuthenticRunCheckout(checkout);
       const shouldFail = ctx.model === EXECUTION_FAIL_DIRECTIVE;
 
       if (shouldFail) {

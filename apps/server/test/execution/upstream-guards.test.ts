@@ -15,12 +15,15 @@ import {
   commitWorktree,
   createArtifactRepo,
   createScratchRepo,
+  DISPOSE_SCRATCH_NOT_AUTHENTIC_REFUSAL,
   disposeScratchRepo,
+  MINT_AT_UPSTREAM_REFUSAL,
   mainCommit,
   PIN_ARTIFACT_NOT_AUTHENTIC_REFUSAL,
   PUSH_INTO_UPSTREAM_REFUSAL,
   pinSettledArtifact,
   pushArtifactBranch,
+  RUN_CHECKOUT_NOT_AUTHENTIC_REFUSAL,
   removeWorktree,
   SCRATCH_REPO_AT_UPSTREAM_REFUSAL,
   type ScratchRepo,
@@ -28,10 +31,14 @@ import {
   WORKTREE_CHECKOUT_NOT_AUTHENTIC_REFUSAL,
   type WorktreeCheckout,
 } from '../../src/execution/git.js';
+import type { SessionContext, Workspace } from '../../src/execution/provider.js';
 import { createDeterministicShimProvider } from '../../src/execution/shim.js';
 import {
+  configuredUpstreamMintOverlap,
   isAcceptableUpstreamUrl,
   pathsOverlap,
+  resetConfiguredExecutionUpstreamForTest,
+  setConfiguredExecutionUpstream,
   UPSTREAM_REF_REFUSAL,
   UPSTREAM_UNPARSEABLE_URL_REFUSAL,
   UPSTREAM_URL_REFUSAL,
@@ -217,6 +224,31 @@ const GUARDS: readonly Guard[] = [
     layer: 'plumbing',
     probe: /addWorktree did not mint/,
   },
+  // ── Round 7 (#141 r7): the CONSTRUCTION-TIME invariant, above the per-site brands ─
+  {
+    // Finding A: BOTH factories refuse — UNCONDITIONALLY, seed passed or not — to
+    // brand+return a handle whose dir overlaps the process-configured upstream. One
+    // sentence, thrown at two mint sites (createScratchRepo AND createArtifactRepo);
+    // one guard used twice, like plumbing/unparseable-url.
+    id: 'plumbing/mint-at-upstream',
+    layer: 'plumbing',
+    probe: /may ever name the upstream/,
+  },
+  {
+    // Finding B: `disposeScratchRepo`'s `rm -rf` — a filesystem mutation, not a git()
+    // call — verifies the scratch brand before deleting repo.dir.
+    id: 'plumbing/dispose-scratch-not-authentic',
+    layer: 'plumbing',
+    probe: /only a factory-branded scratch repo may be disposed/,
+  },
+  {
+    // The fs-mutation sibling: a provider's `run` verifies the checkout brand before
+    // writing into / spawning inside checkout.dir (the shim writeFile, the worktree
+    // harness cwd) — the operations that precede commitWorktree's own git-write gate.
+    id: 'plumbing/run-checkout-not-authentic',
+    layer: 'plumbing',
+    probe: /only a factory-branded checkout may host a run/,
+  },
 ];
 
 /**
@@ -245,6 +277,9 @@ describe('#141 refusal sentences are pairwise disjoint', () => {
       ['plumbing/add-worktree-not-authentic', ADD_WORKTREE_NOT_AUTHENTIC_REFUSAL],
       ['plumbing/pin-artifact-not-authentic', PIN_ARTIFACT_NOT_AUTHENTIC_REFUSAL],
       ['plumbing/worktree-checkout-not-authentic', WORKTREE_CHECKOUT_NOT_AUTHENTIC_REFUSAL],
+      ['plumbing/mint-at-upstream', MINT_AT_UPSTREAM_REFUSAL],
+      ['plumbing/dispose-scratch-not-authentic', DISPOSE_SCRATCH_NOT_AUTHENTIC_REFUSAL],
+      ['plumbing/run-checkout-not-authentic', RUN_CHECKOUT_NOT_AUTHENTIC_REFUSAL],
     ];
     for (const [id, sentence] of shipped) expectExactlyGuard(sentence, id);
     // And no two shipped sentences are the same string, which is the trap in its
@@ -678,6 +713,10 @@ describe('THE UPSTREAM IS NEVER WRITTEN — git plumbing (#141, red-on-revert)',
     trash.push(upstream.dir);
   });
   afterEach(async () => {
+    // Round 7: the construction-time mint guard reads a PROCESS-global configured
+    // upstream. Clear it after every case so a witness that sets it never leaks into
+    // the next test (which expects the pre-#141-r7 "unset" state).
+    resetConfiguredExecutionUpstreamForTest();
     while (trash.length > 0) {
       const dir = trash.pop();
       if (dir) await rm(dir, { recursive: true, force: true });
@@ -1040,6 +1079,148 @@ describe('THE UPSTREAM IS NEVER WRITTEN — git plumbing (#141, red-on-revert)',
     expect(await fingerprint(upstream.dir)).toBe(before);
     await removeWorktree(checkout);
     await disposeScratchRepo(scratch);
+  });
+
+  /* ── Round 7 (#141 r7): the CONSTRUCTION-TIME invariant ─────────────────────
+   *
+   * The terminating fix. Every prior round gated a downstream USE of a handle; a
+   * final gauntlet found two mint/fs sites the per-site git()-enumeration missed,
+   * both rooted in the same gap — the overlap check ran only when a caller passed
+   * the seed/upstream ARGUMENT. So the invariant moves to CONSTRUCTION: the
+   * configured upstream is a process fact the trust boundary records (a value no
+   * factory CALLER can write), and EVERY mint refuses — seed passed or not — to
+   * brand+return a handle naming it. Finding A becomes moot: no authentic handle
+   * can name the upstream, so the whole downstream use-site surface has nothing to
+   * protect. The per-site brands from r5/r6 stay ABOVE, as defense in depth.
+   */
+
+  it('FINDING A (#141 r7): a SEEDLESS createArtifactRepo(upstream) is refused at CONSTRUCTION', async () => {
+    // The seedless call BOTH critics executed: `createArtifactRepo(upstreamDir)` with
+    // the `upstream` argument LEFT OFF. The old overlap check no-ops (`upstreamPath`
+    // is null), so it used to run `init --bare` into the upstream and BRAND the
+    // result. The configured upstream is now a recorded process fact, not an argument.
+    setConfiguredExecutionUpstream(upstream.dir);
+    // Sanity: the recorded fact really does read this dir as an overlap.
+    expect(configuredUpstreamMintOverlap(upstream.dir)).toBe(upstream.dir);
+    const before = await fingerprint(upstream.dir);
+    // REVERT-REDS: delete `assertMintDirNotConfiguredUpstream(dir)` from
+    // `createArtifactRepo` and the seedless call runs `init --bare` + two config
+    // writes straight into the upstream and brands the result — no throw, and the
+    // fingerprint moves.
+    const error = await createArtifactRepo(upstream.dir).then(
+      (repo) => {
+        trash.push(repo.dir);
+        return null;
+      },
+      (e: Error) => e,
+    );
+    expect(
+      error,
+      'expected a seedless createArtifactRepo at the upstream to refuse',
+    ).not.toBeNull();
+    expectExactlyGuard((error as Error).message, 'plumbing/mint-at-upstream');
+    expect(await fingerprint(upstream.dir)).toBe(before);
+  });
+
+  it('FINDING A (#141 r7): a SEEDLESS createScratchRepo(baseDir=upstream) is refused at CONSTRUCTION', async () => {
+    // The scratch-factory twin: `createScratchRepo(upstreamDir)` with no seed used to
+    // mkdtemp + `git init` a branded scratch repo INSIDE the upstream that
+    // `addWorktree` then trusts. The construction guard refuses it at the mint.
+    setConfiguredExecutionUpstream(upstream.dir);
+    const before = await fingerprint(upstream.dir);
+    // REVERT-REDS: delete `assertMintDirNotConfiguredUpstream(baseDir)` from
+    // `createScratchRepo` and this mkdtemps + `git init` INSIDE the upstream and
+    // brands the result — no throw, and the fingerprint moves.
+    const error = await createScratchRepo(upstream.dir).then(
+      (repo) => {
+        trash.push(repo.dir);
+        return null;
+      },
+      (e: Error) => e,
+    );
+    expect(error, 'expected a seedless createScratchRepo at the upstream to refuse').not.toBeNull();
+    expectExactlyGuard((error as Error).message, 'plumbing/mint-at-upstream');
+    expect(await fingerprint(upstream.dir)).toBe(before);
+  });
+
+  it('still mints normally at NON-overlapping dirs while an upstream IS configured — the flip', async () => {
+    // Construction guard is not a ban: with an upstream configured, a scratch/artifact
+    // repo whose dir is nowhere near it mints exactly as before #141 r7.
+    setConfiguredExecutionUpstream(upstream.dir);
+    const base = await mkdtemp(join(tmpdir(), 'atrium-141r7-ok-'));
+    trash.push(base);
+    const artDir = await mkdtemp(join(tmpdir(), 'atrium-141r7-art-'));
+    trash.push(artDir);
+    const scratch = await createScratchRepo(base);
+    trash.push(scratch.dir);
+    const artifact = await createArtifactRepo(artDir);
+    expect(scratch.dir.startsWith(base)).toBe(true);
+    expect(artifact.dir).toBe(artDir);
+  });
+
+  it('FINDING B (#141 r7): disposeScratchRepo refuses a FORGED handle — it will not rm the upstream', async () => {
+    // grok EXECUTED this: `disposeScratchRepo({ dir: upstream })` `rm -rf`s a live
+    // repo. It is a FILESYSTEM mutation, not a git() call, so the git()-scoped
+    // enumeration that gated every other write missed it entirely.
+    const forged: ScratchRepo = { dir: upstream.dir, seedCommit: upstream.commit };
+    const before = await fingerprint(upstream.dir);
+    // REVERT-REDS: delete the `!isAuthenticScratchRepo` gate from `disposeScratchRepo`
+    // and it `rm -rf`s the upstream — the directory is destroyed, so `fingerprint`
+    // moves or throws. The gate refuses BEFORE the destructive call.
+    const message = await disposeScratchRepo(forged).then(
+      () => null,
+      (e: Error) => e.message,
+    );
+    expect(message, 'expected disposeScratchRepo to refuse a forged handle').not.toBeNull();
+    expectExactlyGuard(message as string, 'plumbing/dispose-scratch-not-authentic');
+    // The upstream still exists and is byte-identical — nothing was deleted.
+    expect(await fingerprint(upstream.dir)).toBe(before);
+  });
+
+  it('the fs-mutation sibling (#141 r7): shim.run refuses a FORGED checkout — nothing written into the upstream', async () => {
+    // A forged workspace whose checkout.dir is the upstream. The shim's `run`
+    // `writeFile`s ARTIFACT.json into checkout.dir BEFORE `commitWorktree`'s git-write
+    // brand gate — so without a gate at run() entry it drops a file into the upstream.
+    const plain = await createScratchRepo();
+    trash.push(plain.dir);
+    const artDir = await mkdtemp(join(tmpdir(), 'atrium-141r7-shim-art-'));
+    trash.push(artDir);
+    const artifact = await createArtifactRepo(artDir);
+    const provider = createDeterministicShimProvider({ repo: plain, artifactRepo: artifact });
+    const upstreamGitDir = join(upstream.dir, '.git');
+    const forgedCheckout: WorktreeCheckout = {
+      dir: upstream.dir,
+      branch: 'main',
+      repoDir: upstream.dir,
+      gitDir: upstreamGitDir,
+      commonDir: upstreamGitDir,
+    };
+    const forgedWorkspace = {
+      sessionId: 'forged',
+      dir: upstream.dir,
+      branch: 'main',
+      remote: artifact.dir,
+      checkout: forgedCheckout,
+      dispose: async () => {},
+    } as unknown as Workspace;
+    const ctx: SessionContext = {
+      sessionId: 'forged',
+      roomId: 'r',
+      planId: 'p',
+      harness: 'h',
+      model: 'm',
+    };
+    const before = await fingerprint(upstream.dir);
+    // REVERT-REDS: delete `assertAuthenticRunCheckout(checkout)` from the shim's `run`
+    // and `writeFile(checkout.dir, ARTIFACT.json)` drops a new untracked file INTO the
+    // upstream — the fingerprint moves.
+    const message = await provider.run(forgedWorkspace, ctx).then(
+      () => null,
+      (e: Error) => e.message,
+    );
+    expect(message, 'expected shim.run to refuse a forged checkout').not.toBeNull();
+    expectExactlyGuard(message as string, 'plumbing/run-checkout-not-authentic');
+    expect(await fingerprint(upstream.dir)).toBe(before);
   });
 
   it('an ArtifactRepo STATES its provenance — the field is mandatory, never omitted (#141 r4)', async () => {
@@ -1549,5 +1730,52 @@ describe('THE UPSTREAM IS NEVER WRITTEN — provider wiring (#141, red-on-revert
     // seeded shim with a distinct remote builds — this is the live caller that
     // keeps the seed plumbing reachable and tested.
     expect(() => createDeterministicShimProvider({ repo: seeded, artifactRepo })).not.toThrow();
+  });
+
+  it('the fs-mutation sibling (#141 r7): worktree.run refuses a FORGED checkout — no harness spawned in the upstream', async () => {
+    // The worktree adapter SPAWNS the harness with checkout.dir as its cwd, BEFORE
+    // commitWorktree's git-write brand gate. A forged workspace whose checkout.dir is
+    // the upstream would run the configured command inside it. `plain` is an unseeded,
+    // branded repo (the only kind the worktree factory accepts); the opt-in is set in
+    // beforeEach. The harness writes `planted.txt` if it runs, so the fingerprint is
+    // the witness that it did not.
+    const provider = createWorktreeCommandProvider({
+      repo: plain,
+      command: ['bash', '-lc', 'echo should-not-run > planted.txt'],
+    });
+    const upstreamGitDir = join(upstream.dir, '.git');
+    const forgedCheckout: WorktreeCheckout = {
+      dir: upstream.dir,
+      branch: 'main',
+      repoDir: upstream.dir,
+      gitDir: upstreamGitDir,
+      commonDir: upstreamGitDir,
+    };
+    const forgedWorkspace = {
+      sessionId: 'forged',
+      dir: upstream.dir,
+      branch: 'main',
+      remote: plain.dir,
+      checkout: forgedCheckout,
+      dispose: async () => {},
+    } as unknown as Workspace;
+    const ctx: SessionContext = {
+      sessionId: 'forged',
+      roomId: 'r',
+      planId: 'p',
+      harness: 'h',
+      model: 'm',
+    };
+    const before = await fingerprint(upstream.dir);
+    // REVERT-REDS: delete `assertAuthenticRunCheckout(checkout)` from the worktree
+    // `run` and the harness spawns with cwd=upstream, writing planted.txt into it —
+    // the fingerprint moves.
+    const message = await provider.run(forgedWorkspace, ctx).then(
+      () => null,
+      (e: Error) => e.message,
+    );
+    expect(message, 'expected worktree.run to refuse a forged checkout').not.toBeNull();
+    expectExactlyGuard(message as string, 'plumbing/run-checkout-not-authentic');
+    expect(await fingerprint(upstream.dir)).toBe(before);
   });
 });

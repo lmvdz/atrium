@@ -3,6 +3,7 @@ import {
   type ArtifactRepo,
   addWorktree,
   assertArtifactRemoteIsNotUpstream,
+  assertAuthenticRunCheckout,
   cleanHome,
   commitWorktree,
   DANGEROUS_GIT_VARS,
@@ -316,6 +317,11 @@ export function createWorktreeCommandProvider(options: WorktreeCommandOptions): 
 
     async run(workspace: Workspace, ctx: SessionContext): Promise<ExecutionReport> {
       const checkout = (workspace as WorktreeWorkspace).checkout;
+      // BRAND GATE (#141 r7): the harness below is SPAWNED with `checkout.dir` as its
+      // cwd — a filesystem-touching operation that runs before `commitWorktree`'s own
+      // brand gate. A forged workspace whose checkout.dir is the upstream would run the
+      // configured command inside it. Verified here, before checkout.dir is a cwd.
+      assertAuthenticRunCheckout(checkout);
 
       // Run the harness in its own process group, tracked for cancellation. The
       // harness gets an allowlisted env — never the server's secrets, and scrubbed

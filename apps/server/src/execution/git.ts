@@ -6,6 +6,7 @@ import { delimiter, isAbsolute, join } from 'node:path';
 import { promisify } from 'node:util';
 import {
   assertUpstreamSeed,
+  configuredUpstreamMintOverlap,
   pathsOverlap,
   type UpstreamSeed,
   upstreamLocalPath,
@@ -284,6 +285,39 @@ export function isAuthenticWorktreeCheckout(checkout: WorktreeCheckout): boolean
   return authenticWorktreeCheckouts.has(checkout);
 }
 
+/**
+ * REFUSAL 13 — a provider's `run` only ever touches a FACTORY-MINTED checkout's
+ * directory (#141 r7, the fs-mutation sibling of Finding B).
+ *
+ * The git()-scoped gates (commit/remove/push) all verify the checkout brand — but
+ * a provider's `run` reaches `checkout.dir` through operations that are NOT `git()`
+ * calls and happen BEFORE any of those gates: the shim `writeFile`s its artifact
+ * INTO `checkout.dir`, and the worktree adapter SPAWNS the harness with
+ * `checkout.dir` as its cwd. A caller who hands `run` a forged workspace whose
+ * `checkout.dir` is the upstream would write a file into the upstream, or run a
+ * command inside it, before `commitWorktree`'s brand gate is ever consulted. So the
+ * checkout's authenticity is verified at the TOP of every `run`, before its `dir`
+ * points a filesystem mutation. An authentic checkout's `dir` is always a fresh
+ * `mkdtemp(tmpdir())` (see `addWorktree`), never the upstream, so this refuses only
+ * a forgery.
+ */
+export const RUN_CHECKOUT_NOT_AUTHENTIC_REFUSAL =
+  'refusing to run a harness over a worktree checkout that is not a factory-minted handle (#141 r7) ' +
+  "— a provider's run writes its artifact into checkout.dir (the shim) or spawns the harness with " +
+  'checkout.dir as its cwd (the worktree adapter) BEFORE any git-write brand gate, so a hand-built ' +
+  'checkout aimed at the upstream would write a file into it or execute inside it; only a ' +
+  'factory-branded checkout may host a run';
+
+/**
+ * Verify a checkout is factory-minted before a provider's `run` points its `dir` at
+ * a filesystem mutation. Called at the top of every provider `run`.
+ */
+export function assertAuthenticRunCheckout(checkout: WorktreeCheckout): void {
+  if (!isAuthenticWorktreeCheckout(checkout)) {
+    throw new Error(RUN_CHECKOUT_NOT_AUTHENTIC_REFUSAL);
+  }
+}
+
 const GIT_ENV = {
   // Deterministic, machine-owned identity and no interactive prompts, ever.
   GIT_AUTHOR_NAME: 'atrium-execution',
@@ -524,6 +558,59 @@ export function sessionBranch(sessionId: string): string {
 }
 
 /**
+ * ═══════════════════════════════════════════════════════════════════════════
+ *  REFUSAL 11 — THE CONSTRUCTION-TIME INVARIANT (#141 r7): no authentic handle
+ *  is ever MINTED naming the configured upstream.
+ * ═══════════════════════════════════════════════════════════════════════════
+ *
+ * Every prior round moved the guard closer to the write: the boot gate, the
+ * operation-time overlap re-check, the runtime brand verified at each git-write.
+ * A final gauntlet still found two same-class sites the per-site enumeration
+ * missed, and both share ONE root cause — the overlap check that keeps a handle
+ * off the upstream runs only when a caller passes the seed/upstream ARGUMENT:
+ *
+ *  - Finding A: `createArtifactRepo(upstreamDir)` with the `upstream` arg LEFT OFF
+ *    mints a genuinely-branded ArtifactRepo AT the upstream (`upstreamPath: null`),
+ *    and `pushArtifactBranch`/`pinSettledArtifact` then trust the brand — the null
+ *    path skips their overlap re-check. The factory itself minted the forbidden
+ *    object. `createScratchRepo(upstreamDir)` with no seed is the same at the
+ *    scratch factory: a branded scratch repo INSIDE the upstream that `addWorktree`
+ *    then trusts.
+ *
+ * The architectural fix moves the invariant to CONSTRUCTION, ABOVE the per-site
+ * brands (which stay, as defense in depth). The configured upstream is a
+ * process-wide fact the trust boundary records once (`setConfiguredExecutionUpstream`,
+ * from the same URL the boot gate reads); EVERY mint consults it UNCONDITIONALLY —
+ * seed passed or not — and refuses to brand+return a handle whose directory
+ * overlaps it. A caller can no longer omit the argument into the gap, because the
+ * fact is not an argument: `createArtifactRepo(upstreamDir)` seedless now THROWS
+ * instead of minting, so the whole downstream use-site surface is moot for the one
+ * thing it was protecting — an authentic handle can never name the upstream. When
+ * there is NO configured upstream (empty-trunk, or remote), there is nothing to
+ * overlap and this is a no-op, exactly the pre-#141 behaviour.
+ */
+export const MINT_AT_UPSTREAM_REFUSAL =
+  'refusing to mint an execution repo handle whose directory overlaps the configured execution ' +
+  'upstream (#141 r7) — the construction-time invariant is that no factory-branded ScratchRepo or ' +
+  'ArtifactRepo may ever name the upstream, whether or not a seed is passed, so a seedless ' +
+  'createArtifactRepo/createScratchRepo aimed at it is refused at the mint rather than trusted by ' +
+  'every downstream write';
+
+/**
+ * The construction-time gate both factories call before they brand+return a
+ * handle. Reads the process-recorded configured upstream (a value no factory
+ * CALLER can write — that is the whole point, per Finding A), not a per-call
+ * argument, and canonicalises via `pathsOverlap` so a symlinked mint dir is
+ * caught by realpath too.
+ */
+function assertMintDirNotConfiguredUpstream(dir: string): void {
+  const overlap = configuredUpstreamMintOverlap(dir);
+  if (overlap !== null) {
+    throw new Error(`${MINT_AT_UPSTREAM_REFUSAL}: ${dir} overlaps ${overlap}`);
+  }
+}
+
+/**
  * REFUSAL 7 — the scratch repo is never CREATED at or inside the upstream (#141
  * r3, FIX 2).
  *
@@ -591,6 +678,13 @@ export async function createScratchRepo(
   baseDir?: string,
   seed?: UpstreamSeed,
 ): Promise<ScratchRepo> {
+  // ── CONSTRUCTION-TIME INVARIANT (#141 r7, Finding A) ───────────────────────
+  // Refuse to mint a scratch repo INSIDE the configured upstream, UNCONDITIONALLY —
+  // seed passed or not — against the process-recorded upstream (not a caller arg).
+  // This runs BEFORE the mkdir/init below, so `createScratchRepo(upstreamDir)` with
+  // no seed throws here instead of writing a branded scratch repo into the upstream.
+  // When no upstream is configured (empty-trunk seam), this is a no-op.
+  if (baseDir !== undefined) assertMintDirNotConfiguredUpstream(baseDir);
   if (seed !== undefined) {
     // Validate on the ONLY path that fetches, not merely at config load — a
     // caller that builds a seed by hand gets the same refusal the operator does.
@@ -839,8 +933,32 @@ export async function listSessionBranches(repo: ScratchRepo): Promise<string[]> 
   return out === '' ? [] : out.split('\n').map((line) => line.trim());
 }
 
+/**
+ * REFUSAL 12 — the scratch repo is only ever DELETED through a FACTORY-MINTED
+ * handle (#141 r7, FINDING B — grok, executed).
+ *
+ * `disposeScratchRepo` `rm -rf`s `repo.dir`. That is a FILESYSTEM mutation, not a
+ * `git()` call, so the git()-scoped enumeration that gated every other write in
+ * this file (r5/r6) never covered it — the exact "the gap is on the path nobody
+ * enumerated" class. A hand-built `{ dir: <upstream> }` handed here deletes a live
+ * repository the provider does not own (grok EXECUTED this). So the brand is
+ * verified before the rm, the same runtime-capability check every git-write does,
+ * extended to the one fs-mutation that trusts a caller-supplied repo dir.
+ */
+export const DISPOSE_SCRATCH_NOT_AUTHENTIC_REFUSAL =
+  'refusing to delete a scratch repo that is not a factory-minted handle (#141 r7, Finding B) — ' +
+  'disposeScratchRepo removes repo.dir with a filesystem rm rather than a git() call, so a ' +
+  'hand-built { dir: <upstream> } handed here would rm -rf a repository the provider does not own; ' +
+  'only a factory-branded scratch repo may be disposed';
+
 /** Tear down the whole scratch repo. */
 export async function disposeScratchRepo(repo: ScratchRepo): Promise<void> {
+  // BRAND GATE (#141 r7, FINDING B): a forged handle would `rm -rf` an arbitrary
+  // `dir` — aim it at the upstream and this deletes it. The reclaim is best-effort,
+  // but the gate is not: an unbranded handle is refused before the destructive call.
+  if (!isAuthenticScratchRepo(repo)) {
+    throw new Error(DISPOSE_SCRATCH_NOT_AUTHENTIC_REFUSAL);
+  }
   await rm(repo.dir, { recursive: true, force: true }).catch(() => {});
 }
 
@@ -996,6 +1114,14 @@ export async function createArtifactRepo(
   dir: string,
   upstream?: UpstreamSeed,
 ): Promise<ArtifactRepo> {
+  // ── CONSTRUCTION-TIME INVARIANT (#141 r7, Finding A) ───────────────────────
+  // Refuse to mint the durable repo AT the configured upstream, UNCONDITIONALLY —
+  // whether or not this call passed the `upstream` argument. Finding A was exactly
+  // the seedless call `createArtifactRepo(upstreamDir)`: with `upstream` omitted the
+  // check below no-ops (`upstreamPath` is null), so the factory ran `init --bare`
+  // straight into the upstream and branded the result. Reading the process-recorded
+  // upstream (a value no caller writes) closes that at the mint, before the mkdir.
+  assertMintDirNotConfiguredUpstream(dir);
   const upstreamPath = upstream === undefined ? null : upstreamLocalPath(upstream.url);
   if (upstreamPath !== null && pathsOverlap(dir, upstreamPath)) {
     throw new Error(`${ARTIFACT_REPO_AT_UPSTREAM_REFUSAL}: ${dir} overlaps ${upstreamPath}`);

@@ -263,6 +263,64 @@ export function pathsOverlap(a: string, b: string): boolean {
 }
 
 /**
+ * ═══════════════════════════════════════════════════════════════════════════
+ *  THE CONFIGURED EXECUTION UPSTREAM (#141 r7) — the process-wide fact a mint reads.
+ * ═══════════════════════════════════════════════════════════════════════════
+ *
+ * The construction-time invariant needs ONE thing the per-call arguments cannot
+ * honestly supply: "what is the upstream THIS PROCESS was configured against?"
+ *
+ * The r5/r6 lesson is that a guard is only as honest as the field it reads, and a
+ * CALLER writes the fields it passes. Finding A (both critics, executed) is exactly
+ * that reaching the mint: `createArtifactRepo(upstreamDir)` — with the `upstream`
+ * argument simply LEFT OFF — mints a genuinely-branded ArtifactRepo pointed at the
+ * upstream whose `upstreamPath` is `null`, and every downstream write then trusts
+ * the brand. Threading a caller-supplied "configured upstream" would reintroduce the
+ * same lie one argument over (`createScratchRepo(upstreamDir, undefined)` claims
+ * "no upstream"). So the fact is NOT a parameter: it is recorded ONCE, at the trust
+ * boundary that actually knows it (`configure.ts`'s `createExecutionProvider`, from
+ * the same `EXECUTION_UPSTREAM_URL` the boot gate reads), and the factories read
+ * THIS — a value no factory caller can write.
+ *
+ * `null` means "no local upstream configured in this process" — the classic
+ * empty-trunk seam, or a genuinely remote upstream with no local directory to
+ * overlap. In that state the mint guard is a no-op, exactly as it was before #141:
+ * there is nothing to overlap. When it is a path, NO factory may brand+return a
+ * handle whose directory overlaps it, seed passed or not.
+ */
+let configuredUpstreamLocalPathValue: string | null = null;
+
+/**
+ * Record the configured execution upstream for this process, from its URL (the
+ * same value `assertExecutionUpstreamSafe` validated at boot). `undefined` or a
+ * remote URL records `null` (nothing local to overlap). Called by the provider
+ * trust boundary BEFORE it mints any repo handle; idempotent and last-writer-wins,
+ * which is correct for a process that configures exactly one execution provider.
+ */
+export function setConfiguredExecutionUpstream(upstreamUrl: string | undefined): void {
+  configuredUpstreamLocalPathValue =
+    upstreamUrl === undefined ? null : upstreamLocalPath(upstreamUrl);
+}
+
+/**
+ * The configured upstream local path this `dir` overlaps, or `null` when it is
+ * safe (no configured upstream, a remote one, or no overlap). `pathsOverlap`
+ * canonicalises both sides, so a symlinked `dir` is caught by realpath, not only
+ * lexically. This is the one question the construction-time mint guard asks.
+ */
+export function configuredUpstreamMintOverlap(dir: string): string | null {
+  if (configuredUpstreamLocalPathValue === null) return null;
+  return pathsOverlap(dir, configuredUpstreamLocalPathValue)
+    ? configuredUpstreamLocalPathValue
+    : null;
+}
+
+/** Clear the recorded configured upstream — TEST-ONLY, so a suite can isolate the mint guard. */
+export function resetConfiguredExecutionUpstreamForTest(): void {
+  configuredUpstreamLocalPathValue = null;
+}
+
+/**
  * REFUSAL 1 — the ref must be a well-formed, option-free ref name.
  *
  * `git fetch <url> <ref>` puts the ref on an argv. A value like `--upload-pack=…`
