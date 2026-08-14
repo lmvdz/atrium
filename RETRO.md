@@ -1425,3 +1425,22 @@ tables, the constraint that "should" be an index is a table — write down WHY i
 receipt or every reviewer will go hunting for the index. (3) grok's clean verdict still
 carried the campaign's next ticket (spawn lacks the projection-layer slice re-check
 resume got) — a clean verdict with notes is a frontier report, not just a pass.
+
+## #131 — the e2e flake class (closed 2026-08-13, 1 round)
+
+The "reconnect family flake" was neither reconnect nor a family: the webServer gate
+declared readiness after ONE route compiled, then released four workers to race Next's
+on-demand compiler inside their own test clocks. The stated falsifier fired — a test
+with no sockets and no database was the worst victim — killing every reconnect
+hypothesis at once. Fix: warm all 13 routes serially in globalSetup, in the window
+where nothing is timed; no timeout moved. Cold 4-worker runs went 171/3 in 7.7m →
+174/174 in 4.3m, three consecutive.
+
+Process lessons: (1) name the falsifier before the fix — it converted two failing
+specs' shared adjective ("reconnect") from a mechanism into a coincidence in one run.
+(2) The ticket's own evidence was wrong (load "≤2.1" was a between-runs reading;
+during-run is 7.5–18.3) — a builder that re-measures the ticket's claims catches what
+a builder that inherits them builds on. (3) A moving victim ACROSS families is the
+machine's signature, not the product's — HANDOFF.md had already recorded it at 8
+workers; suites grow back into old limits. The margin at 4 workers is thin and the
+map should know it.
