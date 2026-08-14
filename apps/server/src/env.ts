@@ -3,6 +3,12 @@ import { resolve } from 'node:path';
 import { loadEnvFile } from 'node:process';
 import { hasProxyStrategy, isSecureUrl } from '@atrium/auth';
 import { z } from 'zod';
+import {
+  isAcceptableUpstreamUrl,
+  pathsOverlap,
+  UPSTREAM_URL_SCHEMES,
+  upstreamLocalPath,
+} from './execution/upstream.js';
 import { ACCEPTANCE_MODEL } from './jobs/acceptance-provider.js';
 
 /**
@@ -256,6 +262,30 @@ const RawEnvSchema = BaseEnvSchema.extend({
     .enum(['1', 'true', '0', 'false'])
     .optional()
     .transform((value) => value === '1' || value === 'true'),
+  /**
+   * REAL-REPO EXECUTION MODE — where a session's trunk comes from (#141).
+   *
+   * Unset (the default), the scratch trunk is a synthetic empty commit and a
+   * session's branch is a diff against nothing. Set to an absolute local path or
+   * an allowlisted URL, the scratch trunk is FETCHED from that repository at
+   * `EXECUTION_UPSTREAM_REF`, worktrees fork it, and the settled artifact branch
+   * is a real diff a human can fetch from the artifact repo and merge by hand.
+   *
+   * THE UPSTREAM IS NEVER WRITTEN. This seam only ever `fetch`es it. The config
+   * half of that invariant is `assertExecutionProviderSafe`, which refuses to
+   * boot when the upstream OVERLAPS a directory this server writes — you cannot
+   * configure the write, so the later layers are defending an already-closed
+   * door rather than being the only door.
+   */
+  EXECUTION_UPSTREAM_URL: z.string().min(1).optional(),
+  /**
+   * The exact ref the scratch trunk is seeded from (e.g. `main`, `refs/heads/x`,
+   * a tag). Required whenever `EXECUTION_UPSTREAM_URL` is set and deliberately
+   * without a default: which commit a session's work is a diff AGAINST is the
+   * one fact real-repo mode exists to state, and a silent `main` would make a
+   * misconfigured deployment produce plausible, wrong diffs.
+   */
+  EXECUTION_UPSTREAM_REF: z.string().min(1).optional(),
 
   S3_ENDPOINT: z.string().min(1).default('http://localhost:9000'),
   /** Browser-reachable signing origin; defaults to the endpoint in local dev. */
@@ -463,8 +493,17 @@ export function loadEnv(source: NodeJS.ProcessEnv = process.env): Env {
  * server that would refuse the first session it was asked to run.
  */
 function assertExecutionProviderSafe(env: Env): void {
-  if (env.EXECUTION_PROVIDER === undefined) return;
   const problems: string[] = [];
+  // The upstream gate runs BEFORE the disabled-provider early return on purpose
+  // (#141): `EXECUTION_PROVIDER` unset disables execution, but an upstream
+  // configured against a disabled provider is real-repo config that silently
+  // does nothing — the failure mode this whole ticket exists to remove. It is
+  // named at boot instead.
+  assertExecutionUpstreamSafe(env, problems);
+  if (env.EXECUTION_PROVIDER === undefined) {
+    if (problems.length > 0) throw new Error(`invalid environment:\n${problems.join('\n')}`);
+    return;
+  }
   if (
     (env.EXECUTION_PROVIDER === 'shim' || env.EXECUTION_PROVIDER === 'worktree') &&
     !env.EXECUTION_SCRATCH_DIR
@@ -487,6 +526,78 @@ function assertExecutionProviderSafe(env: Env): void {
     );
   }
   if (problems.length > 0) throw new Error(`invalid environment:\n${problems.join('\n')}`);
+}
+
+/**
+ * ═══════════════════════════════════════════════════════════════════════════
+ *  THE UPSTREAM IS NEVER WRITTEN (#141) — restated here, at the config layer.
+ * ═══════════════════════════════════════════════════════════════════════════
+ *
+ * The first of the three places the invariant is enforced (the others being the
+ * git plumbing and the provider wiring). This layer's job is the one the others
+ * cannot do: make the dangerous configuration UNBOOTABLE, so an operator never
+ * gets a running server whose every session is one bug away from writing the
+ * repository it forked.
+ *
+ * Each problem below carries its own distinct sentence. That is not decoration:
+ * the campaign's recurring failure is guards that share a refusal string, so a
+ * witness "proving" guard B is actually satisfied by guard A and never reds when
+ * B is reverted. `upstream-guards.test.ts` asserts the sentences are pairwise
+ * disjoint and that each fixture trips exactly one.
+ */
+function assertExecutionUpstreamSafe(env: Env, problems: string[]): void {
+  const url = env.EXECUTION_UPSTREAM_URL;
+  const ref = env.EXECUTION_UPSTREAM_REF;
+  if (url === undefined && ref === undefined) return;
+
+  if (url === undefined) {
+    problems.push(
+      '  EXECUTION_UPSTREAM_URL: required whenever EXECUTION_UPSTREAM_REF is set — a ref with no ' +
+        'repository to fetch it from is configuration that reads as live and does nothing',
+    );
+    return;
+  }
+  if (ref === undefined) {
+    problems.push(
+      '  EXECUTION_UPSTREAM_REF: required whenever EXECUTION_UPSTREAM_URL is set — real-repo mode ' +
+        'forks one exact named ref and will not guess which commit your work is a diff against',
+    );
+  }
+  if (env.EXECUTION_PROVIDER !== 'shim' && env.EXECUTION_PROVIDER !== 'worktree') {
+    problems.push(
+      '  EXECUTION_UPSTREAM_URL: only the shim and worktree providers seed a scratch trunk; the ' +
+        `sandbox seam builds no scratch repo, so an upstream under EXECUTION_PROVIDER=${env.EXECUTION_PROVIDER} would be silently inert`,
+    );
+  }
+  if (!isAcceptableUpstreamUrl(url)) {
+    problems.push(
+      '  EXECUTION_UPSTREAM_URL: must name an absolute directory or a ' +
+        `${UPSTREAM_URL_SCHEMES.join(' / ')} URL — a leading dash, an ext:: transport or a ` +
+        'cwd-relative path is not a repository and is refused',
+    );
+  }
+  // ── The write-overlap gate: the reason this function exists ────────────────
+  //
+  // Equality is not the question — an artifact repo at `<upstream>/.git/atrium`
+  // is not equal to the upstream and would still be written INSIDE it. So the
+  // check is containment, in both directions, on resolved paths.
+  const upstreamPath = upstreamLocalPath(url);
+  if (upstreamPath !== null) {
+    const written: Array<[string, string | undefined]> = [
+      ['EXECUTION_SCRATCH_DIR', env.EXECUTION_SCRATCH_DIR],
+      ['EXECUTION_ARTIFACT_DIR', env.EXECUTION_ARTIFACT_DIR],
+    ];
+    const overlapping = written
+      .filter(([, value]) => value !== undefined && pathsOverlap(value, upstreamPath))
+      .map(([key]) => key);
+    if (overlapping.length > 0) {
+      problems.push(
+        `  EXECUTION_UPSTREAM_URL: overlaps ${overlapping.join(' and ')}, which this server ` +
+          'creates and commits into — THE UPSTREAM IS NEVER WRITTEN, so a scratch or artifact ' +
+          'repo at or inside it is refused at boot rather than discovered afterwards',
+      );
+    }
+  }
 }
 
 function assertInterpretationProviderSafe(source: NodeJS.ProcessEnv, env: Env): void {

@@ -4,6 +4,14 @@ import { access, mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { delimiter, isAbsolute, join } from 'node:path';
 import { promisify } from 'node:util';
+import {
+  assertUpstreamSeed,
+  pathsOverlap,
+  type UpstreamSeed,
+  upstreamLocalPath,
+} from './upstream.js';
+
+export type { UpstreamSeed } from './upstream.js';
 
 /**
  * The git plumbing both real providers share (#120).
@@ -85,12 +93,56 @@ export function resetGitBinaryCacheForTest(): void {
   gitBinaryCache = null;
 }
 
+/**
+ * ═══════════════════════════════════════════════════════════════════════════
+ *  THE UPSTREAM IS NEVER WRITTEN (#141) — restated here, at the plumbing.
+ * ═══════════════════════════════════════════════════════════════════════════
+ *
+ * Real-repo mode (#141) points execution at a REAL repository: the scratch
+ * trunk is seeded from `UpstreamSeed`, worktrees fork THAT, and a session's
+ * branch is a diff against a repo a human actually cares about. The covenant
+ * that made the empty-trunk seam safe — "the artifact is a branch, never a
+ * land" — now has a second, sharper edge: the repository being forked is not
+ * the provider's toy, and NOTHING in this process may write it.
+ *
+ * The invariant is restated at three layers, each with its own refusal and its
+ * own red-on-revert witness, because a guard that exists on one layer and not
+ * the adjacent one is the #89 bypass class:
+ *
+ *  1. **Config** (`env.ts`, `assertExecutionProviderSafe`) — an upstream that
+ *     OVERLAPS a path this server writes (the scratch dir, the artifact dir) is
+ *     a boot failure. You cannot configure the write.
+ *  2. **Plumbing** (this file) — `createArtifactRepo` refuses to `init` AT the
+ *     upstream, and `pushArtifactBranch` refuses to push INTO it. These are the
+ *     only two operations in this file that write a repository other than a
+ *     worktree, and each refuses independently of the config gate above.
+ *  3. **Provider** (`worktree-provider.ts` / `shim.ts`, via
+ *     `assertArtifactRemoteIsNotUpstream`) — an upstream-seeded provider must
+ *     hold a durable artifact remote that is DISTINCT from the upstream, or it
+ *     refuses to be built at all.
+ *
+ * The seeding operation itself is `git fetch <url> <ref>` and nothing else: no
+ * remote is ever added (so no `pushurl` can be configured on one), no `clone`
+ * writes an `origin`, and no ref in the upstream is ever named as a push
+ * destination. `fetch` is read-only at the source — verified by the integration
+ * witness, which hashes every file in the upstream before and after a full
+ * session and asserts byte-identity.
+ */
+export const UPSTREAM_IS_NEVER_WRITTEN =
+  'the execution upstream is fetched from and never written to (#141)';
+
 /** A scratch git repo the provider controls — the "remote" the artifact lives in. */
 export interface ScratchRepo {
   /** Absolute path to the repo. Doubles as the `remote` on the artifact. */
   readonly dir: string;
   /** The trunk commit the seed landed on — for proving trunk never moves. */
   readonly seedCommit: string;
+  /**
+   * The upstream this trunk was seeded FROM (#141), or `undefined` for the
+   * classic empty-trunk repo. Carried on the repo so every downstream layer can
+   * ask "is there an upstream, and where is it?" without re-reading config.
+   */
+  readonly upstream?: UpstreamSeed & { readonly commit: string };
 }
 
 /** One resolved worktree — an isolated checkout on a fresh per-session branch. */
@@ -361,11 +413,39 @@ export function sessionBranch(sessionId: string): string {
 }
 
 /**
- * Create a scratch repo with a single seed commit on `main`. This is the git
- * "remote" the shim controls under test — branches produced here are the durable
- * artifacts; the working checkouts are the ephemera.
+ * Create a scratch repo whose trunk is the thing sessions fork from.
+ *
+ * WITHOUT `seed` (the shipped #120 behaviour, unchanged): a single synthetic
+ * commit on `main` holding `README.atrium`. Nothing real is under it, so a
+ * session's branch is a diff against nothing.
+ *
+ * WITH `seed` (#141 real-repo mode): trunk is FETCHED from a real upstream at an
+ * exact ref, so `addWorktree`'s `worktree add … main` forks the real tree and a
+ * session's branch is a genuine diff against the repository a human merges into.
+ *
+ * ## The fetch is the whole interaction with the upstream
+ *
+ * `git fetch <url> <ref>` and nothing else. No `clone` (which would write an
+ * `origin` remote whose `pushurl` a later edit could aim back), no `remote add`,
+ * no ref in the upstream ever named as a destination. `fetch` reads the source
+ * and writes only here — the integration witness hashes every file in the
+ * upstream before and after a full session and asserts byte-identity.
+ *
+ * The `--` separator is load-bearing: without it a location beginning with `-`
+ * is parsed as an OPTION, and `--upload-pack=<cmd>` is remote code execution
+ * where a repository was expected. `assertUpstreamSeed` refuses that shape
+ * first; the separator is the second lock, verified against git 2.43 ("strange
+ * pathname … blocked").
+ *
+ * The scratch repo's OWN working tree is deliberately left empty on the seeded
+ * path — no `checkout`/`reset --hard` after the fetch. Nothing reads it (every
+ * real checkout is a `git worktree`), and materialising a second full copy of a
+ * real repository per boot buys nothing but I/O.
  */
-export async function createScratchRepo(baseDir?: string): Promise<ScratchRepo> {
+export async function createScratchRepo(
+  baseDir?: string,
+  seed?: UpstreamSeed,
+): Promise<ScratchRepo> {
   const dir = baseDir
     ? await (async () => {
         await mkdir(baseDir, { recursive: true });
@@ -374,6 +454,23 @@ export async function createScratchRepo(baseDir?: string): Promise<ScratchRepo> 
     : await mkdtemp(join(tmpdir(), 'atrium-exec-'));
   // `-b main` so the trunk name is stable regardless of the host's git default.
   await git(dir, ['init', '-q', '-b', 'main']);
+
+  if (seed !== undefined) {
+    // Validate on the ONLY path that fetches, not merely at config load — a
+    // caller that builds a seed by hand gets the same refusal the operator does.
+    assertUpstreamSeed(seed);
+    // `--no-tags`: seed the trunk, not the upstream's whole tag namespace.
+    await git(dir, ['fetch', '--no-tags', '--quiet', '--', seed.url, seed.ref]);
+    // `^{commit}` so an ANNOTATED tag resolves to the commit it wraps —
+    // `update-ref refs/heads/*` refuses a tag object, and a ref is a legal seed.
+    const commit = await git(dir, ['rev-parse', `FETCH_HEAD^{commit}`]);
+    // `main` is unborn here and IS the checked-out branch, which is why the fetch
+    // above lands in `FETCH_HEAD` rather than fetching straight into it (git
+    // refuses: "refusing to fetch into branch … checked out at").
+    await git(dir, ['update-ref', 'refs/heads/main', commit]);
+    return { dir, seedCommit: commit, upstream: { ...seed, commit } };
+  }
+
   await writeFile(
     join(dir, 'README.atrium'),
     'Atrium execution scratch repo — session work lands on atrium/session/* branches.\n',
@@ -531,15 +628,66 @@ export async function disposeScratchRepo(repo: ScratchRepo): Promise<void> {
 export interface ArtifactRepo {
   /** Absolute path to the durable bare repo. This is the `remote` on the artifact. */
   readonly dir: string;
+  /**
+   * The LOCAL path of the configured execution upstream (#141), when there is
+   * one and it is local. Carried so `pushArtifactBranch` can re-assert THE
+   * UPSTREAM IS NEVER WRITTEN at the moment of the write, not only at the moment
+   * of the open. `undefined` when no upstream is configured or it is remote.
+   */
+  readonly upstreamPath?: string;
 }
+
+/**
+ * REFUSAL 3 — the durable artifact repo is never opened AT the upstream (#141).
+ *
+ * `createArtifactRepo` runs `init --bare` and two `config` writes. Pointed at a
+ * real repository that is somebody's checkout, `init --bare` converts the
+ * directory it is given, and `config core.hooksPath` edits that repository's
+ * config. Both are writes to the repo the human merges INTO — the exact thing
+ * the invariant forbids — and they happen at BOOT, before any session runs, so a
+ * guard that only watched the push would never see them.
+ */
+export const ARTIFACT_REPO_AT_UPSTREAM_REFUSAL =
+  'refusing to open the durable artifact repo at a path that overlaps the execution upstream ' +
+  '(#141) — `init --bare` plus the hook-guard config writes would modify the very repository a ' +
+  'session forks from and a human merges into';
+
+/**
+ * REFUSAL 4 — a session branch is never pushed INTO the upstream (#141).
+ *
+ * The push is the one operation in this seam that writes a repository the
+ * process does not own, so it re-checks the destination against the recorded
+ * upstream ITSELF rather than trusting that `createArtifactRepo` was the thing
+ * that built its argument. An `ArtifactRepo` is a plain object; a caller that
+ * assembles one by hand (a test, a future daemon, a refactor that inlines the
+ * factory) reaches this function without ever passing the boot gate.
+ *
+ * The direction of the covenant is the point: the artifact is a branch the human
+ * PULLS from a repo the provider controls. The provider pushing INTO the human's
+ * repository is the same act as landing it, one `git merge` earlier.
+ */
+export const PUSH_INTO_UPSTREAM_REFUSAL =
+  'refusing to push a session branch into a destination that overlaps the execution upstream ' +
+  '(#141) — the settled artifact is a branch a human FETCHES from the provider-owned repo; ' +
+  'nothing here ever writes a ref in the repository the session forked';
 
 /**
  * Open (creating if absent) the durable bare artifact repo at `dir`. Idempotent:
  * a path that is already an artifact repo is reused across boots, so its refs
  * accumulate rather than being thrown away with each process. Never disposed on
  * shutdown — that is the whole point.
+ *
+ * `upstream`, when given, is the configured execution upstream: opening the
+ * artifact repo anywhere that overlaps it is refused BEFORE the first `mkdir`.
  */
-export async function createArtifactRepo(dir: string): Promise<ArtifactRepo> {
+export async function createArtifactRepo(
+  dir: string,
+  upstream?: UpstreamSeed,
+): Promise<ArtifactRepo> {
+  const upstreamPath = upstream === undefined ? null : upstreamLocalPath(upstream.url);
+  if (upstreamPath !== null && pathsOverlap(dir, upstreamPath)) {
+    throw new Error(`${ARTIFACT_REPO_AT_UPSTREAM_REFUSAL}: ${dir} overlaps ${upstreamPath}`);
+  }
   await mkdir(dir, { recursive: true });
   // `init --bare` is idempotent: on an existing repo it re-initialises without
   // touching refs, so reusing the same durable path across boots is safe. `-b
@@ -555,7 +703,7 @@ export async function createArtifactRepo(dir: string): Promise<ArtifactRepo> {
   // every open, so a repo created by an older boot is upgraded in place.
   await git(dir, ['config', 'core.hooksPath', await emptyHooksDir()]);
   await git(dir, ['config', 'core.fsmonitor', 'false']);
-  return { dir };
+  return upstreamPath === null ? { dir } : { dir, upstreamPath };
 }
 
 /**
@@ -568,6 +716,14 @@ export async function pushArtifactBranch(
   checkout: WorktreeCheckout,
   artifact: ArtifactRepo,
 ): Promise<string> {
+  // THE UPSTREAM IS NEVER WRITTEN, re-asserted at the write (#141). Checked here
+  // and not only at `createArtifactRepo` because this function's argument is a
+  // plain object any caller can assemble — the boot gate is not on this path.
+  if (artifact.upstreamPath !== undefined && pathsOverlap(artifact.dir, artifact.upstreamPath)) {
+    throw new Error(
+      `${PUSH_INTO_UPSTREAM_REFUSAL}: ${artifact.dir} overlaps ${artifact.upstreamPath}`,
+    );
+  }
   // Explicit refspec, force-free: a colliding ref in the durable repo (a re-run
   // of the same session id) must fail loudly, exactly as `addWorktree` refuses a
   // colliding local branch. Pinned to the trusted per-worktree git dir (#120
@@ -676,6 +832,50 @@ export async function artifactCommitResolves(
     () => true,
     () => false,
   );
+}
+
+/**
+ * REFUSAL 5 — an upstream-seeded provider must have somewhere ELSE to publish
+ * to (#141).
+ *
+ * The config gate and the two plumbing gates each stop a specific WRITE. This
+ * one stops a specific WIRING, which is a different failure and reachable
+ * without any of the others: a provider built with an upstream-seeded scratch
+ * repo but NO durable artifact repo falls back to reporting the scratch repo as
+ * the artifact `remote`. That repo is torn down at shutdown, so a real-repo
+ * session would settle with a receipt naming a remote nobody can fetch from —
+ * the acceptance test's "its branch reachable for a manual merge" quietly
+ * unsatisfied, with no error anywhere.
+ *
+ * And the adjacent shape: a durable repo that IS (or sits inside) the upstream.
+ * `createArtifactRepo` refuses to open one there, so on the wired path this arm
+ * is unreachable — which is exactly why it is asserted here too. Providers take
+ * an `ArtifactRepo` object, not a path, and an object can arrive from anywhere.
+ */
+export const UPSTREAM_ARTIFACT_REMOTE_REFUSAL =
+  'refusing to build an upstream-seeded execution provider without a durable artifact remote ' +
+  'distinct from the upstream (#141) — a real-repo session settles with a branch a human must ' +
+  'be able to fetch, so its remote may be neither the disposable scratch repo nor the upstream';
+
+/**
+ * Assert the provider-layer half of THE UPSTREAM IS NEVER WRITTEN. Called by
+ * every provider factory that holds a scratch repo, so the check binds on each
+ * construction path rather than on the one somebody remembered.
+ */
+export function assertArtifactRemoteIsNotUpstream(
+  repo: ScratchRepo,
+  artifactRepo: ArtifactRepo | undefined,
+): void {
+  if (repo.upstream === undefined) return;
+  if (artifactRepo === undefined) {
+    throw new Error(`${UPSTREAM_ARTIFACT_REMOTE_REFUSAL}: no artifact repo was wired`);
+  }
+  const upstreamPath = upstreamLocalPath(repo.upstream.url);
+  if (upstreamPath !== null && pathsOverlap(artifactRepo.dir, upstreamPath)) {
+    throw new Error(
+      `${UPSTREAM_ARTIFACT_REMOTE_REFUSAL}: ${artifactRepo.dir} overlaps ${upstreamPath}`,
+    );
+  }
 }
 
 function short(sessionId: string): string {

@@ -22,6 +22,7 @@ import {
   pinSettledArtifact,
   type ScratchRepo,
   sessionBranch,
+  type UpstreamSeed,
 } from './git.js';
 import type { ExecutionProvider } from './provider.js';
 import { createSandboxProvider } from './sandbox.js';
@@ -97,14 +98,27 @@ export async function createExecutionProvider(input: {
   // remote} resolves after shutdown. It is NEVER disposed.
   const artifactDir =
     env.EXECUTION_ARTIFACT_DIR ?? join(env.EXECUTION_SCRATCH_DIR ?? tmpdir(), 'atrium-artifacts');
-  const artifactRepo = await createArtifactRepo(artifactDir);
+  // REAL-REPO MODE (#141). Present, the scratch trunk is fetched from this
+  // upstream at this exact ref, so a session's branch is a diff against a real
+  // repository. It is also handed to `createArtifactRepo`, which refuses to open
+  // the durable repo anywhere that overlaps it — THE UPSTREAM IS NEVER WRITTEN,
+  // asserted at the plumbing as well as at the boot gate in `env.ts`.
+  const upstream = executionUpstream(env);
+  const artifactRepo = await createArtifactRepo(artifactDir, upstream);
+  if (upstream) {
+    logger.info('execution runs against a real upstream (#141)', {
+      url: upstream.url,
+      ref: upstream.ref,
+      artifactRepo: artifactDir,
+    });
+  }
 
   let scratch: ScratchRepo | null = null;
   let provider: ExecutionProvider;
 
   switch (env.EXECUTION_PROVIDER) {
     case 'shim': {
-      scratch = await createScratchRepo(env.EXECUTION_SCRATCH_DIR);
+      scratch = await createScratchRepo(env.EXECUTION_SCRATCH_DIR, upstream);
       provider = createDeterministicShimProvider({ repo: scratch, artifactRepo });
       break;
     }
@@ -124,7 +138,7 @@ export async function createExecutionProvider(input: {
           'guarantee for real execution requires the sandbox seam (#120 F1)',
         {},
       );
-      scratch = await createScratchRepo(env.EXECUTION_SCRATCH_DIR);
+      scratch = await createScratchRepo(env.EXECUTION_SCRATCH_DIR, upstream);
       provider = createWorktreeCommandProvider({
         repo: scratch,
         artifactRepo,
@@ -498,6 +512,23 @@ export async function configureExecution(input: {
     drainExecutions: wired.drainExecutions,
     dispose: runtime.dispose,
   };
+}
+
+/**
+ * The configured upstream, or `undefined` for the classic empty-trunk seam
+ * (#141).
+ *
+ * Both halves are REQUIRED TOGETHER — `assertExecutionUpstreamSafe` already
+ * fails boot on a half-set pair, and this reads the pair rather than defaulting
+ * the ref, so a bypass of the boot gate produces `undefined` (no upstream, the
+ * unchanged old behaviour) rather than a guessed `main` against a real
+ * repository. Fail-closed means the degenerate case is the SAFE one.
+ */
+export function executionUpstream(env: Env): UpstreamSeed | undefined {
+  const url = env.EXECUTION_UPSTREAM_URL;
+  const ref = env.EXECUTION_UPSTREAM_REF;
+  if (url === undefined || ref === undefined) return undefined;
+  return { url, ref };
 }
 
 /**

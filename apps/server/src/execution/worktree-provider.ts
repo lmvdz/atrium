@@ -2,6 +2,7 @@ import { type ChildProcess, spawn } from 'node:child_process';
 import {
   type ArtifactRepo,
   addWorktree,
+  assertArtifactRemoteIsNotUpstream,
   cleanHome,
   commitWorktree,
   DANGEROUS_GIT_VARS,
@@ -210,6 +211,10 @@ export const UNSANDBOXED_REFUSAL =
 export function createWorktreeCommandProvider(options: WorktreeCommandOptions): ExecutionProvider {
   if (!unsandboxedExecutionAllowed()) throw new Error(UNSANDBOXED_REFUSAL);
   const { repo, artifactRepo, command, timeoutMs = 10 * 60_000 } = options;
+  // THE UPSTREAM IS NEVER WRITTEN, provider layer (#141). A real-repo session is
+  // the whole reason this provider exists, so the wiring that would publish its
+  // branch nowhere — or into the upstream itself — is refused at construction.
+  assertArtifactRemoteIsNotUpstream(repo, artifactRepo);
   if (command.length === 0) {
     throw new Error('worktree provider requires a non-empty command argv');
   }

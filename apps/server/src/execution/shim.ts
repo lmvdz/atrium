@@ -3,6 +3,7 @@ import { join } from 'node:path';
 import {
   type ArtifactRepo,
   addWorktree,
+  assertArtifactRemoteIsNotUpstream,
   commitWorktree,
   pushArtifactBranch,
   removeWorktree,
@@ -70,6 +71,10 @@ export function createDeterministicShimProvider(
   options: DeterministicShimOptions,
 ): ExecutionProvider {
   const { repo, artifactRepo } = options;
+  // THE UPSTREAM IS NEVER WRITTEN, provider layer (#141). Binds on the shim too:
+  // real-repo mode is a property of the SCRATCH REPO, so whichever provider is
+  // handed a seeded one inherits the obligation.
+  assertArtifactRemoteIsNotUpstream(repo, artifactRepo);
 
   return {
     kind: 'shim',
