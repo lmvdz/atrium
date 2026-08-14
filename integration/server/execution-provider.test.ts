@@ -329,13 +329,93 @@ describe('a funded session runs the shim, produces an artifact, and settles inde
       .from(sessions)
       .where(eq(sessions.id, sessionId));
 
-    // The column carries exactly the produced branch+commit — the identity that
-    // composes the two seams. `remote` is #120's internal scratch pointer and is
-    // NOT a review fact, so it is not copied into the column.
-    expect(row?.artifact).toEqual({ branch: produced.branch, commit: produced.commit });
+    // The column carries exactly the produced branch+commit AND the #145
+    // enrichment (real structured diff + test report) — the identity that composes
+    // the two seams. `remote` is #120's internal scratch pointer and is NOT a
+    // review fact, so it is not copied into the column.
+    expect(produced.diff).toBeDefined();
+    expect(produced.tests).toBeDefined();
+    expect(row?.artifact).toEqual({
+      branch: produced.branch,
+      commit: produced.commit,
+      diff: produced.diff,
+      tests: produced.tests,
+    });
     expect(row?.artifact).not.toHaveProperty('remote');
     expect(row?.artifact?.branch).toBe(sessionBranch(sessionId));
     expect(row?.artifact?.commit).toBe(produced.commit);
+    // The diff carried real hunks (the session id lives inside ARTIFACT.json), so
+    // the control plane renders the actual change — not a summary, not a stub.
+    const diffBody = (produced.diff?.files ?? [])
+      .flatMap((f) => f.hunks)
+      .flatMap((h) => h.lines)
+      .join('\n');
+    expect(diffBody).toContain(sessionId);
+  });
+
+  /**
+   * THE PINNED WRITE-SET (#145; the #127/#128 lesson). A settle carries the #145
+   * enrichment (a real per-file diff + a test report) INTO `sessions.artifact` —
+   * and it must still write NOTHING on the covenant/budget tables. This folds JUST
+   * the settle (the open, which increments `authorized_draws`, is already done and
+   * snapshotted around) and asserts `accepted_objects`, `plans.authorized_draws`
+   * and `plans.rlimit_slice` are BYTE-STABLE across it, while proving the diff/tests
+   * did land in the column. Revert `projectSessionExit` to write those tables and
+   * this reds; a settle has no route to a `✓` or a draw.
+   */
+  it('pins the settle write-set: folding a settle with diff+tests moves accepted_objects / authorized_draws / rlimit_slice by nothing', async () => {
+    const commands = commandService();
+    const planId = await openPlan(commands);
+    await fundPlan(planId);
+
+    // Open (granted) — the draw increments `authorized_draws` HERE, before the snap.
+    const opened = await commands.execute(agentSession, {
+      name: 'open_session',
+      roomId: room.roomId,
+      planId,
+      harness: 'omp',
+      model: 'haiku',
+      causeMessageId: null,
+    });
+    expect(opened.kind).toBe('appended');
+    if (opened.kind !== 'appended' || opened.draw?.outcome !== 'granted') {
+      throw new Error('open_session was not granted');
+    }
+    const sessionId = opened.draw.sessionId;
+
+    const writeSet = async () => {
+      const [plan] = await handle.db
+        .select({
+          authorizedDraws: plans.authorizedDraws,
+          rlimitSlice: plans.rlimitSlice,
+        })
+        .from(plans)
+        .where(eq(plans.id, planId));
+      return { census: await census(), plan };
+    };
+    const before = await writeSet();
+
+    // Drive JUST the settle: claim → run the shim (produces the diff+tests) → settle.
+    const outcome = await coordinator(commands).runGranted(agentSession, {
+      sessionId,
+      roomId: room.roomId,
+      planId,
+      harness: 'omp',
+      model: 'haiku',
+    });
+    expect(outcome.kind).toBe('settled');
+
+    // The settle WROTE the enrichment into the column…
+    const [row] = await handle.db
+      .select({ artifact: sessions.artifact, status: sessions.status })
+      .from(sessions)
+      .where(eq(sessions.id, sessionId));
+    expect(row?.status).toBe('settled');
+    expect(row?.artifact?.diff?.files.length).toBeGreaterThan(0);
+    expect(row?.artifact?.tests).toBeDefined();
+
+    // …and yet the covenant/budget tables are byte-identical across the settle.
+    expect(await writeSet()).toEqual(before);
   });
 
   it('leaves sessions.artifact null on a failed exit — nothing for a signature to sign', async () => {

@@ -366,7 +366,19 @@ describe('real-repo mode: removed from the worktree provider, alive on the shim 
       .from(sessions)
       .where(eq(sessions.id, outcome.sessionId));
     expect(row?.status).toBe('settled');
-    expect(row?.stored).toEqual({ branch: artifact.branch, commit: artifact.commit });
+    // The column carries the branch+commit AND the #145 enrichment — and here, in
+    // real-repo mode, that diff is the REAL diff against the UPSTREAM ref: exactly
+    // the ARTIFACT.json added atop the real tree the `--name-status` check above saw.
+    expect(artifact.diff?.files.map((f) => `${f.status}:${f.path}`)).toEqual([
+      `added:${SHIM_ARTIFACT_PATH}`,
+    ]);
+    expect(artifact.tests).toBeDefined();
+    expect(row?.stored).toEqual({
+      branch: artifact.branch,
+      commit: artifact.commit,
+      diff: artifact.diff,
+      tests: artifact.tests,
+    });
   });
 
   it('THE FLIP — with no upstream configured, the empty-trunk WORKTREE seam is unchanged', async () => {

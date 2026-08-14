@@ -1,6 +1,7 @@
 import { z } from 'zod';
 import type { Command, CommandResult } from '../commands.js';
 import type { Logger } from '../logger.js';
+import { ExecutionArtifact as ExecutionArtifactSchema } from '../room-events.js';
 import type { Session } from '../session.js';
 import type {
   ExecutionArtifact,
@@ -44,13 +45,12 @@ const ReportSchema = z.object({
     exitSummary: z.string().max(4000),
     spendMicros: z.number().int().nonnegative().nullable(),
     contextPct: z.number().min(0).max(1).nullable(),
-    artifact: z
-      .object({
-        branch: z.string(),
-        commit: z.string(),
-        remote: z.string(),
-      })
-      .nullable(),
+    // The SAME artifact schema the durable settle boundary uses (`room-events.ts`),
+    // so the provider's report — including the #145 structured diff/tests — parses
+    // here identically to how it will parse when written and read back. Defining it
+    // inline would strip the diff/tests off the report before the settle ever saw
+    // them (zod drops unknown keys), silently dropping the enrichment.
+    artifact: ExecutionArtifactSchema.nullable(),
   }),
 });
 

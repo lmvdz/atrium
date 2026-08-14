@@ -30,9 +30,9 @@
 
 import { useEffect, useState } from 'react';
 import { CERTIFY_HOLD_MS, isReviewableArtifact } from '@/lib/certify-hold';
-import type { ControlSessionRow } from '@/lib/control-plane-data';
+import type { ControlSessionRow, SessionArtifact } from '@/lib/control-plane-data';
 import type { ParticipantKind } from '../model/kind';
-import { systemText } from '../model/quotation';
+import { fileText, systemText } from '../model/quotation';
 import { Glyph } from '../primitives/Glyph';
 import { HoldToAct } from '../primitives/HoldToAct';
 import styles from './control.module.css';
@@ -124,15 +124,7 @@ export function ReviewPane({
       <section className={styles.section} data-review-diff="true">
         <div className={`${styles.sectionHead} atr-lbl`}>DIFF</div>
         <div className={styles.sectionBody}>
-          {artifact?.diffStat ? (
-            <span className={`${styles.v} ${styles.vMono}`} data-diff-stat="true">
-              {systemText(artifact.diffStat, 'ReviewPane diff')}
-            </span>
-          ) : (
-            <span className={styles.muted}>
-              no diff recorded — the ExecutionProvider (#120) records one at settle
-            </span>
-          )}
+          <DiffView artifact={artifact} />
         </div>
       </section>
 
@@ -140,22 +132,7 @@ export function ReviewPane({
       <section className={styles.section} data-review-tests="true">
         <div className={`${styles.sectionHead} atr-lbl`}>TESTS</div>
         <div className={styles.sectionBody}>
-          {artifact?.testsPassed === undefined && artifact?.testsFailed === undefined ? (
-            <span className={styles.muted}>no test run recorded</span>
-          ) : (
-            <span className={styles.v} data-tests="true">
-              <span className={styles.pass} data-tests-passed={artifact?.testsPassed ?? 0}>
-                {systemText(String(artifact?.testsPassed ?? 0), 'ReviewPane tests passed')} passed
-              </span>
-              {' · '}
-              <span
-                className={(artifact?.testsFailed ?? 0) > 0 ? styles.fail : styles.muted}
-                data-tests-failed={artifact?.testsFailed ?? 0}
-              >
-                {systemText(String(artifact?.testsFailed ?? 0), 'ReviewPane tests failed')} failed
-              </span>
-            </span>
-          )}
+          <TestsView artifact={artifact} />
         </div>
       </section>
 
@@ -306,5 +283,212 @@ export function ReviewPane({
         </div>
       )}
     </div>
+  );
+}
+
+/* ---------------------------------------------------------------------------
+ * THE DIFF, RENDERED HONESTLY (#145).
+ *
+ * Three distinct states, three distinct renders, so the surface never lets one
+ * stand in for another:
+ *
+ *   1. STRUCTURED diff PRESENT with files — render the real hunks in a scrollable
+ *      overflow-x box (the frontend guideline: wide content scrolls in its own
+ *      box, the page body never scrolls sideways), coloured by git's own line
+ *      marker. A cap notice appears when the producer truncated a huge diff.
+ *   2. STRUCTURED diff PRESENT but EMPTY — the producer computed a diff and it was
+ *      empty. An honest "no changes", NOT the absent copy below.
+ *   3. Neither — fall back to the legacy one-line `diffStat` if a producer only
+ *      carried a summary, else the ABSENT copy ("no diff recorded"). Absent means
+ *      no producer reported a diff at all; it is a different fact from #2.
+ * ------------------------------------------------------------------------- */
+function DiffView({ artifact }: { artifact: SessionArtifact | null }) {
+  const diff = artifact?.diff;
+
+  if (diff !== undefined) {
+    if (diff.files.length === 0) {
+      // HONEST EMPTY (#145): the producer computed a diff and it had no changes.
+      // Distinct from absent — the producer vouches there was nothing to show.
+      return (
+        <span className={styles.muted} data-diff-empty="true">
+          no changes — the session settled without touching the tree
+        </span>
+      );
+    }
+    return (
+      <div data-diff-structured="true" data-diff-truncated={diff.truncated}>
+        <div className={styles.diffSummary}>
+          <span className={styles.vMono} data-diff-file-count={diff.fileCount}>
+            {systemText(
+              `${diff.fileCount} ${diff.fileCount === 1 ? 'file' : 'files'}`,
+              'ReviewPane diff files',
+            )}
+          </span>
+          <span className={styles.pass} data-diff-additions={diff.additions}>
+            {systemText(`+${diff.additions}`, 'ReviewPane diff additions')}
+          </span>
+          <span className={styles.fail} data-diff-deletions={diff.deletions}>
+            {systemText(`−${diff.deletions}`, 'ReviewPane diff deletions')}
+          </span>
+          {diff.truncated ? (
+            <span className={styles.muted} data-diff-truncated-note="true">
+              · truncated — showing the first {diff.files.length} of {diff.fileCount}
+            </span>
+          ) : null}
+        </div>
+        {/* The scroll box: wide diff lines scroll HERE, never the page body — the
+            frontend guideline that wide content owns its own overflow. The lines
+            stay in document order for a screen reader regardless of scroll. */}
+        <div className={styles.diffScroll} data-diff-scroll="true">
+          {diff.files.map((file) => (
+            <DiffFileView key={`${file.oldPath ?? ''}→${file.path}`} file={file} />
+          ))}
+        </div>
+      </div>
+    );
+  }
+
+  // No structured diff. Fall back to the legacy one-line stat, else absent.
+  if (artifact?.diffStat) {
+    return (
+      <span className={`${styles.v} ${styles.vMono}`} data-diff-stat="true">
+        {systemText(artifact.diffStat, 'ReviewPane diff')}
+      </span>
+    );
+  }
+  return (
+    <span className={styles.muted} data-diff-absent="true">
+      no diff recorded — the ExecutionProvider (#120) records one at settle
+    </span>
+  );
+}
+
+/** One file's block within the structured diff — its header row and its hunks. */
+function DiffFileView({ file }: { file: NonNullable<SessionArtifact['diff']>['files'][number] }) {
+  const label =
+    file.status === 'renamed' && file.oldPath ? `${file.oldPath} → ${file.path}` : file.path;
+  return (
+    <div className={styles.diffFile} data-diff-file="true" data-diff-file-path={file.path}>
+      <div className={styles.diffFileHead}>
+        <span className={styles.diffStatus} data-diff-file-status={file.status}>
+          {file.status}
+        </span>
+        <span className={styles.diffPath}>{fileText(label, 'ReviewPane diff path')}</span>
+        <span className={styles.diffFileCounts}>
+          <span className={styles.pass}>+{file.additions}</span>{' '}
+          <span className={styles.fail}>−{file.deletions}</span>
+        </span>
+      </div>
+      {file.binary ? (
+        <div className={styles.diffBinary} data-diff-binary="true">
+          binary file — {file.additions + file.deletions === 0 ? 'changed' : 'not shown'}
+        </div>
+      ) : (
+        file.hunks.map((hunk, hi) => (
+          // biome-ignore lint/suspicious/noArrayIndexKey: hunks have no id; order is stable.
+          <div key={hi} className={styles.diffHunk}>
+            <div className={styles.diffHunkHead}>
+              {fileText(hunk.header, 'ReviewPane diff hunk')}
+            </div>
+            {hunk.lines.map((line, li) => (
+              <div
+                // biome-ignore lint/suspicious/noArrayIndexKey: lines have no id; order is stable.
+                key={li}
+                className={`${styles.diffLine} ${diffLineClass(line)}`}
+                data-diff-line={diffLineKind(line)}
+              >
+                {fileText(line === '' ? ' ' : line, 'ReviewPane diff line')}
+              </div>
+            ))}
+          </div>
+        ))
+      )}
+    </div>
+  );
+}
+
+/** git's leading marker → the line's kind, for styling and a test hook. */
+function diffLineKind(line: string): 'add' | 'del' | 'meta' | 'context' {
+  const marker = line[0];
+  if (marker === '+') return 'add';
+  if (marker === '-') return 'del';
+  if (marker === '\\') return 'meta';
+  return 'context';
+}
+
+function diffLineClass(line: string): string | undefined {
+  const kind = diffLineKind(line);
+  if (kind === 'add') return styles.diffAdd;
+  if (kind === 'del') return styles.diffDel;
+  if (kind === 'meta') return styles.diffMeta;
+  return styles.diffContext;
+}
+
+/* ---------------------------------------------------------------------------
+ * THE TEST RESULTS, RENDERED HONESTLY (#145).
+ *
+ * PRESENT (structured) → the pass/fail summary and any failing test names, capped.
+ * A present block with 0/0 is an honest "ran, nothing to report". ABSENT → the
+ * legacy scalar counts if a producer carried them, else "no test run recorded" —
+ * a different fact from a present-but-zero block.
+ * ------------------------------------------------------------------------- */
+function TestsView({ artifact }: { artifact: SessionArtifact | null }) {
+  const tests = artifact?.tests;
+
+  if (tests !== undefined) {
+    return (
+      <div data-tests="true" data-tests-structured="true">
+        <span className={styles.v}>
+          <span className={styles.pass} data-tests-passed={tests.passed}>
+            {systemText(String(tests.passed), 'ReviewPane tests passed')} passed
+          </span>
+          {' · '}
+          <span
+            className={tests.failed > 0 ? styles.fail : styles.muted}
+            data-tests-failed={tests.failed}
+          >
+            {systemText(String(tests.failed), 'ReviewPane tests failed')} failed
+          </span>
+        </span>
+        {tests.failures.length > 0 ? (
+          <ul className={styles.testFailures} data-tests-failures="true">
+            {tests.failures.map((name, i) => (
+              // biome-ignore lint/suspicious/noArrayIndexKey: names may repeat; order is stable.
+              <li key={i} className={styles.testFailure} data-test-failure="true">
+                {fileText(name, 'ReviewPane failing test')}
+              </li>
+            ))}
+            {tests.failuresTruncated ? (
+              <li className={styles.muted} data-tests-failures-truncated="true">
+                … and more, truncated
+              </li>
+            ) : null}
+          </ul>
+        ) : null}
+      </div>
+    );
+  }
+
+  // No structured block. Fall back to the legacy scalars, else absent.
+  if (artifact?.testsPassed !== undefined || artifact?.testsFailed !== undefined) {
+    return (
+      <span className={styles.v} data-tests="true">
+        <span className={styles.pass} data-tests-passed={artifact?.testsPassed ?? 0}>
+          {systemText(String(artifact?.testsPassed ?? 0), 'ReviewPane tests passed')} passed
+        </span>
+        {' · '}
+        <span
+          className={(artifact?.testsFailed ?? 0) > 0 ? styles.fail : styles.muted}
+          data-tests-failed={artifact?.testsFailed ?? 0}
+        >
+          {systemText(String(artifact?.testsFailed ?? 0), 'ReviewPane tests failed')} failed
+        </span>
+      </span>
+    );
+  }
+  return (
+    <span className={styles.muted} data-tests-absent="true">
+      no test run recorded
+    </span>
   );
 }

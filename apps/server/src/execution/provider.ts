@@ -1,3 +1,5 @@
+import type { SessionDiff, SessionTestResults } from '@atrium/db';
+
 /**
  * The ExecutionProvider seam (#120, from its binding Resolution).
  *
@@ -61,6 +63,19 @@ export interface ExecutionArtifact {
   readonly commit: string;
   /** The scratch remote/repo the branch lives in (a path the provider controls). */
   readonly remote: string;
+  /**
+   * The REAL structured diff the producer computed (#145) — per-file hunks of the
+   * scratch worktree against the seeded upstream ref. PRESENT means it reported a
+   * diff (an empty `files` is an honest "no changes"); absent means it reported
+   * none. A `~` fact the adapter reports, never verified beyond the branch/commit
+   * it rides with (the same producer that made the verified commit reported it).
+   */
+  readonly diff?: SessionDiff;
+  /**
+   * The harness's own test report (#145). PRESENT means a run was reported (0/0 is
+   * honest); absent means none. A `~` fact, like the diff beside it.
+   */
+  readonly tests?: SessionTestResults;
 }
 
 /**

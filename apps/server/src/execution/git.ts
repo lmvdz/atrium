@@ -4,6 +4,7 @@ import { access, mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { delimiter, isAbsolute, join } from 'node:path';
 import { promisify } from 'node:util';
+import type { SessionDiff, SessionDiffFile } from '@atrium/db';
 import {
   assertUpstreamSeed,
   configuredUpstreamMintOverlap,
@@ -879,6 +880,282 @@ function worktreePin(checkout: WorktreeCheckout): GitDirPin | undefined {
   return checkout.gitDir === undefined
     ? undefined
     : { gitDir: checkout.gitDir, workTree: checkout.dir, commonDir: checkout.commonDir };
+}
+
+/* ═══════════════════════════════════════════════════════════════════════════
+ *  THE REAL STRUCTURED DIFF (#145) — what the producer computes and reports.
+ * ═══════════════════════════════════════════════════════════════════════════
+ *
+ * `diffWorktree` computes the ACTUAL git diff of a session's checkout against the
+ * ref it forked from (`main`, which in real-repo mode #141 is the seeded upstream
+ * commit and never moves — the covenant's negative proof). It returns per-file
+ * structured hunks the review pane renders directly, so the surface shows the real
+ * change rather than a one-line stat. A stubbed-constant diff fails the shim's
+ * flip-the-input test; this reads git.
+ *
+ * THE CAP IS HONEST. The retained `files` and their hunk lines are bounded so a
+ * huge diff can never blow the jsonb row or the DB. The whole-diff totals come
+ * from `git diff --numstat` (one line per file — it survives a diff far too large
+ * to buffer as a patch), so `fileCount`/`additions`/`deletions` describe the REAL
+ * change even when the carried hunks are a truncated prefix; `truncated` says so.
+ */
+
+/** Cap on retained files — a diff wider than this carries a prefix, `truncated:true`. */
+export const MAX_DIFF_FILES = 40;
+/** Cap on retained hunk BODY lines, summed across all files. */
+export const MAX_DIFF_LINES = 2000;
+/** Cap on a single hunk line's length — a minified megabyte-line is trimmed. */
+export const MAX_DIFF_LINE_LEN = 500;
+
+/** One file's whole-diff counts, from `git diff --numstat -z` (survives huge diffs). */
+interface NumstatEntry {
+  readonly path: string;
+  readonly oldPath?: string;
+  readonly additions: number;
+  readonly deletions: number;
+  readonly binary: boolean;
+}
+
+/**
+ * Parse `git diff --numstat --find-renames -z` output. The `-z` form is
+ * NUL-terminated and never path-quotes, so an arbitrary real-repo path (spaces,
+ * unicode) parses without ambiguity. A normal record is `adds\tdels\tpath\0`; a
+ * rename is `adds\tdels\t\0oldpath\0newpath\0` (empty inline path, two extra
+ * tokens). A binary file reports `-\t-` for the counts.
+ */
+function parseNumstatZ(raw: string): NumstatEntry[] {
+  const tokens = raw.split('\0');
+  const out: NumstatEntry[] = [];
+  let i = 0;
+  while (i < tokens.length) {
+    const head = tokens[i];
+    if (head === undefined || head === '') {
+      i += 1;
+      continue;
+    }
+    const tab1 = head.indexOf('\t');
+    const tab2 = head.indexOf('\t', tab1 + 1);
+    if (tab1 === -1 || tab2 === -1) {
+      i += 1;
+      continue;
+    }
+    const addsRaw = head.slice(0, tab1);
+    const delsRaw = head.slice(tab1 + 1, tab2);
+    const inlinePath = head.slice(tab2 + 1);
+    const binary = addsRaw === '-' && delsRaw === '-';
+    const additions = binary ? 0 : Number.parseInt(addsRaw, 10) || 0;
+    const deletions = binary ? 0 : Number.parseInt(delsRaw, 10) || 0;
+    if (inlinePath === '') {
+      // A rename/copy: the old and new paths are the next two NUL-separated tokens.
+      const oldPath = tokens[i + 1] ?? '';
+      const path = tokens[i + 2] ?? '';
+      out.push({ path, oldPath, additions, deletions, binary });
+      i += 3;
+    } else {
+      out.push({ path: inlinePath, additions, deletions, binary });
+      i += 1;
+    }
+  }
+  return out;
+}
+
+/** One file's shape from the unified-diff patch text — status + hunks + paths. */
+interface PatchFile {
+  readonly path: string;
+  readonly oldPath?: string;
+  readonly status: 'added' | 'modified' | 'deleted' | 'renamed';
+  readonly binary: boolean;
+  readonly hunks: { header: string; lines: string[] }[];
+}
+
+/** Strip git's `a/`/`b/` image prefix from a `---`/`+++` path. */
+function stripImagePrefix(p: string): string {
+  if (p === '/dev/null') return p;
+  if (p.startsWith('a/') || p.startsWith('b/')) return p.slice(2);
+  return p;
+}
+
+/**
+ * Parse a `git diff --no-color` patch into per-file blocks with their hunks. Keyed
+ * later against numstat by post-image path, so the counts come from numstat (the
+ * whole-file truth) and the hunk BODIES come from here (bounded by the caller).
+ * The paths come from the `+++ b/…`/`--- a/…` lines (unquoted under
+ * `core.quotePath=false`), falling back to the `Binary files … differ` line for a
+ * binary file that has no image lines.
+ */
+function parseUnifiedDiff(patch: string): PatchFile[] {
+  if (patch === '') return [];
+  const files: PatchFile[] = [];
+  const lines = patch.split('\n');
+  let cur: {
+    path: string;
+    oldPath?: string;
+    status: PatchFile['status'];
+    binary: boolean;
+    hunks: { header: string; lines: string[] }[];
+    minus?: string;
+    plus?: string;
+  } | null = null;
+  let hunk: { header: string; lines: string[] } | null = null;
+
+  const flush = () => {
+    if (cur === null) return;
+    // Resolve the path: prefer the post-image (`+++ b/…`), then the pre-image for a
+    // deletion, then an explicit rename-to, then whatever the header parsed.
+    const path =
+      cur.plus !== undefined && cur.plus !== '/dev/null'
+        ? cur.plus
+        : cur.minus !== undefined && cur.minus !== '/dev/null'
+          ? cur.minus
+          : cur.path;
+    files.push({
+      path,
+      oldPath: cur.oldPath,
+      status: cur.status,
+      binary: cur.binary,
+      hunks: cur.hunks,
+    });
+  };
+
+  for (const line of lines) {
+    if (line.startsWith('diff --git ')) {
+      flush();
+      hunk = null;
+      // Header paths are a last resort; `+++`/`---` below are authoritative.
+      cur = { path: '', status: 'modified', binary: false, hunks: [] };
+      continue;
+    }
+    if (cur === null) continue;
+    if (line.startsWith('new file mode')) cur.status = 'added';
+    else if (line.startsWith('deleted file mode')) cur.status = 'deleted';
+    else if (line.startsWith('rename from ')) {
+      cur.oldPath = line.slice('rename from '.length);
+      cur.status = 'renamed';
+    } else if (line.startsWith('rename to ')) {
+      cur.path = line.slice('rename to '.length);
+      cur.status = 'renamed';
+    } else if (line.startsWith('Binary files ')) {
+      cur.binary = true;
+      // `Binary files a/x and b/y differ` — recover the post-image path.
+      const m = /^Binary files .* and (.*) differ$/.exec(line);
+      if (m?.[1]) cur.path = stripImagePrefix(m[1]);
+    } else if (line.startsWith('--- ')) {
+      cur.minus = stripImagePrefix(line.slice(4));
+    } else if (line.startsWith('+++ ')) {
+      cur.plus = stripImagePrefix(line.slice(4));
+    } else if (line.startsWith('@@')) {
+      hunk = { header: line, lines: [] };
+      cur.hunks.push(hunk);
+    } else if (
+      hunk !== null &&
+      (line.startsWith(' ') ||
+        line.startsWith('+') ||
+        line.startsWith('-') ||
+        line.startsWith('\\'))
+    ) {
+      hunk.lines.push(line);
+    }
+  }
+  flush();
+  return files;
+}
+
+/**
+ * Compute the REAL structured diff of a session checkout against `base` (#145).
+ *
+ * Two git reads: `--numstat -z` for the whole-diff totals and per-file counts
+ * (huge-diff-safe), and the `--no-color` patch for the hunk bodies. They are
+ * merged by post-image path, then the hunks are trimmed to the caps. An unchanged
+ * checkout returns an HONEST EMPTY (`files: []`, all counts `0`, `truncated:false`)
+ * — a real "no changes", which the caller carries as PRESENT-but-empty, distinct
+ * from never reporting a diff at all.
+ *
+ * `base...HEAD` (three-dot) diffs against the fork point, so the result is exactly
+ * what the session added since it branched from trunk.
+ */
+export async function diffWorktree(
+  checkout: WorktreeCheckout,
+  base = 'main',
+): Promise<SessionDiff> {
+  // BRAND GATE (#141 r6): the checkout's pinned gitDir is what the diff reads
+  // through, so a forged checkout would point the read at another repo. Refuse it
+  // here, the same as every other git-driving consumer.
+  if (!isAuthenticWorktreeCheckout(checkout)) {
+    throw new Error(WORKTREE_CHECKOUT_NOT_AUTHENTIC_REFUSAL);
+  }
+  const pin = worktreePin(checkout);
+  const range = `${base}...HEAD`;
+  const numstatRaw = await git(
+    checkout.dir,
+    ['diff', '--numstat', '--find-renames', '-z', range],
+    pin,
+  );
+  const numstat = parseNumstatZ(numstatRaw);
+  const fileCount = numstat.length;
+  const additions = numstat.reduce((n, f) => n + f.additions, 0);
+  const deletions = numstat.reduce((n, f) => n + f.deletions, 0);
+  if (fileCount === 0) {
+    return { files: [], fileCount: 0, additions: 0, deletions: 0, truncated: false };
+  }
+
+  // `core.quotePath=false` so a non-ASCII path is emitted raw and the parser sees
+  // the same string numstat's `-z` gave. `-c` must precede the subcommand.
+  const patchRaw = await git(
+    checkout.dir,
+    ['-c', 'core.quotePath=false', 'diff', '--no-color', '--find-renames', range],
+    pin,
+  );
+  const patchByPath = new Map(parseUnifiedDiff(patchRaw).map((f) => [f.path, f]));
+
+  const files: SessionDiffFile[] = [];
+  let truncated = false;
+  let lineBudget = MAX_DIFF_LINES;
+  for (const entry of numstat) {
+    if (files.length >= MAX_DIFF_FILES) {
+      truncated = true;
+      break;
+    }
+    const patchFile = patchByPath.get(entry.path);
+    const status: SessionDiffFile['status'] =
+      patchFile?.status ?? (entry.oldPath !== undefined ? 'renamed' : 'modified');
+    const oldPath = patchFile?.oldPath ?? entry.oldPath;
+    const binary = entry.binary || (patchFile?.binary ?? false);
+    const hunks: { header: string; lines: string[] }[] = [];
+    if (!binary && patchFile) {
+      for (const h of patchFile.hunks) {
+        if (lineBudget <= 0) {
+          truncated = true;
+          break;
+        }
+        const kept: string[] = [];
+        for (const raw of h.lines) {
+          if (lineBudget <= 0) {
+            truncated = true;
+            break;
+          }
+          if (raw.length > MAX_DIFF_LINE_LEN) {
+            kept.push(`${raw.slice(0, MAX_DIFF_LINE_LEN)}…`);
+            truncated = true;
+          } else {
+            kept.push(raw);
+          }
+          lineBudget -= 1;
+        }
+        hunks.push({ header: h.header, lines: kept });
+      }
+    }
+    files.push({
+      path: entry.path,
+      ...(oldPath !== undefined && oldPath !== '' ? { oldPath } : {}),
+      status,
+      additions: entry.additions,
+      deletions: entry.deletions,
+      binary,
+      hunks,
+    });
+  }
+
+  return { files, fileCount, additions, deletions, truncated };
 }
 
 /** Reclaim the ephemeral checkout. The branch it produced is left intact. */

@@ -1487,23 +1487,119 @@ export const plans = pgTable(
  */
 
 /**
+ * One contiguous hunk of a unified diff — its `@@` header and its body lines,
+ * exactly as git emits them (#145). Each body line keeps git's leading marker:
+ * `' '` context, `'+'` added, `'-'` removed, `'\'` the no-newline marker. The
+ * render reads the marker to colour the line; nothing here is interpreted.
+ */
+export interface SessionDiffHunk {
+  /** The `@@ -a,b +c,d @@` header line git wrote for this hunk. */
+  readonly header: string;
+  /** The hunk body, each line prefixed by git's ` `/`+`/`-`/`\` marker. */
+  readonly lines: readonly string[];
+}
+
+/** One file's change in a structured diff (#145). */
+export interface SessionDiffFile {
+  /** The file's path (the post-image path for an add/modify/rename). */
+  readonly path: string;
+  /** The pre-rename path, present only when `status === 'renamed'`. */
+  readonly oldPath?: string;
+  /** What happened to the file. */
+  readonly status: 'added' | 'modified' | 'deleted' | 'renamed';
+  /** Lines added in this file (from git numstat — the whole file, not the cap). */
+  readonly additions: number;
+  /** Lines removed in this file (from git numstat — the whole file, not the cap). */
+  readonly deletions: number;
+  /** A binary file carries no textual hunks; git reports only that it changed. */
+  readonly binary: boolean;
+  /** The retained hunks. Empty for a binary file, or when the line cap trimmed them. */
+  readonly hunks: readonly SessionDiffHunk[];
+}
+
+/**
+ * THE REAL STRUCTURED DIFF THE PRODUCER COMPUTED (#145) — per-file hunks the
+ * ExecutionProvider derived from the git diff of its scratch worktree against the
+ * seeded upstream ref, so the review pane renders the ACTUAL change, not a
+ * one-line summary.
+ *
+ * ## PRESENT-BUT-EMPTY IS A DIFFERENT FACT FROM ABSENT
+ *
+ * The field being PRESENT means the producer computed a diff. An EMPTY `files`
+ * array is then an HONEST EMPTY — the producer ran and the worktree matched the
+ * seeded upstream, a real "no changes" it can vouch for. That is a different fact
+ * from the whole `diff` field being ABSENT (`undefined`): a merge/branch-only
+ * artifact, a session that predates #145, or any producer that reported no diff
+ * at all. The render distinguishes the two — present+empty says "no changes",
+ * absent says "no diff recorded" — so the pane never lets one stand in for the
+ * other. Non-epistemic: a `~` fact the adapter reports, never an `accepted_objects`
+ * `✓`.
+ *
+ * ## THE CAP IS HONEST
+ *
+ * `files` and each file's `hunks` are CAPPED so a huge diff can never blow the
+ * jsonb row or the DB (see `MAX_DIFF_*` in `execution/git.ts`). The whole-diff
+ * totals (`fileCount`/`additions`/`deletions`) come from git numstat over the
+ * ENTIRE diff, so they describe the real change even when the carried hunks are a
+ * truncated prefix; `truncated` says so and the render prints "N files, truncated".
+ */
+export interface SessionDiff {
+  /** The retained (possibly capped) per-file changes. Empty array = honest empty. */
+  readonly files: readonly SessionDiffFile[];
+  /** Total changed files across the WHOLE diff, before any cap. */
+  readonly fileCount: number;
+  /** Total additions across the WHOLE diff, before any cap. */
+  readonly additions: number;
+  /** Total deletions across the WHOLE diff, before any cap. */
+  readonly deletions: number;
+  /** True when `files`/`hunks` are a truncated prefix of the whole diff. */
+  readonly truncated: boolean;
+}
+
+/**
+ * THE HARNESS'S OWN TEST REPORT (#145). PRESENT means the producer reported a
+ * test run — `passed: 0, failed: 0` is an honest "ran, nothing to report", which
+ * is a different fact from the whole `tests` field being ABSENT (no run reported).
+ * The render distinguishes the two. Non-epistemic, like the diff beside it.
+ */
+export interface SessionTestResults {
+  /** Tests that passed. */
+  readonly passed: number;
+  /** Tests that failed. */
+  readonly failed: number;
+  /** The names of failing tests, capped (see `MAX_TEST_FAILURES`). */
+  readonly failures: readonly string[];
+  /** True when `failures` is a truncated prefix of the whole failing set. */
+  readonly failuresTruncated: boolean;
+}
+
+/**
  * The execution artifact a settled session produced — #120's ExecutionProvider
- * output, surfaced in #121's review pane. All fields optional: the shape a merge
- * carries (branch + commit) differs from what a test run carries (pass/fail
- * counts), and an audit session carries neither. `diffStat` is a rendered
- * summary line (`+128 −34 · 6 files`), not structured hunks — the control plane
- * shows the shape of the change, and the terminal is the break-glass detail.
+ * output, surfaced in #121's review pane and enriched in #145. All fields
+ * optional: the shape a merge carries (branch + commit) differs from what a real
+ * shim session carries (branch + commit + structured diff + tests), and an audit
+ * session carries neither.
+ *
+ * `diff`/`tests` (#145) are the STRUCTURED enrichment — real per-file hunks and a
+ * pass/fail block. `diffStat`/`testsPassed`/`testsFailed` are the older one-line
+ * scalars; both remain for a producer that only carries a summary, and the render
+ * prefers the structured field when present, falling back to the scalar. All are
+ * non-epistemic `~` facts the adapter reports (#114 T3), never a covenant `✓`.
  */
 export interface SessionArtifact {
   /** The branch the work landed on, when it produced one. */
   readonly branch?: string;
   /** The commit sha, when it produced one. */
   readonly commit?: string;
-  /** A one-line diff summary — additions, deletions, files touched. */
+  /** The real structured diff the producer computed (#145). Present-but-empty ≠ absent. */
+  readonly diff?: SessionDiff;
+  /** The harness's structured test report (#145). Present-but-zero ≠ absent. */
+  readonly tests?: SessionTestResults;
+  /** A one-line diff summary — additions, deletions, files touched (legacy scalar). */
   readonly diffStat?: string;
-  /** Tests that passed, when the session ran a suite. */
+  /** Tests that passed, when the session ran a suite (legacy scalar). */
   readonly testsPassed?: number;
-  /** Tests that failed, when the session ran a suite. */
+  /** Tests that failed, when the session ran a suite (legacy scalar). */
   readonly testsFailed?: number;
   /** A free one-line note about the artifact — kept short, system voice. */
   readonly summary?: string;

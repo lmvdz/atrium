@@ -237,10 +237,55 @@ export type SessionOpened = z.infer<typeof SessionOpened>;
  * waiting for one rather than one the adapter certified. Nullable, because a
  * failing harness produces no verifiable object.
  */
+/**
+ * THE STRUCTURED DIFF PAYLOAD (#145) — real per-file hunks, BOUNDED at the durable
+ * boundary. The producer (`execution/git.ts`) caps the diff before it ever rides an
+ * event; these ceilings are the defensive second lock, sat ABOVE the producer caps
+ * (files 40 / lines 2000 / line-len 500 there) so a legitimate capped diff always
+ * parses while a pathological one cannot persist a replay-breaking megabyte row.
+ * A settle carries this only WITH a provider-verified branch/commit (`commands.ts`),
+ * so it is trusted exactly when the tuple it rides with is.
+ */
+const SessionDiffHunkPayload = z.object({
+  header: z.string().max(600),
+  // `.readonly()` so the inferred arrays match the readonly `SessionDiff` the
+  // producer (@atrium/db) reports — a readonly value the provider hands the settle
+  // command must remain assignable through the seam.
+  lines: z.array(z.string().max(600)).max(4000).readonly(),
+});
+const SessionDiffFilePayload = z.object({
+  path: z.string().min(1).max(1000),
+  oldPath: z.string().min(1).max(1000).optional(),
+  status: z.enum(['added', 'modified', 'deleted', 'renamed']),
+  additions: z.number().int().nonnegative(),
+  deletions: z.number().int().nonnegative(),
+  binary: z.boolean(),
+  hunks: z.array(SessionDiffHunkPayload).max(2000).readonly(),
+});
+export const SessionDiffPayload = z.object({
+  files: z.array(SessionDiffFilePayload).max(64).readonly(),
+  fileCount: z.number().int().nonnegative(),
+  additions: z.number().int().nonnegative(),
+  deletions: z.number().int().nonnegative(),
+  truncated: z.boolean(),
+});
+
+/** The harness's structured test report (#145), bounded the same way. */
+export const SessionTestsPayload = z.object({
+  passed: z.number().int().nonnegative(),
+  failed: z.number().int().nonnegative(),
+  failures: z.array(z.string().max(500)).max(100).readonly(),
+  failuresTruncated: z.boolean(),
+});
+
 export const ExecutionArtifact = z.object({
   branch: z.string().min(1).max(200),
   commit: z.string().min(1).max(64),
   remote: z.string().min(1).max(1000),
+  /** The real structured diff the producer reported (#145). Present-but-empty ≠ absent. */
+  diff: SessionDiffPayload.optional(),
+  /** The harness's structured test report (#145). Present-but-zero ≠ absent. */
+  tests: SessionTestsPayload.optional(),
 });
 export type ExecutionArtifact = z.infer<typeof ExecutionArtifact>;
 

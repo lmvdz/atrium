@@ -911,21 +911,32 @@ async function projectSessionExit(
       exitSummary: event.exitSummary,
       spendMicros: event.spendMicros ?? 0,
       contextPct: event.contextPct,
-      // THE PRODUCED ARTIFACT LANDS IN THE ROW HERE — the #120×#121 seam.
-      // #120's ExecutionProvider mints the verified artifact (`{branch, commit,
-      // remote}`) and carries it on the exit event; #121's control-plane review
-      // pane certifies `sessions.artifact` (`SessionArtifact`). The two were
-      // built apart — #120's projection wrote no column (there was none) and
-      // #121's column named #120 as "the eventual writer at settle time" without
-      // one. On the integrated tree the settle projection IS that writer: it
-      // persists the event's branch+commit into the column so the produced
-      // artifact is exactly what the human reviews and lands. `remote` is #120's
-      // internal scratch pointer and is not a review fact, so it is dropped;
-      // diff/test fields are not on #120's ExecutionArtifact and stay absent (a
-      // merge artifact carries branch+commit, per the column doc). Null exit
-      // artifact leaves the slot null — an external/audit/failed exit.
+      // THE PRODUCED ARTIFACT LANDS IN THE ROW HERE — the #120×#121 seam, enriched
+      // by #145. #120's ExecutionProvider mints the verified artifact (`{branch,
+      // commit, remote}`) and #145 carries the REAL structured diff and the test
+      // results ALONGSIDE it on the exit event; #121's control-plane review pane
+      // certifies `sessions.artifact` (`SessionArtifact`) and renders exactly this.
+      // The settle projection is the writer: it persists the event's branch+commit
+      // AND the diff/tests into the column so the produced artifact is exactly what
+      // the human reviews and lands. `remote` is #120's internal scratch pointer and
+      // is not a review fact, so it is dropped. `diff`/`tests` are copied ONLY when
+      // the event carried them — a merge/branch-only artifact carries neither, and
+      // the column leaves them ABSENT (undefined), which the render distinguishes
+      // from a present-but-empty diff the producer vouched for (#145's honest-empty).
+      // Null exit artifact leaves the slot null — an external/audit/failed exit.
+      //
+      // PINNED WRITE-SET (#127/#128): the enrichment rides the SAME jsonb column
+      // this projection already wrote. It touches NOTHING on `accepted_objects`,
+      // `plans.rlimit_slice`, or `plans.authorized_draws` — a settle is non-epistemic
+      // and carries no route to a `✓` or a draw. `settle-writeset.test.ts` folds a
+      // settle carrying a full diff+tests and asserts those three tables byte-stable.
       artifact: event.artifact
-        ? { branch: event.artifact.branch, commit: event.artifact.commit }
+        ? {
+            branch: event.artifact.branch,
+            commit: event.artifact.commit,
+            ...(event.artifact.diff !== undefined ? { diff: event.artifact.diff } : {}),
+            ...(event.artifact.tests !== undefined ? { tests: event.artifact.tests } : {}),
+          }
         : null,
       settledByEventId: eventId,
       updatedAt: new Date(event.at),

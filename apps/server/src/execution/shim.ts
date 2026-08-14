@@ -1,11 +1,13 @@
 import { writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
+import type { SessionTestResults } from '@atrium/db';
 import {
   type ArtifactRepo,
   addWorktree,
   assertArtifactRemoteIsNotUpstream,
   assertAuthenticRunCheckout,
   commitWorktree,
+  diffWorktree,
   pushArtifactBranch,
   removeWorktree,
   type ScratchRepo,
@@ -27,10 +29,13 @@ import type { ExecutionProvider, ExecutionReport, SessionContext, Workspace } fr
  *
  * The artifact CONTENT is derived from the session context — the file it writes
  * names the session, plan, harness and model — so two different sessions produce
- * two byte-different commits. And the TERMINAL is driven by input too: a session
+ * two byte-different commits. The REAL DIFF it reports (#145) is computed from that
+ * commit against trunk, so it moves with the content too — a stubbed constant would
+ * fail the flip-the-input test. And the TERMINAL is driven by input: a session
  * whose model directive is `EXECUTION_FAIL_DIRECTIVE` exits `ok: false` with no
- * artifact. Change the input and the output moves; that is what proves the seam
- * is genuinely exercised rather than a canned success.
+ * artifact, and `EXECUTION_TESTS_FAIL_DIRECTIVE` settles cleanly but reports a
+ * failing test so the TESTS render moves too. Change the input and the output
+ * moves; that is what proves the seam is genuinely exercised, not a canned success.
  */
 
 /**
@@ -41,8 +46,38 @@ import type { ExecutionProvider, ExecutionReport, SessionContext, Workspace } fr
  */
 export const EXECUTION_FAIL_DIRECTIVE = '__atrium_shim_fail__';
 
+/**
+ * The reserved model directive that makes the deterministic harness settle CLEANLY
+ * but report FAILING tests (#145). It is a session-context input, so the
+ * flip-the-input witness on the TESTS render changes exactly one field: the default
+ * clean run reports all-passing, this one reports a failure with a named test, and
+ * the rendered pass/fail summary moves. The work still exists (a branch/commit,
+ * a real diff) — a settled session whose tests failed is exactly what the review
+ * pane must show a human BEFORE they certify, not hide.
+ */
+export const EXECUTION_TESTS_FAIL_DIRECTIVE = '__atrium_shim_tests_fail__';
+
 /** The file the fake harness writes — the artifact's payload, on the branch. */
 export const SHIM_ARTIFACT_PATH = 'ARTIFACT.json';
+
+/**
+ * The deterministic harness's own test report (#145). The shim is a fixed
+ * in-process stand-in, so its "suite" is fixed too: the clean run reports a small
+ * all-passing suite, and the reserved `EXECUTION_TESTS_FAIL_DIRECTIVE` reports one
+ * named failure. Honest by construction — it is what THIS harness's run reported,
+ * the same way the shim's artifact content is a pure function of its input.
+ */
+export function deterministicTestResults(ctx: SessionContext): SessionTestResults {
+  if (ctx.model === EXECUTION_TESTS_FAIL_DIRECTIVE) {
+    return {
+      passed: 2,
+      failed: 1,
+      failures: ['the deterministic fixture suite reports a failing test'],
+      failuresTruncated: false,
+    };
+  }
+  return { passed: 3, failed: 0, failures: [], failuresTruncated: false };
+}
 
 export interface DeterministicShimOptions {
   /** The scratch repo the shim controls — where every per-session worktree lands. */
@@ -141,6 +176,17 @@ export function createDeterministicShimProvider(
         };
       }
 
+      // THE REAL STRUCTURED DIFF (#145): compute the actual git diff of this
+      // scratch worktree against the ref it forked from (`main` — in real-repo mode
+      // #141 the seeded upstream commit). It carries the exact hunks the review pane
+      // renders. Computed from the checkout BEFORE it is disposed, and reported as a
+      // fact ALONGSIDE the verified branch/commit. Flip the input (a different
+      // session, a different fixture edit) and these hunks move — a stubbed constant
+      // fails the shim's flip-the-input test. The test results are the harness's own
+      // report, deterministic here.
+      const diff = await diffWorktree(checkout);
+      const tests = deterministicTestResults(ctx);
+
       // Push the branch to the DURABLE artifact repo so the receipt resolves
       // after shutdown (#120 F3); the reported commit is the one the durable ref
       // points at. Absent a durable repo, the artifact stays on the scratch repo.
@@ -157,7 +203,7 @@ export function createDeterministicShimProvider(
           exitSummary: `deterministic shim: session ${ctx.sessionId} settled on ${checkout.branch}`,
           spendMicros: 0,
           contextPct: null,
-          artifact: { branch: checkout.branch, commit: durableCommit, remote },
+          artifact: { branch: checkout.branch, commit: durableCommit, remote, diff, tests },
         },
       };
     },

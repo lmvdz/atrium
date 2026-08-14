@@ -68,6 +68,10 @@ interface Seeded {
   failedSessionId: string;
   /** settled, NO artifact, uncertified — the row that used to lie with a ✓. */
   cleanExitSessionId: string;
+  /** settled with the #145 enrichment — a real structured diff + failing tests. */
+  richSessionId: string;
+  /** settled whose producer reported an EMPTY diff — the honest-empty case. */
+  emptyDiffSessionId: string;
 }
 
 /** One room that is an agent's channel, a funded plan, and three sessions. */
@@ -201,7 +205,88 @@ async function seed(viewerEmail: string): Promise<Seeded> {
     })
     .returning({ id: sessions.id });
 
-  if (!openSession || !settledSession || !failedSession || !cleanExitSession) {
+  /* A SETTLED SESSION CARRYING THE REAL #145 ENRICHMENT — a structured per-file
+     diff (with a hunk whose line contains quotation marks and first person, to
+     prove the render does NOT hold verbatim file content to the system-voice ban)
+     and a structured test report with failing names. */
+  const [richSession] = await db
+    .insert(sessions)
+    .values({
+      roomId: room.id,
+      planId: plan.id,
+      harness: 'claude-code',
+      model: 'opus · diff',
+      status: 'settled',
+      contextPct: 0.55,
+      spendMicros: 1_200_000,
+      exitSummary: 'Reworked the loader; two tests still red.',
+      artifact: {
+        branch: 'feat/loader',
+        commit: 'deadbee',
+        diff: {
+          files: [
+            {
+              path: 'src/loader.ts',
+              status: 'modified',
+              additions: 2,
+              deletions: 1,
+              binary: false,
+              hunks: [
+                {
+                  header: '@@ -1,3 +1,4 @@',
+                  lines: [
+                    ' export function load() {',
+                    '-  return null;',
+                    '+  const msg = "I said we would ship";',
+                    '+  return msg;',
+                  ],
+                },
+              ],
+            },
+          ],
+          fileCount: 1,
+          additions: 2,
+          deletions: 1,
+          truncated: false,
+        },
+        tests: {
+          passed: 39,
+          failed: 2,
+          failures: ['loader > returns the message', 'loader > handles empty input'],
+          failuresTruncated: false,
+        },
+      },
+    })
+    .returning({ id: sessions.id });
+
+  /* A SETTLED SESSION WHOSE PRODUCER REPORTED AN EMPTY DIFF — the honest-empty
+     case: present-but-empty, which must render "no changes", NOT the absent copy. */
+  const [emptyDiffSession] = await db
+    .insert(sessions)
+    .values({
+      roomId: room.id,
+      planId: plan.id,
+      harness: 'omp',
+      model: 'sonnet · noop',
+      status: 'settled',
+      spendMicros: 40_000,
+      exitSummary: 'settled without touching the tree',
+      artifact: {
+        branch: 'feat/noop',
+        commit: 'cafef00',
+        diff: { files: [], fileCount: 0, additions: 0, deletions: 0, truncated: false },
+      },
+    })
+    .returning({ id: sessions.id });
+
+  if (
+    !openSession ||
+    !settledSession ||
+    !failedSession ||
+    !cleanExitSession ||
+    !richSession ||
+    !emptyDiffSession
+  ) {
     throw new Error('session inserts returned nothing');
   }
 
@@ -216,6 +301,8 @@ async function seed(viewerEmail: string): Promise<Seeded> {
     settledSessionId: settledSession.id,
     failedSessionId: failedSession.id,
     cleanExitSessionId: cleanExitSession.id,
+    richSessionId: richSession.id,
+    emptyDiffSessionId: emptyDiffSession.id,
   };
 }
 
@@ -423,6 +510,67 @@ test.describe('the control plane renders the pin, tree, surfaces and a human-gat
       await expect(
         page.locator(`[data-tree-session="${at.cleanExitSessionId}"] [data-glyph]`).first(),
       ).toHaveAttribute('data-glyph', '~');
+    } finally {
+      await teardown(at);
+    }
+  });
+
+  /**
+   * THE REAL DIFF + TESTS, IN THE BROWSER (#145). The pane renders the actual
+   * per-file hunks in a scroll box, a code line full of quotation marks and first
+   * person survives the render (it is verbatim file content, not the system's
+   * voice), the failing test names show, and a present-but-empty diff renders an
+   * honest "no changes" rather than the absent copy. Checked in both themes,
+   * because the diff colours are design tokens.
+   */
+  test('renders real diff hunks, failing tests, and an honest-empty diff', async ({ page }) => {
+    const email = uniqueEmail('control-diff');
+    await signUpAndVerify(page, { email, name: 'Ada' });
+    const at = await seed(email);
+
+    try {
+      await openControl(page, at);
+
+      // ── the RICH session: real hunks in a scroll box ────────────────────────
+      await page.locator(`[data-tree-session="${at.richSessionId}"]`).click();
+      const review = page.locator(`[data-review-session="${at.richSessionId}"]`);
+      await expect(review).toBeVisible();
+
+      const scroll = review.locator('[data-diff-scroll]');
+      await expect(scroll).toBeVisible();
+      await expect(review.locator('[data-diff-file-path="src/loader.ts"]')).toBeVisible();
+      // The added line carries quotation marks AND first person — verbatim file
+      // content the render must NOT hold to the system-voice ban. If `fileText`
+      // regressed into a speech check, this line would have thrown the page.
+      await expect(review.locator('[data-diff-line="add"]').first()).toContainText(
+        'const msg = "I said we would ship";',
+      );
+      // A real hunk carries context, not just the change.
+      await expect(review.locator('[data-diff-line="context"]').first()).toContainText(
+        'export function load()',
+      );
+      await expect(review.locator('[data-diff-file-count]')).toContainText('1 file');
+
+      // ── the TESTS: pass/fail summary and the failing names ──────────────────
+      await expect(review.locator('[data-tests-failed]')).toContainText('2 failed');
+      await expect(review.locator('[data-test-failure]')).toHaveCount(2);
+      await expect(review.locator('[data-test-failure]').first()).toContainText(
+        'returns the message',
+      );
+
+      // BOTH THEMES: the diff box is token-coloured, so flipping the theme keeps it
+      // legible. The WIRE surface is single-palette, so this is the honest check.
+      await page.evaluate(() => document.documentElement.classList.add('atr-dark'));
+      await expect(scroll).toBeVisible();
+      await expect(review.locator('[data-diff-line="add"]').first()).toBeVisible();
+
+      // ── the HONEST-EMPTY diff: "no changes", not "no diff recorded" ─────────
+      await page.locator(`[data-tree-session="${at.emptyDiffSessionId}"]`).click();
+      const emptyReview = page.locator(`[data-review-session="${at.emptyDiffSessionId}"]`);
+      await expect(emptyReview.locator('[data-diff-empty]')).toBeVisible();
+      await expect(emptyReview.locator('[data-diff-empty]')).toContainText('no changes');
+      await expect(emptyReview.locator('[data-diff-absent]')).toHaveCount(0);
+      await expect(emptyReview.locator('[data-diff-structured]')).toHaveCount(0);
     } finally {
       await teardown(at);
     }

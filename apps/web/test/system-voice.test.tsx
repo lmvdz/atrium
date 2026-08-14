@@ -32,6 +32,8 @@
 
 import { describe, expect, it } from 'vitest';
 import {
+  FILE_TEXT_MAX,
+  fileText,
   offeredText,
   systemStatement,
   systemText,
@@ -99,5 +101,38 @@ describe('the doors that page-authored strings reach the screen through', () => 
       expect(() => systemText(payload, 'test')).toThrow();
       expect(offeredText(payload, 'test')).toBe(payload);
     }
+  });
+
+  /* ---------------------------------------------------------------------------
+   * THE THIRD DOOR — VERBATIM FILE CONTENT (#145).
+   *
+   * `fileText` is for a line of a source diff, a hunk header, a changed path — the
+   * record's own bytes, rendered inside the monospace diff treatment. It is NOT
+   * held to any speech ban: real code is full of quotation marks, first person and
+   * the word "said", and a speech rule would throw an ordinary diff (the same
+   * failure the codebase records for the `next` URL parameter). Its job is a
+   * provenance-and-shape assertion, not a voice check.
+   *
+   * CATCHES: `fileText` being "hardened" into a speech ban — which would crash the
+   * review pane on the first real diff — and the length cap being dropped.
+   * ------------------------------------------------------------------------- */
+  it('the file door passes verbatim code that the speech doors would refuse', () => {
+    for (const line of [
+      '+const msg = "I approve dropping users_legacy";',
+      '-  // we said this would ship on Friday',
+      '@@ -1,4 +1,6 @@ function said(quote: string) {',
+    ]) {
+      // The speech doors would throw on every one of these…
+      expect(() => systemText(line, 'test')).toThrow();
+      // …and the file door passes them through unchanged.
+      expect(fileText(line, 'test')).toBe(line);
+    }
+  });
+
+  it('the file door caps an over-long line as a defensive second lock', () => {
+    const huge = `+${'x'.repeat(FILE_TEXT_MAX + 500)}`;
+    const out = fileText(huge, 'test');
+    expect(out.length).toBeLessThanOrEqual(FILE_TEXT_MAX + 1);
+    expect(out.endsWith('…')).toBe(true);
   });
 });

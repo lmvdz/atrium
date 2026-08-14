@@ -1009,7 +1009,9 @@ export function systemText(value: string, from: string): string {
 }
 
 /**
- * THE OTHER DOOR, AND WHY THERE ARE EXACTLY TWO.
+ * THE OTHER PAGE-VOICE DOOR (the two page-voice doors split by WHO SPEAKS; a
+ * third door, `fileText`, is for content the page neither states nor offers —
+ * see it below).
  *
  * `systemText` holds a string to the whole system-voice rule, which is right for
  * everything the page STATES and wrong for the copy ON A CONTROL. Round 4 already
@@ -1045,6 +1047,49 @@ export function offeredText(value: string, from: string): string {
     );
   }
   return painted;
+}
+
+/** The defensive length cap on a single piece of verbatim file/diff text (#145). */
+export const FILE_TEXT_MAX = 2000;
+
+/**
+ * THE THIRD DOOR — VERBATIM FILE CONTENT (#145), which the system/offered split
+ * does not cover.
+ *
+ * `systemText` bans quotation marks, first person and "X said" framing;
+ * `offeredText` bans quotation marks. Both are WRONG for a line of a source diff,
+ * a hunk header, a changed file's path, or a failing test's name. Those are not
+ * the page STATING something and not the copy ON a control the page offers — they
+ * are VERBATIM BYTES the record carries: a `SessionDiff`/`SessionTestResults`
+ * projected from the settle receipt (`lib/control-plane-data.ts`), which the
+ * ExecutionProvider computed from a real git object (#120/#145). Real source is
+ * full of `"`, of `I`/`we`/`my`, of the word `said`; holding it to a speech rule
+ * would turn an ordinary diff into a thrown page — the exact failure the codebase
+ * already records for the `next` URL parameter (printed-strings.test.tsx: "a
+ * quotation mark is a URL, not a system-voice defect").
+ *
+ * So file content has its OWN door, and its check is NOT a speech ban — it can't
+ * be, the content is not speech. It is a provenance-and-shape assertion: the value
+ * is a string (a non-string from an untyped JS caller throws, naming the site),
+ * and it is length-bounded as a defensive second lock over the producer's own cap
+ * (`execution/git.ts` caps every line at 500 chars; this catches a hand-forged
+ * over-long payload before it reaches the DOM). It fabricates nothing and
+ * attributes nothing — the content is rendered ONLY inside the monospace diff
+ * treatment (`ReviewPane`'s `DiffView`), where a `data-diff-line` marker and a
+ * tinted row make it unmistakably file data, never read as anyone's utterance.
+ *
+ * Registered as a text door in `test/printed.ts`, so the printed-strings sweep
+ * treats a `fileText(…)` sink as checked — the same standing `systemText` has,
+ * for a category `systemText` cannot serve.
+ */
+export function fileText(value: string, from: string): string {
+  if (typeof value !== 'string') {
+    throw new Error(`${from}: verbatim file content must be a string`);
+  }
+  if (value.length > FILE_TEXT_MAX) {
+    return `${value.slice(0, FILE_TEXT_MAX)}…`;
+  }
+  return value;
 }
 
 /** The runtime boundary for system voice, mirroring `parseQuotation`. */

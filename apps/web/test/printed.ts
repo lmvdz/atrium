@@ -123,12 +123,24 @@ const REGISTER_DOORS: ReadonlySet<string> = new Set([
  *   which keeps its pronouns (CONVENTIONS: "the first-person ban is scoped to the
  *   system's framing, not to the payload it reports") and is bounded to controls
  *   by `test/printed-strings.test.tsx`.
+ *
+ *   VERBATIM FILE CONTENT (#145). `fileText` for a value that is neither the page
+ *   stating something nor the copy on a control: a line of a source diff, a hunk
+ *   header, a changed path, a failing test's name. It is RECORD data the settle
+ *   receipt carried (`lib/control-plane-data.ts` → the ExecutionProvider's real
+ *   git output), rendered only inside the monospace diff treatment. It is held to
+ *   NO speech ban — real source is full of `"`, first person and the word "said",
+ *   and a speech rule would throw an ordinary diff (the same reason `next` URLs
+ *   are not `systemText`, receipted in printed-strings.test.tsx). Its door buys a
+ *   provenance-and-shape assertion, not a speech check — see `fileText` in
+ *   `model/quotation.ts`.
  */
 const TEXT_DOORS: ReadonlySet<string> = new Set([
   'systemText',
   'statementText',
   'rationaleText',
   'offeredText',
+  'fileText',
 ]);
 
 /**

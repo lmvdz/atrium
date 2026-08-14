@@ -20,6 +20,7 @@ import {
   createDeterministicShimProvider,
   deterministicArtifact,
   EXECUTION_FAIL_DIRECTIVE,
+  EXECUTION_TESTS_FAIL_DIRECTIVE,
   SHIM_ARTIFACT_PATH,
 } from '../../src/execution/shim.js';
 
@@ -156,6 +157,49 @@ describe('the deterministic shim produces a real, verifiable artifact', () => {
     } finally {
       await rm(durableDir, { recursive: true, force: true });
     }
+  });
+
+  it('carries the REAL structured diff and a test report on the receipt (#145)', async () => {
+    const provider = createDeterministicShimProvider({ repo });
+    const c = ctx();
+    const report = await provider.run(await provider.resolve(c), c);
+
+    const artifact = report.receipt.artifact;
+    // The diff is PRESENT and non-empty — the shim produced a real commit.
+    expect(artifact?.diff).toBeDefined();
+    expect(artifact?.diff?.files.length).toBeGreaterThan(0);
+    const added = artifact?.diff?.files.find((f) => f.path === SHIM_ARTIFACT_PATH);
+    expect(added?.status).toBe('added');
+    // The hunk carries the EXACT content — the session id is inside ARTIFACT.json,
+    // so a stubbed constant diff would not contain it.
+    const body = (added?.hunks ?? []).flatMap((h) => h.lines).join('\n');
+    expect(body).toContain(c.sessionId);
+
+    // The test report is present; the clean run is all-passing.
+    expect(artifact?.tests).toEqual({
+      passed: 3,
+      failed: 0,
+      failures: [],
+      failuresTruncated: false,
+    });
+  });
+
+  it('flips the input on TESTS: the tests-fail directive settles clean but reports a failure', async () => {
+    const provider = createDeterministicShimProvider({ repo });
+    const pass = ctx();
+    const fail = ctx({ model: EXECUTION_TESTS_FAIL_DIRECTIVE });
+    const rp = await provider.run(await provider.resolve(pass), pass);
+    const rf = await provider.run(await provider.resolve(fail), fail);
+
+    // The tests-fail directive still SETTLES (a real artifact + diff) — the work
+    // exists; its tests failed, which the human must see before certifying.
+    expect(rf.terminal.ok).toBe(true);
+    expect(rf.receipt.artifact?.diff?.files.length).toBeGreaterThan(0);
+
+    // Flip-the-input: the rendered test summary moves with the directive.
+    expect(rp.receipt.artifact?.tests?.failed).toBe(0);
+    expect(rf.receipt.artifact?.tests?.failed).toBe(1);
+    expect(rf.receipt.artifact?.tests?.failures.length).toBe(1);
   });
 
   it('never moves trunk — no artifact lands itself (the covenant, in git)', async () => {

@@ -490,6 +490,131 @@
   color: var(--tx2);
 }
 
+/* ── structured diff (#145) ─────────────────────────────────────────────────
+ * Real per-file hunks. The line rows scroll HORIZONTALLY inside `.diffScroll`
+ * alone — the page body never scrolls sideways (the frontend guideline). Colours
+ * are design tokens, so the single WIRE surface renders correctly in either theme.
+ */
+.diffSummary {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  flex-wrap: wrap;
+  font-size: 11px;
+}
+
+.diffScroll {
+  margin-top: 6px;
+  border: 1px solid var(--line2);
+  border-radius: 5px;
+  background: var(--bg0);
+  overflow-x: auto;
+  overflow-y: auto;
+  max-height: 340px;
+  font-size: 11.5px;
+  line-height: 1.55;
+}
+
+.diffFile {
+  border-bottom: 1px solid var(--line);
+}
+
+.diffFile:last-child {
+  border-bottom: none;
+}
+
+.diffFileHead {
+  position: sticky;
+  left: 0;
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  padding: 5px 8px;
+  background: var(--bg1);
+  border-bottom: 1px solid var(--line);
+}
+
+.diffStatus {
+  flex: none;
+  padding: 0 5px;
+  border-radius: 3px;
+  background: var(--bg6);
+  color: var(--tx2);
+  font-size: 9.5px;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+
+.diffPath {
+  color: var(--tx0);
+  overflow-wrap: anywhere;
+  flex: 1 1 auto;
+  min-width: 0;
+}
+
+.diffFileCounts {
+  flex: none;
+  font-size: 10.5px;
+}
+
+.diffHunkHead {
+  position: sticky;
+  left: 0;
+  padding: 2px 8px;
+  background: var(--bg3);
+  color: var(--tx2);
+  border-top: 1px solid var(--line);
+}
+
+/* Each line is `pre` and as wide as its content but never narrower than the box,
+ * so the widest line sets the scroll width and a short line's tint still fills
+ * the row. This is what lets the box — and only the box — scroll horizontally. */
+.diffLine {
+  white-space: pre;
+  width: max-content;
+  min-width: 100%;
+  padding: 0 8px;
+  color: var(--tx1);
+}
+
+.diffAdd {
+  background: var(--grnbg);
+  color: var(--tx0);
+}
+
+.diffDel {
+  background: var(--redbg);
+  color: var(--tx0);
+}
+
+.diffContext {
+  color: var(--tx1);
+}
+
+.diffMeta {
+  color: var(--tx2);
+  font-style: italic;
+}
+
+.diffBinary {
+  padding: 4px 8px;
+  color: var(--tx2);
+}
+
+/* ── structured test failures (#145) ────────────────────────────────────── */
+.testFailures {
+  margin: 6px 0 0;
+  padding: 0 0 0 14px;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.testFailure {
+  color: var(--red2);
+  overflow-wrap: anywhere;
+}
+
 /* certify block */
 .certify {
   border: 1px solid var(--line2);

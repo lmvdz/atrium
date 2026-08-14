@@ -962,6 +962,181 @@ describe('the review pane distinguishes no-artifact from an incomplete receipt',
 });
 
 /**
+ * THE REAL DIFF AND TEST RESULTS, RENDERED HONESTLY (#145).
+ *
+ * The pane used to render a one-line `diffStat` or "no diff recorded"; #145 carries
+ * the real per-file hunks and a structured test report on the receipt. These are
+ * the render witnesses: the exact hunks appear, FLIP-THE-INPUT moves them, a
+ * present-but-empty diff is an honest "no changes" (NOT the absent copy), a session
+ * that never reported a diff says so distinctly, and the test summary is legible.
+ */
+describe('the review pane renders the real diff and test results (#145)', () => {
+  const noop = () => {};
+  function pane(s: ControlSessionRow) {
+    return render(
+      <ReviewPane
+        agentName={null}
+        certifyError={null}
+        onArm={noop}
+        onCertify={noop}
+        onDisarm={noop}
+        planTitle={null}
+        session={s}
+        viewerId="ada-id"
+        viewerKind="human"
+      />,
+    );
+  }
+
+  function diffArtifact(line: string): ControlSessionRow['artifact'] {
+    return {
+      branch: 'feat/x',
+      commit: 'abc123',
+      diff: {
+        files: [
+          {
+            path: 'src/app.ts',
+            status: 'modified',
+            additions: 1,
+            deletions: 0,
+            binary: false,
+            hunks: [{ header: '@@ -1,2 +1,3 @@', lines: [' const a = 1;', line] }],
+          },
+        ],
+        fileCount: 1,
+        additions: 1,
+        deletions: 0,
+        truncated: false,
+      },
+      tests: { passed: 4, failed: 0, failures: [], failuresTruncated: false },
+    };
+  }
+
+  it('renders the real hunk lines in a scrollable box, with a file summary', () => {
+    const { container } = pane(
+      session({ status: 'settled', artifact: diffArtifact('+const b = 2;') }),
+    );
+    const scroll = container.querySelector('[data-diff-scroll]');
+    expect(scroll).not.toBeNull();
+    // The scroll box owns the horizontal overflow (the page body never scrolls).
+    expect(container.querySelector('[data-diff-structured]')).not.toBeNull();
+    expect(container.querySelector('[data-diff-file-path="src/app.ts"]')).not.toBeNull();
+    const added = container.querySelector('[data-diff-line="add"]');
+    expect(added?.textContent).toBe('+const b = 2;');
+    // A context line is present too — real hunks, not just the changed line.
+    expect(container.querySelector('[data-diff-line="context"]')?.textContent).toContain(
+      'const a = 1;',
+    );
+    expect(container.querySelector('[data-diff-file-count]')?.textContent).toContain('1 file');
+  });
+
+  it('flips the input: changing the edit moves the rendered hunks (a stub would not)', () => {
+    const first = pane(session({ status: 'settled', artifact: diffArtifact('+const b = 2;') }));
+    const firstText = first.container.querySelector('[data-diff-line="add"]')?.textContent;
+    cleanup();
+    const second = pane(session({ status: 'settled', artifact: diffArtifact('+const zzz = 99;') }));
+    const secondText = second.container.querySelector('[data-diff-line="add"]')?.textContent;
+    expect(firstText).toBe('+const b = 2;');
+    expect(secondText).toBe('+const zzz = 99;');
+    expect(firstText).not.toBe(secondText);
+  });
+
+  it('renders code containing quotation marks and first person WITHOUT throwing', () => {
+    // A diff line is verbatim file content, not the system's voice — `fileText`
+    // must not hold it to the speech ban `systemText` enforces.
+    const line = '+const msg = "I said we would ship";';
+    const { container } = pane(session({ status: 'settled', artifact: diffArtifact(line) }));
+    expect(container.querySelector('[data-diff-line="add"]')?.textContent).toBe(line);
+  });
+
+  it('an empty diff is an HONEST EMPTY, distinct from an absent one', () => {
+    const empty = session({
+      status: 'settled',
+      artifact: {
+        branch: 'feat/x',
+        commit: 'abc123',
+        diff: { files: [], fileCount: 0, additions: 0, deletions: 0, truncated: false },
+      },
+    });
+    const { container } = pane(empty);
+    expect(container.querySelector('[data-diff-empty]')).not.toBeNull();
+    expect(container.querySelector('[data-diff-absent]')).toBeNull();
+    expect(container.querySelector('[data-diff-empty]')?.textContent).toContain('no changes');
+  });
+
+  it('a session that reported no diff says so distinctly (absent, not empty)', () => {
+    const { container } = pane(
+      session({ status: 'settled', artifact: { branch: 'b', commit: 'c' } }),
+    );
+    expect(container.querySelector('[data-diff-absent]')).not.toBeNull();
+    expect(container.querySelector('[data-diff-empty]')).toBeNull();
+    expect(container.querySelector('[data-diff-structured]')).toBeNull();
+  });
+
+  it('shows a truncation notice when the producer capped the diff', () => {
+    const truncated = session({
+      status: 'settled',
+      artifact: {
+        branch: 'b',
+        commit: 'c',
+        diff: {
+          files: [
+            {
+              path: 'a.ts',
+              status: 'added',
+              additions: 1,
+              deletions: 0,
+              binary: false,
+              hunks: [{ header: '@@ -0,0 +1 @@', lines: ['+x'] }],
+            },
+          ],
+          fileCount: 12,
+          additions: 900,
+          deletions: 3,
+          truncated: true,
+        },
+      },
+    });
+    const { container } = pane(truncated);
+    expect(container.querySelector('[data-diff-truncated="true"]')).not.toBeNull();
+    expect(container.querySelector('[data-diff-truncated-note]')?.textContent).toContain(
+      'truncated',
+    );
+  });
+
+  it('renders the test summary and failing test names when tests failed', () => {
+    const failed = session({
+      status: 'settled',
+      artifact: {
+        branch: 'b',
+        commit: 'c',
+        tests: {
+          passed: 7,
+          failed: 2,
+          failures: ['app > renders header', 'app > handles empty state'],
+          failuresTruncated: false,
+        },
+      },
+    });
+    const { container } = pane(failed);
+    expect(container.querySelector('[data-tests-structured]')).not.toBeNull();
+    expect(container.querySelector('[data-tests-passed]')?.textContent).toContain('7 passed');
+    expect(container.querySelector('[data-tests-failed]')?.textContent).toContain('2 failed');
+    const failures = container.querySelectorAll('[data-test-failure]');
+    expect(failures.length).toBe(2);
+    expect(failures[0]?.textContent).toContain('renders header');
+  });
+
+  it('says "no test run recorded" when no producer reported tests', () => {
+    const { container } = pane(
+      session({ status: 'settled', artifact: { branch: 'b', commit: 'c' } }),
+    );
+    expect(container.querySelector('[data-tests-absent]')).not.toBeNull();
+    expect(container.querySelector('[data-tests-structured]')).toBeNull();
+  });
+});
+
+/**
  * SPEND SYMMETRY ON THE CATCH-UP SURFACE (#127 fix round 2, finding D).
  *
  * `draw_refused` was already a lifecycle kind, so a REFUSED continuation showed
