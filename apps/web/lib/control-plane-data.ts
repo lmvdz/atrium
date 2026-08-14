@@ -146,6 +146,18 @@ export interface ControlPlanRow {
    * `count(sessions)` the moment continuations existed.
    */
   readonly authorizedDraws: number;
+  /**
+   * Draws Atrium REFUSED under this plan's CURRENT slice (#146). Counted from the
+   * `draw_refused` ledger rows whose payload `slice` matches the plan's present
+   * `rlimit_slice` (an unfunded plan's refusals carry `slice: 0`), so a human
+   * RAISING the slice drops the old refusals out of the count — the surface shows
+   * "the slice as it stands is turning work away", never a stale historical tally.
+   *
+   * It is the ENFORCED refusal (what Atrium turned down), never adapter-reported
+   * spend (#118): a refusal grants nothing, so `authorized_draws` does not move
+   * for it, and this is the separate honest fact that a spent slice is refusing.
+   */
+  readonly refusedDraws: number;
   readonly sessions: readonly ControlSessionRow[];
 }
 
@@ -276,58 +288,85 @@ export async function loadControlPlane(
     gt(coreEvents.roomSeq, seenSeq),
   );
 
-  const [planRows, sessionRows, decisionRows, eventRows, unseenCountRows] = await Promise.all([
-    database
-      .select()
-      .from(plans)
-      .where(eq(plans.roomId, roomId))
-      .orderBy(asc(plans.createdAt), asc(plans.id)),
-    database
-      .select({
-        ...getTableColumns(sessions),
-        /* THE DIGEST OF THE ARTIFACT THIS RENDER CARRIES — `md5(artifact::text)`,
+  const [planRows, sessionRows, decisionRows, eventRows, unseenCountRows, refusalRows] =
+    await Promise.all([
+      database
+        .select()
+        .from(plans)
+        .where(eq(plans.roomId, roomId))
+        .orderBy(asc(plans.createdAt), asc(plans.id)),
+      database
+        .select({
+          ...getTableColumns(sessions),
+          /* THE DIGEST OF THE ARTIFACT THIS RENDER CARRIES — `md5(artifact::text)`,
            the same expression the arm and confirm compute, so the client can hand
            it back as its attestation of what it reviewed and the server can bind
            the signature to that exact revision (round-6 finding 1). NULL for a null
            artifact. */
-        artifactDigest: sql<string | null>`md5(${sessions.artifact}::text)`,
-      })
-      .from(sessions)
-      .where(eq(sessions.roomId, roomId))
-      .orderBy(asc(sessions.createdAt), asc(sessions.id)),
-    /* THE DECISIONS OWED TO THIS VIEWER, filtered AT THE QUERY (round-7 finding 6).
+          artifactDigest: sql<string | null>`md5(${sessions.artifact}::text)`,
+        })
+        .from(sessions)
+        .where(eq(sessions.roomId, roomId))
+        .orderBy(asc(sessions.createdAt), asc(sessions.id)),
+      /* THE DECISIONS OWED TO THIS VIEWER, filtered AT THE QUERY (round-7 finding 6).
        `attention_items` is per-person (`user_id` is the addressee), so the whole
        pending queue is not this reader's to see: handing every viewer the room's
        items and filtering only at render meant the server shipped one person's
        decisions to another. Scoped to `user_id = viewerId` here, so two viewers get
        two different payloads from the server, not the same payload masked twice. */
-    database
-      .select()
-      .from(attentionItems)
-      .where(
-        and(
-          eq(attentionItems.roomId, roomId),
-          eq(attentionItems.status, 'pending'),
-          eq(attentionItems.userId, viewerId),
-        ),
-      )
-      .orderBy(asc(attentionItems.createdAt), asc(attentionItems.id)),
-    database
-      .select({
-        id: coreEvents.id,
-        type: coreEvents.type,
-        actorKind: coreEvents.actorKind,
-        at: coreEvents.occurredAt,
-      })
-      .from(coreEvents)
-      .where(unseenPredicate)
-      .orderBy(desc(coreEvents.roomSeq))
-      .limit(UNSEEN_LIST_LIMIT),
-    /* THE TRUE TOTAL, uncapped — so the surface reports `12+` rather than a capped
+      database
+        .select()
+        .from(attentionItems)
+        .where(
+          and(
+            eq(attentionItems.roomId, roomId),
+            eq(attentionItems.status, 'pending'),
+            eq(attentionItems.userId, viewerId),
+          ),
+        )
+        .orderBy(asc(attentionItems.createdAt), asc(attentionItems.id)),
+      database
+        .select({
+          id: coreEvents.id,
+          type: coreEvents.type,
+          actorKind: coreEvents.actorKind,
+          at: coreEvents.occurredAt,
+        })
+        .from(coreEvents)
+        .where(unseenPredicate)
+        .orderBy(desc(coreEvents.roomSeq))
+        .limit(UNSEEN_LIST_LIMIT),
+      /* THE TRUE TOTAL, uncapped — so the surface reports `12+` rather than a capped
        "12" that lies when a thirteenth event arrives (round-7 finding 5). */
-    database.select({ total: sql<number>`count(*)::int` }).from(coreEvents).where(unseenPredicate),
-  ]);
+      database
+        .select({ total: sql<number>`count(*)::int` })
+        .from(coreEvents)
+        .where(unseenPredicate),
+      /* THE REFUSED DRAWS, by plan and by the slice they were refused UNDER (#146).
+       The `draw_refused` payload carries the `planId` and the `slice` in force at
+       the moment of the refusal; tallying against each plan's CURRENT slice below
+       is what makes a raise clear the count. This is the enforcement ledger (what
+       Atrium turned down), never adapter-reported spend. */
+      database
+        .select({
+          planId: sql<string>`${coreEvents.payload} ->> 'planId'`,
+          slice: sql<number>`(${coreEvents.payload} ->> 'slice')::int`,
+        })
+        .from(coreEvents)
+        .where(and(eq(coreEvents.roomId, roomId), eq(coreEvents.type, 'draw_refused'))),
+    ]);
   const unseenTotal = unseenCountRows[0]?.total ?? 0;
+
+  /* Refusals grouped by plan, each keeping the slice it was refused under, so the
+     per-plan count below can keep only the refusals under that plan's slice AS IT
+     STANDS NOW. */
+  const refusalSlicesByPlan = new Map<string, number[]>();
+  for (const refusal of refusalRows) {
+    if (refusal.planId === null) continue;
+    const list = refusalSlicesByPlan.get(refusal.planId);
+    if (list === undefined) refusalSlicesByPlan.set(refusal.planId, [refusal.slice]);
+    else list.push(refusal.slice);
+  }
 
   /* The agents whose work lives in this room: every agent named by a plan here.
      A plan's `agent_user_id` is exactly its channel owner (the
@@ -415,6 +454,13 @@ export async function loadControlPlane(
 
   const plansByAgent = new Map<string, ControlPlanRow[]>();
   for (const plan of planRows) {
+    /* Refusals UNDER THE SLICE AS IT STANDS. An unfunded plan (`rlimit_slice`
+       NULL) refuses with `slice: 0`, so its refusals are counted against 0; a
+       raise moves the current slice and the old refusals no longer match. */
+    const currentSlice = plan.rlimitSlice ?? 0;
+    const refusedDraws = (refusalSlicesByPlan.get(plan.id) ?? []).filter(
+      (slice) => slice === currentSlice,
+    ).length;
     const row: ControlPlanRow = {
       id: plan.id,
       agentUserId: plan.agentUserId,
@@ -424,6 +470,7 @@ export async function loadControlPlane(
       spentMicros: plan.spentMicros,
       rlimitSlice: plan.rlimitSlice,
       authorizedDraws: plan.authorizedDraws,
+      refusedDraws,
       sessions: sessionsByPlan.get(plan.id) ?? [],
     };
     const list = plansByAgent.get(plan.agentUserId);

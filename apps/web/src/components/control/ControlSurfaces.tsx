@@ -30,6 +30,13 @@ export interface CostPlanLine {
   readonly title: string;
   readonly drawsLabel: string;
   readonly dollarsLabel: string;
+  /**
+   * Draws Atrium REFUSED under the current slice (#146). The meter reads granted
+   * draws only, so it stays honest; this is the separate fact that the slice is
+   * turning work away — otherwise visible only as an unseen line (the #140
+   * gauntlet finding). Zero renders nothing.
+   */
+  readonly refused: number;
   readonly warn: boolean;
   /** 0..1 fill of the enforced draw ceiling; ≥1 (or unfunded burn) reads as over. */
   readonly fill: number;
@@ -145,6 +152,11 @@ export function ControlSurfaces({ decisions, unseen, cost }: ControlSurfacesProp
                   <span data-cost-draws={plan.drawsLabel}>
                     {systemText(plan.drawsLabel, 'ControlSurfaces draws')}
                   </span>
+                  {plan.refused > 0 ? (
+                    <span className={styles.costRefused} data-cost-refused={plan.refused}>
+                      {systemText(` · ${plan.refused} refused`, 'ControlSurfaces refused')}
+                    </span>
+                  ) : null}
                   {' · '}
                   <span data-cost-dollars={plan.dollarsLabel}>
                     {systemText(plan.dollarsLabel, 'ControlSurfaces dollars')}

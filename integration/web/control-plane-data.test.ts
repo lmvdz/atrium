@@ -337,3 +337,139 @@ describe('a session row carries the certifier KIND, not only the name', () => {
     expect(session?.certifyArmedAt).not.toBeNull();
   });
 });
+
+/* ---------------------------------------------------------------------------
+ * THE REFUSED-DRAW COUNT ON THE COST SURFACE — #146.
+ *
+ * The cost meter reads GRANTED draws (`authorized_draws`) against the slice, so a
+ * refused draw — which grants nothing — never moves it. The #140 gauntlet found a
+ * spent slice turning work away was therefore invisible on cost, showing only as
+ * an unseen line. `loadControlPlane` now carries `refusedDraws` per plan: the
+ * `draw_refused` ledger rows refused UNDER THE PLAN'S CURRENT SLICE, so the
+ * surface can render the refusal while the meter stays honest, and a human RAISING
+ * the slice clears the count. This is the ENFORCED refusal (what Atrium turned
+ * down), never adapter-reported spend.
+ * ------------------------------------------------------------------------- */
+describe('the cost surface carries the enforced refused-draw count (#146)', () => {
+  /**
+   * A `draw_refused` ledger row, appended through the one door, refused under
+   * `slice`. `actorId` is the AGENT whose draw was refused — the ledger requires
+   * the actor be a real identity in the room (the planId is not one).
+   */
+  async function drawRefused(
+    roomId: string,
+    planId: string,
+    actorId: string,
+    slice: number,
+  ): Promise<void> {
+    clock += 1;
+    const at = new Date(Date.UTC(2026, 7, 14, 0, 0, clock)).toISOString();
+    const id = randomUUID();
+    const payload = {
+      id,
+      type: 'draw_refused',
+      at,
+      roomId,
+      planId,
+      reason: 'budget',
+      slice,
+      authorizedDraws: slice,
+      harness: 'omp',
+      model: 'haiku',
+    };
+    await handle.db.execute(sql`
+      SELECT "room_seq" FROM atrium_append_core_event(
+        ${roomId}::uuid,
+        ${id}::text,
+        'draw_refused'::event_type,
+        'agent'::actor_kind,
+        ${actorId}::text,
+        ${JSON.stringify(payload)}::jsonb,
+        ${at}::timestamptz,
+        ${null}::text
+      )
+    `);
+  }
+
+  async function planWithSlice(
+    roomId: string,
+    agentUserId: string,
+    slice: number | null,
+    authorizedDraws: number,
+  ): Promise<string> {
+    const planId = randomUUID();
+    await handle.db.insert(plans).values({
+      id: planId,
+      roomId,
+      agentUserId,
+      title: 'a plan',
+      status: 'open',
+      rlimitSlice: slice,
+      authorizedDraws,
+    });
+    return planId;
+  }
+
+  it('counts the refusals under the CURRENT slice, and the meter (used) does not move', async () => {
+    const room = await seedRoom(handle, ['ada', 'hexi'], { agents: ['hexi'] });
+    const ada = room.people.ada as string;
+    const hexi = room.people.hexi as string;
+    await agentWithChannel(hexi, ada, room.roomId);
+
+    // A plan funded to a slice of 3, all 3 draws granted; the 4th and 5th refused.
+    const planId = await planWithSlice(room.roomId, hexi, 3, 3);
+    await drawRefused(room.roomId, planId, hexi, 3);
+    await drawRefused(room.roomId, planId, hexi, 3);
+
+    const view = await loadControlPlane(handle.db, room.roomId, 'fleet', ada);
+    const plan = view.agents[0]?.plans[0];
+    expect(plan?.authorizedDraws).toBe(3); // GRANTS only — the refusals did not move it
+    expect(plan?.rlimitSlice).toBe(3);
+    expect(plan?.refusedDraws).toBe(2); // the two refused draws render
+  });
+
+  /**
+   * RAISING THE SLICE CLEARS THE STALE COUNT. Two draws were refused under slice 3;
+   * a human raises the slice to 5. Those refusals were against the old ceiling, so
+   * they no longer describe the plan as it stands — `refusedDraws` reads 0.
+   *
+   * RED ON REVERT: count `draw_refused` rows regardless of the slice they carry,
+   * and the raised plan keeps reporting 2 stale refusals forever.
+   */
+  it('a raise drops refusals taken under the old slice — the count is not stale', async () => {
+    const room = await seedRoom(handle, ['ada', 'hexi'], { agents: ['hexi'] });
+    const ada = room.people.ada as string;
+    const hexi = room.people.hexi as string;
+    await agentWithChannel(hexi, ada, room.roomId);
+
+    const planId = await planWithSlice(room.roomId, hexi, 3, 3);
+    await drawRefused(room.roomId, planId, hexi, 3);
+    await drawRefused(room.roomId, planId, hexi, 3);
+    // The human raises the ceiling to 5 — the old refusals were under 3.
+    await handle.db.update(plans).set({ rlimitSlice: 5 }).where(eq(plans.id, planId));
+
+    const view = await loadControlPlane(handle.db, room.roomId, 'fleet', ada);
+    const plan = view.agents[0]?.plans[0];
+    expect(plan?.rlimitSlice).toBe(5);
+    expect(plan?.refusedDraws).toBe(0); // stale refusals under slice 3 no longer count
+  });
+
+  it('an UNFUNDED plan counts its slice-0 refusals; funding then clears them', async () => {
+    const room = await seedRoom(handle, ['ada', 'hexi'], { agents: ['hexi'] });
+    const ada = room.people.ada as string;
+    const hexi = room.people.hexi as string;
+    await agentWithChannel(hexi, ada, room.roomId);
+
+    // Unfunded (null slice): the loop's first spawn is refused under slice 0.
+    const planId = await planWithSlice(room.roomId, hexi, null, 0);
+    await drawRefused(room.roomId, planId, hexi, 0);
+
+    const unfunded = await loadControlPlane(handle.db, room.roomId, 'fleet', ada);
+    expect(unfunded.agents[0]?.plans[0]?.refusedDraws).toBe(1);
+
+    // FLIP THE INPUT: fund it to 3. The slice-0 refusal is no longer the current story.
+    await handle.db.update(plans).set({ rlimitSlice: 3 }).where(eq(plans.id, planId));
+    const funded = await loadControlPlane(handle.db, room.roomId, 'fleet', ada);
+    expect(funded.agents[0]?.plans[0]?.refusedDraws).toBe(0);
+  });
+});

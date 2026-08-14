@@ -15,19 +15,22 @@ import Link from 'next/link';
 import { useRouter } from 'next/navigation';
 import { useMemo, useRef, useState } from 'react';
 import type { ArmOutcome, CertifyOutcome, DisarmOutcome } from '@/lib/certify-session';
-import type { ControlPlaneData, ControlSessionRow } from '@/lib/control-plane-data';
+import type { ControlPlaneData, ControlPlanRow, ControlSessionRow } from '@/lib/control-plane-data';
 import type { ParticipantKind } from '../model/kind';
 import { systemText } from '../model/quotation';
 import { ControlPin, type ControlPinItem } from './ControlPin';
 import { ControlSurfaces, type CostPlanLine, type SurfaceLine } from './ControlSurfaces';
 import styles from './control.module.css';
+import { PlanPane } from './PlanPane';
 import { ProcessTree } from './ProcessTree';
 import { ReviewPane } from './ReviewPane';
 import {
   decisionLabel,
   decisionState,
   formatMicros,
+  fundingOwedState,
   planCost,
+  planOwedFunding,
   sessionAwaitsLanding,
   sessionState,
 } from './state';
@@ -151,7 +154,20 @@ export function ControlPlane({
 }: ControlPlaneProps) {
   const router = useRouter();
   const [openSessionId, setOpenSessionId] = useState<string | undefined>(undefined);
+  /* The right column shows a session's ReviewPane OR a plan's PlanPane — never
+     both. Opening one clears the other so the pane a person is acting in is
+     unambiguous. */
+  const [openPlanId, setOpenPlanId] = useState<string | undefined>(undefined);
   const [certifyError, setCertifyError] = useState<string | null>(null);
+
+  const openSession = (sessionId: string) => {
+    setOpenPlanId(undefined);
+    setOpenSessionId(sessionId);
+  };
+  const openPlan = (planId: string) => {
+    setOpenSessionId(undefined);
+    setOpenPlanId(planId);
+  };
 
   /* WHO IS OWED. A failed session and an unlanded artifact are owed to any HUMAN
      — certifying is a human-only act — so an agent-principal viewer must not be
@@ -182,6 +198,18 @@ export function ControlPlane({
   }, [data.agents]);
 
   const allSessions = useMemo(() => [...index.values()], [index]);
+
+  // A flat index of every plan with its agent name, so the pin's owed-funding row
+  // and the plan pane resolve one by id without re-walking the tree.
+  const planIndex = useMemo(() => {
+    const map = new Map<string, { plan: ControlPlanRow; agentName: string }>();
+    for (const agent of data.agents) {
+      for (const plan of agent.plans) {
+        map.set(plan.id, { plan, agentName: agent.name });
+      }
+    }
+    return map;
+  }, [data.agents]);
 
   /* WHAT THE PIN AND THE DECISIONS SURFACE ARE ABOUT: the items addressed to
      THIS reader. The room's other pending items belong to the people they name,
@@ -218,7 +246,7 @@ export function ControlPlane({
           title: `${session.model} failed`,
           detail: session.exitSummary ?? 'the session exited without a clean receipt',
           meta: planTitle,
-          onOpen: () => setOpenSessionId(session.id),
+          onOpen: () => openSession(session.id),
         });
       } else if (sessionAwaitsLanding(session)) {
         items.push({
@@ -231,7 +259,25 @@ export function ControlPlane({
               ? `on ${session.artifact.branch}`
               : 'settled, awaiting a human'),
           meta: planTitle,
-          onOpen: () => setOpenSessionId(session.id),
+          onOpen: () => openSession(session.id),
+        });
+      }
+    }
+    /* OWED FUNDING (#146). A plan opened with a zero/absent slice cannot spawn —
+       it is stopped until a human funds it, and the #140 gauntlet found it
+       appeared on no pin. It is owed to a HUMAN only (funding is human-only), so
+       it joins the pin exactly when the viewer is one, sorted by GLYPH_HARDNESS
+       (`◆`) with the room's other owed gates. Opening it lands the plan pane. */
+    if (viewerIsHuman) {
+      for (const { plan, agentName } of planIndex.values()) {
+        if (!planOwedFunding(plan)) continue;
+        items.push({
+          id: `fund:${plan.id}`,
+          state: fundingOwedState(viewerIsHuman),
+          title: `fund ${plan.title}`,
+          detail: 'opened with no slice — nothing can spawn until you fund it',
+          meta: agentName,
+          onOpen: () => openPlan(plan.id),
         });
       }
     }
@@ -245,7 +291,7 @@ export function ControlPlane({
       });
     }
     return items;
-  }, [allSessions, owedDecisions, viewerIsHuman]);
+  }, [allSessions, owedDecisions, planIndex, viewerIsHuman]);
 
   // The three surfaces. The certify lines are the SAME session work the pin
   // filters, and they are owed to a human too — so they are gated on the viewer
@@ -299,6 +345,11 @@ export function ControlPlane({
           plan.budgetLimitMicros === null
             ? `${formatMicros(plan.spentMicros)} spent`
             : `${formatMicros(plan.spentMicros)} / ${formatMicros(plan.budgetLimitMicros)}`,
+        /* The ENFORCED refusal count under the current slice (#146). The meter
+           reads `used/ceiling` — grants only, so it stays honest — while this
+           renders the draws the slice turned away, which were otherwise only an
+           unseen line (the #140 gauntlet finding). */
+        refused: cost.draws.refused,
         warn: cost.warn,
         fill,
       });
@@ -307,6 +358,7 @@ export function ControlPlane({
   const costWarn = costPlans.some((plan) => plan.warn);
 
   const open = openSessionId === undefined ? null : (index.get(openSessionId) ?? null);
+  const openPlanEntry = openPlanId === undefined ? null : (planIndex.get(openPlanId) ?? null);
 
   /* THE PRESS'S SERVER-ISSUED TOKEN, held between begin and complete/cancel.
      `armAction` mints the token and returns it (round-7 finding 2); the confirm and
@@ -413,24 +465,39 @@ export function ControlPlane({
           />
           <ProcessTree
             agents={data.agents}
-            onOpenSession={setOpenSessionId}
+            onOpenPlan={openPlan}
+            onOpenSession={openSession}
+            openPlanId={openPlanId}
             openSessionId={openSessionId}
             viewerIsHuman={viewerIsHuman}
           />
         </div>
         <div className={styles.right}>
           <div className={styles.rightSticky}>
-            <ReviewPane
-              agentName={open?.agentName ?? null}
-              certifyError={certifyError}
-              onArm={onArm}
-              onCertify={onCertify}
-              onDisarm={onDisarm}
-              planTitle={open?.planTitle ?? null}
-              session={open?.session ?? null}
-              viewerId={viewerId}
-              viewerKind={viewerKind}
-            />
+            {/* The right column is one detail pane: a plan's fund/settle surface
+                when a plan is open, otherwise a session's review pane (its empty
+                state when nothing is open). Opening one clears the other. */}
+            {openPlanEntry !== null ? (
+              <PlanPane
+                agentName={openPlanEntry.agentName}
+                plan={openPlanEntry.plan}
+                roomId={data.room.id}
+                viewerId={viewerId}
+                viewerKind={viewerKind}
+              />
+            ) : (
+              <ReviewPane
+                agentName={open?.agentName ?? null}
+                certifyError={certifyError}
+                onArm={onArm}
+                onCertify={onCertify}
+                onDisarm={onDisarm}
+                planTitle={open?.planTitle ?? null}
+                session={open?.session ?? null}
+                viewerId={viewerId}
+                viewerKind={viewerKind}
+              />
+            )}
           </div>
         </div>
       </div>

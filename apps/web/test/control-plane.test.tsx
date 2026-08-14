@@ -67,13 +67,16 @@ vi.mock('next/link', () => ({
 import {
   agentState,
   decisionState,
+  fundingOwedState,
   planCost,
+  planOwedFunding,
+  planSettleable,
   planState,
   sessionAwaitsLanding,
   sessionCertified,
   sessionState,
 } from '../src/components/control/state';
-import { glyphFor } from '../src/components/model/glyph';
+import { GLYPH_HARDNESS, glyphFor } from '../src/components/model/glyph';
 
 /* These cases query `document` for the FIRST match, so a previous render left
    mounted would answer for the current one — and a badge assertion that reads
@@ -145,6 +148,7 @@ function plan(overrides: Partial<ControlPlanRow>): ControlPlanRow {
     spentMicros: 0,
     rlimitSlice: null,
     authorizedDraws: 0,
+    refusedDraws: 0,
     sessions: [],
     ...overrides,
   };
@@ -290,7 +294,14 @@ describe('the tree badge and the tree glyph read the SAME predicate', () => {
      non-human name reaches the column. */
   it('a settled-uncertified session wears ~ and no certified badge', () => {
     const row = session({ id: 's1', status: 'settled' });
-    render(<ProcessTree agents={[agent([row])]} onOpenSession={() => {}} viewerIsHuman={true} />);
+    render(
+      <ProcessTree
+        agents={[agent([row])]}
+        onOpenSession={() => {}}
+        onOpenPlan={() => {}}
+        viewerIsHuman={true}
+      />,
+    );
     const node = document.querySelector('[data-tree-session="s1"]');
     expect(node?.querySelector('[data-glyph]')?.getAttribute('data-glyph')).toBe('~');
     expect(document.querySelector('[data-session-certified]')).toBeNull();
@@ -298,7 +309,14 @@ describe('the tree badge and the tree glyph read the SAME predicate', () => {
 
   it('a human-certified session wears ✓ and the badge, together', () => {
     const row = certifiedSession({ id: 's1' });
-    render(<ProcessTree agents={[agent([row])]} onOpenSession={() => {}} viewerIsHuman={true} />);
+    render(
+      <ProcessTree
+        agents={[agent([row])]}
+        onOpenSession={() => {}}
+        onOpenPlan={() => {}}
+        viewerIsHuman={true}
+      />,
+    );
     const node = document.querySelector('[data-tree-session="s1"]');
     expect(node?.querySelector('[data-glyph]')?.getAttribute('data-glyph')).toBe('✓');
     expect(document.querySelector('[data-session-certified]')?.textContent).toBe('certified');
@@ -306,7 +324,14 @@ describe('the tree badge and the tree glyph read the SAME predicate', () => {
 
   it('a machine-named session wears no certified badge — the badge moves with the glyph', () => {
     const row = certifiedSession({ id: 's1', certifiedByKind: 'agent' });
-    render(<ProcessTree agents={[agent([row])]} onOpenSession={() => {}} viewerIsHuman={true} />);
+    render(
+      <ProcessTree
+        agents={[agent([row])]}
+        onOpenSession={() => {}}
+        onOpenPlan={() => {}}
+        viewerIsHuman={true}
+      />,
+    );
     const node = document.querySelector('[data-tree-session="s1"]');
     // The machine's name does not mint the tick; the row already carries a certifier
     // id, so it is not awaiting a fresh human either — a `✓` the render refuses falls
@@ -458,11 +483,25 @@ describe('the room-wide owed is gated on the viewer being human', () => {
       budgetLimitMicros: null,
       plans: [plan({ id: 'p1', sessions: [awaiting()] })],
     };
-    render(<ProcessTree agents={[agentRow]} onOpenSession={() => {}} viewerIsHuman={false} />);
+    render(
+      <ProcessTree
+        agents={[agentRow]}
+        onOpenSession={() => {}}
+        onOpenPlan={() => {}}
+        viewerIsHuman={false}
+      />,
+    );
     const node = document.querySelector('[data-tree-session="s-await"]');
     expect(node?.querySelector('[data-glyph]')?.getAttribute('data-glyph')).toBe('~');
     cleanup();
-    render(<ProcessTree agents={[agentRow]} onOpenSession={() => {}} viewerIsHuman={true} />);
+    render(
+      <ProcessTree
+        agents={[agentRow]}
+        onOpenSession={() => {}}
+        onOpenPlan={() => {}}
+        viewerIsHuman={true}
+      />,
+    );
     const humanNode = document.querySelector('[data-tree-session="s-await"]');
     expect(humanNode?.querySelector('[data-glyph]')?.getAttribute('data-glyph')).toBe('■');
   });
@@ -523,6 +562,123 @@ describe('cost is burn vs budget, read off the plan columns', () => {
         plan({ rlimitSlice: 9, authorizedDraws: 1, budgetLimitMicros: 100, spentMicros: 200 }),
       ).warn,
     ).toBe(true);
+  });
+
+  /**
+   * THE ENFORCED-DRAW COUNT MOVES ON GRANTS, NOT ON REFUSALS (#146, #118). The
+   * meter reads granted draws (`authorizedDraws`) against the slice; a refusal
+   * grants nothing, so the meter must NOT move for it — the refusal is a separate,
+   * honest fact. A spent slice at 3/3 with a refused 4th reads `used === ceiling`
+   * (not over), and `refused` carries the turned-away draw so it renders.
+   *
+   * MUTATION THAT MUST TURN THIS RED: fold `refusedDraws` into `authorizedDraws`
+   * (make a refusal move the meter) — the enforced count would then lie.
+   */
+  it('the meter reads GRANTED draws; a refused draw shows separately and does not move used', () => {
+    const spent = planCost(plan({ rlimitSlice: 3, authorizedDraws: 3, refusedDraws: 1 }));
+    expect(spent.draws.used).toBe(3); // grants only — the refusal did not move it
+    expect(spent.draws.ceiling).toBe(3);
+    expect(spent.draws.overCeiling).toBe(false); // 3/3 is full, not over
+    expect(spent.draws.refused).toBe(1);
+    // a live refusal on an OPEN plan is a look owed — the surface warns.
+    expect(spent.warn).toBe(true);
+  });
+
+  it('a refusal on a SETTLED plan is history, not a live debt — it does not warn', () => {
+    const settled = planCost(
+      plan({ status: 'settled', rlimitSlice: 3, authorizedDraws: 3, refusedDraws: 2 }),
+    );
+    expect(settled.draws.refused).toBe(2);
+    expect(settled.warn).toBe(false);
+  });
+});
+
+describe('an unfunded plan is owed funding, and funding clears it (#146)', () => {
+  /**
+   * THE #140 GAUNTLET FINDING: an unfunded plan appeared on NO pin. A plan opened
+   * with a null (or zero) slice cannot spawn — it is owed a human's funding — so it
+   * must surface. Funding it (a non-zero slice) clears the owed state, and nothing
+   * else does: a merely SPENT slice is a cost warning, not owed-funding.
+   *
+   * MUTATION THAT MUST TURN THIS RED: make `planOwedFunding` return false for a
+   * null slice — the unfunded plan falls off the pin exactly as the gauntlet found.
+   */
+  it('open + null/zero slice is owed funding; a funded slice is not', () => {
+    expect(planOwedFunding(plan({ status: 'open', rlimitSlice: null }))).toBe(true);
+    expect(planOwedFunding(plan({ status: 'open', rlimitSlice: 0 }))).toBe(true);
+    // FLIP THE INPUT: fund it, and the owed state clears.
+    expect(planOwedFunding(plan({ status: 'open', rlimitSlice: 3 }))).toBe(false);
+  });
+
+  it('a settled unfunded plan is NOT owed funding — there is nothing left to spawn', () => {
+    expect(planOwedFunding(plan({ status: 'settled', rlimitSlice: null }))).toBe(false);
+  });
+
+  it('owed-funding and a spent slice are DISJOINT — funding moves exactly the owed state', () => {
+    // a funded slice fully drawn is a cost warning, never owed-funding.
+    const spent = plan({ status: 'open', rlimitSlice: 3, authorizedDraws: 3, refusedDraws: 1 });
+    expect(planOwedFunding(spent)).toBe(false);
+    expect(planCost(spent).warn).toBe(true);
+  });
+
+  /**
+   * OWED FUNDING SORTS BY GLYPH_HARDNESS WITH THE OTHER OWED GATES. It is a
+   * reversible needs-you gate (`◆`, hardness 2), owed to a HUMAN only — so it
+   * sorts below a failed `✗` (0) and a destructive `■` (1), above the routine
+   * rest, exactly as #146 requires. An agent viewer is owed no funding.
+   */
+  it('owed-funding is a ◆ gate owed to a human, sorting below ✗ and ■', () => {
+    expect(glyphFor(fundingOwedState(true))).toBe('◆');
+    // owed to a human only: a non-human viewer is owed no funding decision.
+    expect(fundingOwedState(false).owedToViewer).toBe(false);
+    expect(glyphFor(fundingOwedState(false))).not.toBe('◆');
+    // the pin order the vocabulary carries.
+    expect(GLYPH_HARDNESS['◆']).toBeGreaterThan(GLYPH_HARDNESS['✗']);
+    expect(GLYPH_HARDNESS['◆']).toBeGreaterThan(GLYPH_HARDNESS['■']);
+  });
+
+  it('owed-funding takes its place on the pin between the certify ■ and the routine tail', () => {
+    const failed = sessionState(session({ status: 'failed' }), true);
+    const certify = sessionState(
+      session({ status: 'settled', artifact: { branch: 'b', commit: 'c0ffee' } }),
+      true,
+    );
+    const items: ControlPinItem[] = [
+      { id: 'fund', state: fundingOwedState(true), title: 'fund a plan', detail: '', meta: '' },
+      { id: 'failed', state: failed, title: 'failed', detail: '', meta: '' },
+      { id: 'certify', state: certify, title: 'certify', detail: '', meta: '' },
+    ];
+    expect(pinHardestFirst(items).map((item) => item.id)).toEqual(['failed', 'certify', 'fund']);
+  });
+});
+
+describe('settle_plan is legal only when every child has exited (#146, #119)', () => {
+  /**
+   * The projection refuses a settle while a child session is open (#119); the UI
+   * offers the settle only where it is legal, so a human is never handed a settle
+   * the server would nack. An open child makes it un-settleable; the child exiting
+   * makes it settleable.
+   *
+   * MUTATION THAT MUST TURN THIS RED: drop the open-child predicate — a plan with
+   * an open child would falsely read settleable.
+   */
+  it('an open child blocks settle; all-terminal children make it settleable', () => {
+    const openChild = plan({
+      status: 'open',
+      sessions: [session({ id: 's1', status: 'open' })],
+    });
+    expect(planSettleable(openChild)).toBe(false);
+
+    const allExited = plan({
+      status: 'open',
+      sessions: [session({ id: 's1', status: 'settled' }), session({ id: 's2', status: 'failed' })],
+    });
+    expect(planSettleable(allExited)).toBe(true);
+  });
+
+  it('a plan with no sessions is settleable; a settled plan is not (nothing to settle)', () => {
+    expect(planSettleable(plan({ status: 'open', sessions: [] }))).toBe(true);
+    expect(planSettleable(plan({ status: 'settled', sessions: [] }))).toBe(false);
   });
 });
 

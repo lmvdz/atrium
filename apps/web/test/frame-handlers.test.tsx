@@ -387,6 +387,34 @@ const NOT_FORWARDED: readonly {
     handler: 'onCancel',
     why: 'same as the open card — the compressed row renders the same control for the same in-room answers',
   },
+  /*
+   * The PLAN pane's fund/settle holds (#146) are CLIENT-TIMED, not server-timed.
+   * `HoldToAct.onBegin`/`onCancel` exist for the certify path's server arm→confirm
+   * (the server stamps its clock on begin, clears it on cancel). Funding and
+   * settling issue a single command on hold-COMPLETE (`onAct` → `issueRoomCommand`)
+   * and arm no server clock, so there is nothing to start on begin nor disarm on
+   * cancel — the same reason the attention cards decline these two, weighed once.
+   * `onArm` is the local "who armed it, when" record HoldToAct produces on
+   * completion; the certify pane uses it to flip a local "recording…" note, but the
+   * plan pane's own `working`/`error` states are driven by the command promise
+   * (`runFund`/`runSettle`), so it needs no separate arm record. Declining it keeps
+   * the pane from threading a handler it would only ignore.
+   */
+  {
+    edge: 'PlanPane→HoldToAct',
+    handler: 'onBegin',
+    why: 'funding/settling is client-timed; no server clock is armed on begin, so there is nothing to start (unlike the certify pane)',
+  },
+  {
+    edge: 'PlanPane→HoldToAct',
+    handler: 'onCancel',
+    why: 'the mirror of onBegin — no server arm is stamped, so a released hold has nothing to disarm',
+  },
+  {
+    edge: 'PlanPane→HoldToAct',
+    handler: 'onArm',
+    why: 'the command promise (runFund/runSettle) drives the working/error states; the local arm record is redundant here',
+  },
 ];
 
 const FRAME = FRAME_SOURCE;

@@ -746,6 +746,66 @@ describe('the agent/plan/session lifecycle appends, projects, and touches no cov
   });
 
   /**
+   * A HUMAN MAY SETTLE A PLAN — the run-book's settle path (#146). `settle_plan`
+   * is an OPEN-class command, not human-only like certify or set_plan_rlimit: the
+   * pre-append gate refuses only `certifies`/`authorizes-spend`, and settle is
+   * neither. #140's resolution homes the steady-state settle in the daemon (#139,
+   * unbuilt), but the run-book's first, daemon-less runs need a human to close a
+   * plan — and the same open-class command serves both. This is the witness that a
+   * human's `settle_plan` is honoured (once children have exited), so the plan pane
+   * offering it is legal, not a control the server would only nack.
+   *
+   * RED ON REVERT: add `settle_plan` to the `authorizes-spend`/`certifies` class in
+   * `certificationClassOf`, and this human settle nacks `invalid` (human = init /
+   * not_human) — the run-book's human settle path would be gone.
+   */
+  it("a HUMAN settles a plan once its children have exited — the run-book's settle path", async () => {
+    const hexi = await connect(agentId, 'agent');
+    const alice = await connect(humanId, 'human');
+    await hexi.command({
+      name: 'open_plan',
+      roomId: room.roomId,
+      agentUserId: agentId,
+      title: 'a plan a human will settle',
+      budgetLimitMicros: null,
+    });
+    const [{ id: planId } = { id: '' }] = await handle.db
+      .select({ id: plans.id })
+      .from(plans)
+      .where(eq(plans.roomId, room.roomId));
+    await fundPlan(planId);
+    const opened = await hexi.command({
+      name: 'open_session',
+      roomId: room.roomId,
+      planId,
+      harness: 'omp',
+      model: 'haiku',
+    });
+    expect(opened.type).toBe('ack');
+    const [{ id: sessionId } = { id: '' }] = await handle.db
+      .select({ id: sessions.id })
+      .from(sessions)
+      .where(eq(sessions.roomId, room.roomId));
+    const settledSession = await hexi.command({
+      name: 'settle_session',
+      roomId: room.roomId,
+      sessionId,
+      outcome: 'settled',
+      exitSummary: 'done',
+      spendMicros: null,
+      contextPct: null,
+    });
+    expect(settledSession.type).toBe('ack');
+
+    // The HUMAN settles the plan — accepted, not refused as a human-only violation.
+    const humanSettle = await alice.command({ name: 'settle_plan', roomId: room.roomId, planId });
+    expect(humanSettle.type).toBe('ack');
+    const [settledPlan] = await handle.db.select().from(plans).where(eq(plans.id, planId));
+    expect(settledPlan?.status).toBe('settled');
+    expect(settledPlan?.settledByEventId).toBeTruthy();
+  });
+
+  /**
    * The no-child and all-children-exited cases still settle fine through the real
    * boundary — the guard refuses only an OPEN child, nothing else.
    *

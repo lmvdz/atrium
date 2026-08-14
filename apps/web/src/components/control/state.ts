@@ -362,6 +362,16 @@ export interface PlanCost {
     readonly ceiling: number | null;
     readonly unfunded: boolean;
     readonly overCeiling: boolean;
+    /**
+     * Draws Atrium REFUSED under the plan's CURRENT ceiling (#146). The
+     * enforced-count (`used`) never moves for a refusal — a refusal grants
+     * nothing — so a spent slice turning work away was invisible on the cost
+     * surface, showing only as a full-but-calm meter and an unseen line (the
+     * #140 gauntlet finding). This is the refusal count carried onto the surface
+     * so the meter stays honest AND the refusal renders. Scoped to the current
+     * slice in the read model, so raising the ceiling clears it.
+     */
+    readonly refused: number;
   };
   readonly dollars: {
     readonly spentMicros: number;
@@ -376,20 +386,75 @@ export function planCost(plan: ControlPlanRow): PlanCost {
   const unfunded = plan.rlimitSlice === null;
   const overCeiling = plan.rlimitSlice !== null && plan.authorizedDraws > plan.rlimitSlice;
   const dollarsOver = plan.budgetLimitMicros !== null && plan.spentMicros > plan.budgetLimitMicros;
+  /* A draw refused under the current slice, on a plan that is still open, is the
+     slice actively holding back work — a look is owed. A settled plan's past
+     refusals are history, not a live debt, so the warn is gated on `open`. */
+  const refusing = plan.refusedDraws > 0 && plan.status === 'open';
   return {
     draws: {
       used: plan.authorizedDraws,
       ceiling: plan.rlimitSlice,
       unfunded,
       overCeiling,
+      refused: plan.refusedDraws,
     },
     dollars: {
       spentMicros: plan.spentMicros,
       budgetMicros: plan.budgetLimitMicros,
       over: dollarsOver,
     },
-    warn: overCeiling || dollarsOver || (unfunded && plan.authorizedDraws > 0),
+    warn: overCeiling || dollarsOver || refusing || (unfunded && plan.authorizedDraws > 0),
   };
+}
+
+/* ── funding: the owed-unfunded plan, and where a settle is legal (#146) ──── */
+
+/**
+ * A plan OPENED WITH NO SLICE (null or an explicit zero) is OWED FUNDING: an
+ * agent cannot draw a single spawn or continue against a ceiling of zero, so the
+ * plan is stopped until a human authorizes spend (#115, #140 resolution — funding
+ * happens before the goal is posted). The #140 gauntlet found such a plan
+ * appeared on NO pin; this is the predicate that puts it there.
+ *
+ * It is derived purely from the plan's own state — open, and a zero/absent
+ * ceiling — so FUNDING IT CLEARS IT: `set_plan_rlimit=3` moves `rlimitSlice`
+ * off zero and this reads false on the next projection. A settled plan is never
+ * owed funding (there is nothing left to spawn), and a funded plan whose slice is
+ * merely SPENT is a cost warning (`overCeiling`/`refused`), not this — the two
+ * are disjoint so funding moves exactly the owed-funding state and nothing else.
+ */
+export function planOwedFunding(plan: ControlPlanRow): boolean {
+  return plan.status === 'open' && (plan.rlimitSlice === null || plan.rlimitSlice === 0);
+}
+
+/**
+ * The owed-funding EpistemicState — a reversible gate awaiting a human (`◆`),
+ * owed to a HUMAN only. `set_plan_rlimit` is human-only (the server refuses a
+ * non-human before the append), so an agent-principal viewer is owed no funding
+ * decision: `owedToViewer` is the viewer's humanity, exactly as the session work
+ * is. `◆` sorts by `GLYPH_HARDNESS` with the room's other owed gates (below a
+ * failed `✗` and a destructive `■`), which is the pin order #146 requires.
+ */
+export function fundingOwedState(viewerIsHuman: boolean): EpistemicState {
+  return {
+    kind: 'decision',
+    verification: 'proposed',
+    owedToViewer: viewerIsHuman,
+    irreversible: false,
+  };
+}
+
+/**
+ * Whether `settle_plan` is LEGAL for this plan right now — the projection refuses
+ * a settle while any child session is open (#119), so the affordance is offered
+ * only when the plan is open and every child has reached a terminal state. A
+ * human may issue `settle_plan` (it is an open-class command, not human-only), so
+ * this is the run-book's human settle path; the daemon (#139, unbuilt) issues the
+ * same command in steady state. Gating the control on legality means the human is
+ * never handed a settle that the server would only nack.
+ */
+export function planSettleable(plan: ControlPlanRow): boolean {
+  return plan.status === 'open' && plan.sessions.every((session) => session.status !== 'open');
 }
 
 /** Micro-dollars as a short `$1.80` string. Whole cents; the tree is not a ledger. */

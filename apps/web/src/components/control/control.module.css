@@ -790,3 +790,63 @@
   color: var(--red2);
   font-size: 10px;
 }
+
+/* ── the refused-draw marker on the cost surface (#146) ─────────────────────
+ * The meter reads granted draws only, so it stays honest; the refused count is a
+ * separate red fact beside it, so a spent slice turning work away is legible on
+ * the cost surface instead of only in the unseen fold. */
+.costRefused {
+  color: var(--red2);
+}
+
+/* ── the plan pane: FUND and SETTLE (#146) ──────────────────────────────────
+ * Amber for funding — a needs-you spend gate, not the certify pane's destructive
+ * red. Settling is terminal, so it wears the red the vocabulary gives an act that
+ * cannot be undone. Both are bordered blocks matching the certify block's shape. */
+.fund {
+  border: 1px solid var(--ambbd);
+  border-radius: 6px;
+  padding: 12px;
+  background: var(--ambbg);
+  display: flex;
+  flex-direction: column;
+  gap: 9px;
+}
+
+.settle {
+  border: 1px solid var(--redbd);
+  border-radius: 6px;
+  padding: 12px;
+  background: var(--redbg);
+  display: flex;
+  flex-direction: column;
+  gap: 9px;
+}
+
+.sliceRow {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.sliceInput {
+  width: 96px;
+  padding: 6px 8px;
+  border: 1px solid var(--line2);
+  border-radius: 5px;
+  background: var(--bg0);
+  color: var(--tx0);
+  font: inherit;
+  font-size: 13px;
+}
+
+.sliceInput:focus-visible {
+  outline: none;
+  border-color: var(--line3);
+  box-shadow: 0 0 0 2px var(--ambbd2);
+}
+
+.fundHold,
+.settleHold {
+  align-self: flex-start;
+}

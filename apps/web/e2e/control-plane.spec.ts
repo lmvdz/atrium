@@ -592,3 +592,185 @@ test.describe('the control plane renders the pin, tree, surfaces and a human-gat
     }
   });
 });
+
+/* ---------------------------------------------------------------------------
+ * THE FUNDING + SETTLE SURFACES, END TO END — #146.
+ *
+ * An agent opens a plan with NO slice; on /app it surfaces on the PIN as owed
+ * funding (the #140 gauntlet found it appeared on no pin). The human opens its
+ * plan pane and FUNDS it through a press-and-hold — which issues `set_plan_rlimit`
+ * over the SAME authenticated command socket the app uses, so the server's
+ * human-only spend gate is the enforcement (this browser is a human, so it is
+ * honoured). The owed-funding pin row clears, and the cost surface reads the
+ * granted-draw ceiling (`0/3 draws`) — the ENFORCED count, not reported spend.
+ *
+ * Then, every child having exited (there are none), the same pane offers SETTLE;
+ * holding it issues `settle_plan`, and the plan closes to a receipt. Both acts are
+ * real commands over the real server, and the surface reflects each on refresh.
+ * ------------------------------------------------------------------------- */
+interface SeededFunding {
+  workspaceSlug: string;
+  roomSlug: string;
+  agentId: string;
+  planId: string;
+}
+
+async function seedUnfunded(viewerEmail: string): Promise<SeededFunding> {
+  const tag = viewerEmail.split('@')[0] ?? 'fund';
+  const [viewer] = await db
+    .select({ id: users.id })
+    .from(users)
+    .where(eq(users.email, viewerEmail))
+    .limit(1);
+  if (!viewer) throw new Error(`the signed-up viewer ${viewerEmail} was not found`);
+
+  const [workspace] = await db
+    .insert(workspaces)
+    .values({ name: `fund ${tag}`, slug: `fund-${tag}` })
+    .returning({ id: workspaces.id, slug: workspaces.slug });
+  if (!workspace) throw new Error('workspace insert returned nothing');
+
+  const [room] = await db
+    .insert(rooms)
+    .values({ workspaceId: workspace.id, slug: 'fleet', name: 'fleet', createdBy: viewer.id })
+    .returning({ id: rooms.id, slug: rooms.slug });
+  if (!room) throw new Error('room insert returned nothing');
+
+  const agent = await provisionAgentPrincipal({
+    db,
+    email: `agent-fund-${tag}@agents.atrium.invalid`,
+    displayName: 'hexi',
+  });
+  await provisionAgentConfig({
+    db,
+    userId: agent.userId,
+    ownerUserId: viewer.id,
+    channelRoomId: room.id,
+    host: 'fly-ord',
+    harness: 'claude-code',
+    model: 'opus',
+    budgetLimitMicros: 20_000_000,
+  });
+  await db.insert(workspaceMembers).values([
+    { organizationId: workspace.id, userId: viewer.id, role: 'admin' },
+    { organizationId: workspace.id, userId: agent.userId, role: 'member' },
+  ]);
+  await db.insert(memberships).values([
+    { roomId: room.id, userId: viewer.id, role: 'admin' },
+    { roomId: room.id, userId: agent.userId, role: 'member' },
+  ]);
+
+  // An UNFUNDED plan — a null slice, no draws, no sessions. It cannot spawn until
+  // a human funds it, so it is owed funding.
+  const [plan] = await db
+    .insert(plans)
+    .values({
+      roomId: room.id,
+      agentUserId: agent.userId,
+      title: 'the funding run',
+      status: 'open',
+      rlimitSlice: null,
+      authorizedDraws: 0,
+    })
+    .returning({ id: plans.id });
+  if (!plan) throw new Error('plan insert returned nothing');
+
+  return {
+    workspaceSlug: workspace.slug,
+    roomSlug: room.slug,
+    agentId: agent.userId,
+    planId: plan.id,
+  };
+}
+
+async function teardownFunding(at: SeededFunding): Promise<void> {
+  const [ws] = await db
+    .select({ id: workspaces.id })
+    .from(workspaces)
+    .where(eq(workspaces.slug, at.workspaceSlug))
+    .limit(1);
+  if (ws) await db.delete(workspaces).where(eq(workspaces.id, ws.id));
+  await db.delete(users).where(eq(users.id, at.agentId));
+}
+
+/** Press and hold a control past its gate, so its `onAct` fires on the clock. */
+async function holdPast(page: Page, selector: string, ms: number): Promise<void> {
+  const box = await page.locator(selector).boundingBox();
+  if (!box) throw new Error(`the hold control ${selector} had no box`);
+  await page.mouse.move(box.x + box.width / 2, box.y + box.height / 2);
+  await page.mouse.down();
+  await page.waitForTimeout(ms);
+  await page.mouse.up();
+}
+
+test.describe('the funding + settle surfaces (#146)', () => {
+  requireBrowser();
+
+  test('an unfunded plan is owed on the pin; a human funds it, then settles it, over the real command path', async ({
+    page,
+  }) => {
+    const email = uniqueEmail('fund');
+    await signUpAndVerify(page, { email, name: 'Ada' });
+    const at = await seedUnfunded(email);
+    try {
+      await page.goto(`/app/${at.workspaceSlug}/${at.roomSlug}/control`);
+      await expect(page.locator('[data-frame="control"]')).toBeVisible();
+
+      // ── OWED FUNDING ON THE PIN ─────────────────────────────────────────
+      const fundPin = page.locator(`[data-pin-item="fund:${at.planId}"]`);
+      await expect(fundPin).toBeVisible();
+
+      // Open the plan pane from the pin. The fund control is offered (human).
+      await fundPin.click();
+      const pane = page.locator(`[data-plan-pane="${at.planId}"]`);
+      await expect(pane).toBeVisible();
+      await expect(pane.locator('[data-fund="ready"]')).toBeVisible();
+
+      // BOTH THEMES: the WIRE surface is single-palette, so the pane is legible in
+      // either. Toggle dark and confirm the fund control still renders.
+      await page.evaluate(() => document.documentElement.classList.add('atr-dark'));
+      await expect(pane.locator('[data-fund="ready"]')).toBeVisible();
+      await page.evaluate(() => document.documentElement.classList.remove('atr-dark'));
+
+      // ── FUND IT: set the slice to 3 and hold to authorize ───────────────
+      await pane.locator('[data-fund-slice-input]').fill('3');
+      await holdPast(page, `[data-hold-action="fund-${at.planId}"]`, 1_900);
+
+      // The command funded the plan through the server (human-only gate honoured
+      // because this viewer is a human). The DB carries the slice.
+      await expect
+        .poll(async () => {
+          const [row] = await db
+            .select({ slice: plans.rlimitSlice })
+            .from(plans)
+            .where(eq(plans.id, at.planId));
+          return row?.slice ?? null;
+        })
+        .toBe(3);
+
+      // The surface caught up: the owed-funding pin row is GONE, and the cost
+      // surface reads the enforced ceiling — 0 granted of 3.
+      await expect(page.locator(`[data-pin-item="fund:${at.planId}"]`)).toHaveCount(0);
+      await expect(page.locator(`[data-cost-plan="${at.planId}"] [data-cost-draws]`)).toHaveText(
+        '0/3 draws',
+      );
+
+      // ── SETTLE IT: every child has exited (none), so settle is offered ──
+      await expect(pane.locator('[data-settle="ready"]')).toBeVisible();
+      await holdPast(page, `[data-hold-action="settle-${at.planId}"]`, 1_900);
+
+      // The plan closed to a receipt through the real settle_plan command.
+      await expect
+        .poll(async () => {
+          const [row] = await db
+            .select({ status: plans.status })
+            .from(plans)
+            .where(eq(plans.id, at.planId));
+          return row?.status ?? null;
+        })
+        .toBe('settled');
+    } finally {
+      await teardownFunding(at);
+    }
+  });
+});

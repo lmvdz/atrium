@@ -33,7 +33,10 @@ import {
 export interface ProcessTreeProps {
   readonly agents: readonly ControlAgentRow[];
   readonly openSessionId?: string;
+  readonly openPlanId?: string;
   readonly onOpenSession: (sessionId: string) => void;
+  /** Open a plan's fund/settle pane — the plan-level acts (#146). */
+  readonly onOpenPlan: (planId: string) => void;
   /**
    * Whether the person reading is a HUMAN. It gates the room-wide "owed" a failed
    * session and an unlanded artifact carry: those are owed to any human (any human
@@ -55,7 +58,9 @@ function sessionSummary(session: ControlSessionRow): string {
 export function ProcessTree({
   agents,
   openSessionId,
+  openPlanId,
   onOpenSession,
+  onOpenPlan,
   viewerIsHuman,
 }: ProcessTreeProps) {
   return (
@@ -100,9 +105,10 @@ export function ProcessTree({
                 cost.draws.ceiling === null
                   ? `${cost.draws.used} draws · unfunded`
                   : `${cost.draws.used}/${cost.draws.ceiling} draws`;
+              const refusing = cost.draws.refused > 0 && plan.status === 'open';
               const chipClass = [
                 styles.chip,
-                cost.draws.overCeiling || (cost.draws.unfunded && cost.draws.used > 0)
+                cost.draws.overCeiling || refusing || (cost.draws.unfunded && cost.draws.used > 0)
                   ? styles.chipOver
                   : cost.dollars.over
                     ? styles.chipWarn
@@ -112,7 +118,21 @@ export function ProcessTree({
                 .join(' ');
               return (
                 <div data-tree-plan={plan.id} key={plan.id}>
-                  <div className={`${styles.row} ${styles.rowPlan}`}>
+                  {/* The plan row opens its fund/settle pane (#146) — a real button
+                      so keyboard and screen-reader users reach the plan-level acts,
+                      the same affordance a session row already is. */}
+                  <button
+                    className={[
+                      styles.row,
+                      styles.rowPlan,
+                      plan.id === openPlanId ? styles.rowSessionOpen : null,
+                    ]
+                      .filter(Boolean)
+                      .join(' ')}
+                    data-tree-plan-open={plan.id}
+                    onClick={() => onOpenPlan(plan.id)}
+                    type="button"
+                  >
                     <Glyph className={styles.rowGlyph} state={planState(plan, viewerIsHuman)} />
                     <span className={styles.rowMain}>
                       <span className={styles.name}>
@@ -124,13 +144,16 @@ export function ProcessTree({
                     </span>
                     <span className={styles.rowMeta}>
                       <span className={chipClass} data-plan-cost={plan.id}>
-                        {systemText(drawsLabel, 'ProcessTree draws')}
+                        {systemText(
+                          refusing ? `${drawsLabel} · ${cost.draws.refused} refused` : drawsLabel,
+                          'ProcessTree draws',
+                        )}
                       </span>
                       <span className={styles.sub}>
                         {systemText(formatMicros(plan.spentMicros), 'ProcessTree spend')}
                       </span>
                     </span>
-                  </div>
+                  </button>
 
                   {plan.sessions.map((session) => (
                     <button
