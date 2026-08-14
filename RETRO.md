@@ -1408,3 +1408,20 @@ the ALTER TYPE ADD VALUE line satisfied the pin meant for the CHECK constraint �
 slice assertions to the last deployed statement. (4) tail masks exit codes — the
 third time this campaign; it is now a reflex to re-run unpiped before believing
 any gate.
+
+## #128 — the channel loop's Atrium-side contract (closed 2026-08-13, 1 round + micro-fix)
+
+Opus built; codex + grok gauntleted blind; near-clean round — codex FINDINGS 1 note
+(a test comment claimed a mutation that would not go red; the orchestrator applied the
+adjudicated two-line remedy directly and added the explicit two-null-cause witness),
+grok VERDICT CLEAN with executed parse/refusal checks. The funded-arm claim TABLE
+(not index — no unique index spans the two draw-projecting tables) survived spawn+spawn,
+spawn+resume, resume+resume, replay, and cascade attacks from both lineages.
+
+Process lessons: (1) a RED-ON-REVERT comment is itself a claim that can be false — the
+witness table is only as honest as its parenthetical reasoning, and a critic who checks
+the CLAIM (not just the test) catches it. (2) When enforcement spans two projection
+tables, the constraint that "should" be an index is a table — write down WHY in the
+receipt or every reviewer will go hunting for the index. (3) grok's clean verdict still
+carried the campaign's next ticket (spawn lacks the projection-layer slice re-check
+resume got) — a clean verdict with notes is a frontier report, not just a pass.

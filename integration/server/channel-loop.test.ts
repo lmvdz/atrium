@@ -760,9 +760,11 @@ describe('one channel message funds at most one arm', () => {
    * THE TABLE is the authority the other two layers describe — a writer with a
    * connection and nothing else.
    *
-   * RED-ON-REVERT: drop `funded_arms_room_cause_pk` (or make
-   * `cause_message_id` nullable, which would make NULLs distinct and reopen the
-   * hole for every uncaused draw) and this INSERT lands.
+   * RED-ON-REVERT: drop `funded_arms_room_cause_pk` and this INSERT lands.
+   * (Making `cause_message_id` nullable would NOT turn this test red — its
+   * insert carries a non-null cause, so the PK still bites. The uncaused case
+   * is safe for a different reason: null-cause draws never write a claim at
+   * all, which the two-null-cause test below checks by mutation.)
    */
   it('refuses a hand-written second claim on one cause message', async () => {
     const alice = await connect(ownerId, 'human');
@@ -778,6 +780,25 @@ describe('one channel message funds at most one arm', () => {
       `),
     );
     expect(await armRows()).toHaveLength(1);
+  });
+
+  /**
+   * Two uncaused draws must BOTH land — a human opening sessions by hand has no
+   * cause message, and refusing the second would break every non-loop workflow.
+   * The safety is that neither writes a claim (`cause_message_id` is NOT NULL
+   * in `funded_arms`, and the projection returns before claiming on a null
+   * cause), so there is no NULL-distinctness to fail open.
+   *
+   * RED-ON-REVERT: make `claimFundedArm` claim on a null cause (or make the
+   * column nullable and claim anyway) and the second spawn is wrongly refused —
+   * or, with NULLs-distinct semantics, two phantom claims appear below.
+   */
+  it('funds two uncaused draws and writes no claim for either', async () => {
+    const hexi = await connect(agentId, 'agent');
+    const planId = await fundedPlan(5, null);
+    grantedSessionId(await spawn(hexi, planId, null));
+    grantedSessionId(await spawn(hexi, planId, null));
+    expect(await armRows()).toHaveLength(0);
   });
 
   /** Only a draw may claim an arm — the closed vocabulary, as a table fact. */
