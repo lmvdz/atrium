@@ -1525,3 +1525,29 @@ makes the operator/agent paths never write the upstream. The residual completene
 registration coupling, the harness config-rewrite, the mint-dir TOCTOU) is defense-in-depth
 against internal miswiring and is bundled into #138, where the sandbox is the real
 containment.
+
+## #145 — artifact enrichment: the covenant on a surface (closed 2026-08-14, 3 rounds)
+
+Opus built it; two foreign lineages + a live page-driving critic gauntleted it. The
+core lesson is the covenant made concrete on a rendered surface: the settle write-set
+was clean from r1, but the enriched diff/tests REPORT rendered as truth — a green
+'N passed' that read as a ✓ the machine never earned, and a schema that let an empty
+file list carry nonzero totals so the pane could show 'no changes' over real edits.
+r2 fixed the covenant framing (the test block leads with a ~ reported/not-verified
+marker + its producing command; incoherent diffs fail-closed at the ledger; the diff
+gutter is CSS chrome the bytes can't forge). r3 completed the boundary coverage
+(validate the artifact at the settle COMMAND boundary, not only wire-parse; count
+real UTF-8 bytes; neutralize the missed Unicode separators).
+
+Process lessons: (1) 'the surface must not lie' is the campaign's core enemy, and a
+diff/tests pane is exactly where a machine's claim dresses as a fact — the fix is the
+covenant's own rule (a claim renders as ~, never as a ✓) applied to pixels. (2) A
+page-DRIVING critic (live server, screenshots, measured no-forged-badge) caught the
+visual-provenance weakness a code-only read states but can't see, and cleared the
+injection surface by executing it — worth its cost on any taste/surface lane. (3) The
+recurring class struck again: a Zod refine at wire-parse is bypassed by the
+command-construction path (commands.execute persists command.artifact unparsed) —
+validate at EVERY boundary, the same lesson as #122/#127/#128. (4) A weak red-on-revert
+witness (one that reds via a downstream rule, not your guard) is a false witness; the
+builder caught its own and wired a permissive verifier so the guard is provably
+load-bearing.
