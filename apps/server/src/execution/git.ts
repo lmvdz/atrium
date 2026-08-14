@@ -429,6 +429,40 @@ export function sessionBranch(sessionId: string): string {
 }
 
 /**
+ * REFUSAL 7 — the scratch repo is never CREATED at or inside the upstream (#141
+ * r3, FIX 2).
+ *
+ * `createScratchRepo` runs `mkdir` + `git init` + `git worktree add` under
+ * `baseDir` (`EXECUTION_SCRATCH_DIR`). Pointed at (or inside) the upstream, every
+ * one of those writes the repository the session forks. The config gate refuses
+ * an overlapping `EXECUTION_SCRATCH_DIR` at boot; this is the same refusal moved
+ * to the OPERATION, so a `baseDir` that only became an overlap AFTER boot — a
+ * symlink swapped in — is caught at the moment of the write rather than trusted
+ * from a stale boot-time comparison.
+ *
+ * ## TRUSTED-DIRECTORY OWNERSHIP ASSUMPTION — the honest boundary (#141 r3)
+ *
+ * This recheck NARROWS the check-then-use (TOCTOU) window; it does not close it.
+ * Between `pathsOverlap` returning "no overlap" and the `mkdir`/`git init` that
+ * follows, a sufficiently-privileged local attacker could still swap a component
+ * of `baseDir` (or the artifact dir) for a symlink into the upstream. Closing
+ * that fully needs the directories to be (re)built through no-follow descriptors
+ * — `O_NOFOLLOW`/`openat2(RESOLVE_NO_SYMLINKS)` on each component, then
+ * operations relative to the verified fd — which is a larger change tracked as a
+ * FOLLOW-UP (see docs/real-repo-execution.md).
+ *
+ * Until then the boundary is stated, not pretended: the scratch, artifact and
+ * upstream PARENT directories are ASSUMED operator-owned and not attacker-writable.
+ * The recheck plus that stated assumption is the honest guarantee — the recheck
+ * defeats a stale-boot spelling and a link already present at operation time; the
+ * assumption is what covers the residual race a pure path check cannot.
+ */
+export const SCRATCH_REPO_AT_UPSTREAM_REFUSAL =
+  'refusing to create the execution scratch repo at a path that overlaps the execution upstream ' +
+  '(#141) — the per-session worktrees forked here would be written inside the repository they ' +
+  'fork, re-checked at creation against a directory swapped in after the boot-time gate';
+
+/**
  * Create a scratch repo whose trunk is the thing sessions fork from.
  *
  * WITHOUT `seed` (the shipped #120 behaviour, unchanged): a single synthetic
@@ -462,6 +496,28 @@ export async function createScratchRepo(
   baseDir?: string,
   seed?: UpstreamSeed,
 ): Promise<ScratchRepo> {
+  if (seed !== undefined) {
+    // Validate on the ONLY path that fetches, not merely at config load — a
+    // caller that builds a seed by hand gets the same refusal the operator does.
+    assertUpstreamSeed(seed);
+    // ── FIX 2 (#141 r3): the write-overlap check, RE-RUN AT OPERATION TIME ─────
+    //
+    // The boot gate (`assertExecutionUpstreamSafe`) already refused a scratch dir
+    // that overlaps the upstream — but that is a boot-time comparison, and this is
+    // check-then-use: a symlink swapped into `baseDir` in the window between boot
+    // and now makes the boot answer stale, and the mkdtemp+`init`+worktrees below
+    // would then land INSIDE the upstream. So the overlap is re-checked HERE,
+    // immediately before the dir is created, against `realpath` — `pathsOverlap`
+    // canonicalises the deepest existing prefix, so a link substituted after boot
+    // is caught. This narrows, but does NOT by itself close, the TOCTOU window:
+    // see the TRUSTED-DIRECTORY OWNERSHIP ASSUMPTION on `SCRATCH_REPO_AT_UPSTREAM_REFUSAL`.
+    if (baseDir !== undefined) {
+      const upstreamPath = upstreamLocalPath(seed.url);
+      if (upstreamPath !== null && pathsOverlap(baseDir, upstreamPath)) {
+        throw new Error(`${SCRATCH_REPO_AT_UPSTREAM_REFUSAL}: ${baseDir} overlaps ${upstreamPath}`);
+      }
+    }
+  }
   const dir = baseDir
     ? await (async () => {
         await mkdir(baseDir, { recursive: true });
@@ -472,9 +528,6 @@ export async function createScratchRepo(
   await git(dir, ['init', '-q', '-b', 'main']);
 
   if (seed !== undefined) {
-    // Validate on the ONLY path that fetches, not merely at config load — a
-    // caller that builds a seed by hand gets the same refusal the operator does.
-    assertUpstreamSeed(seed);
     // `--no-tags`: seed the trunk, not the upstream's whole tag namespace.
     await git(dir, ['fetch', '--no-tags', '--quiet', '--', seed.url, seed.ref]);
     // `^{commit}` so an ANNOTATED tag resolves to the commit it wraps —
@@ -695,10 +748,17 @@ export const PUSH_INTO_UPSTREAM_REFUSAL =
  *
  * `upstream`, when given, is the configured execution upstream: opening the
  * artifact repo anywhere that overlaps it is refused BEFORE the first `mkdir`.
- * Its location is CANONICALISED first (#141 r2) — a loopback `file://` spelling
- * and a symlinked destination both name the same directory as a plain path, and
- * a `file://` URL that cannot be canonicalised throws rather than being read as
- * "remote, therefore no overlap".
+ * Its location is CANONICALISED first — every `file://` spelling (any host, git
+ * drops the authority) and a symlinked destination both name the same directory
+ * as a plain path, and a `file://` URL that cannot be canonicalised throws rather
+ * than being read as "remote, therefore no overlap".
+ *
+ * This overlap check IS the operation-time recheck for the artifact repo (#141
+ * r3, FIX 2): it runs here, in the function that performs `init --bare`, right
+ * before the `mkdir`, against `realpath` — not only at the boot gate — so a
+ * symlink swapped into `dir` after boot is caught at the write. It narrows but
+ * does not alone close the TOCTOU window; the residual race is covered by the
+ * trusted-directory ownership assumption stated on `SCRATCH_REPO_AT_UPSTREAM_REFUSAL`.
  */
 export async function createArtifactRepo(
   dir: string,

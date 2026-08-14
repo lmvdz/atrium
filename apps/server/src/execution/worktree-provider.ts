@@ -130,6 +130,29 @@ export interface WorktreeCommandOptions {
   command: readonly string[];
   /** How long the command may run before it is killed and the run fails. */
   timeoutMs?: number;
+  /**
+   * THE REAL-REPO CONTAINMENT SEAM (#141 r3, FIX 3) — the ONLY way to build this
+   * provider over a seeded-upstream scratch repo.
+   *
+   * A seeded upstream under THIS provider is refused by construction (see
+   * `WORKTREE_UPSTREAM_SEED_REFUSAL`): the harness is arbitrary code that can
+   * rewrite the adapter's own push destination through git config, which no path
+   * guard can see. `env.ts` refuses `worktree` + upstream at boot, but this
+   * factory is reachable by a DIRECT caller that never loads an `Env`, so the
+   * refusal binds here too.
+   *
+   * Set this ONLY when the caller supplies its OWN containment or a trusted,
+   * fixed harness — NOT reachable from any operator config path:
+   *  - the #138 sandbox provider (docker/gVisor), which contains the harness so
+   *    the config-rewrite reach no longer exists — this is the seam it will use;
+   *  - the acceptance integration test, whose harness is a fixed `rm <file>`
+   *    written by the test, not attacker code (see execution-upstream.test.ts).
+   *
+   * It is a NAMED seam, not a `spelling`: the operator-facing path stays refused
+   * regardless (env.ts fails boot), and the two callers that set it each document
+   * why the containment assumption holds for them.
+   */
+  containedUpstreamSeed?: boolean;
 }
 
 /**
@@ -194,6 +217,26 @@ export const UNSANDBOXED_REFUSAL =
   'deterministic shim provider, or set the opt-in out loud if you mean it.';
 
 /**
+ * REFUSAL — real-repo mode does not build on the unsandboxed worktree provider,
+ * at the FACTORY, not only at env (#141 r3, FIX 3).
+ *
+ * `env.ts` refuses `EXECUTION_PROVIDER=worktree` + an upstream at boot. But an
+ * `ExecutionProvider` is built by a plain function call, and a direct caller (a
+ * test, a future daemon) reaches this factory without ever loading an `Env` — the
+ * #89 adjacent-path-bypass class. So the constructor itself refuses a seeded
+ * scratch repo, unless the caller opts into the containment seam
+ * (`containedUpstreamSeed`) the #138 sandbox provider will use. A guarantee that
+ * lives only in the config layer is not a guarantee against the caller who skips
+ * the config layer.
+ */
+export const WORKTREE_UPSTREAM_SEED_REFUSAL =
+  'refusing to build the UNSANDBOXED worktree provider against a seeded execution upstream ' +
+  '(#141) — a real harness here can rewrite its own push destination through git config, so ' +
+  'real-repo mode is unavailable on this provider until the sandbox seam (#138) contains it; ' +
+  'the boot gate refuses this configuration and the factory refuses the direct caller who never ' +
+  'loaded it';
+
+/**
  * THE GATE IS HERE, NOT ONLY UPSTREAM (#120 round-3 F6).
  *
  * `env.ts` (`assertExecutionProviderSafe`) and `configure.ts` both refuse to
@@ -211,6 +254,14 @@ export const UNSANDBOXED_REFUSAL =
 export function createWorktreeCommandProvider(options: WorktreeCommandOptions): ExecutionProvider {
   if (!unsandboxedExecutionAllowed()) throw new Error(UNSANDBOXED_REFUSAL);
   const { repo, artifactRepo, command, timeoutMs = 10 * 60_000 } = options;
+  // REAL-REPO MODE IS NOT AVAILABLE ON THIS PROVIDER, refused at the FACTORY (#141
+  // r3, FIX 3). A seeded scratch repo means real-repo mode, and this provider's
+  // harness can rewrite its own push destination via git config — so the boundary
+  // env.ts states at boot is restated here, where a direct caller lands. The only
+  // way through is the documented containment seam the #138 sandbox provider uses.
+  if (repo.upstream !== undefined && options.containedUpstreamSeed !== true) {
+    throw new Error(WORKTREE_UPSTREAM_SEED_REFUSAL);
+  }
   // THE UPSTREAM IS NEVER WRITTEN, provider layer (#141). A real-repo session is
   // the whole reason this provider exists, so the wiring that would publish its
   // branch nowhere — or into the upstream itself — is refused at construction.

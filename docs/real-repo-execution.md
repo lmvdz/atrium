@@ -33,6 +33,12 @@ EXECUTION_UPSTREAM_REF=main
 Setting `EXECUTION_UPSTREAM_URL` with `EXECUTION_PROVIDER=worktree` is a boot
 failure that names #138 as the unblock. That is not a lint: it is the difference
 between a guarantee and a hope, and it is stated below rather than guarded around.
+The refusal is **not env-only**: the `createWorktreeCommandProvider` factory
+itself refuses a seeded-upstream scratch repo, so a direct caller that never loads
+an `Env` cannot bypass the boot gate. The one way through is a documented
+containment seam (`containedUpstreamSeed`) that the #138 sandbox provider will use
+— and that the acceptance test uses, because its harness is a fixed `rm`, not
+arbitrary code.
 
 Both upstream variables are required together. The ref has **no default**: which
 commit the work is a diff *against* is the one fact this mode exists to state,
@@ -57,14 +63,25 @@ same URL git accepts — URL schemes are case-insensitive. So: the protocol must
 on the allowlist, `https`/`http`/`ssh`/`git` must carry a hostname-shaped
 authority, and a `file://` URL must carry a path and no query or fragment.
 
-A `file://` URL naming a **loopback host** — `file://127.0.0.1/srv/atrium`,
-`file://[::1]/…`, `file://localhost/…` — is the same local directory as
-`file:///srv/atrium`, and is canonicalised to it before any overlap check. Node's
-`fileURLToPath` throws on the numeric spellings, and swallowing that throw is
-what used to turn every overlap check into a silent no-op. A `file://` URL naming
-some *other* host is a genuinely remote filesystem and stays remote; one that
-cannot be canonicalised at all is **refused**, because "unreadable" and "remote"
-are different facts and must not share a return value.
+A `file://` URL is **always local**, and its authority is **git-irrelevant**.
+git drops the authority of every `file:` URL and localises the path — verified,
+executed: `git fetch -- file://build-box.example.com/srv/atrium main` runs
+`git-upload-pack '/srv/atrium'` and reads the *local* directory. So
+`file://127.0.0.1/srv/atrium`, `file://[::1]/…`, `file://localhost/…`,
+`file://build-box.example.com/…` and `file:///srv/atrium` all name the one
+directory `/srv/atrium`, and each is canonicalised to it (host dropped) before any
+overlap check.
+
+There is **no "remote `file://` host"** category. The round-2 fix introduced one —
+resolving only the loopback hosts and reading any *other* host as "remote, no
+overlap question" — and that was a campaign-stopper: a non-loopback `file://` host
+skipped every overlap check while git wrote locally under the upstream, the exact
+silent-bypass class the canonicalisation exists to kill, reintroduced one
+host-allowlist narrower. Only the **non-`file:` schemes** (`https`/`http`/`ssh`/
+`git`) are remote. A `file:` URL that git localises but this server cannot
+canonicalise (an `%2F`-encoded separator, a query or fragment) is **refused**,
+because "unreadable" and "remote" are different facts and must not share a return
+value.
 
 Overlap is likewise not a string comparison. It is checked on resolved paths, on
 **dereferenced** paths (the deepest existing prefix is `realpath`ed, so a
@@ -72,6 +89,33 @@ symlinked artifact dir pointing into the upstream is caught before it exists),
 and case-folded (on a case-insensitive filesystem `/Repos/Atrium` and
 `/repos/atrium` are one directory). Any of the three saying "overlap" refuses:
 the only acceptable failure direction here is a false refusal.
+
+### The overlap check runs again at operation time — and its honest boundary
+
+The boot gate is a string comparison against config; by the time the write
+actually happens it can be **stale**. So the overlap check is **re-run at the
+operation**, against `realpath`, immediately before the write, on both write
+paths: `createArtifactRepo` re-checks before its `init --bare`, and
+`createScratchRepo` re-checks before it creates the scratch dir it will `git init`
+and add worktrees under. A hand-built seed (a test, a future daemon) reaches these
+functions without ever loading an `Env`, so the recheck is also what binds the
+guard on the adjacent path that skips the boot gate entirely.
+
+This **narrows** the check-then-use (TOCTOU) window; it does **not** close it. A
+sufficiently-privileged local attacker could still swap a component of the scratch
+or artifact directory for a symlink into the upstream in the gap between the
+`realpath` check and the `mkdir`/`init` that follows. Closing that fully needs the
+directories to be built through **no-follow descriptors** —
+`O_NOFOLLOW`/`openat2(RESOLVE_NO_SYMLINKS)` on each path component, then operating
+relative to the verified fd — which is a larger change and is a **follow-up**
+(not built here).
+
+Until then the boundary is **stated, not pretended**: the scratch, artifact and
+upstream **parent directories are assumed operator-owned and not
+attacker-writable**. The honest guarantee is the recheck *plus* that assumption
+together — the recheck defeats a stale-boot spelling and a link already present at
+operation time; the ownership assumption covers the residual race a pure path
+check cannot. The recheck alone is **not** claimed to close TOCTOU.
 
 ## Fetching a human's branch back out
 
@@ -140,9 +184,11 @@ campaign keeps meeting:
 | Config | `env.ts` · `assertExecutionUpstreamSafe` | real-repo mode on the **unsandboxed worktree provider** at all (#138 is the unblock); a half-set pair; an upstream under a provider that seeds no trunk; a location git would read as a flag, an `ext::` transport, a relative path or an authority-less URL; and — the load-bearing one — a `EXECUTION_SCRATCH_DIR` or `EXECUTION_ARTIFACT_DIR` that **overlaps** the upstream |
 | Config + plumbing | `upstream.ts` · `upstreamLocalPath` | a `file://` URL that cannot be canonicalised, rather than reading it as "remote, no overlap question" |
 | Plumbing | `upstream.ts` · `assertUpstreamSeed` | a ref that is not a well-formed, option-free ref name, and a location on the same allowlist as above — checked on the only path that fetches, so a hand-built seed gets the operator's refusal |
-| Plumbing | `git.ts` · `createArtifactRepo` | opening the durable artifact repo at or inside the upstream. `init --bare` plus two `config` writes would modify it — at **boot**, before any session exists |
+| Plumbing | `git.ts` · `createArtifactRepo` | opening the durable artifact repo at or inside the upstream. `init --bare` plus two `config` writes would modify it — re-checked at the operation (before `mkdir`), so a hand-built call and a symlink swapped in after boot are both caught |
+| Plumbing | `git.ts` · `createScratchRepo` | **creating** the scratch repo at or inside the upstream. `mkdir` + `git init` + worktrees would write it — re-checked at the operation, the scratch counterpart to the artifact recheck |
 | Plumbing | `git.ts` · `pushArtifactBranch` | pushing a session branch into a destination overlapping the upstream. Re-checked at the write because an `ArtifactRepo` is a plain object a caller can assemble without passing the boot gate |
 | Provider | `shim.ts` · `worktree-provider.ts` | building an upstream-seeded provider with no durable artifact remote, or one that is the upstream. Without a durable remote the artifact `remote` falls back to the scratch repo, which teardown deletes — a receipt naming a remote nobody can fetch from |
+| Provider | `worktree-provider.ts` · `createWorktreeCommandProvider` | building the **unsandboxed worktree provider against a seeded upstream at all** — real-repo mode is unavailable on it (its harness can rewrite the push destination), refused at the factory as well as at boot, past-able only through the `containedUpstreamSeed` containment seam (#138) |
 
 "Overlap" is containment in both directions — an artifact repo at
 `<upstream>/.git/atrium` is not *equal* to the upstream and would still be

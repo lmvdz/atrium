@@ -100,8 +100,13 @@ export function isAcceptableUpstreamUrl(url: string): boolean {
   if (!UPSTREAM_URL_PROTOCOLS.has(parsed.protocol)) return false;
   if (parsed.username.startsWith('-') || parsed.password.startsWith('-')) return false;
   if (AUTHORITY_REQUIRED.has(parsed.protocol)) return isPlausibleHost(parsed.hostname);
-  // `file:` — an authority is optional, but a PATH is not, and the host (when
-  // present) decides local-vs-remote in `upstreamLocalPath`, not here.
+  // `file:` — an authority is optional AND git-irrelevant: git localises EVERY
+  // `file:` URL by DROPPING the authority (`file://anyhost/p` is `/p` to git), so
+  // the host never decides local-vs-remote — `upstreamLocalPath` treats every
+  // accepted `file:` URL as the local path it names. A PATH is required and a
+  // query/fragment is refused (two readers, `file://` and git, would disagree on
+  // one). The host, when present, is still shape-checked so a malformed authority
+  // is refused loudly rather than silently ignored.
   if (parsed.search !== '' || parsed.hash !== '') return false;
   if (parsed.pathname === '' || parsed.pathname === '/') return false;
   return parsed.hostname === '' || isPlausibleHost(parsed.hostname);
@@ -126,33 +131,35 @@ export const UPSTREAM_UNPARSEABLE_URL_REFUSAL =
   'is what silently disables every overlap check';
 
 /**
- * The `file://` hosts that name THIS machine. RFC 8089 makes an empty host and
- * `localhost` equivalent to a local path; the loopback literals are the same
- * claim spelled numerically, and git resolves all of them to the local path.
- * Anything else is a genuinely remote host and stays remote.
- */
-const LOOPBACK_FILE_HOSTS: ReadonlySet<string> = new Set([
-  'localhost',
-  '127.0.0.1',
-  '[::1]',
-  '::1',
-]);
-
-/**
  * The LOCAL absolute path an upstream names, or `null` when it is genuinely
  * REMOTE. Throws `UPSTREAM_UNPARSEABLE_URL_REFUSAL` when it is neither.
+ *
+ * ## `file:` IS ALWAYS LOCAL — the host is git-irrelevant (#141 r3)
+ *
+ * The round-2 fix carried a fatal remnant: it kept a "remote `file://` host"
+ * category, resolving only `localhost`/`127.0.0.1`/`[::1]` to a path and
+ * returning `null` ("remote") for any OTHER host. But git does not honour a
+ * `file:` authority AT ALL — it DROPS it and localises the path, for every host.
+ * Verified, executed: `git fetch -- file://build-box.example.com/srv/atrium main`
+ * runs `git-upload-pack '/srv/atrium'` and fetches the LOCAL directory. So a
+ * non-loopback `file://` host skipped every overlap check (this returned "remote")
+ * while git wrote locally under the upstream — the exact class of silent bypass
+ * REFUSAL 6 exists to kill, reintroduced one host-allowlist narrower. There is no
+ * "remote `file://`": every `file:` URL is the local path it names, authority
+ * dropped exactly as git drops it.
  *
  * Three outcomes, because there are three states and the old two-state return
  * merged the dangerous one into the safe one:
  *
- *  - **local** — an absolute path, or a `file://` URL whose host is absent or a
- *    loopback alias (`localhost`, `127.0.0.1`, `[::1]`). Node's `fileURLToPath`
- *    refuses the numeric spellings outright, so the host is stripped first and
- *    the path taken from the parse.
- *  - **remote** (`null`) — every other scheme, and a `file://` URL naming some
- *    OTHER host, which is a different machine's filesystem and cannot be
- *    overlapped by a directory here.
- *  - **unparseable** (throw) — a `file://` URL that is neither. Fail closed.
+ *  - **local** — an absolute path, or ANY `file:` URL. The authority (a hostname,
+ *    an IPv4/IPv6 literal, `localhost`, or nothing) is dropped before the path is
+ *    read, because git drops it; `file://anyhost/p`, `file://localhost/p` and
+ *    `file:///p` are one directory, `/p`.
+ *  - **remote** (`null`) — every non-`file:` scheme (`https`/`http`/`ssh`/`git`):
+ *    a network location with no local directory here to overlap.
+ *  - **unparseable** (throw) — a `file:` URL git localises but this server cannot
+ *    canonicalise to a directory (a `%2F`-encoded separator, a query/fragment).
+ *    Fail closed: unreadable is not remote.
  */
 export function upstreamLocalPath(url: string): string | null {
   if (isAbsolute(url)) return resolve(url);
@@ -165,8 +172,8 @@ export function upstreamLocalPath(url: string): string | null {
     return null;
   }
   if (parsed.protocol !== 'file:') return null;
-  const host = parsed.hostname.toLowerCase();
-  if (host !== '' && !LOOPBACK_FILE_HOSTS.has(host)) return null;
+  // git DROPS a `file:` authority and localises the path regardless of host, so
+  // the host tells us nothing about local-vs-remote — every `file:` URL is local.
   if (parsed.search !== '' || parsed.hash !== '') {
     throw new Error(`${UPSTREAM_UNPARSEABLE_URL_REFUSAL}: ${url.slice(0, 120)}`);
   }

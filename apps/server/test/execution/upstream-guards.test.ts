@@ -18,6 +18,7 @@ import {
   PUSH_INTO_UPSTREAM_REFUSAL,
   pushArtifactBranch,
   removeWorktree,
+  SCRATCH_REPO_AT_UPSTREAM_REFUSAL,
   type ScratchRepo,
   UPSTREAM_ARTIFACT_REMOTE_REFUSAL,
 } from '../../src/execution/git.js';
@@ -30,7 +31,10 @@ import {
   UPSTREAM_URL_REFUSAL,
   upstreamLocalPath,
 } from '../../src/execution/upstream.js';
-import { createWorktreeCommandProvider } from '../../src/execution/worktree-provider.js';
+import {
+  createWorktreeCommandProvider,
+  WORKTREE_UPSTREAM_SEED_REFUSAL,
+} from '../../src/execution/worktree-provider.js';
 
 /**
  * REAL-REPO EXECUTION MODE (#141) — the guard witnesses.
@@ -150,6 +154,22 @@ const GUARDS: readonly Guard[] = [
     layer: 'plumbing',
     probe: /an unreadable location is not evidence that it is remote/,
   },
+  // ── Round 3 (#141 r3) ─────────────────────────────────────────────────────
+  {
+    // FIX 2: the write-overlap check re-run AT OPERATION TIME inside
+    // `createScratchRepo`, so a hand-built seed (or a symlink swapped in after
+    // the boot gate) is caught at the moment of the write, not only at boot.
+    id: 'plumbing/scratch-repo-at-upstream',
+    layer: 'plumbing',
+    probe: /the per-session worktrees forked here would be written inside/,
+  },
+  {
+    // FIX 3: the worktree factory itself refuses a seeded upstream, so a direct
+    // caller who never loaded an `Env` cannot bypass the boot refusal.
+    id: 'provider/worktree-upstream-seed',
+    layer: 'provider',
+    probe: /a real harness here can rewrite its own push destination/,
+  },
 ];
 
 /**
@@ -171,6 +191,8 @@ describe('#141 refusal sentences are pairwise disjoint', () => {
       ['plumbing/push-into-upstream', PUSH_INTO_UPSTREAM_REFUSAL],
       ['provider/artifact-remote', UPSTREAM_ARTIFACT_REMOTE_REFUSAL],
       ['plumbing/unparseable-url', UPSTREAM_UNPARSEABLE_URL_REFUSAL],
+      ['plumbing/scratch-repo-at-upstream', SCRATCH_REPO_AT_UPSTREAM_REFUSAL],
+      ['provider/worktree-upstream-seed', WORKTREE_UPSTREAM_SEED_REFUSAL],
     ];
     for (const [id, sentence] of shipped) expectExactlyGuard(sentence, id);
     // And no two shipped sentences are the same string, which is the trap in its
@@ -371,12 +393,24 @@ describe('THE UPSTREAM IS NEVER WRITTEN — config layer (#141, red-on-revert)',
     ['a trailing slash', 'file:///srv/atrium/'],
     ['an uppercase scheme', 'FILE:///srv/atrium'],
     ['an unnormalised path', 'file:///srv/other/../atrium'],
+    // ── FIX 1 (#141 r3): the non-loopback authorities git ALSO localises ──────
+    // The campaign-stopper the round-2 fix introduced: it kept a "remote file://
+    // host" category and left these classified as remote, so the overlap check
+    // no-opped while git wrote under the upstream. git drops EVERY file:
+    // authority — verified: `git fetch file://build-box.example.com/srv/atrium`
+    // runs `git-upload-pack '/srv/atrium'`.
+    ['a non-loopback hostname (the exact stopper)', 'file://build-box.example.com/srv/atrium'],
+    ['a bare word host', 'file://hostname/srv/atrium'],
+    [
+      'an IPv4-mapped IPv6 host not in the old loopback set',
+      'file://[::ffff:127.0.0.1]/srv/atrium',
+    ],
   ])('sees the write overlap through a file:// URL with %s', (_name, url) => {
-    // REVERT-REDS: restore `upstreamLocalPath`'s `catch { return null }` and the
-    // loopback-host rows BOOT — `fileURLToPath` throws ERR_INVALID_FILE_URL_HOST
-    // on every one of them, the null read as "remote, no overlap question", and
-    // the scratch dir is the upstream. Executed, not reasoned: git resolves
-    // `file://127.0.0.1/srv/atrium` to the local directory.
+    // REVERT-REDS: restore `upstreamLocalPath`'s loopback-host allowlist (the
+    // `host !== '' && !LOOPBACK_FILE_HOSTS.has(host)` return-null) and the
+    // non-loopback rows BOOT — `upstreamLocalPath` reads them as "remote, no
+    // overlap question" while git writes the scratch repo under the upstream.
+    // The loopback rows red on the round-2 defect (the `catch { return null }`).
     expectExactlyGuard(
       refusal({
         ...BASE,
@@ -389,15 +423,36 @@ describe('THE UPSTREAM IS NEVER WRITTEN — config layer (#141, red-on-revert)',
     );
   });
 
-  it('treats a file:// URL naming a DIFFERENT host as genuinely remote', () => {
-    // The other direction of the same fix: a non-loopback host is somebody
-    // else's filesystem, so there is no local overlap to find and this must
-    // still boot. Fail-closed is not fail-always.
+  it('catches the overlap through a file:// URL naming a DIFFERENT host — git drops the authority', () => {
+    // FIX 1 (#141 r3), the corrected direction. The round-2 fix asserted this
+    // very configuration BOOTS ("a non-loopback host is somebody else's
+    // filesystem"). That was wrong: git ignores the `file:` authority and
+    // localises the path, so `file://build-box.example.com/srv/atrium` IS the
+    // local `/srv/atrium`, which IS the scratch dir. It must be REFUSED as an
+    // overlap, not booted as remote. REVERT-REDS: restore the loopback allowlist
+    // in `upstreamLocalPath` and this boots — the stopper, executed.
+    expectExactlyGuard(
+      refusal({
+        ...BASE,
+        EXECUTION_PROVIDER: 'shim',
+        EXECUTION_SCRATCH_DIR: '/srv/atrium',
+        EXECUTION_UPSTREAM_URL: 'file://build-box.example.com/srv/atrium',
+        EXECUTION_UPSTREAM_REF: 'main',
+      }),
+      'config/write-overlap',
+    );
+  });
+
+  it('still boots a file:// upstream on a DIFFERENT host that does not overlap — the flip', () => {
+    // Fail-closed is not fail-always: the host is irrelevant, but the PATH still
+    // decides overlap. A non-loopback file:// URL whose localised path is nowhere
+    // near the scratch/artifact dirs is a normal, bootable local upstream.
     expect(() =>
       loadEnv({
         ...BASE,
         EXECUTION_PROVIDER: 'shim',
-        EXECUTION_SCRATCH_DIR: '/srv/atrium',
+        EXECUTION_SCRATCH_DIR: '/tmp/atrium-scratch-141',
+        EXECUTION_ARTIFACT_DIR: '/tmp/atrium-artifacts-141',
         EXECUTION_UPSTREAM_URL: 'file://build-box.example.com/srv/atrium',
         EXECUTION_UPSTREAM_REF: 'main',
       }),
@@ -712,11 +767,20 @@ describe('THE UPSTREAM IS NEVER WRITTEN — git plumbing (#141, red-on-revert)',
     ['the localhost alias', (dir: string) => `file://localhost${dir}`],
     ['a trailing slash', (dir: string) => `file://${dir}/`],
     ['an uppercase scheme', (dir: string) => `FILE://${dir}`],
+    // FIX 1 (#141 r3): the non-loopback authorities git also localises. Before
+    // this fix `upstreamLocalPath` returned null for these ("remote") and
+    // `createArtifactRepo` ran `init --bare` straight into the upstream.
+    [
+      'a non-loopback hostname (the stopper)',
+      (dir: string) => `file://build-box.example.com${dir}`,
+    ],
+    ['a bare word host', (dir: string) => `file://hostname${dir}`],
+    ['an IPv4-mapped IPv6 host', (dir: string) => `file://[::ffff:127.0.0.1]${dir}`],
   ])('refuses to open the artifact repo at an upstream spelled with %s', async (_name, spell) => {
     const before = await fingerprint(upstream.dir);
     // EXECUTED, not argued: before this fix `upstreamLocalPath` returned null
-    // for every loopback spelling and `createArtifactRepo` ran `init --bare`
-    // straight into the upstream, moving the fingerprint below.
+    // for every loopback/non-loopback spelling and `createArtifactRepo` ran
+    // `init --bare` straight into the upstream, moving the fingerprint below.
     const error = await createArtifactRepo(upstream.dir, {
       url: spell(upstream.dir),
       ref: 'main',
@@ -760,6 +824,79 @@ describe('THE UPSTREAM IS NEVER WRITTEN — git plumbing (#141, red-on-revert)',
     expectExactlyGuard((error as Error).message, 'plumbing/unparseable-url');
   });
 
+  /* ── FIX 2 (#141 r3): the SCRATCH repo's OPERATION-TIME overlap recheck ────
+   *
+   * `createScratchRepo` runs mkdir + `git init` + worktrees under its baseDir.
+   * The boot gate refuses an overlapping `EXECUTION_SCRATCH_DIR`, but that is a
+   * stale string comparison by the time the write happens — a symlink swapped
+   * in after boot escapes it. So the overlap is re-checked HERE, in the function
+   * that writes, against realpath. A hand-built seed reaches this without any
+   * boot gate at all, which is exactly the adjacent path being closed.
+   */
+
+  it.each([
+    ['baseDir IS the upstream', (dir: string) => dir, (dir: string) => dir],
+    ['baseDir is INSIDE the upstream', (dir: string) => join(dir, 'nested'), (dir: string) => dir],
+    // FIX 1 rides along: a non-loopback file:// spelling of the upstream must be
+    // recognised as the same local path here too.
+    [
+      'the upstream named by a non-loopback file:// URL',
+      (dir: string) => dir,
+      (dir: string) => `file://build-box.example.com${dir}`,
+    ],
+  ])('refuses to CREATE the scratch repo when %s', async (_name, baseDirOf, urlOf) => {
+    const before = await fingerprint(upstream.dir);
+    // REVERT-REDS: drop the operation-time recheck from `createScratchRepo` and
+    // this mkdtemps + `git init` + fetches INSIDE the upstream, moving its
+    // fingerprint below.
+    const error = await createScratchRepo(baseDirOf(upstream.dir), {
+      url: urlOf(upstream.dir),
+      ref: 'main',
+    }).then(
+      (repo) => {
+        trash.push(repo.dir);
+        return null;
+      },
+      (e: Error) => e,
+    );
+    expect(error, 'expected createScratchRepo to refuse an overlapping baseDir').not.toBeNull();
+    expectExactlyGuard((error as Error).message, 'plumbing/scratch-repo-at-upstream');
+    expect(await fingerprint(upstream.dir)).toBe(before);
+  });
+
+  it('refuses to CREATE the scratch repo under a baseDir SYMLINKED into the upstream', async () => {
+    // The realpath half of FIX 2: the lexical spelling of `baseDir` does not
+    // overlap, but it dereferences into the upstream. `pathsOverlap` canonicalises
+    // the deepest existing prefix, so the link is caught at operation time.
+    const before = await fingerprint(upstream.dir);
+    const root = await mkdtemp(join(tmpdir(), 'atrium-141-scratch-link-'));
+    trash.push(root);
+    const link = join(root, 'scratch-link');
+    await symlink(upstream.dir, link, 'dir');
+    const error = await createScratchRepo(join(link, 'exec'), {
+      url: upstream.dir,
+      ref: 'main',
+    }).then(
+      (repo) => {
+        trash.push(repo.dir);
+        return null;
+      },
+      (e: Error) => e,
+    );
+    expect(error).not.toBeNull();
+    expectExactlyGuard((error as Error).message, 'plumbing/scratch-repo-at-upstream');
+    expect(await fingerprint(upstream.dir)).toBe(before);
+  });
+
+  it('still creates the scratch repo normally under a non-overlapping baseDir — the flip', async () => {
+    const base = await mkdtemp(join(tmpdir(), 'atrium-141-scratch-ok-'));
+    trash.push(base);
+    const scratch = await createScratchRepo(base, { url: upstream.dir, ref: 'main' });
+    trash.push(scratch.dir);
+    // It really seeded from the upstream, and left the upstream untouched.
+    expect(scratch.seedCommit).toBe(upstream.commit);
+  });
+
   it('still opens the artifact repo normally beside a loopback-spelled upstream', async () => {
     // The flip. Canonicalising a loopback `file://` URL must find the overlap
     // when there is one and NOT invent one when there is not.
@@ -777,7 +914,7 @@ describe('THE UPSTREAM IS NEVER WRITTEN — git plumbing (#141, red-on-revert)',
 
   /* ── The pure functions, directly ──────────────────────────────────────── */
 
-  it('canonicalises every local spelling of one directory to one path', () => {
+  it('canonicalises every local spelling of one directory to one path — any host', () => {
     for (const spelling of [
       upstream.dir,
       `file://${upstream.dir}`,
@@ -787,20 +924,30 @@ describe('THE UPSTREAM IS NEVER WRITTEN — git plumbing (#141, red-on-revert)',
       `FILE://${upstream.dir}`,
       `file://${upstream.dir}/`,
       `${upstream.dir}/`,
+      // FIX 1 (#141 r3): git drops the authority for EVERY host, so a non-loopback
+      // authority names the SAME local directory. These returned null before.
+      `file://build-box.example.com${upstream.dir}`,
+      `file://hostname${upstream.dir}`,
+      `file://[::ffff:127.0.0.1]${upstream.dir}`,
     ]) {
       expect(upstreamLocalPath(spelling), spelling).toBe(upstream.dir);
     }
   });
 
   it('keeps a genuinely remote location remote, and refuses an unreadable one', () => {
+    // Only the NON-file schemes are remote — a network location with no local
+    // directory to overlap. Every `file:` URL, whatever its authority, is local
+    // (FIX 1 #141 r3): `file://build-box.example.com/...` is NOT in this list.
     for (const remote of [
       'https://github.com/lmvdz/atrium.git',
       'ssh://git@github.com/lmvdz/atrium.git',
       'git://host/r',
-      'file://build-box.example.com/srv/atrium',
+      'http://internal.example/atrium.git',
     ]) {
       expect(upstreamLocalPath(remote), remote).toBeNull();
     }
+    // The former "remote file:// host" is now correctly LOCAL — git localises it.
+    expect(upstreamLocalPath('file://build-box.example.com/srv/atrium')).toBe('/srv/atrium');
     expect(() => upstreamLocalPath('file:///srv/atrium%2F..%2Fetc')).toThrow(
       /an unreadable location is not evidence that it is remote/,
     );
@@ -893,7 +1040,16 @@ describe('THE UPSTREAM IS NEVER WRITTEN — provider wiring (#141, red-on-revert
     ['shim', (repo, ar) => createDeterministicShimProvider({ repo, artifactRepo: ar })],
     [
       'worktree',
-      (repo, ar) => createWorktreeCommandProvider({ repo, artifactRepo: ar, command: ['true'] }),
+      // `containedUpstreamSeed: true` gets PAST the FIX-3 seeded-upstream refusal
+      // so these cases exercise the artifact-remote guard itself. The FIX-3
+      // refusal (no opt-in) has its own witness below.
+      (repo, ar) =>
+        createWorktreeCommandProvider({
+          repo,
+          artifactRepo: ar,
+          command: ['true'],
+          containedUpstreamSeed: true,
+        }),
     ],
   ];
 
@@ -924,19 +1080,25 @@ describe('THE UPSTREAM IS NEVER WRITTEN — provider wiring (#141, red-on-revert
       expectExactlyGuard(message, 'provider/artifact-remote');
     });
 
-    it(`the ${kind} provider sees the upstream through a loopback file:// spelling`, () => {
-      // The provider layer resolves the seed's URL itself, so the null-swallow
-      // (#141 r2 FIX 2) disabled this guard too. REVERT-REDS: restore the
-      // `catch { return null }` and this provider BUILDS with its artifact
-      // remote sitting on the upstream.
+    it(`the ${kind} provider sees the upstream through a non-loopback file:// spelling`, () => {
+      // The provider layer resolves the seed's URL itself. FIX 1 (#141 r3): a
+      // non-loopback authority is the SAME local path (git drops the authority),
+      // so an artifact remote at the upstream must be caught even when the seed
+      // URL spells the upstream with a foreign host. REVERT-REDS: restore
+      // `upstreamLocalPath`'s loopback allowlist and this returns null ("remote"),
+      // so the provider BUILDS with its artifact remote sitting on the upstream.
       const spelled: ScratchRepo = {
         ...seeded,
-        upstream: { url: `file://127.0.0.1${upstream.dir}`, ref: 'main', commit: upstream.commit },
+        upstream: {
+          url: `file://build-box.example.com${upstream.dir}`,
+          ref: 'main',
+          commit: upstream.commit,
+        },
       };
       let message = '';
       try {
         build(spelled, { dir: upstream.dir, upstreamPath: upstream.dir });
-        expect.unreachable(`${kind} must refuse a loopback-spelled upstream`);
+        expect.unreachable(`${kind} must refuse a non-loopback-spelled upstream`);
       } catch (error) {
         message = (error as Error).message;
       }
@@ -952,4 +1114,51 @@ describe('THE UPSTREAM IS NEVER WRITTEN — provider wiring (#141, red-on-revert
       expect(() => build(plain, undefined)).not.toThrow();
     });
   }
+
+  /* ── FIX 3 (#141 r3): the worktree factory refuses a seeded upstream ──────
+   *
+   * env.ts refuses `EXECUTION_PROVIDER=worktree` + an upstream at boot, but the
+   * factory is reachable by a direct caller that never loads an `Env` — the #89
+   * adjacent-path-bypass class. So the constructor itself refuses a seeded
+   * scratch repo unless the caller opts into the documented containment seam
+   * (`containedUpstreamSeed`) the #138 sandbox provider will use. This is
+   * worktree-only: the shim runs no harness, so a seeded shim is safe and stays
+   * bootable (asserted by the factories loop above).
+   */
+
+  it('the worktree factory REFUSES a seeded upstream without the containment opt-in', () => {
+    // A VALID, distinct artifact remote — so this is not the artifact-remote
+    // guard firing; it is the FIX-3 factory refusal, which is about the MODE not
+    // the wiring. REVERT-REDS: delete the `repo.upstream !== undefined && ...`
+    // refusal from `createWorktreeCommandProvider` and this BUILDS, and a direct
+    // caller then runs a real harness against a real upstream with no boot gate.
+    let message = '';
+    try {
+      createWorktreeCommandProvider({ repo: seeded, artifactRepo, command: ['true'] });
+      expect.unreachable('worktree must refuse a seeded upstream without the containment opt-in');
+    } catch (error) {
+      message = (error as Error).message;
+    }
+    expectExactlyGuard(message, 'provider/worktree-upstream-seed');
+    expect(message).toContain('#138');
+  });
+
+  it('the worktree factory ALLOWS a seeded upstream through the containment seam — the flip', () => {
+    // The #138 sandbox provider and the acceptance test reach real-repo mode
+    // through exactly this seam; with a distinct durable remote it builds.
+    expect(() =>
+      createWorktreeCommandProvider({
+        repo: seeded,
+        artifactRepo,
+        command: ['true'],
+        containedUpstreamSeed: true,
+      }),
+    ).not.toThrow();
+  });
+
+  it('the shim factory NEEDS no opt-in for a seeded upstream — it runs no harness', () => {
+    // FIX 3 is worktree-only. The shim has no config-rewrite reach, so a seeded
+    // shim with a distinct remote builds with no containment seam at all.
+    expect(() => createDeterministicShimProvider({ repo: seeded, artifactRepo })).not.toThrow();
+  });
 });

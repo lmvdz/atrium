@@ -72,6 +72,11 @@ import { openDatabase, resetDatabase, type SeededRoom, seedRoom } from '../suppo
  * The harness here is `rm <known file>`, written by this test, not arbitrary
  * code. The boot refusal itself has its own witness, at the config layer, in
  * `apps/server/test/execution/upstream-guards.test.ts`.
+ *
+ * Since #141 r3 (FIX 3) the worktree factory ALSO refuses a seeded upstream by
+ * construction, so a direct caller cannot bypass the boot refusal. This test
+ * passes `containedUpstreamSeed: true` — the same documented containment seam the
+ * #138 sandbox provider will use — because its harness is trusted and fixed.
  */
 
 const run = promisify(execFile);
@@ -254,10 +259,20 @@ describe('a session against a seeded UPSTREAM produces a real, fetchable diff (#
     const censusBefore = await census();
 
     // THE HARNESS: it deletes the known file. Nothing else.
+    //
+    // `containedUpstreamSeed: true` is the documented containment seam (#141 r3,
+    // FIX 3): the worktree factory refuses a seeded upstream by construction,
+    // because a real harness could rewrite its own push destination via git
+    // config. This test is allowed through the same narrow seam the #138 sandbox
+    // provider will use — its harness is a fixed `rm`, written here, not attacker
+    // code, and the mechanics under test are exactly what #138 inherits. The
+    // operator-facing path stays refused at boot (env.ts); its witness is at the
+    // config layer in apps/server/test/execution/upstream-guards.test.ts.
     const provider = createWorktreeCommandProvider({
       repo: scratch,
       artifactRepo,
       command: ['bash', '-lc', `rm ${KNOWN_FILE}`],
+      containedUpstreamSeed: true,
     });
     const outcome = await createExecutionCoordinator({
       commands,
