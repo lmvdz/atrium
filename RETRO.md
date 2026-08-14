@@ -1485,3 +1485,43 @@ verification had run the seed test as a file, not among the suite — the class
 hides exactly where you verify least. (3) A fix brief's env claim was half right
 and the builder shipped the sharper truth: NODE_ENV unset against a production DB
 is the shape no runtime refusal can see; the header is the only control there.
+
+## #141 — real-repo execution mode (closed 2026-08-14, 7 rounds — the campaign's whetstone)
+
+A git-write boundary on the tool's OWN source repo: an execution session must never
+write the configured upstream. Codex built it; both foreign lineages gauntleted it
+five times; opus fixed it across seven rounds. The arc: unconditional "never written"
+claim (r1-3, false — the harness redirects the push via git config) → scope the claim +
+non-lexical guards (r4, but plain objects forgeable) → runtime brand (r5, but checked at
+2 of N sites) → brand every git-write site (r6, but fs-mutations + mutable fields
+missed) → CONSTRUCTION invariant: no authentic handle may name the upstream (r7).
+
+The transferable lessons, in order of how much they cost:
+1. **A git-write (or any-mutation) boundary where the attacker is IN-PROCESS needs a
+   threat model at CHARTER, not discovered across rounds.** This ticket was chartered as
+   a feature ("session diffs against this repo") with the security as an afterthought; the
+   security WAS the ticket. Seven rounds is the price of finding that out by adversarial
+   discovery instead of design.
+2. **Guarding each USE site is a receding frontier; move the invariant to CONSTRUCTION.**
+   Every "complete enumeration" round missed a site (a new git-write, then an fs rm, then
+   the mint point itself) because the surface is "every caller-influenced mutation," which
+   is unbounded from the use side. The construction-time invariant ("no authentic handle
+   can name the upstream") makes the entire use-site surface moot in one stroke.
+3. **A required TS field / a boolean / readonly / a plain object are ALL forgeable at
+   runtime.** "The type says so" is not containment. Runtime provenance (a module-private
+   WeakSet brand + Object.freeze) is. This is the same class as the payload-vs-envelope
+   actor rule, one tier down.
+4. **The orchestrator's own briefs are hypotheses too.** Two rounds fixed errors that
+   originated in MY briefs (FOR-KEY-SHARE-style overreach; the file://-host
+   misclassification; "shim is like worktree"). The builder refuted each with evidence
+   because the dispatch said so. A brief is not authority.
+5. **Hold your own stop-condition.** By r5 this was a local-optimum trap. I pre-committed
+   in writing (on the ticket) that r7 closes regardless, with residuals bundled to #138 —
+   and held it, rather than letting a security ticket become an infinite regress. The
+   residuals are real, off the shipped paths, and named — not hidden.
+
+The shipped enforcement (brands + freeze + construction-overlap, all gauntlet-verified)
+makes the operator/agent paths never write the upstream. The residual completeness (the
+registration coupling, the harness config-rewrite, the mint-dir TOCTOU) is defense-in-depth
+against internal miswiring and is bundled into #138, where the sandbox is the real
+containment.
