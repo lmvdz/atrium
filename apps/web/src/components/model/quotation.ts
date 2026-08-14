@@ -1053,6 +1053,33 @@ export function offeredText(value: string, from: string): string {
 export const FILE_TEXT_MAX = 2000;
 
 /**
+ * VISUAL-IMPERSONATION NORMALIZATION for verbatim content (#145 r2, FIX 4).
+ *
+ * React escapes markup, so a diff line cannot inject an element — the round-1 page
+ * critic confirmed it renders inert. What React does NOT stop is a line that
+ * REORDERS or HIDES itself with Unicode control characters: a bidi override
+ * (U+202A–202E) or isolate (U+2066–2069) makes `+harmless` display as a different
+ * string than its bytes, and a raw newline or C0/C1 control inside a single diff
+ * row (which the pane renders `white-space: pre`) forges a second visual line the
+ * gutter never marked. Either turns verbatim file bytes into a tool for
+ * impersonating the pane's own voice.
+ *
+ * So every control character is replaced with U+FFFD (�) at the render boundary,
+ * where the position is kept visible rather than silently dropped — TAB (U+0009)
+ * alone survives, because it is legitimate, meaningful whitespace in real source.
+ * A bidi override cannot reorder what is no longer there, and a newline cannot open
+ * a row the component did not.
+ */
+const CONTROL_CHARS =
+  // C0 controls except TAB (\u0009), DEL and C1 controls, plus the bidi
+  // overrides (\u202A-\u202E) and isolates (\u2066-\u2069).
+  // biome-ignore lint/suspicious/noControlCharactersInRegex: neutralizing them is the whole point.
+  /[\u0000-\u0008\u000A-\u001F\u007F-\u009F\u202A-\u202E\u2066-\u2069]/g;
+export function neutralizeControlChars(value: string): string {
+  return value.replace(CONTROL_CHARS, '\uFFFD');
+}
+
+/**
  * THE THIRD DOOR — VERBATIM FILE CONTENT (#145), which the system/offered split
  * does not cover.
  *
@@ -1075,8 +1102,16 @@ export const FILE_TEXT_MAX = 2000;
  * (`execution/git.ts` caps every line at 500 chars; this catches a hand-forged
  * over-long payload before it reaches the DOM). It fabricates nothing and
  * attributes nothing — the content is rendered ONLY inside the monospace diff
- * treatment (`ReviewPane`'s `DiffView`), where a `data-diff-line` marker and a
- * tinted row make it unmistakably file data, never read as anyone's utterance.
+ * treatment (`ReviewPane`'s `DiffView`), where a fixed gutter and a `data-diff-line`
+ * marker make it unmistakably file data, never read as anyone's utterance.
+ *
+ * CONTROL-CHARACTER NORMALIZATION (#145 r2, FIX 4): before it returns, every bidi
+ * override/isolate and nonprinting control char is replaced with U+FFFD (see
+ * `neutralizeControlChars`). React already stops markup; this stops the OTHER
+ * verbatim-content attack the round-1 critics named — a line that reorders or hides
+ * itself, or forges a second visual row with a raw newline — so `+harmless` can
+ * never render as anything but its own bytes, and the gutter it sits behind is the
+ * only thing that speaks for the pane.
  *
  * Registered as a text door in `test/printed.ts`, so the printed-strings sweep
  * treats a `fileText(…)` sink as checked — the same standing `systemText` has,
@@ -1086,10 +1121,11 @@ export function fileText(value: string, from: string): string {
   if (typeof value !== 'string') {
     throw new Error(`${from}: verbatim file content must be a string`);
   }
-  if (value.length > FILE_TEXT_MAX) {
-    return `${value.slice(0, FILE_TEXT_MAX)}…`;
+  const normalized = neutralizeControlChars(value);
+  if (normalized.length > FILE_TEXT_MAX) {
+    return `${normalized.slice(0, FILE_TEXT_MAX)}…`;
   }
-  return value;
+  return normalized;
 }
 
 /** The runtime boundary for system voice, mirroring `parseQuotation`. */

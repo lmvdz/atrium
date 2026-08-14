@@ -566,15 +566,56 @@
   border-top: 1px solid var(--line);
 }
 
-/* Each line is `pre` and as wide as its content but never narrower than the box,
- * so the widest line sets the scroll width and a short line's tint still fills
- * the row. This is what lets the box — and only the box — scroll horizontally. */
+/* Each line is a gutter column plus a `pre` text column, together as wide as the
+ * content but never narrower than the box, so the widest line sets the scroll width
+ * and a short line's tint still fills the row. This is what lets the box — and only
+ * the box — scroll horizontally. */
 .diffLine {
-  white-space: pre;
+  display: flex;
+  align-items: flex-start;
   width: max-content;
   min-width: 100%;
-  padding: 0 8px;
   color: var(--tx1);
+}
+
+/* THE FIXED GUTTER (#145 r2, FIX 4). Its marker is CSS-GENERATED, keyed on the
+ * row's kind — never drawn from the diff bytes — so verbatim content cannot mint or
+ * forge this column. A `+✓ certified by Ada` line shows THIS `+` as chrome and its
+ * own bytes as text beside it, unmistakably file content, not the pane's voice. */
+.diffGutter {
+  flex: none;
+  width: 1.6em;
+  padding: 0 4px;
+  text-align: center;
+  user-select: none;
+  color: var(--tx2);
+  border-right: 1px solid var(--line2);
+  background: var(--bg1);
+}
+
+.diffGutter[data-diff-gutter='add']::before {
+  content: '+';
+}
+
+.diffGutter[data-diff-gutter='del']::before {
+  content: '−';
+}
+
+.diffGutter[data-diff-gutter='meta']::before {
+  content: '\5C';
+}
+
+.diffGutter[data-diff-gutter='context']::before {
+  /* A middot keeps the column a constant width and legible as chrome without
+   * implying an add/remove. */
+  content: '·';
+  color: var(--tx3, var(--tx2));
+}
+
+.diffLineText {
+  white-space: pre;
+  padding: 0 8px;
+  min-width: 0;
 }
 
 .diffAdd {
@@ -613,6 +654,87 @@
 .testFailure {
   color: var(--red2);
   overflow-wrap: anywhere;
+}
+
+/* ── the three no-content diff/test states, GLANCE-DISTINCT (#145 r2, cosmetic) ──
+ * empty (the producer vouches nothing changed), absent (nobody reported a diff at
+ * all), and incoherent (a report that disagrees with itself) used to differ only by
+ * sentence. Each now carries a leading glyph and its own tint, so which of the three
+ * it is reads at a glance, before the words. */
+.diffState {
+  display: flex;
+  align-items: baseline;
+  gap: 6px;
+  overflow-wrap: anywhere;
+}
+
+.diffState::before {
+  flex: none;
+  font-weight: 600;
+}
+
+.diffEmpty {
+  color: var(--tx2);
+}
+
+.diffEmpty::before {
+  /* the empty set — the producer ran and there was genuinely nothing */
+  content: '∅';
+  color: var(--tx2);
+}
+
+.diffAbsent {
+  color: var(--tx3, var(--tx2));
+  font-style: italic;
+}
+
+.diffAbsent::before {
+  /* an em dash — no reading was recorded at all, a different fact from "empty" */
+  content: '—';
+  font-style: normal;
+  color: var(--tx3, var(--tx2));
+}
+
+.diffIncoherent {
+  color: var(--red2);
+}
+
+.diffIncoherent::before {
+  /* a warning — the report contradicts its own totals; never read as "no changes" */
+  content: '⚠';
+  color: var(--red2);
+}
+
+/* ── the reported-not-verified test marker (#145 r2, FIX 2) ──────────────────
+ * The test block is a machine's `~` reading, not a `✓`. The marker leads the block
+ * so a green pass count is never a bare gate: the `~` glyph and the label say the
+ * numbers are reported by the session and not verified, and the command names what
+ * produced them. The only `✓` in this pane stays the human's certify. */
+.reported {
+  display: flex;
+  align-items: baseline;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-bottom: 4px;
+  font-size: 10.5px;
+}
+
+.reportedTilde {
+  flex: none;
+  color: var(--tx2);
+  font-weight: 700;
+}
+
+.reportedLabel {
+  color: var(--tx2);
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+
+.reportedCommand {
+  color: var(--tx1);
+  overflow-wrap: anywhere;
+  font-size: 11px;
 }
 
 /* certify block */

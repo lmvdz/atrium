@@ -1571,6 +1571,15 @@ export interface SessionTestResults {
   readonly failures: readonly string[];
   /** True when `failures` is a truncated prefix of the whole failing set. */
   readonly failuresTruncated: boolean;
+  /**
+   * WHAT PRODUCED THESE NUMBERS (#145 r2, FIX 2) — the test command or harness
+   * suite that ran, carried as provenance so the review pane can render the block
+   * as an explicit reported-not-verified `~` fact instead of a bare green pass that
+   * reads as a covenant `✓`. Optional: a producer that reported no command still
+   * renders as `~` reported, it just cannot name the runner. A `~` fact the adapter
+   * reports, never a certification.
+   */
+  readonly command?: string;
 }
 
 /**

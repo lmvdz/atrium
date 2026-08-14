@@ -906,6 +906,28 @@ export const MAX_DIFF_FILES = 40;
 export const MAX_DIFF_LINES = 2000;
 /** Cap on a single hunk line's length — a minified megabyte-line is trimmed. */
 export const MAX_DIFF_LINE_LEN = 500;
+/**
+ * Cap on a single hunk HEADER's length (#145 r2, FIX 3). A `@@ … @@` header
+ * carries a trailing function-context line git does not itself bound; a hostile
+ * or pathological one is trimmed to the same ceiling a body line is, so the
+ * durable event schema can enforce one number for every carried string.
+ */
+export const MAX_DIFF_HEADER_LEN = MAX_DIFF_LINE_LEN;
+/** Cap on a file path (post- or pre-image) carried in the diff. */
+export const MAX_DIFF_PATH_LEN = 1000;
+/**
+ * THE AGGREGATE SERIALIZED-BYTE CEILING (#145 r2, FIX 3) — the whole diff, not one
+ * line. The producer caps files, lines and line length individually; this is the
+ * PRODUCT bound a durable-boundary schema enforces so a hostile provider that
+ * bypasses this shim cannot compose in-bounds pieces into an out-of-bounds jsonb
+ * row. It is the sum of every retained line (≤ `MAX_DIFF_LINES` lines, each ≤
+ * `MAX_DIFF_LINE_LEN` + 1 for the trim ellipsis) plus, per file, one header and
+ * two paths — a ceiling the honest producer's largest legal output sits under, and
+ * a hostile one cannot exceed without the event failing to parse.
+ */
+export const MAX_DIFF_TOTAL_BYTES =
+  MAX_DIFF_LINES * (MAX_DIFF_LINE_LEN + 1) +
+  MAX_DIFF_FILES * (MAX_DIFF_HEADER_LEN + 1 + 2 * MAX_DIFF_PATH_LEN);
 
 /** One file's whole-diff counts, from `git diff --numstat -z` (survives huge diffs). */
 interface NumstatEntry {
@@ -1141,7 +1163,15 @@ export async function diffWorktree(
           }
           lineBudget -= 1;
         }
-        hunks.push({ header: h.header, lines: kept });
+        // Trim the hunk header to the same ceiling a body line gets (#145 r2, FIX
+        // 3): a `@@ … @@` header's trailing function-context is unbounded by git,
+        // and the durable schema enforces `MAX_DIFF_HEADER_LEN`, so the producer
+        // trims here rather than emit a header the ledger boundary would reject.
+        const header =
+          h.header.length > MAX_DIFF_HEADER_LEN
+            ? `${h.header.slice(0, MAX_DIFF_HEADER_LEN)}…`
+            : h.header;
+        hunks.push({ header, lines: kept });
       }
     }
     files.push({

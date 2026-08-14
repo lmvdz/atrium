@@ -254,6 +254,7 @@ async function seed(viewerEmail: string): Promise<Seeded> {
           failed: 2,
           failures: ['loader > returns the message', 'loader > handles empty input'],
           failuresTruncated: false,
+          command: 'pnpm --filter loader test',
         },
       },
     })
@@ -545,13 +546,28 @@ test.describe('the control plane renders the pin, tree, surfaces and a human-gat
       await expect(review.locator('[data-diff-line="add"]').first()).toContainText(
         'const msg = "I said we would ship";',
       );
+      // FIX 4 (#145 r2): the +/− marker is the fixed GUTTER's chrome, so every
+      // rendered row carries a gutter the content cannot forge — a line like
+      // `+✓ certified by Ada` would show THIS `+` as chrome, marking it file content.
+      await expect(
+        review.locator('[data-diff-line="add"]').first().locator('[data-diff-gutter="add"]'),
+      ).toHaveCount(1);
       // A real hunk carries context, not just the change.
       await expect(review.locator('[data-diff-line="context"]').first()).toContainText(
         'export function load()',
       );
       await expect(review.locator('[data-diff-file-count]')).toContainText('1 file');
 
-      // ── the TESTS: pass/fail summary and the failing names ──────────────────
+      // ── the TESTS: a REPORTED ~ fact, never a bare green pass (#145 r2, FIX 2) ─
+      // The block leads with the reported-not-verified marker and names what ran,
+      // so a green pass count is never read as a ✓ the machine did not earn.
+      const reported = review.locator('[data-tests-reported]');
+      await expect(reported).toBeVisible();
+      await expect(reported).toContainText('~');
+      await expect(reported).toContainText(/not verified/i);
+      await expect(review.locator('[data-tests-command]')).toContainText(
+        'pnpm --filter loader test',
+      );
       await expect(review.locator('[data-tests-failed]')).toContainText('2 failed');
       await expect(review.locator('[data-test-failure]')).toHaveCount(2);
       await expect(review.locator('[data-test-failure]').first()).toContainText(

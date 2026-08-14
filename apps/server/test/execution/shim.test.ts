@@ -175,12 +175,14 @@ describe('the deterministic shim produces a real, verifiable artifact', () => {
     const body = (added?.hunks ?? []).flatMap((h) => h.lines).join('\n');
     expect(body).toContain(c.sessionId);
 
-    // The test report is present; the clean run is all-passing.
+    // The test report is present; the clean run is all-passing and carries its
+    // command provenance (#145 r2, FIX 2) — the pane renders it as a reported ~ fact.
     expect(artifact?.tests).toEqual({
       passed: 3,
       failed: 0,
       failures: [],
       failuresTruncated: false,
+      command: 'atrium deterministic shim — fixture suite (no external runner)',
     });
   });
 

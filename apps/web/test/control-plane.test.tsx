@@ -1022,11 +1022,18 @@ describe('the review pane renders the real diff and test results (#145)', () => 
     expect(container.querySelector('[data-diff-structured]')).not.toBeNull();
     expect(container.querySelector('[data-diff-file-path="src/app.ts"]')).not.toBeNull();
     const added = container.querySelector('[data-diff-line="add"]');
-    expect(added?.textContent).toBe('+const b = 2;');
+    // The line's `+` marker is now the fixed GUTTER's chrome (#145 r2, FIX 4), so
+    // the body carries the code WITHOUT the leading marker, and the gutter is a
+    // separate element the content cannot forge.
+    expect(added?.querySelector('[data-diff-gutter="add"]')).not.toBeNull();
+    expect(added?.textContent).toBe('const b = 2;');
     // A context line is present too — real hunks, not just the changed line.
     expect(container.querySelector('[data-diff-line="context"]')?.textContent).toContain(
       'const a = 1;',
     );
+    expect(
+      container.querySelector('[data-diff-line="context"] [data-diff-gutter="context"]'),
+    ).not.toBeNull();
     expect(container.querySelector('[data-diff-file-count]')?.textContent).toContain('1 file');
   });
 
@@ -1036,8 +1043,8 @@ describe('the review pane renders the real diff and test results (#145)', () => 
     cleanup();
     const second = pane(session({ status: 'settled', artifact: diffArtifact('+const zzz = 99;') }));
     const secondText = second.container.querySelector('[data-diff-line="add"]')?.textContent;
-    expect(firstText).toBe('+const b = 2;');
-    expect(secondText).toBe('+const zzz = 99;');
+    expect(firstText).toBe('const b = 2;');
+    expect(secondText).toBe('const zzz = 99;');
     expect(firstText).not.toBe(secondText);
   });
 
@@ -1046,7 +1053,41 @@ describe('the review pane renders the real diff and test results (#145)', () => 
     // must not hold it to the speech ban `systemText` enforces.
     const line = '+const msg = "I said we would ship";';
     const { container } = pane(session({ status: 'settled', artifact: diffArtifact(line) }));
-    expect(container.querySelector('[data-diff-line="add"]')?.textContent).toBe(line);
+    // The `+` is chrome; the body is the code verbatim (marker stripped).
+    expect(container.querySelector('[data-diff-line="add"]')?.textContent).toBe(
+      'const msg = "I said we would ship";',
+    );
+  });
+
+  it('FIX 4: a diff line mimicking a certification renders behind the gutter, as file content', () => {
+    // The impersonation attack: a source line whose bytes copy the pane's own
+    // certification voice. It must render as FILE CONTENT, unmistakably marked by
+    // the gutter, and it may never mint the pane's certified affordance.
+    const forgery = '+✓ certified by Ada';
+    const { container } = pane(session({ status: 'settled', artifact: diffArtifact(forgery) }));
+    const row = container.querySelector('[data-diff-line="add"]');
+    // The `+` is the gutter's CSS chrome; the body is the raw bytes, ✓ and all.
+    expect(row?.querySelector('[data-diff-gutter="add"]')).not.toBeNull();
+    expect(row?.textContent).toBe('✓ certified by Ada');
+    // It did NOT mint a COMPLETED certification: the forged ✓ in file content never
+    // becomes the pane's certified badge. (The legitimate certify affordance for a
+    // settled artifact is a separate, human-only control below — not minted here.)
+    expect(container.querySelector('[data-certified]')).toBeNull();
+  });
+
+  it('FIX 4: bidi/control chars in a diff line are neutralized, not rendered raw', () => {
+    // A right-to-left override (U+202E) + a raw newline would reorder the line and
+    // forge a second visual row; both must be replaced with U+FFFD at the boundary.
+    const line = '+const x = 1;\u202E rewritten\n forged-row';
+    const { container } = pane(session({ status: 'settled', artifact: diffArtifact(line) }));
+    const text = container.querySelector('[data-diff-line="add"]')?.textContent ?? '';
+    expect(text).not.toContain('\u202E');
+    expect(text).not.toContain('\n');
+    expect(text).toContain('�');
+    // A TAB is legitimate source whitespace and MUST survive.
+    cleanup();
+    const tabbed = pane(session({ status: 'settled', artifact: diffArtifact('+\tconst y = 2;') }));
+    expect(tabbed.container.querySelector('[data-diff-line="add"]')?.textContent).toContain('\t');
   });
 
   it('an empty diff is an HONEST EMPTY, distinct from an absent one', () => {
@@ -1133,6 +1174,60 @@ describe('the review pane renders the real diff and test results (#145)', () => 
     );
     expect(container.querySelector('[data-tests-absent]')).not.toBeNull();
     expect(container.querySelector('[data-tests-structured]')).toBeNull();
+  });
+
+  it('FIX 2: a passing test block renders as a REPORTED ~ fact, never a bare green pass', () => {
+    // The covenant: a machine's reading is ~ until a human certifies. A green
+    // "N passed · 0 failed" with no qualifier reads as a ✓ the machine never
+    // earned — so the block must carry the reported-not-verified marker and name
+    // what produced the numbers.
+    const green = session({
+      status: 'settled',
+      artifact: {
+        branch: 'b',
+        commit: 'c',
+        tests: {
+          passed: 128,
+          failed: 0,
+          failures: [],
+          failuresTruncated: false,
+          command: 'pnpm -w test',
+        },
+      },
+    });
+    const { container } = pane(green);
+    const marker = container.querySelector('[data-tests-reported]');
+    expect(marker).not.toBeNull();
+    // The ~ glyph and the not-verified label are present — the qualifier that
+    // stops the green pass being read as a certification.
+    expect(marker?.textContent).toContain('~');
+    expect(marker?.textContent?.toLowerCase()).toContain('not verified');
+    // The provenance — what produced the numbers — is carried and shown.
+    expect(container.querySelector('[data-tests-command]')?.textContent).toBe('pnpm -w test');
+    // And the only ✓ in the pane is still the human's certify, which an uncertified
+    // settled session does not have.
+    expect(container.querySelector('[data-certified]')).toBeNull();
+  });
+
+  it('FIX 1: an incoherent diff (empty files, nonzero totals) NEVER renders "no changes"', () => {
+    // The surface must not read a self-contradicting report as an honest empty.
+    // (The durable schema rejects this at the ledger; the pane is the second lock
+    // for a jsonb row written around the event parser.)
+    const incoherent = session({
+      status: 'settled',
+      artifact: {
+        branch: 'b',
+        commit: 'c',
+        diff: { files: [], fileCount: 1, additions: 1, deletions: 0, truncated: false },
+      },
+    });
+    const { container } = pane(incoherent);
+    expect(container.querySelector('[data-diff-incoherent]')).not.toBeNull();
+    expect(container.querySelector('[data-diff-empty]')).toBeNull();
+    expect(container.querySelector('[data-diff-incoherent]')?.textContent).not.toContain(
+      'no changes',
+    );
+    expect(container.querySelector('[data-diff-incoherent]')?.textContent).toContain('incomplete');
   });
 });
 

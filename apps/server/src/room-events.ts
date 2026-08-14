@@ -14,6 +14,14 @@ import {
 } from '@atrium/core';
 import { coreEventTypes } from '@atrium/db';
 import { z } from 'zod';
+import {
+  MAX_DIFF_FILES,
+  MAX_DIFF_HEADER_LEN,
+  MAX_DIFF_LINE_LEN,
+  MAX_DIFF_LINES,
+  MAX_DIFF_PATH_LEN,
+  MAX_DIFF_TOTAL_BYTES,
+} from './execution/git.js';
 
 /**
  * What may take a position in `core_events` — the ledger's event union.
@@ -247,28 +255,119 @@ export type SessionOpened = z.infer<typeof SessionOpened>;
  * so it is trusted exactly when the tuple it rides with is.
  */
 const SessionDiffHunkPayload = z.object({
-  header: z.string().max(600),
+  // `+ 1` for the producer's trim ellipsis: `execution/git.ts` slices a hostile
+  // header/line to `MAX_DIFF_*` and appends `…`, so the durable ceiling is that
+  // length plus the one appended character — the durable boundary and the producer
+  // enforce THE SAME number (#145 r2, FIX 3), never a looser one that lets a hostile
+  // provider bypassing the shim bloat the jsonb row.
+  header: z.string().max(MAX_DIFF_HEADER_LEN + 1),
   // `.readonly()` so the inferred arrays match the readonly `SessionDiff` the
   // producer (@atrium/db) reports — a readonly value the provider hands the settle
   // command must remain assignable through the seam.
-  lines: z.array(z.string().max(600)).max(4000).readonly(),
+  lines: z
+    .array(z.string().max(MAX_DIFF_LINE_LEN + 1))
+    .max(MAX_DIFF_LINES)
+    .readonly(),
 });
 const SessionDiffFilePayload = z.object({
-  path: z.string().min(1).max(1000),
-  oldPath: z.string().min(1).max(1000).optional(),
+  path: z.string().min(1).max(MAX_DIFF_PATH_LEN),
+  oldPath: z.string().min(1).max(MAX_DIFF_PATH_LEN).optional(),
   status: z.enum(['added', 'modified', 'deleted', 'renamed']),
   additions: z.number().int().nonnegative(),
   deletions: z.number().int().nonnegative(),
   binary: z.boolean(),
-  hunks: z.array(SessionDiffHunkPayload).max(2000).readonly(),
+  hunks: z.array(SessionDiffHunkPayload).max(MAX_DIFF_LINES).readonly(),
 });
-export const SessionDiffPayload = z.object({
-  files: z.array(SessionDiffFilePayload).max(64).readonly(),
-  fileCount: z.number().int().nonnegative(),
-  additions: z.number().int().nonnegative(),
-  deletions: z.number().int().nonnegative(),
-  truncated: z.boolean(),
-});
+
+/**
+ * THE DIFF THE LEDGER ACCEPTS (#145 r2) — two invariants the producer's own caps
+ * never reached, because a hostile provider can bypass the shim and hand the
+ * settle command a hand-built diff that satisfies every FIELD bound while lying or
+ * bloating in the AGGREGATE. Both are enforced here, at the durable boundary, so a
+ * violating event does not PARSE (fail-closed at the ledger) — the surface never
+ * sees it to be fooled by it.
+ *
+ *  FIX 1 — THE COHERENCE INVARIANT. `files` empty ⟺ every whole-diff total is zero
+ *  and nothing was truncated. Round 1 found the schema accepted
+ *  `{files:[], fileCount:1, additions:1}` — an empty file list carrying nonzero
+ *  totals — and the pane keyed only on `files.length`, so it rendered a confident
+ *  "no changes" over a report that DECLARED edits it did not carry. A report that
+ *  disagrees with itself is not an honest empty; it is rejected here rather than
+ *  rendered as truth. (`fileCount` is INCLUDED in the "all zero" test so a real
+ *  pure-rename diff — `additions:0, deletions:0, fileCount:1` — is coherent and
+ *  survives: its `files` is non-empty and its `fileCount` is non-zero, so both
+ *  sides of the biconditional are false together.)
+ *
+ *  FIX 3 — THE AGGREGATE CEILING. Every per-field cap can be individually legal
+ *  while the WHOLE serialized diff is a megabyte: 40 files × 2000 lines each would
+ *  satisfy each array bound and blow the row. So the total retained lines and the
+ *  total serialized bytes are bounded to `MAX_DIFF_LINES` / `MAX_DIFF_TOTAL_BYTES`
+ *  — the product bound the honest producer's largest legal output sits under.
+ */
+export const SessionDiffPayload = z
+  .object({
+    files: z.array(SessionDiffFilePayload).max(MAX_DIFF_FILES).readonly(),
+    fileCount: z.number().int().nonnegative(),
+    additions: z.number().int().nonnegative(),
+    deletions: z.number().int().nonnegative(),
+    truncated: z.boolean(),
+  })
+  .superRefine((diff, ctx) => {
+    // ── FIX 1: the coherence biconditional ─────────────────────────────────────
+    const filesEmpty = diff.files.length === 0;
+    const totalsZero =
+      diff.fileCount === 0 &&
+      diff.additions === 0 &&
+      diff.deletions === 0 &&
+      diff.truncated === false;
+    if (filesEmpty !== totalsZero) {
+      ctx.addIssue({
+        code: 'custom',
+        path: ['files'],
+        message:
+          'an incoherent diff report — an empty file list must carry zero totals (fileCount, ' +
+          'additions, deletions all 0, truncated false), and non-empty totals must carry files. ' +
+          'A report whose contents disagree with its own totals is rejected at the ledger rather ' +
+          'than rendered as an honest "no changes".',
+      });
+    }
+    // The retained `files` are a (possibly truncated) PREFIX of the whole diff, so
+    // the whole-diff `fileCount` can never be fewer than the files actually carried.
+    // A report claiming zero-or-few files while carrying more is the same
+    // self-contradiction, from the other side.
+    if (diff.fileCount < diff.files.length) {
+      ctx.addIssue({
+        code: 'custom',
+        path: ['fileCount'],
+        message: `an incoherent diff report — fileCount ${diff.fileCount} is fewer than the ${diff.files.length} files carried; the retained files are a prefix of the whole diff and cannot outnumber it`,
+      });
+    }
+    // ── FIX 3: the aggregate line and byte ceilings ────────────────────────────
+    let totalLines = 0;
+    let totalBytes = 0;
+    for (const file of diff.files) {
+      totalBytes += file.path.length + (file.oldPath?.length ?? 0);
+      for (const hunk of file.hunks) {
+        totalBytes += hunk.header.length;
+        totalLines += hunk.lines.length;
+        for (const line of hunk.lines) totalBytes += line.length;
+      }
+    }
+    if (totalLines > MAX_DIFF_LINES) {
+      ctx.addIssue({
+        code: 'custom',
+        path: ['files'],
+        message: `a diff carrying ${totalLines} retained hunk lines exceeds the durable ceiling of ${MAX_DIFF_LINES} (#145 r2, FIX 3) — the aggregate cap the producer enforces, restated at the ledger`,
+      });
+    }
+    if (totalBytes > MAX_DIFF_TOTAL_BYTES) {
+      ctx.addIssue({
+        code: 'custom',
+        path: ['files'],
+        message: `a diff serializing to ${totalBytes} bytes exceeds the durable ceiling of ${MAX_DIFF_TOTAL_BYTES} (#145 r2, FIX 3) — a hostile provider cannot compose in-bounds pieces into an out-of-bounds jsonb row`,
+      });
+    }
+  });
 
 /** The harness's structured test report (#145), bounded the same way. */
 export const SessionTestsPayload = z.object({
@@ -276,6 +375,16 @@ export const SessionTestsPayload = z.object({
   failed: z.number().int().nonnegative(),
   failures: z.array(z.string().max(500)).max(100).readonly(),
   failuresTruncated: z.boolean(),
+  /**
+   * THE TEST-COMMAND PROVENANCE (#145 r2, FIX 2). What produced these numbers —
+   * the command or the harness suite that ran. It rides the durable event so the
+   * review pane can render the pass/fail block as an EXPLICIT reported-not-verified
+   * `~` fact ("reported by the session · <command>") rather than a bare green pass
+   * that reads as a `✓` the machine never earned. Optional, so a producer that
+   * predates this field still parses; absent, the pane still marks the block `~`
+   * reported, it just cannot name what ran.
+   */
+  command: z.string().min(1).max(500).optional(),
 });
 
 export const ExecutionArtifact = z.object({

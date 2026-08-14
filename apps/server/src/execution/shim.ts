@@ -68,15 +68,20 @@ export const SHIM_ARTIFACT_PATH = 'ARTIFACT.json';
  * the same way the shim's artifact content is a pure function of its input.
  */
 export function deterministicTestResults(ctx: SessionContext): SessionTestResults {
+  // The provenance of these numbers (#145 r2, FIX 2): the shim runs no external
+  // runner, so its command names the fixture suite honestly rather than pretending
+  // a `pnpm test` ran. The pane renders it beside the `~` reported marker.
+  const command = 'atrium deterministic shim — fixture suite (no external runner)';
   if (ctx.model === EXECUTION_TESTS_FAIL_DIRECTIVE) {
     return {
       passed: 2,
       failed: 1,
       failures: ['the deterministic fixture suite reports a failing test'],
       failuresTruncated: false,
+      command,
     };
   }
-  return { passed: 3, failed: 0, failures: [], failuresTruncated: false };
+  return { passed: 3, failed: 0, failures: [], failuresTruncated: false, command };
 }
 
 export interface DeterministicShimOptions {
