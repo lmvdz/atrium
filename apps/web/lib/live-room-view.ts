@@ -48,7 +48,49 @@ export function liveRoomView(
 ) {
   const base = replayView(data, viewerId);
   const participantName = new Map(base.participants.map((person) => [person.id, person.name]));
-  const pendingRecords: MessageRecord[] = live.pending.map((pending) => ({
+  /**
+   * The committed row claims its own echo, here, in the same render.
+   *
+   * #136. The two halves of a send arrive on two unsynchronised channels: the
+   * durable row reaches `data` when `router.refresh()` re-reads the route from
+   * the database, and the optimistic echo leaves `live.pending` when the
+   * socket's own `message_posted` event is applied (`reconcilePending`). Each
+   * half is correct; nothing related them. So any refresh whose *server* render
+   * postdates the commit but whose *client* commit predates the event renders
+   * both — the same message twice, once as `data-origin="seeded"` with its real
+   * id and once as `data-origin="typed"` with `pending:…`.
+   *
+   * That window is normally a few milliseconds, which is why it read as a
+   * flake. A socket drop across the commit stretches it to a whole reconnect:
+   * the event is delayed until the resubscribe's catch-up, while
+   * `projection_changed` (which `shouldRefreshLiveRoute` deliberately lets
+   * bypass the event-sequence guard) and the post-load refresh chain keep
+   * pulling the committed row in from the database meanwhile.
+   *
+   * Relating them cannot be done on either channel alone — each one only ever
+   * sees its own half. It can be done here, because this is the one place that
+   * holds both at once: an echo whose durable row is already in this very
+   * projection is not pending, it is delivered. Dropping it in the same
+   * expression that renders the durable row makes the swap atomic by
+   * construction — there is no frame in which both exist, whichever signal wins
+   * the race, and no reachable state in which a stuck echo outlives its own
+   * message.
+   *
+   * Matched on `clientMessageId` *and* on the row being the viewer's own, for
+   * the reason `reconcilePending` gives: the key is client-chosen, and claiming
+   * an echo against somebody else's row would erase the viewer's message.
+   */
+  const committedClientMessageIds = new Set(
+    data.messages.flatMap((message) =>
+      message.authorId === viewerId && typeof message.clientMessageId === 'string'
+        ? [message.clientMessageId]
+        : [],
+    ),
+  );
+  const unclaimedPending = live.pending.filter(
+    (pending) => !committedClientMessageIds.has(pending.clientMessageId),
+  );
+  const pendingRecords: MessageRecord[] = unclaimedPending.map((pending) => ({
     id: `pending:${pending.clientMessageId}`,
     at: clock(pending.at),
     actor: base.viewer.name,
@@ -69,7 +111,7 @@ export function liveRoomView(
     })),
   }));
   const pendingEntries = pendingRecords.map((record, index) => {
-    const pending = live.pending[index];
+    const pending = unclaimedPending[index];
     return messageEntry(record, {
       state: TALK,
       body:

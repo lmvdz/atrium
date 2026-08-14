@@ -1457,6 +1457,136 @@ describe('live room view', () => {
     expect(view.entries.some((entry) => entry.type === 'since-you-left')).toBe(false);
     expect(view.rooms[0]?.unseen).toBe(0);
   });
+
+  /**
+   * #136. Mutation: render `live.pending` as given, trusting the socket's
+   * `reconcilePending` to have emptied it. It has not, and cannot be relied on
+   * to have: the durable row reaches `data` through `router.refresh()` and the
+   * echo leaves `live.pending` through the socket event, and this is the exact
+   * interleaving where the refresh won — the state a socket drop across the
+   * commit holds open for a whole reconnect. The room then shows the same
+   * sentence twice, once committed and once as `pending:…`.
+   */
+  it('claims the pending echo with its own committed row in the same render', () => {
+    const snapshot = data();
+    const live: RoomView = {
+      roomId: 'room',
+      lastSeq: 1,
+      head: 2,
+      seenSeq: 1,
+      events: [],
+      // `m2` is already in `snapshot.messages`, carrying this exact
+      // `clientMessageId` — its socket event has not been applied yet.
+      pending: [
+        {
+          clientMessageId: 'client-answer-a',
+          commandName: 'send_message',
+          replyToId: 'm1',
+          body: 'Yes, while the previous page remains available.',
+          at: '2026-08-02T12:01:00.000Z',
+          status: 'failed',
+          error: 'the connection dropped before the server answered',
+          retryable: true,
+          attachments: [],
+          references: [],
+        },
+      ],
+      presence: {},
+      typing: [],
+      subscribed: true,
+    };
+    const view = liveRoomView(snapshot, 'alice', live);
+
+    const sameBody = view.records.filter(
+      (record) => record.text === 'Yes, while the previous page remains available.',
+    );
+    expect(sameBody).toHaveLength(1);
+    expect(sameBody[0]?.id).toBe('m2');
+    expect(view.records.some((record) => record.id.startsWith('pending:'))).toBe(false);
+    expect(view.entries.some((entry) => entry.id.startsWith('pending:'))).toBe(false);
+    // The retry affordance goes with it: the send did land, so offering to
+    // send it again is offering to duplicate a message that already exists.
+    expect(
+      view.entries.some(
+        (entry) => entry.type === 'message' && entry.tag?.label === 'retry exact send',
+      ),
+    ).toBe(false);
+  });
+
+  /**
+   * The other half of the same rule: an echo the projection does NOT hold is
+   * still the only evidence the person's words exist, and claiming it on a
+   * loose match would delete them from their own screen mid-send.
+   */
+  it('keeps a pending echo whose durable row has not landed', () => {
+    const snapshot = data();
+    const live: RoomView = {
+      roomId: 'room',
+      lastSeq: 2,
+      head: 2,
+      seenSeq: 2,
+      events: [],
+      pending: [
+        {
+          clientMessageId: 'client-answer-b',
+          commandName: 'send_message',
+          replyToId: null,
+          body: 'Still in flight.',
+          at: '2026-08-02T12:02:00.000Z',
+          status: 'pending',
+          attachments: [],
+          references: [],
+        },
+      ],
+      presence: {},
+      typing: [],
+      subscribed: true,
+    };
+    const view = liveRoomView(snapshot, 'alice', live);
+    expect(view.records.map((record) => record.id)).toContain('pending:client-answer-b');
+    expect(view.entries.at(-1)).toMatchObject({ id: 'pending:client-answer-b' });
+  });
+
+  /**
+   * The key is client-chosen, so a collision with somebody else's row must not
+   * claim this viewer's echo — the same guard `reconcilePending` states.
+   */
+  it('does not claim a pending echo against another author’s row', () => {
+    const snapshot: ReplayData = {
+      ...data(),
+      participants: [
+        { id: 'alice', name: 'alice', avatarUrl: null, principalKind: 'human' },
+        { id: 'bob', name: 'bob', avatarUrl: null, principalKind: 'human' },
+      ],
+      messages: data().messages.map((message) =>
+        message.id === 'm2' ? { ...message, authorId: 'bob', author: 'bob' } : message,
+      ),
+    };
+    const live: RoomView = {
+      roomId: 'room',
+      lastSeq: 1,
+      head: 2,
+      seenSeq: 1,
+      events: [],
+      pending: [
+        {
+          clientMessageId: 'client-answer-a',
+          commandName: 'send_message',
+          replyToId: null,
+          body: 'Alice’s own words, colliding on the key.',
+          at: '2026-08-02T12:01:00.000Z',
+          status: 'pending',
+          attachments: [],
+          references: [],
+        },
+      ],
+      presence: {},
+      typing: [],
+      subscribed: true,
+    };
+    const view = liveRoomView(snapshot, 'alice', live);
+    expect(view.records.map((record) => record.id)).toContain('pending:client-answer-a');
+  });
 });
 
 /* ───────────────────────────────────────────────────────────────────────────
