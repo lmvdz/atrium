@@ -309,6 +309,13 @@
       "when": 1788000000000,
       "tag": "0043_the_signal_and_the_wait",
       "breakpoints": true
+    },
+    {
+      "idx": 44,
+      "version": "7",
+      "when": 1788086400000,
+      "tag": "0044_the_wait_binds_to_its_session",
+      "breakpoints": true
     }
   ]
 }

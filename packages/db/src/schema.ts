@@ -101,6 +101,11 @@ export const attentionClass = pgEnum('attention_class', [
   'owned_commitment',
   'mention',
   'blocking_question',
+  // An expired unmatched wait, owed the agent's owner (#127). Deployed by
+  // migration 0044. A DISTINCT class from `mention`: the expiry escalation must
+  // not synthesize a "you were named" sentence, nor collide with a resolved
+  // mention on the same subject under `attention_items_user_subject_class_key`.
+  'subscription_expired',
 ]);
 
 export const attentionStatus = pgEnum('attention_status', ['pending', 'resolved', 'dismissed']);
@@ -1677,6 +1682,13 @@ export const sessionSubscriptions = pgTable(
     status: subscriptionStatus('status').notNull().default('pending'),
     /** The `core_events.id` of the `session_subscribed` that projected this. */
     subscribedByEventId: text('subscribed_by_event_id'),
+    /**
+     * A durable retry key (#127). A resend of an identical `subscribe_session`
+     * carries the same token; the partial unique index below refuses the second
+     * projection, so a lost-ack retry duplicates no wait. NULL for a subscribe
+     * that carries no token (each such call is its own wait, as before).
+     */
+    idempotencyKey: text('idempotency_key'),
     createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
     updatedAt: timestamp('updated_at', { withTimezone: true }).notNull().defaultNow(),
   },
@@ -1685,6 +1697,14 @@ export const sessionSubscriptions = pgTable(
     index('session_subscriptions_room_status_idx').on(t.roomId, t.status),
     /** The composite-FK target a `resume` signal's `subscriptionId` lands on. */
     uniqueIndex('session_subscriptions_room_id_key').on(t.roomId, t.id),
+    /**
+     * One wait per (room, retry key) — the durable idempotency backstop (#127).
+     * Partial, so the many NULL-token waits are unconstrained; a duplicate
+     * `subscribe_session` under the same token hits this and its projection aborts.
+     */
+    uniqueIndex('session_subscriptions_idempotency_key')
+      .on(t.roomId, t.idempotencyKey)
+      .where(sql`${t.idempotencyKey} IS NOT NULL`),
     /** One parent session, in the same room. */
     foreignKey({
       name: 'session_subscriptions_session_same_room_fk',
@@ -1742,13 +1762,34 @@ export const sessionSignals = pgTable(
     supersedesEventId: text('supersedes_event_id'),
     /** The subscription a `resume` consumes. Same-room FK'd; NULL for steer/interrupt. */
     subscriptionId: uuid('subscription_id'),
+    /**
+     * A durable retry key (#127). A resend of an identical `resume_session`
+     * carries the same token; the partial unique index below refuses the second
+     * projection, so a lost-ack retry on a FUNDED resume neither re-charges a draw
+     * nor lands a second signal row. NULL for a resume that carries no token.
+     */
+    idempotencyKey: text('idempotency_key'),
     createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
   },
   (t) => [
     index('session_signals_session_idx').on(t.sessionId),
     index('session_signals_room_kind_idx').on(t.roomId, t.kind),
-    /** The composite-FK target `supersedes_event_id` / `subscription_id` land on. */
+    /** The composite-FK target `subscription_id` lands on. */
     uniqueIndex('session_signals_room_id_key').on(t.roomId, t.id),
+    /**
+     * The composite-FK target `supersedes_event_id` lands on (#127 fix): a
+     * forward-only revision must name a prior signal in the SAME session, not
+     * merely the same room, so the target carries `session_id` too.
+     */
+    uniqueIndex('session_signals_room_session_id_key').on(t.roomId, t.sessionId, t.id),
+    /**
+     * One signal per (room, retry key) — the durable idempotency backstop (#127).
+     * Partial, so the NULL-token signals (every steer/interrupt and a tokenless
+     * resume) are unconstrained; a duplicate funded resume under one token aborts.
+     */
+    uniqueIndex('session_signals_idempotency_key')
+      .on(t.roomId, t.idempotencyKey)
+      .where(sql`${t.idempotencyKey} IS NOT NULL`),
     /** One target session, in the same room. */
     foreignKey({
       name: 'session_signals_session_same_room_fk',
@@ -1761,11 +1802,16 @@ export const sessionSignals = pgTable(
       columns: [t.roomId, t.causeMessageId],
       foreignColumns: [messages.roomId, messages.id],
     }),
-    /** The superseded signal is a real prior signal in the same room (self-ref). */
+    /**
+     * The superseded signal is a real prior signal in the SAME SESSION (#127 fix):
+     * a forward-only revision names an earlier signal against this very session,
+     * not just any signal in the room. Room-bound alone let a steer supersede a
+     * different session's steer; carrying `session_id` in the FK closes that.
+     */
     foreignKey({
-      name: 'session_signals_supersedes_same_room_fk',
-      columns: [t.roomId, t.supersedesEventId],
-      foreignColumns: [t.roomId, t.id],
+      name: 'session_signals_supersedes_same_session_fk',
+      columns: [t.roomId, t.sessionId, t.supersedesEventId],
+      foreignColumns: [t.roomId, t.sessionId, t.id],
     }),
     /** The consumed subscription is in the same room. */
     foreignKey({

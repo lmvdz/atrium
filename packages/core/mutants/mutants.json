@@ -373,8 +373,8 @@
       "id": "attention_priority_tiers_swapped",
       "why": "The hardest-first sort is the whole product of the panel.",
       "file": "src/attention.ts",
-      "find": "export const ATTENTION_PRIORITY = Object.freeze({\n  needs_decision: 0,",
-      "replace": "export const ATTENTION_PRIORITY = Object.freeze({\n  needs_decision: 9,",
+      "find": "export const ATTENTION_PRIORITY = Object.freeze({\n  subscription_expired: 0,",
+      "replace": "export const ATTENTION_PRIORITY = Object.freeze({\n  subscription_expired: 9,",
       "catches": ["gives every class a tier, and every tier a distinct rank"]
     },
     {

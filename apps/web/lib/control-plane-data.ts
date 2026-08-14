@@ -169,7 +169,14 @@ export interface ControlDecisionRow {
    * count.
    */
   readonly owedToViewer: boolean;
-  readonly class: 'needs_decision' | 'owned_commitment' | 'mention' | 'blocking_question';
+  readonly class:
+    | 'needs_decision'
+    | 'owned_commitment'
+    | 'mention'
+    | 'blocking_question'
+    // An expired unmatched wait, owed the agent's owner (#127). Carried through so
+    // the control plane can surface it like any other owed item.
+    | 'subscription_expired';
   readonly subjectKind: string;
   readonly subjectId: string;
   readonly createdAt: string;

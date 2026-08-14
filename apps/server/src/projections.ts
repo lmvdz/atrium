@@ -935,6 +935,19 @@ async function projectSignalRaised(
   // the `status = 'pending'` predicate: a re-swept or replayed row touches zero
   // rows. NULL for every ordinary escalation, which leaves this a no-op.
   if (event.subscriptionId) {
+    // SAME-ROOM AND SAME-SESSION BINDING (#127 fix A#3). The subscription pointer
+    // is JSON in the ledger payload and cannot carry a DB foreign key the way
+    // `session_signals.subscription_id` does, so it is bound HERE, at its one
+    // dereference: the transition fires only for a subscription in THIS room and —
+    // via `subscriptionSessionId`, set alongside the pointer by `expire_
+    // subscription` — THIS session. A `signal_raised` naming a wait from another
+    // session or room transitions nothing. Still idempotent by `status='pending'`.
+    if (!event.subscriptionSessionId) {
+      throw new CommandError(
+        'invalid',
+        'a signal_raised that disposes a subscription must name the subscription’s session (#127) — the wait cannot be bound without it',
+      );
+    }
     await tx
       .update(sessionSubscriptions)
       .set({ status: 'expired', updatedAt: new Date(at) })
@@ -942,6 +955,7 @@ async function projectSignalRaised(
         and(
           eq(sessionSubscriptions.id, event.subscriptionId),
           eq(sessionSubscriptions.roomId, roomId),
+          eq(sessionSubscriptions.sessionId, event.subscriptionSessionId),
           eq(sessionSubscriptions.status, 'pending'),
         ),
       );
@@ -1050,6 +1064,30 @@ async function projectSessionSignaled(
       `session "${event.sessionId}" is ${target.status}, not open — a signal targets an open session only; an interrupt requests, an exit concludes, and this session has already exited`,
     );
   }
+  // DURABLE IDEMPOTENCY (#127 fix C). A resend of a FUNDED resume carries the same
+  // token; refuse the second here — under the append lock, so this read-then-insert
+  // cannot race — rather than let it re-charge a draw. The partial unique index on
+  // `session_signals(room_id, idempotency_key)` is the hard backstop; this is the
+  // clean nack the caller sees. NULL-token signals (steer/interrupt, a tokenless
+  // resume) skip it entirely.
+  if (event.idempotencyKey) {
+    const [prior] = await tx
+      .select({ id: sessionSignals.id })
+      .from(sessionSignals)
+      .where(
+        and(
+          eq(sessionSignals.roomId, roomId),
+          eq(sessionSignals.idempotencyKey, event.idempotencyKey),
+        ),
+      )
+      .limit(1);
+    if (prior) {
+      throw new CommandError(
+        'conflict',
+        `a signal with retry key "${event.idempotencyKey}" already landed in room "${roomId}" — this resend is refused, not re-charged`,
+      );
+    }
+  }
   await tx.insert(sessionSignals).values({
     id,
     roomId,
@@ -1060,29 +1098,47 @@ async function projectSessionSignaled(
     causeMessageId: event.causeMessageId,
     supersedesEventId: event.supersedesEventId,
     subscriptionId: event.subscriptionId,
+    idempotencyKey: event.idempotencyKey,
     createdAt: new Date(at),
   });
   if (event.kind === 'resume') {
-    // The continuation draw is now GRANTED — the same +1 accounting a spawn takes
-    // (#118), under the same lock, so `authorized_draws` still equals the count of
-    // draws Atrium granted this plan by construction.
-    await tx
-      .update(plans)
-      .set({ authorizedDraws: sql`${plans.authorizedDraws} + 1`, updatedAt: new Date(at) })
-      .where(and(eq(plans.id, target.planId), eq(plans.roomId, roomId)));
+    // SAME-SESSION BINDING (#127 fix A#1). When a resume names a wait, consume it
+    // FIRST, bound to THIS session, and require exactly one PENDING row to
+    // transition. A subscription that belongs to another session, is terminal, was
+    // already matched, or does not exist yields zero transitioned rows — and the
+    // throw aborts the append, so NO draw is funded and no signal lands. This is
+    // why the draw increment below is UNREACHABLE unless a legitimate wait (or no
+    // wait at all) backed the resume: the old order incremented the draw first and
+    // matched by id+room only, funding a draw off a foreign or already-consumed
+    // subscription.
     if (event.subscriptionId) {
-      // Consume the wait: a matched subscription can neither expire nor match again.
-      await tx
+      const matched = await tx
         .update(sessionSubscriptions)
         .set({ status: 'matched', updatedAt: new Date(at) })
         .where(
           and(
             eq(sessionSubscriptions.id, event.subscriptionId),
             eq(sessionSubscriptions.roomId, roomId),
+            eq(sessionSubscriptions.sessionId, event.sessionId),
             eq(sessionSubscriptions.status, 'pending'),
           ),
+        )
+        .returning({ id: sessionSubscriptions.id });
+      if (matched.length !== 1) {
+        throw new CommandError(
+          'invalid',
+          `resume named subscription "${event.subscriptionId}", which is not a pending wait of session "${event.sessionId}" in room "${roomId}" — a draw is never funded on a foreign, terminal, or already-matched subscription`,
         );
+      }
     }
+    // The continuation draw is now GRANTED — the same +1 accounting a spawn takes
+    // (#118), under the same lock, so `authorized_draws` still equals the count of
+    // draws Atrium granted this plan by construction. Reached only when the named
+    // wait (if any) legitimately transitioned above.
+    await tx
+      .update(plans)
+      .set({ authorizedDraws: sql`${plans.authorizedDraws} + 1`, updatedAt: new Date(at) })
+      .where(and(eq(plans.id, target.planId), eq(plans.roomId, roomId)));
   }
 }
 
@@ -1114,6 +1170,27 @@ async function projectSessionSubscribed(
       `session "${event.sessionId}" is ${target.status}, not open — a subscription waits on an open session only`,
     );
   }
+  // DURABLE IDEMPOTENCY (#127 fix C). A resend under the same token creates no
+  // second wait: refuse it here, under the append lock, with the partial unique
+  // index on `session_subscriptions(room_id, idempotency_key)` as the hard backstop.
+  if (event.idempotencyKey) {
+    const [prior] = await tx
+      .select({ id: sessionSubscriptions.id })
+      .from(sessionSubscriptions)
+      .where(
+        and(
+          eq(sessionSubscriptions.roomId, roomId),
+          eq(sessionSubscriptions.idempotencyKey, event.idempotencyKey),
+        ),
+      )
+      .limit(1);
+    if (prior) {
+      throw new CommandError(
+        'conflict',
+        `a subscription with retry key "${event.idempotencyKey}" already exists in room "${roomId}" — this resend creates no second wait`,
+      );
+    }
+  }
   await tx.insert(sessionSubscriptions).values({
     id: event.subscriptionId,
     roomId,
@@ -1124,6 +1201,7 @@ async function projectSessionSubscribed(
     causeMessageId: event.causeMessageId,
     status: 'pending',
     subscribedByEventId: id,
+    idempotencyKey: event.idempotencyKey,
     createdAt: new Date(at),
     updatedAt: new Date(at),
   });

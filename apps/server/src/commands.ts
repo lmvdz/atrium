@@ -451,6 +451,12 @@ export const Command = z.discriminatedUnion('name', [
     sessionId: Id,
     /** The wait this resume consumes, if it woke on a subscription. Same-room, FK'd. */
     subscriptionId: Id.nullable().default(null),
+    /**
+     * A durable retry key (#127 fix C). A resend of a FUNDED resume under the same
+     * token is refused by the projection's uniqueness backstop rather than charging
+     * a second draw. Optional: a caller that mints none accepts at-least-once.
+     */
+    idempotencyKey: z.string().min(1).max(128).nullable().default(null),
   }),
   z.object({
     name: z.literal('subscribe_session'),
@@ -465,6 +471,11 @@ export const Command = z.discriminatedUnion('name', [
     expiresAt: Timestamp,
     /** The channel message anchoring the wait — the expiry escalation's subject. */
     causeMessageId: Id,
+    /**
+     * A durable retry key (#127 fix C). A resend under the same token creates no
+     * second wait — the projection's uniqueness backstop refuses it. Optional.
+     */
+    idempotencyKey: z.string().min(1).max(128).nullable().default(null),
   }),
   z.object({
     name: z.literal('expire_subscription'),
@@ -2066,8 +2077,10 @@ export function createCommandService({
           class: command.class,
           reason: command.reason,
           // A member-raised escalation disposes no subscription (#127). Only
-          // `expire_subscription` sets this, to transition an expired wait.
+          // `expire_subscription` sets these, to transition an expired wait — and
+          // it binds the pointer to the wait's session (fix A#3).
           subscriptionId: null,
+          subscriptionSessionId: null,
         }));
 
       // The human-only spend-authorization (#118). The non-human refusal already
@@ -2107,6 +2120,9 @@ export function createCommandService({
             causeMessageId: command.causeMessageId,
             supersedesEventId: command.supersedesEventId,
             subscriptionId: null,
+            // A steer/interrupt carries no retry key — only a funded resume needs
+            // the double-charge guard (#127 fix C). NULL leaves it unconstrained.
+            idempotencyKey: null,
           }),
           command.kind === 'interrupt'
             ? async (tx) => {
@@ -2219,6 +2235,7 @@ export function createCommandService({
                   causeMessageId: null,
                   supersedesEventId: null,
                   subscriptionId: command.subscriptionId,
+                  idempotencyKey: command.idempotencyKey,
                 },
           project: (context) => projectRoomEvent(context, projectionHooks),
         });
@@ -2263,6 +2280,7 @@ export function createCommandService({
           matcher: command.matcher,
           expiresAt: command.expiresAt,
           causeMessageId: command.causeMessageId,
+          idempotencyKey: command.idempotencyKey,
         }));
       }
 
@@ -2275,7 +2293,12 @@ export function createCommandService({
       // reads 'expired' here and nacks — no duplicate escalation, replay-deterministic.
       case 'expire_subscription': {
         const roomId = command.roomId;
-        let escalation: { targetUserId: string; causeMessageId: string } | null = null;
+        let escalation: {
+          targetUserId: string;
+          causeMessageId: string;
+          sessionId: string;
+          source: string;
+        } | null = null;
         return appendAndProject(
           session,
           roomId,
@@ -2293,13 +2316,20 @@ export function createCommandService({
               targetUserId: escalation.targetUserId,
               subjectKind: 'message',
               subjectId: escalation.causeMessageId,
-              class: 'mention',
-              reason: {
-                kind: 'mention',
-                request:
-                  'A subscription this session was waiting on expired unmatched — the wait is now owed your attention.',
-              },
+              // An HONEST class (#127 fix B): the owner was NEVER named in a
+              // message, so this is not a `mention` — a `mention` reason would
+              // synthesize "you were named…", speech the room never wrote, AND its
+              // `(user, subject, class='mention')` key would let a pre-existing
+              // resolved mention on this same message silently swallow the escalation
+              // while the wait still went `expired`. A distinct class collides with
+              // neither, and its reason states plainly what expired.
+              class: 'subscription_expired',
+              reason: { kind: 'subscription_expired', source: escalation.source },
               subscriptionId: command.subscriptionId,
+              // The wait's session (#127 fix A#3): `projectSignalRaised` transitions
+              // the subscription ONLY when it belongs to this room AND this session,
+              // binding the otherwise-unconstrained JSON pointer at its one deref.
+              subscriptionSessionId: escalation.sessionId,
             };
           },
           async (tx) => {
@@ -2308,6 +2338,8 @@ export function createCommandService({
                 status: sessionSubscriptions.status,
                 expiresAt: sessionSubscriptions.expiresAt,
                 causeMessageId: sessionSubscriptions.causeMessageId,
+                sessionId: sessionSubscriptions.sessionId,
+                source: sessionSubscriptions.source,
                 ownerUserId: agents.ownerUserId,
               })
               .from(sessionSubscriptions)
@@ -2348,7 +2380,12 @@ export function createCommandService({
                 `subscription "${command.subscriptionId}" has not reached its expiresAt yet`,
               );
             }
-            escalation = { targetUserId: row.ownerUserId, causeMessageId: row.causeMessageId };
+            escalation = {
+              targetUserId: row.ownerUserId,
+              causeMessageId: row.causeMessageId,
+              sessionId: row.sessionId,
+              source: row.source,
+            };
           },
         );
       }

@@ -10,6 +10,8 @@ import {
 } from '@atrium/db/schema';
 import { and, asc, desc, eq, sql } from 'drizzle-orm';
 import { afterAll, afterEach, beforeEach, describe, expect, it } from 'vitest';
+import { sweepExpiredSubscriptions } from '../../apps/server/src/jobs/subscription-sweep.js';
+import { createLogger } from '../../apps/server/src/logger.js';
 import {
   openDatabase,
   resetDatabase,
@@ -373,6 +375,15 @@ describe('the signal/interrupt boundary appends, projects, and guards', () => {
       subjectId: cause,
       userId: ownerId,
     });
+    // An HONEST attention shape (#127 fix B): a distinct class, NOT `mention`. The
+    // owner was never named in a message, so a `mention` here would synthesize
+    // "you were named…" speech the room never wrote AND its (user, subject,
+    // class='mention') key would let a pre-existing resolved mention on this
+    // message swallow the escalation. RED-ON-REVERT: restore `class: 'mention'` /
+    // `reason.kind: 'mention'` in `expire_subscription` and both of these fail.
+    expect(attention[0]?.class).toBe('subscription_expired');
+    expect(attention[0]?.class).not.toBe('mention');
+    expect((attention[0]?.reason as { kind?: string })?.kind).toBe('subscription_expired');
 
     const [sub] = await handle.db
       .select({ status: sessionSubscriptions.status })
@@ -515,5 +526,208 @@ describe('the signal/interrupt boundary appends, projects, and guards', () => {
     });
     expect(ack.type).toBe('nack');
     expect(await signalRows(sessionId)).toHaveLength(0);
+  });
+
+  /**
+   * A#1 — SAME-SESSION BINDING. A resume may consume ONLY a pending wait that
+   * belongs to the RESUMED session, and it funds a draw ONLY when exactly one such
+   * row transitions. A resume of session A that names session B's subscription is
+   * refused and funds NO draw on A; and reusing an already-matched subscription is
+   * refused and funds no draw.
+   *
+   * RED-ON-REVERT: drop the `session_id` predicate and the one-row check in
+   * `projectSessionSignaled`'s resume branch (revert to the draw-first,
+   * id+room-only match) and A's `authorized_draws` climbs on B's wait — red.
+   */
+  it('A#1: refuses a resume that names another session’s wait, and funds no draw', async () => {
+    const alice = await connect(ownerId, 'human');
+    const hexi = await connect(agentId, 'agent');
+    // Two funded plans, two sessions. Each plan gets one draw for its open and one
+    // spare, so a wrongly-funded resume would be VISIBLE as a climb, not refused
+    // for lack of slice.
+    const planA = await openFundedPlan(hexi, 2, 'plan A');
+    const sessionA = await openSession(hexi, planA);
+    // B is funded generously (open + a legit resume + a reuse attempt) so the
+    // reuse is refused by the SAME-SESSION check, never by a spent slice — a
+    // budget refusal is an ack-with-refused-draw, which would hide the bug.
+    const planB = await openFundedPlan(hexi, 3, 'plan B');
+    const sessionB = await openSession(hexi, planB);
+    const cause = await postMessage(alice, room.roomId, 'B is waiting on a webhook');
+
+    // A pending wait that belongs to session B.
+    expect(
+      (
+        await hexi.command({
+          name: 'subscribe_session',
+          roomId: room.roomId,
+          sessionId: sessionB,
+          source: 'b-webhook',
+          matcher: 'status==done',
+          expiresAt: new Date(Date.now() + 3_600_000).toISOString(),
+          causeMessageId: cause,
+        })
+      ).type,
+    ).toBe('ack');
+    const [{ id: bSubscriptionId } = { id: '' }] = await handle.db
+      .select({ id: sessionSubscriptions.id })
+      .from(sessionSubscriptions)
+      .where(eq(sessionSubscriptions.sessionId, sessionB));
+
+    const drawsABefore = (await planRow(planA))?.authorizedDraws;
+
+    // Resume A citing B's subscription — refused, and NO draw funded on A.
+    const cross = await hexi.command({
+      name: 'resume_session',
+      roomId: room.roomId,
+      sessionId: sessionA,
+      subscriptionId: bSubscriptionId,
+    });
+    expect(cross.type).toBe('nack');
+    expect((await planRow(planA))?.authorizedDraws).toBe(drawsABefore);
+    // B's wait is untouched — a foreign resume neither matched nor consumed it.
+    const [bSub] = await handle.db
+      .select({ status: sessionSubscriptions.status })
+      .from(sessionSubscriptions)
+      .where(eq(sessionSubscriptions.id, bSubscriptionId));
+    expect(bSub?.status).toBe('pending');
+    expect((await signalRows(sessionA)).filter((r) => r.kind === 'resume')).toHaveLength(0);
+
+    // Now match it legitimately from B, then try to reuse the matched id — refused,
+    // no draw.
+    expect(
+      (
+        await hexi.command({
+          name: 'resume_session',
+          roomId: room.roomId,
+          sessionId: sessionB,
+          subscriptionId: bSubscriptionId,
+        })
+      ).type,
+    ).toBe('ack');
+    expect((await planRow(planB))?.authorizedDraws).toBe(2);
+    const drawsBAfterMatch = (await planRow(planB))?.authorizedDraws;
+    const reuse = await hexi.command({
+      name: 'resume_session',
+      roomId: room.roomId,
+      sessionId: sessionB,
+      subscriptionId: bSubscriptionId,
+    });
+    expect(reuse.type).toBe('nack');
+    expect((await planRow(planB))?.authorizedDraws).toBe(drawsBAfterMatch);
+  });
+
+  /**
+   * C — IDEMPOTENCY. A resend of a FUNDED resume under the same durable retry key
+   * is refused, not re-charged; a resend of a subscribe under the same key creates
+   * no second wait.
+   *
+   * RED-ON-REVERT: drop the idempotency pre-check + partial unique index and the
+   * second resume charges a second draw / the second subscribe lands a second wait.
+   */
+  it('C: a duplicated funded resume on one key is refused, and a duplicated subscribe makes no second wait', async () => {
+    const alice = await connect(ownerId, 'human');
+    const hexi = await connect(agentId, 'agent');
+    const plan = await openFundedPlan(hexi, 3); // open + up to two resumes
+    const sessionId = await openSession(hexi, plan);
+    const cause = await postMessage(alice, room.roomId, 'anchor for the wait');
+
+    // A duplicated subscribe under one key: one wait, not two.
+    const subKey = randomUUID();
+    for (let i = 0; i < 2; i++) {
+      await hexi.command({
+        name: 'subscribe_session',
+        roomId: room.roomId,
+        sessionId,
+        source: 's',
+        matcher: 'm',
+        expiresAt: new Date(Date.now() + 3_600_000).toISOString(),
+        causeMessageId: cause,
+        idempotencyKey: subKey,
+      });
+    }
+    const waits = await handle.db
+      .select({ id: sessionSubscriptions.id })
+      .from(sessionSubscriptions)
+      .where(eq(sessionSubscriptions.sessionId, sessionId));
+    expect(waits).toHaveLength(1);
+
+    // A duplicated funded resume under one key: one draw, second refused.
+    const resumeKey = randomUUID();
+    const first = await hexi.command({
+      name: 'resume_session',
+      roomId: room.roomId,
+      sessionId,
+      idempotencyKey: resumeKey,
+    });
+    expect(first.type).toBe('ack');
+    const drawsAfterFirst = (await planRow(plan))?.authorizedDraws;
+    const second = await hexi.command({
+      name: 'resume_session',
+      roomId: room.roomId,
+      sessionId,
+      idempotencyKey: resumeKey,
+    });
+    expect(second.type).toBe('nack');
+    expect((await planRow(plan))?.authorizedDraws).toBe(drawsAfterFirst);
+    expect((await signalRows(sessionId)).filter((r) => r.kind === 'resume')).toHaveLength(1);
+  });
+
+  /**
+   * D — THE EXPIRY SWEEP. A subscription past its horizon is disposed and its
+   * owner is owed attention with NO manual `expire_subscription` command — the
+   * periodic sweep does it, driven here directly the way `index.ts`'s timer does.
+   *
+   * RED-ON-REVERT: delete `sweepExpiredSubscriptions` (or its wiring) and an
+   * overdue wait stays `pending` forever — red on both the status and the sweep count.
+   */
+  it('D: the sweep expires an overdue wait and owes the owner attention, with no manual command', async () => {
+    const alice = await connect(ownerId, 'human');
+    const hexi = await connect(agentId, 'agent');
+    const plan = await openFundedPlan(hexi, 1);
+    const sessionId = await openSession(hexi, plan);
+    const cause = await postMessage(alice, room.roomId, 'awaiting an approval that never comes');
+    expect(
+      (
+        await hexi.command({
+          name: 'subscribe_session',
+          roomId: room.roomId,
+          sessionId,
+          source: 'external-approval',
+          matcher: 'approved==true',
+          expiresAt: new Date(Date.now() - 1_000).toISOString(),
+          causeMessageId: cause,
+        })
+      ).type,
+    ).toBe('ack');
+
+    // No manual command — the sweep alone.
+    const result = await sweepExpiredSubscriptions({
+      db: handle.db,
+      commands: server.commands,
+      logger: createLogger('error'),
+    });
+    expect(result.found).toBe(1);
+    expect(result.expired).toBe(1);
+
+    const [sub] = await handle.db
+      .select({ status: sessionSubscriptions.status })
+      .from(sessionSubscriptions)
+      .where(eq(sessionSubscriptions.sessionId, sessionId));
+    expect(sub?.status).toBe('expired');
+
+    const attention = await handle.db
+      .select()
+      .from(attentionItems)
+      .where(and(eq(attentionItems.roomId, room.roomId), eq(attentionItems.userId, ownerId)));
+    expect(attention).toHaveLength(1);
+    expect(attention[0]?.class).toBe('subscription_expired');
+
+    // A second sweep finds nothing overdue — the wait is no longer pending.
+    const again = await sweepExpiredSubscriptions({
+      db: handle.db,
+      commands: server.commands,
+      logger: createLogger('error'),
+    });
+    expect(again.found).toBe(0);
   });
 });

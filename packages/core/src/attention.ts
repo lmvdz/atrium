@@ -23,6 +23,13 @@ export const AttentionClass = z.enum([
   'owned_commitment',
   'mention',
   'blocking_question',
+  // A wait a session held expired unmatched, and its horizon is now owed the
+  // agent's owner (#127). A DISTINCT class, never `mention`: the owner was never
+  // named in a message, so folding this escalation onto the mention key would
+  // both synthesize a "you were named" sentence the room never wrote AND let a
+  // pre-existing resolved mention on the same subject swallow it under the
+  // `(user, subject, class)` uniqueness. Its own class collides with neither.
+  'subscription_expired',
 ]);
 export type AttentionClass = z.infer<typeof AttentionClass>;
 
@@ -130,6 +137,14 @@ export const RationaleReason = z.discriminatedUnion('kind', [
   z.object({ kind: z.literal('question_names_you'), question: z.string().min(1) }),
   z.object({ kind: z.literal('mention'), request: z.string().min(1) }),
   /**
+   * A durable wait a session armed (#127) reached its horizon with nothing
+   * matching it, and the unmatched wait is now owed the agent's owner. The
+   * `source` is the wait's own event-source label — the room's own data, not a
+   * sentence written for the UI — so the rendered rationale states plainly what
+   * expired without ever claiming the owner was named in a message.
+   */
+  z.object({ kind: z.literal('subscription_expired'), source: z.string().min(1) }),
+  /**
    * **r8.** A model reading that the engine staged for a person rather than
    * accepting — today that is `type_not_certified`, whose refusal text promises
    * this panel by name. It is not `decision_pending`: nobody is being asked to
@@ -199,6 +214,8 @@ export function rationaleFor(userId: Id, reason: RationaleReason): Rationale {
       return `${you} — this open question names you: "${clip(reason.question)}".` as Rationale;
     case 'mention':
       return `${you} — you were named in a message that asks you something: "${clip(reason.request)}".` as Rationale;
+    case 'subscription_expired':
+      return `${you} — a wait this session held for you on "${clip(reason.source)}" reached its horizon with nothing matching it, so the unmatched wait is now owed your attention.` as Rationale;
     case 'reading_pending':
       return `${you} — a machine read this as a ${reason.proposedType} and nothing in the words settles that it was one, so it is staged rather than accepted and any member of the room can file it or decline it: "${clip(reason.statement)}".` as Rationale;
     case 'receipt_review':
@@ -229,20 +246,27 @@ function clip(text: string, limit = 140): string {
  * blocking_question > confirms > mentions — owed attention sorts above
  * everything and never hides in a fold."*
  *
- * Six tiers for four classes, because `owned_commitment` splits three ways in
+ * Seven tiers for five classes, because `owned_commitment` splits three ways in
  * that sentence: an overdue commitment outranks a blocking question, a confirm
  * sits below one, and an ordinary open commitment is named in neither half. It
  * goes below confirms and above mentions — a confirm is a question aimed at you
  * that nobody else can answer, an open commitment is work you already agreed to
  * and have not been asked about again.
+ *
+ * `subscription_expired` (#127) takes the TOP tier — a wait a session held for
+ * its owner lapsed unmatched, which is owed attention in its strongest form: the
+ * horizon that existed to prevent a forever-open wait has passed. It sorts above
+ * everything and never hides in a fold, exactly the sentence above. The other six
+ * ranks keep their #6 order relative to each other, shifted down by one.
  */
 export const ATTENTION_PRIORITY = Object.freeze({
-  needs_decision: 0,
-  commitment_overdue: 1,
-  blocking_question: 2,
-  commitment_confirm: 3,
-  commitment_open: 4,
-  mention: 5,
+  subscription_expired: 0,
+  needs_decision: 1,
+  commitment_overdue: 2,
+  blocking_question: 3,
+  commitment_confirm: 4,
+  commitment_open: 5,
+  mention: 6,
 });
 
 export type AttentionPriority = (typeof ATTENTION_PRIORITY)[keyof typeof ATTENTION_PRIORITY];
@@ -297,6 +321,12 @@ function fallbackPriority(attentionClass: AttentionClass): number {
       return ATTENTION_PRIORITY.blocking_question;
     case 'mention':
       return ATTENTION_PRIORITY.mention;
+    case 'subscription_expired':
+      // Owed attention — an expired wait a session held for its owner. Its own
+      // top tier, above `needs_decision`, so it never hides in a fold (#6, #127):
+      // a horizon that lapsed unmatched is the "owed attention sorts above
+      // everything" case in its strongest form.
+      return ATTENTION_PRIORITY.subscription_expired;
     default:
       return Number.MAX_SAFE_INTEGER;
   }
@@ -383,6 +413,13 @@ export type AttentionProducer =
    */
   | 'mention_signal'
   /**
+   * `subscription_expired` — the escalation `expire_subscription` raises (#127).
+   * Like `mention_signal`, **no source declares it**: an expired wait is not a
+   * fact any state-reading cycle recomputes, so no examination ever matches it and
+   * the escalation stays until a person acts on it, never resolved by absence.
+   */
+  | 'subscription_signal'
+  /**
    * A reason kind this build does not know — a store written by another version
    * of this package. No source declares it, so no examination ever matches it
    * and the item stays where it is. See `producerOf`.
@@ -408,6 +445,7 @@ const PRODUCER_OF: Readonly<Record<RationaleReason['kind'], AttentionProducer>> 
   question_blocks_objective: 'blocking_relation',
   question_names_you: 'named_question',
   mention: 'mention_signal',
+  subscription_expired: 'subscription_signal',
 });
 
 /**
@@ -1547,6 +1585,7 @@ export function sinceCursorCounts(state: CoreState, input: SinceCursorInput): Si
     owned_commitment: 0,
     mention: 0,
     blocking_question: 0,
+    subscription_expired: 0,
   };
   let attention = 0;
 

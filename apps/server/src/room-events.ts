@@ -267,6 +267,17 @@ export const SignalRaised = z.object({
    * `raise_signal` from a member never sets it.
    */
   subscriptionId: Id.nullable().default(null),
+  /**
+   * The session the disposed subscription belongs to (#127 fix), set alongside
+   * `subscriptionId` by `expire_subscription`. The subscription pointer is JSON
+   * in the ledger payload and cannot carry a DB foreign key the way
+   * `session_signals.subscription_id` does; this binds it at the one place it is
+   * dereferenced — `projectSignalRaised` transitions the wait ONLY when it belongs
+   * to this room AND this session, so a `signal_raised` naming a subscription from
+   * another session (or room) transitions nothing. NULL for every ordinary
+   * escalation, exactly as `subscriptionId` is.
+   */
+  subscriptionSessionId: Id.nullable().default(null),
 });
 export type SignalRaised = z.infer<typeof SignalRaised>;
 
@@ -360,6 +371,14 @@ export const SessionSignaled = z.object({
   causeMessageId: Id.nullable().default(null),
   supersedesEventId: Id.nullable().default(null),
   subscriptionId: Id.nullable().default(null),
+  /**
+   * A durable retry key (#127 fix C). A resend of an identical `resume_session`
+   * carries the same token; its projection refuses the second row against the
+   * partial unique index on `session_signals`, so a lost-ack retry on a FUNDED
+   * resume neither re-charges a draw nor lands a duplicate signal. NULL for a
+   * signal that carries no token (every steer/interrupt, a tokenless resume).
+   */
+  idempotencyKey: z.string().min(1).max(128).nullable().default(null),
 });
 export type SessionSignaled = z.infer<typeof SessionSignaled>;
 
@@ -382,6 +401,13 @@ export const SessionSubscribed = z.object({
   matcher: z.string().min(1).max(2000),
   expiresAt: Timestamp,
   causeMessageId: Id,
+  /**
+   * A durable retry key (#127 fix C). A resend of an identical `subscribe_session`
+   * carries the same token; its projection refuses the second row against the
+   * partial unique index on `session_subscriptions`, so a lost-ack retry creates
+   * no second wait. NULL for a subscribe that carries no token.
+   */
+  idempotencyKey: z.string().min(1).max(128).nullable().default(null),
 });
 export type SessionSubscribed = z.infer<typeof SessionSubscribed>;
 

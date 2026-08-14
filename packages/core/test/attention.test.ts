@@ -703,14 +703,15 @@ describe('the sort — owed attention above everything', () => {
     );
 
     expect(classesOf(items)).toEqual([
-      'needs_decision', // 0
-      'owned_commitment', // 1 — overdue
-      'owned_commitment', // 3 — awaiting confirm
-      'mention', // 5
+      'needs_decision', // 1
+      'owned_commitment', // 2 — overdue
+      'owned_commitment', // 4 — awaiting confirm
+      'mention', // 6
     ]);
     // Literal ranks, not the constants under test: a table that describes itself
-    // cannot notice when it changes.
-    expect(items.map((entry) => entry.priority)).toEqual([0, 1, 3, 5]);
+    // cannot notice when it changes. Shifted down by one since `subscription_
+    // expired` (#127) took the new top tier 0.
+    expect(items.map((entry) => entry.priority)).toEqual([1, 2, 4, 6]);
   });
 
   it('breaks ties deterministically, so two nodes agree', () => {
@@ -746,10 +747,12 @@ describe('the sort — owed attention above everything', () => {
   });
 
   it('gives every class a tier, and every tier a distinct rank', () => {
-    // Six tiers for four classes, because `owned_commitment` splits three ways
-    // in #6's sentence. Spelled out so a new class cannot arrive without a rank
-    // and a new tier cannot arrive without a class.
+    // Seven tiers for five classes, because `owned_commitment` splits three ways
+    // in #6's sentence and `subscription_expired` (#127) takes its own top tier.
+    // Spelled out so a new class cannot arrive without a rank and a new tier
+    // cannot arrive without a class.
     const tiersByClass: Record<AttentionClass, (keyof typeof ATTENTION_PRIORITY)[]> = {
+      subscription_expired: ['subscription_expired'],
       needs_decision: ['needs_decision'],
       owned_commitment: ['commitment_overdue', 'commitment_confirm', 'commitment_open'],
       blocking_question: ['blocking_question'],
@@ -763,12 +766,13 @@ describe('the sort — owed attention above everything', () => {
     // …and the ranks are #6's order, by value. Every assertion here is a literal
     // on both sides: the round-1 version compared the constants to themselves.
     expect(ATTENTION_PRIORITY).toEqual({
-      needs_decision: 0,
-      commitment_overdue: 1,
-      blocking_question: 2,
-      commitment_confirm: 3,
-      commitment_open: 4,
-      mention: 5,
+      subscription_expired: 0,
+      needs_decision: 1,
+      commitment_overdue: 2,
+      blocking_question: 3,
+      commitment_confirm: 4,
+      commitment_open: 5,
+      mention: 6,
     });
   });
 

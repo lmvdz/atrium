@@ -182,6 +182,9 @@ export async function seedRoom(
 export interface TestServer {
   realtime: RealtimeServer;
   ledger: Ledger;
+  /** The command service behind the socket — so a test can drive a background job
+   * (the #127 subscription sweep) the same way `index.ts`'s timer does. */
+  commands: ReturnType<typeof createCommandService>;
   url: string;
   /** Present when this server was started with cross-instance fan-out. */
   bus?: EventBus;
@@ -280,6 +283,7 @@ export async function startTestServer(
   return {
     realtime,
     ledger,
+    commands,
     bus,
     url: `ws://127.0.0.1:${address.port}/ws`,
     close: () => realtime.close(),

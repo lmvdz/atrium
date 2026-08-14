@@ -47,7 +47,9 @@ async function ensureHuman(): Promise<string> {
     // same — build the shared instance and call it directly.
     const authInstance = createAtriumAuth({ db, baseURL: APP_URL });
     try {
-      await authInstance.api.signUpEmail({ body: { email: EMAIL, password: PASSWORD, name: NAME } });
+      await authInstance.api.signUpEmail({
+        body: { email: EMAIL, password: PASSWORD, name: NAME },
+      });
     } catch (e) {
       // requireEmailVerification means no session is minted; the user row is
       // still written. Only re-throw if the user genuinely didn't appear.
@@ -69,7 +71,10 @@ async function wipePrior(): Promise<void> {
     .where(eq(workspaces.slug, WS_SLUG))
     .limit(1);
   if (!ws) return;
-  const roomRows = await db.select({ id: rooms.id }).from(rooms).where(eq(rooms.workspaceId, ws.id));
+  const roomRows = await db
+    .select({ id: rooms.id })
+    .from(rooms)
+    .where(eq(rooms.workspaceId, ws.id));
   for (const r of roomRows) {
     await db.delete(sessions).where(eq(sessions.roomId, r.id));
     await db.delete(plans).where(eq(plans.roomId, r.id));

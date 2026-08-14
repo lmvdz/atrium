@@ -32,6 +32,8 @@ import {
   proposals,
   relationKind,
   rooms,
+  sessionSignals,
+  sessionSubscriptions,
   users,
 } from '../src/schema.js';
 
@@ -308,6 +310,14 @@ describe('the durable ledger (issue #22)', () => {
       // 0028. Same parity, two more kinds.
       'plan_rlimit_set',
       'draw_refused',
+      // The signal/interrupt kinds (#127) join the same CHECK too — each declares a
+      // top-level roomId, so the fail-closed tail refuses an append of either until
+      // its arm is present in BOTH schema.ts and migration 0043. Without these two
+      // lines the parity assertion would not fail if a regenerate dropped the new
+      // arms, leaving `session_signaled` / `session_subscribed` appends silently
+      // refused. Same parity, two more kinds.
+      'session_signaled',
+      'session_subscribed',
     ];
     for (const kind of lifecycleKinds) {
       // In the schema (drift target) AND in the migration (deployed truth): if
@@ -318,6 +328,50 @@ describe('the durable ledger (issue #22)', () => {
     // The fail-closed tail must survive: a ninth kind with no room policy is still
     // refused, not waved through.
     expect(rendered.toLowerCase()).toContain('false)');
+  });
+
+  it('binds a signal’s supersedes pointer to the SAME session, not just the room (#127 A#2)', () => {
+    // The forward-only revision must name a prior signal against THIS session. A
+    // room-bound FK let a steer supersede a different session's steer; the FK now
+    // carries `session_id` on both sides. RED-ON-REVERT: shrink the FK back to
+    // (room_id, supersedes_event_id) → (room_id, id) and this fails.
+    const fks = getTableConfig(sessionSignals).foreignKeys.map((fk) => fk.reference());
+    const supersedes = fks.find((fk) =>
+      fk.columns.some((c) => c.name === 'supersedes_event_id'),
+    );
+    expect(supersedes, 'a supersedes FK must exist').toBeTruthy();
+    expect(supersedes?.columns.map((c) => c.name)).toEqual([
+      'room_id',
+      'session_id',
+      'supersedes_event_id',
+    ]);
+    expect(supersedes?.foreignColumns.map((c) => c.name)).toEqual([
+      'room_id',
+      'session_id',
+      'id',
+    ]);
+    // And the migration deploys the same session-bound shape.
+    expect(migrationSql()).toContain('session_signals_supersedes_same_session_fk');
+  });
+
+  it('carries a durable retry key with a partial-unique backstop on both signal tables (#127 C)', () => {
+    // A resend of a funded resume / a subscribe under one token is refused by a
+    // partial UNIQUE (room_id, idempotency_key) WHERE idempotency_key IS NOT NULL.
+    // RED-ON-REVERT: drop either index (or its WHERE) and the double-charge /
+    // duplicate-wait guard is gone.
+    for (const table of [sessionSignals, sessionSubscriptions]) {
+      const cfg = getTableConfig(table);
+      expect(cfg.columns.map((c) => c.name)).toContain('idempotency_key');
+      const idem = cfg.indexes.find((index) =>
+        index.config.columns.some((c) => 'name' in c && c.name === 'idempotency_key'),
+      );
+      expect(idem, `${cfg.name} must have an idempotency index`).toBeTruthy();
+      expect(idem?.config.unique).toBe(true);
+      expect(idem?.config.where).toBeTruthy();
+    }
+    const migration = migrationSql();
+    expect(migration).toContain('session_signals_idempotency_key');
+    expect(migration).toContain('session_subscriptions_idempotency_key');
   });
 
   it('carries the trusted actor as two columns, and no actor in the payload', () => {

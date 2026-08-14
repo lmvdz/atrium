@@ -19,6 +19,7 @@ import {
 import { reconcileWedgedSessions } from './execution/reconcile.js';
 import { createAcceptanceProvider } from './jobs/acceptance-provider.js';
 import { createGatewayProvider } from './jobs/provider.js';
+import { sweepExpiredSubscriptions } from './jobs/subscription-sweep.js';
 import { createLedger } from './ledger.js';
 import { createLogger } from './logger.js';
 import { startQueue } from './queue.js';
@@ -296,6 +297,29 @@ async function main(): Promise<void> {
   }
 
   /* ---------------------------------------------------------------------------
+   * STARTUP SUBSCRIPTION SWEEP (#127 fix D).
+   *
+   * A durable wait carries a MANDATORY horizon, but nothing crossed it: a wait
+   * past `expires_at` stayed `pending` forever, the very wedge the horizon
+   * exists to prevent. This clears any wait a previous process left overdue,
+   * disposing it `expired` and raising the owner the attention it is owed —
+   * through the ordinary command path, on the BASE service, exactly as
+   * reconciliation runs. The periodic sweep below keeps it clear thereafter.
+   * ------------------------------------------------------------------------- */
+  const swept = await sweepExpiredSubscriptions({
+    db: database.db,
+    commands: baseCommands,
+    logger,
+  });
+  if (swept.found > 0) {
+    logger.warn('startup swept subscriptions past their horizon', {
+      found: swept.found,
+      expired: swept.expired,
+      unswept: swept.unswept,
+    });
+  }
+
+  /* ---------------------------------------------------------------------------
    * THE OWNERSHIP HEARTBEAT + PERIODIC SWEEP (#120 round-5 F4, round-6 F8).
    *
    * Two jobs, deliberately split by which boots they run on:
@@ -330,6 +354,22 @@ async function main(): Promise<void> {
             found: swept.found,
             failed: swept.failed,
             unreconciled: swept.unreconciled,
+          });
+        }
+        // The subscription horizon sweep (#127 fix D) rides the same timer: a
+        // wait past its `expires_at` is disposed `expired` and its owner is owed
+        // attention. Runs on EVERY boot regardless of execution, the same as the
+        // reconcile sweep — a wait's horizon is not an execution concern.
+        const waits = await sweepExpiredSubscriptions({
+          db: database.db,
+          commands: baseCommands,
+          logger,
+        });
+        if (waits.found > 0) {
+          logger.warn('periodic sweep expired subscriptions past their horizon', {
+            found: waits.found,
+            expired: waits.expired,
+            unswept: waits.unswept,
           });
         }
       } catch (error) {

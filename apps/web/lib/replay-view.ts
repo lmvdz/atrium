@@ -1085,6 +1085,8 @@ function reasonFor(reason: ReplayData['attention'][number]['reason'], viewer: st
       return `${viewer} is named on this open question`;
     case 'mention':
       return `${viewer} has a direct request routed here for action`;
+    case 'subscription_expired':
+      return `a wait held for ${viewer} on "${reason.source}" reached its horizon unmatched and is owed their attention`;
     case 'reading_pending':
       return `this was staged as ${reason.proposedType}; a person must file or decline it`;
     case 'receipt_review':
