@@ -1385,3 +1385,26 @@ ticket decayed in three places (journal number, already-landed DDL, line ranges)
 builder caught all three because the dispatch said verify-don't-inherit; and the fix brief
 itself carried an impossible fixture (two agents' plans in one room) that the tree's own
 trigger refused — the builder re-derived the constructible form instead of forcing it.
+
+## #127 — signal/interrupt on the spine (closed 2026-08-13, 2 rounds)
+
+Opus built it; codex + grok gauntleted it blind; opus fixed it. Round 1's headline
+(codex, campaign-stopping): the resume spend boundary lived only in the command's
+authorize closure — the generic append path incremented without checking and a raw
+insert minted a wake receipt with zero draws counted. The fix is the repo's own
+pattern applied one layer deeper: the PROJECTION re-checks the slice (as it already
+re-checked target-open, and for the same reason — 0025-class triggers cannot nack a
+later append), and the trigger refuses a receipt no ledger event stands behind.
+
+Process lessons: (1) an enforcement that must hold against every writer needs
+restating at every layer that writes — command, projection, trigger — and each
+restatement needs its OWN witness with a DISJOINT refusal sentence; the shared-
+sentence trap has now fired three times in two tickets (caught live each time only
+because the reverts were actually run). (2) A specified lock class is a hypothesis:
+FOR KEY SHARE read as correct, and measurement showed it does not conflict with a
+settle's UPDATE — ornament shipped as safety. The builder measured instead of
+inheriting. (3) A whole-history toContain over migrations is a false-green shape:
+the ALTER TYPE ADD VALUE line satisfied the pin meant for the CHECK constraint —
+slice assertions to the last deployed statement. (4) tail masks exit codes — the
+third time this campaign; it is now a reflex to re-run unpiped before believing
+any gate.
