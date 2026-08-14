@@ -43,6 +43,8 @@ const APP_TABLES = [
   'accepted_objects',
   'proposals',
   'interpretations',
+  'session_signals',
+  'session_subscriptions',
   'sessions',
   'plans',
   'agents',

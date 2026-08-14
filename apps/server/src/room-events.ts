@@ -258,6 +258,15 @@ export const SignalRaised = z.object({
   subjectId: Id,
   class: AttentionClass,
   reason: RationaleReason,
+  /**
+   * The subscription this escalation disposes, when a `signal_raised` is raised by
+   * `expire_subscription` for a wait that expired unmatched (#127). NULL for every
+   * ordinary escalation. When set, `projectSignalRaised` also transitions the named
+   * subscription `pending → expired` in the same append transaction, so the state
+   * change rides the ledger row and replays deterministically. Additive: a
+   * `raise_signal` from a member never sets it.
+   */
+  subscriptionId: Id.nullable().default(null),
 });
 export type SignalRaised = z.infer<typeof SignalRaised>;
 
@@ -314,6 +323,68 @@ export const DrawRefused = z.object({
 });
 export type DrawRefused = z.infer<typeof DrawRefused>;
 
+/* ── the signal/interrupt boundary (#127, from #123's resolution) ─────────────
+ *
+ * Two more ledger-only kinds, like the eight above: they ride the spine for a
+ * `room_seq` and never join `CoreEvent`. `session_signaled` carries control DOWN
+ * into a running session; `session_subscribed` is a durable wait. The projections
+ * write `session_signals` / `session_subscriptions` and — the pinned write-set
+ * sentence, the same one `session_settled` carries — touch NOTHING on
+ * `accepted_objects` / `rlimit_slice` / `authorized_draws`, with the ONE non-
+ * epistemic exception the covenant already permits: a `resume` is a #118 draw, so
+ * it moves `authorized_draws` by exactly one, the same accounting `session_opened`
+ * does. Neither ever mints or moves a `~`→`✓`.
+ * ───────────────────────────────────────────────────────────────────────────── */
+
+export const SessionSignalKind = z.enum(['steer', 'interrupt', 'resume']);
+export type SessionSignalKind = z.infer<typeof SessionSignalKind>;
+
+/**
+ * A control-DOWN signal against a session (#127). `kind` is `steer | interrupt |
+ * resume`; `resume` is the #118 continuation draw (its refusal is a `draw_refused`,
+ * built by the command, never a `session_signaled`).
+ *
+ * The three provenance fields are NEW and explicit — never `MessageReference`,
+ * which has no `message` kind. `causeMessageId` is the channel message that caused
+ * the signal (same-room, FK'd at the projection). `supersedesEventId` is the
+ * `core_events.id` of an earlier signal this forward-only revises (append-only; the
+ * tail-discard is the harness's act, reported in the session receipt).
+ * `subscriptionId` is the wait a `resume` consumes.
+ */
+export const SessionSignaled = z.object({
+  ...eventBase,
+  type: z.literal('session_signaled'),
+  roomId: Id,
+  sessionId: Id,
+  kind: SessionSignalKind,
+  causeMessageId: Id.nullable().default(null),
+  supersedesEventId: Id.nullable().default(null),
+  subscriptionId: Id.nullable().default(null),
+});
+export type SessionSignaled = z.infer<typeof SessionSignaled>;
+
+/**
+ * A durable wait on an open session (#127). `expiresAt` is MANDATORY: a wait with
+ * no horizon is the forever-open session that blocks #119's plan-settle.
+ * `causeMessageId` is MANDATORY too — it is the wait's anchor and the
+ * `signal_raised` subject when the subscription expires unmatched (that escalation
+ * needs a subject, and `signal_raised`'s vocabulary is the closed `{object,
+ * proposal, message}`; a subscription's only representable subject is the channel
+ * message that requested it).
+ */
+export const SessionSubscribed = z.object({
+  ...eventBase,
+  type: z.literal('session_subscribed'),
+  roomId: Id,
+  sessionId: Id,
+  subscriptionId: Id,
+  source: z.string().min(1).max(120),
+  matcher: z.string().min(1).max(2000),
+  expiresAt: Timestamp,
+  causeMessageId: Id,
+});
+export type SessionSubscribed = z.infer<typeof SessionSubscribed>;
+
 /** The payload union, before the no-actor guard. */
 const RoomEventVariants = z.discriminatedUnion('type', [
   ProposalRecorded,
@@ -332,6 +403,8 @@ const RoomEventVariants = z.discriminatedUnion('type', [
   SignalRaised,
   PlanRlimitSet,
   DrawRefused,
+  SessionSignaled,
+  SessionSubscribed,
 ]);
 
 /**
@@ -413,7 +486,9 @@ export type ServerEvent =
   | SessionFailed
   | SignalRaised
   | PlanRlimitSet
-  | DrawRefused;
+  | DrawRefused
+  | SessionSignaled
+  | SessionSubscribed;
 
 /** True when @atrium/core's `reduce` consumes this event. */
 export function isCoreEvent(event: RoomEvent): event is CoreEvent {
@@ -454,6 +529,8 @@ export function declaredRoomId(event: RoomEvent): string | null {
     case 'signal_raised':
     case 'plan_rlimit_set':
     case 'draw_refused':
+    case 'session_signaled':
+    case 'session_subscribed':
       return event.roomId;
     case 'proposal_rejected':
     case 'proposal_superseded':

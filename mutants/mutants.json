@@ -833,8 +833,8 @@
       "kind": "file",
       "why": "The drizzle event_type enum grows a value the database does not have. _CoreEventTypeCoverage asserts only that every core event type is in the enum, so this compiles. It pins that a comparison exists at all — and it is honest to say it does not discriminate r7 from r6, because r6 compared Object.keys(OWN_KEY) against eventType.enumValues and this trips that too. The direction r7 added is the database growing a kind TypeScript has not heard of, which cannot be a mutant at all: ALTER TYPE ... ADD VALUE is irreversible, so it would leak a ninth kind into every later file in the run. That half is verified by hand and the test says so.",
       "file": "packages/db/src/schema.ts",
-      "find": "  'draw_refused',\n]);",
-      "replace": "  'draw_refused',\n  'ninth_kind',\n]);",
+      "find": "  'session_subscribed',\n]);",
+      "replace": "  'session_subscribed',\n  'ninth_kind',\n]);",
       "catches": ["takes its list of kinds from the deployed enum, not from a TypeScript constant"]
     },
     {

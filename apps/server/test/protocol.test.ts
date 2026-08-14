@@ -224,6 +224,12 @@ describe('ClientFrame', () => {
       'raise_signal',
       // The budget/rlimit spend-authorization (#118): human-only slice set/raise.
       'set_plan_rlimit',
+      // The signal/interrupt boundary (#127): steer/interrupt, the resume draw, a
+      // durable subscription, and the expiry sweep.
+      'signal_session',
+      'resume_session',
+      'subscribe_session',
+      'expire_subscription',
     ];
     const declared = Command.options.map((option) => option.shape.name.value);
     expect([...declared].sort()).toEqual([...names].sort());

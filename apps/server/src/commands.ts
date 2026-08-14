@@ -5,6 +5,7 @@ import {
   AcceptedObjectType,
   type Actor,
   AttentionClass,
+  actorUserId,
   ClaimPayload,
   CommitmentPayload,
   CorrectionAction,
@@ -20,16 +21,19 @@ import {
   parseSemanticCommand,
   RationaleReason,
   type Relation,
+  Timestamp,
 } from '@atrium/core';
 import type { Database } from '@atrium/db';
 import {
   acceptedObjects,
+  agents,
   coreEvents,
   messages,
   objectSources,
   plans,
   proposalSources,
   proposals,
+  sessionSubscriptions,
   sessions,
   users,
 } from '@atrium/db/schema';
@@ -418,6 +422,56 @@ export const Command = z.discriminatedUnion('name', [
     /** The new ceiling on authorized draws (spawns/continues). Non-negative. */
     slice: z.number().int().nonnegative(),
   }),
+
+  // ── the signal/interrupt boundary (#127, from #123's resolution) ───────────
+  //
+  // Four `open`-class verbs producing the two new ledger-only events. None mints
+  // or moves a `✓`: a steer/interrupt/subscribe is coordination, and a resume
+  // draws against a slice a HUMAN already funded (exactly as `open_session` does,
+  // which is `open` too). Authorization that IS command-specific — an interrupt is
+  // the agent-principal-or-owner's alone — is a lookup in the handler's `authorize`
+  // (under the append lock), trigger-backstopped, not a `certificationClassOf`
+  // class. The role returned by `requireMembership` (session.ts) is not relied on.
+  z.object({
+    name: z.literal('signal_session'),
+    roomId: Id,
+    /** The session being signaled — must be OPEN (projection nack). */
+    sessionId: Id,
+    /** `steer` (any member) or `interrupt` (agent principal or owner only). */
+    kind: z.enum(['steer', 'interrupt']),
+    /** Provenance: the channel message that caused this signal. Same-room, FK'd. */
+    causeMessageId: Id.nullable().default(null),
+    /** Provenance: a prior signal this forward-only revises. Same-room, FK'd. */
+    supersedesEventId: Id.nullable().default(null),
+  }),
+  z.object({
+    name: z.literal('resume_session'),
+    roomId: Id,
+    /** The session being resumed — must be OPEN (projection nack). */
+    sessionId: Id,
+    /** The wait this resume consumes, if it woke on a subscription. Same-room, FK'd. */
+    subscriptionId: Id.nullable().default(null),
+  }),
+  z.object({
+    name: z.literal('subscribe_session'),
+    roomId: Id,
+    /** The open session that is waiting. */
+    sessionId: Id,
+    /** The event source this wait is armed against — a label. */
+    source: z.string().min(1).max(120),
+    /** An opaque matcher the channel-loop (#128) recognises a match by. */
+    matcher: z.string().min(1).max(2000),
+    /** MANDATORY horizon: when the wait expires if unmatched. */
+    expiresAt: Timestamp,
+    /** The channel message anchoring the wait — the expiry escalation's subject. */
+    causeMessageId: Id,
+  }),
+  z.object({
+    name: z.literal('expire_subscription'),
+    roomId: Id,
+    /** The pending, past-`expiresAt` subscription to escalate to the agent's owner. */
+    subscriptionId: Id,
+  }),
 ]);
 export type Command = z.infer<typeof Command>;
 
@@ -559,6 +613,16 @@ export function certificationClassOf(name: CommandName): CertificationClass {
     case 'open_session':
     case 'settle_session':
     case 'raise_signal':
+    // The signal/interrupt verbs (#127). Participation, not certification: none of
+    // them mints or moves a `✓`. A steer/interrupt/subscribe is coordination DOWN
+    // and an escalation sweep; a resume DRAWS against a slice a human already funded
+    // (`open_session` is `open` for the same reason). Command-specific authorization
+    // — an interrupt is the agent-principal-or-owner's alone — is a lookup in the
+    // handler under the append lock, trigger-backstopped, not this class.
+    case 'signal_session':
+    case 'resume_session':
+    case 'subscribe_session':
+    case 'expire_subscription':
       return 'open';
     // The spend-authorization (#118). NOT `open`: setting or raising a plan's
     // rlimit slice is `human = init`'s act, refused to a machine before the
@@ -2001,6 +2065,9 @@ export function createCommandService({
           subjectId: command.subjectId,
           class: command.class,
           reason: command.reason,
+          // A member-raised escalation disposes no subscription (#127). Only
+          // `expire_subscription` sets this, to transition an expired wait.
+          subscriptionId: null,
         }));
 
       // The human-only spend-authorization (#118). The non-human refusal already
@@ -2016,6 +2083,275 @@ export function createCommandService({
           planId: command.planId,
           slice: command.slice,
         }));
+
+      // ── the signal/interrupt boundary (#127, from #123's resolution) ───────
+      //
+      // A steer or an interrupt. Open-only is enforced by `projectSessionSignaled`
+      // (the 0025 trigger cannot — a signal is an APPEND, not a row UPDATE). An
+      // INTERRUPT additionally runs an in-command authorization lookup under the
+      // append lock: it is the session's plan's agent principal or that agent's
+      // owner ONLY (`plans.agent_user_id` → `agents.owner_user_id`), never the role
+      // discarded at session.ts:74. Trigger-backstopped by the session_signals
+      // interrupt trigger. A steer runs no such guard — any room member may steer.
+      case 'signal_session':
+        return appendAndProject(
+          session,
+          command.roomId,
+          ({ id, at }) => ({
+            id,
+            at,
+            type: 'session_signaled',
+            roomId: command.roomId,
+            sessionId: command.sessionId,
+            kind: command.kind,
+            causeMessageId: command.causeMessageId,
+            supersedesEventId: command.supersedesEventId,
+            subscriptionId: null,
+          }),
+          command.kind === 'interrupt'
+            ? async (tx) => {
+                const [row] = await tx
+                  .select({
+                    agentUserId: plans.agentUserId,
+                    ownerUserId: agents.ownerUserId,
+                  })
+                  .from(sessions)
+                  .innerJoin(
+                    plans,
+                    and(eq(plans.id, sessions.planId), eq(plans.roomId, sessions.roomId)),
+                  )
+                  .innerJoin(agents, eq(agents.userId, plans.agentUserId))
+                  .where(
+                    and(eq(sessions.id, command.sessionId), eq(sessions.roomId, command.roomId)),
+                  );
+                if (!row) {
+                  throw new CommandError(
+                    'invalid',
+                    `no session "${command.sessionId}" to interrupt in room "${command.roomId}" — it does not exist here`,
+                  );
+                }
+                const actorId = actorUserId(actorOf(session));
+                if (actorId !== row.agentUserId && actorId !== row.ownerUserId) {
+                  throw new CommandError(
+                    'invalid',
+                    `"interrupt" is authorized to the session's agent principal or that agent's owner only; this actor is neither. A steer is open to any member — an interrupt is not`,
+                  );
+                }
+              }
+            : undefined,
+        );
+
+      // A RESUME is the #118 continuation draw (#115's "spawns/continues"). It
+      // passes the budget boundary under the append lock EXACTLY as `open_session`
+      // does: it reads the plan's committed `authorized_draws` against the human-set
+      // `rlimit_slice`, and an over-slice resume is built as a `draw_refused` row —
+      // never a free wake. The `refusal` closure is set in `authorize`, read in
+      // `build`, both under the ONE lock. Open-only is enforced by the projection.
+      case 'resume_session': {
+        const roomId = command.roomId;
+        let refusal: {
+          planId: string;
+          slice: number;
+          authorizedDraws: number;
+          harness: string;
+          model: string;
+        } | null = null;
+        const appended = await ledger.append({
+          roomId,
+          actor: actorOf(session),
+          authorize: async (tx) => {
+            await requireMembership(session, roomId, tx);
+            const [row] = await tx
+              .select({
+                status: sessions.status,
+                planId: sessions.planId,
+                harness: sessions.harness,
+                model: sessions.model,
+                planStatus: plans.status,
+                slice: plans.rlimitSlice,
+                authorizedDraws: plans.authorizedDraws,
+              })
+              .from(sessions)
+              .innerJoin(
+                plans,
+                and(eq(plans.id, sessions.planId), eq(plans.roomId, sessions.roomId)),
+              )
+              .where(and(eq(sessions.id, command.sessionId), eq(sessions.roomId, roomId)))
+              .for('share');
+            // The draw is decided ONLY for an open session under an open plan. Any
+            // other case builds a `session_signaled` whose projection nacks
+            // (open-only), so no draw and no signal land — the same fail-closed shape
+            // `open_session` leaves an absent/settled plan to its projection.
+            if (row && row.status === 'open' && row.planStatus === 'open') {
+              const slice = row.slice ?? 0;
+              if (row.authorizedDraws + 1 > slice) {
+                refusal = {
+                  planId: row.planId,
+                  slice,
+                  authorizedDraws: row.authorizedDraws,
+                  harness: row.harness,
+                  model: row.model,
+                };
+              }
+            }
+          },
+          build: ({ id, at }): RoomEvent =>
+            refusal
+              ? {
+                  id,
+                  at,
+                  type: 'draw_refused',
+                  roomId,
+                  planId: refusal.planId,
+                  reason: 'budget',
+                  slice: refusal.slice,
+                  authorizedDraws: refusal.authorizedDraws,
+                  harness: refusal.harness,
+                  model: refusal.model,
+                }
+              : {
+                  id,
+                  at,
+                  type: 'session_signaled',
+                  roomId,
+                  sessionId: command.sessionId,
+                  kind: 'resume',
+                  causeMessageId: null,
+                  supersedesEventId: null,
+                  subscriptionId: command.subscriptionId,
+                },
+          project: (context) => projectRoomEvent(context, projectionHooks),
+        });
+        return {
+          kind: 'appended',
+          roomId: appended.roomId,
+          seq: appended.seq,
+          roomSeq: appended.roomSeq,
+          actor: appended.actor,
+          event: appended.event,
+          issues:
+            appended.outcome?.outcome === 'applied_with_issue'
+              ? appended.outcome.issues.map((issue) => issue.reason)
+              : [],
+          // The draw outcome, in the RESULT, so a caller tells a woken session from a
+          // refused resume — the same synchronous signal `open_session` carries.
+          draw:
+            appended.event.type === 'draw_refused'
+              ? {
+                  outcome: 'refused',
+                  reason: 'budget',
+                  slice: appended.event.slice,
+                  authorizedDraws: appended.event.authorizedDraws,
+                }
+              : { outcome: 'granted', sessionId: command.sessionId },
+        };
+      }
+
+      // A durable wait on an open session. The projection nacks a subscription on a
+      // session that is not open. `subscriptionId` is minted server-side and read
+      // back off the projected row.
+      case 'subscribe_session': {
+        const subscriptionId = randomUUID();
+        return appendAndProject(session, command.roomId, ({ id, at }) => ({
+          id,
+          at,
+          type: 'session_subscribed',
+          roomId: command.roomId,
+          sessionId: command.sessionId,
+          subscriptionId,
+          source: command.source,
+          matcher: command.matcher,
+          expiresAt: command.expiresAt,
+          causeMessageId: command.causeMessageId,
+        }));
+      }
+
+      // A wait that expired unmatched becomes OWED ATTENTION (#123 resolution point
+      // 6): a `signal_raised` to the agent's OWNER, subject = the wait's anchor
+      // message (the closed attention vocabulary's only representable subject for a
+      // subscription). The guard reads the owner and gates on a still-pending,
+      // past-horizon wait UNDER THE APPEND LOCK; `projectSignalRaised` then
+      // transitions the wait pending→expired in the same transaction, so a re-sweep
+      // reads 'expired' here and nacks — no duplicate escalation, replay-deterministic.
+      case 'expire_subscription': {
+        const roomId = command.roomId;
+        let escalation: { targetUserId: string; causeMessageId: string } | null = null;
+        return appendAndProject(
+          session,
+          roomId,
+          ({ id, at }) => {
+            if (!escalation) {
+              // Unreachable: the guard throws when the wait is not eligible, aborting
+              // the append before `build` runs. Present so the type is total.
+              throw new CommandError('invalid', 'no eligible subscription to expire');
+            }
+            return {
+              id,
+              at,
+              type: 'signal_raised',
+              roomId,
+              targetUserId: escalation.targetUserId,
+              subjectKind: 'message',
+              subjectId: escalation.causeMessageId,
+              class: 'mention',
+              reason: {
+                kind: 'mention',
+                request:
+                  'A subscription this session was waiting on expired unmatched — the wait is now owed your attention.',
+              },
+              subscriptionId: command.subscriptionId,
+            };
+          },
+          async (tx) => {
+            const [row] = await tx
+              .select({
+                status: sessionSubscriptions.status,
+                expiresAt: sessionSubscriptions.expiresAt,
+                causeMessageId: sessionSubscriptions.causeMessageId,
+                ownerUserId: agents.ownerUserId,
+              })
+              .from(sessionSubscriptions)
+              .innerJoin(
+                sessions,
+                and(
+                  eq(sessions.id, sessionSubscriptions.sessionId),
+                  eq(sessions.roomId, sessionSubscriptions.roomId),
+                ),
+              )
+              .innerJoin(
+                plans,
+                and(eq(plans.id, sessions.planId), eq(plans.roomId, sessions.roomId)),
+              )
+              .innerJoin(agents, eq(agents.userId, plans.agentUserId))
+              .where(
+                and(
+                  eq(sessionSubscriptions.id, command.subscriptionId),
+                  eq(sessionSubscriptions.roomId, roomId),
+                ),
+              )
+              .for('share');
+            if (!row) {
+              throw new CommandError(
+                'invalid',
+                `no subscription "${command.subscriptionId}" in room "${roomId}" — it does not exist here`,
+              );
+            }
+            if (row.status !== 'pending') {
+              throw new CommandError(
+                'invalid',
+                `subscription "${command.subscriptionId}" is ${row.status}, not pending — only a pending wait can expire`,
+              );
+            }
+            if (new Date(row.expiresAt).getTime() > Date.now()) {
+              throw new CommandError(
+                'invalid',
+                `subscription "${command.subscriptionId}" has not reached its expiresAt yet`,
+              );
+            }
+            escalation = { targetUserId: row.ownerUserId, causeMessageId: row.causeMessageId };
+          },
+        );
+      }
 
       // ── ephemeral: broadcast, never appended (#14) ─────────────────────────
       case 'set_presence':

@@ -129,6 +129,46 @@ export const planStatus = pgEnum('plan_status', ['open', 'settled']);
 export const sessionStatus = pgEnum('session_status', ['open', 'settled', 'failed']);
 
 /**
+ * The three meanings a `session_signaled` carries — control DOWN into a running
+ * session (#127, from #123's resolution point 2). Deliberately NOT `signal_raised`
+ * (that is escalation UP into attention) and NOT `session_subscribed` (a durable
+ * wait): three different acts, named differently because they are different.
+ *
+ *   * `steer` — a coordination nudge, open to any room member. Powerless over the
+ *     covenant and the purse; the append is public and receipted.
+ *   * `interrupt` — a request to break a running turn. Authorized to the session's
+ *     plan's agent principal or that agent's owner only (`session_signals`'
+ *     interrupt-authz trigger, #127). An interrupt REQUESTS; a session exit
+ *     CONCLUDES — whichever commits first under the append lock wins the ledger.
+ *   * `resume` — the CONTINUE half of #115's "spawns/continues" slice. It is a
+ *     DRAW: it passes the #118 budget boundary exactly as `open_session` does, and
+ *     an over-slice resume becomes a `draw_refused` row, never a free wake.
+ */
+export const sessionSignalKind = pgEnum('session_signal_kind', ['steer', 'interrupt', 'resume']);
+
+/**
+ * A durable wait's disposition (#127, from #123's resolution point 6). A
+ * `session_subscribed` is born `pending`; it leaves that state exactly one way:
+ *
+ *   * `matched` — a `resume` draw named it (`session_signaled {kind:resume,
+ *     subscriptionId}`), waking the session and consuming the wait.
+ *   * `expired` — `expiresAt` passed unmatched; the wait became owed attention and
+ *     a `signal_raised` escalated it to the agent's owner (`expire_subscription`).
+ *   * `disposed` — the subscribed session took its exit; a wait on a concluded
+ *     session is disposed so it can neither match nor block #119's plan-settle.
+ *
+ * A subscription in any terminal state is inert: the next sweep, match, or exit
+ * reads the committed status and does nothing, which is what makes the transitions
+ * idempotent on replay.
+ */
+export const subscriptionStatus = pgEnum('subscription_status', [
+  'pending',
+  'matched',
+  'expired',
+  'disposed',
+]);
+
+/**
  * Closed alphabet for durable authored references.
  *
  * `agent` (drizzle/0019) joins `human` as the second **participant** kind a
@@ -240,6 +280,18 @@ export const eventType = pgEnum('event_type', [
   // neither, and `plans`/`sessions` are still their only projections.
   'plan_rlimit_set',
   'draw_refused',
+  // ── the signal/interrupt boundary (#127, from #123's resolution) ───────────
+  //
+  // Two more ledger-only kinds, KEPT OUT of `coreEventTypes` exactly as the eight
+  // above are. `session_signaled` carries control DOWN into a running session
+  // (steer/interrupt/resume — resume is a #118 draw); `session_subscribed` is a
+  // durable wait on an open session. Neither is folded by the covenant reducer;
+  // their projections write `session_signals` / `session_subscriptions` and touch
+  // NOTHING on `accepted_objects` / `rlimit_slice` / `authorized_draws` (beyond
+  // the resume draw, which is `session_opened`'s own accounting). Their zod
+  // schemas live in `apps/server/src/room-events.ts`, never in `@atrium/core`.
+  'session_signaled',
+  'session_subscribed',
 ]);
 
 /**
@@ -912,6 +964,8 @@ export const coreEvents = pgTable(
         WHEN 'signal_raised' THEN ARRAY['roomId']
         WHEN 'plan_rlimit_set' THEN ARRAY['roomId']
         WHEN 'draw_refused' THEN ARRAY['roomId']
+        WHEN 'session_signaled' THEN ARRAY['roomId']
+        WHEN 'session_subscribed' THEN ARRAY['roomId']
         WHEN 'proposal_rejected' THEN ARRAY[]::text[]
         WHEN 'proposal_superseded' THEN ARRAY[]::text[]
         WHEN 'object_corrected' THEN ARRAY[]::text[]
@@ -929,6 +983,8 @@ export const coreEvents = pgTable(
         WHEN 'signal_raised' THEN ${t.payload}->>'roomId'
         WHEN 'plan_rlimit_set' THEN ${t.payload}->>'roomId'
         WHEN 'draw_refused' THEN ${t.payload}->>'roomId'
+        WHEN 'session_signaled' THEN ${t.payload}->>'roomId'
+        WHEN 'session_subscribed' THEN ${t.payload}->>'roomId'
         ELSE ${t.roomId}::text
       END, false)`,
     ),
@@ -1579,6 +1635,144 @@ export const sessions = pgTable(
       columns: [t.roomId, t.planId],
       foreignColumns: [plans.roomId, plans.id],
     }).onDelete('cascade'),
+  ],
+);
+
+/**
+ * A durable wait on an open session (#127, projection of `session_subscribed`).
+ *
+ * The subscribe/resume half of #123's resolution: a session may register that it
+ * is waiting on an external event, and a later `resume` draw wakes it. Defined
+ * BEFORE `session_signals` because a `resume` signal's `subscriptionId` composite
+ * FK lands on `(room_id, id)` here.
+ *
+ * `expires_at` is MANDATORY — a wait with no horizon is the forever-open session
+ * that silently blocks #119's plan-settle. `cause_message_id` is MANDATORY too and
+ * is the wait's anchor: when the subscription expires unmatched, the escalation is
+ * a `signal_raised` and `signal_raised`'s subject vocabulary is the closed
+ * `{object, proposal, message}` — a subscription owns no object or proposal, so its
+ * only representable subject is the channel message that requested the wait. It is
+ * composite-FK'd into the same room, so a cross-room anchor is refused at INSERT.
+ */
+export const sessionSubscriptions = pgTable(
+  'session_subscriptions',
+  {
+    id: uuid('id').primaryKey(),
+    roomId: uuid('room_id')
+      .notNull()
+      .references(() => rooms.id, { onDelete: 'cascade' }),
+    /** The open session this wait belongs to. Composite-FK'd into the same room. */
+    sessionId: uuid('session_id').notNull(),
+    /** The event source this wait is armed against — a label the daemon routes on. */
+    source: text('source').notNull(),
+    /** An opaque matcher the channel-loop (#128) recognises a match by. */
+    matcher: text('matcher').notNull(),
+    /** MANDATORY horizon: when the wait expires if still unmatched. */
+    expiresAt: timestamp('expires_at', { withTimezone: true }).notNull(),
+    /**
+     * The channel message that anchors this wait — the `signal_raised` subject when
+     * the subscription expires unmatched. Composite-FK'd into the same room.
+     */
+    causeMessageId: uuid('cause_message_id').notNull(),
+    status: subscriptionStatus('status').notNull().default('pending'),
+    /** The `core_events.id` of the `session_subscribed` that projected this. */
+    subscribedByEventId: text('subscribed_by_event_id'),
+    createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
+    updatedAt: timestamp('updated_at', { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [
+    index('session_subscriptions_session_idx').on(t.sessionId),
+    index('session_subscriptions_room_status_idx').on(t.roomId, t.status),
+    /** The composite-FK target a `resume` signal's `subscriptionId` lands on. */
+    uniqueIndex('session_subscriptions_room_id_key').on(t.roomId, t.id),
+    /** One parent session, in the same room. */
+    foreignKey({
+      name: 'session_subscriptions_session_same_room_fk',
+      columns: [t.roomId, t.sessionId],
+      foreignColumns: [sessions.roomId, sessions.id],
+    }).onDelete('cascade'),
+    /** The anchor message is in the same room — refuses a cross-room `causeMessageId`. */
+    foreignKey({
+      name: 'session_subscriptions_cause_message_same_room_fk',
+      columns: [t.roomId, t.causeMessageId],
+      foreignColumns: [messages.roomId, messages.id],
+    }),
+  ],
+);
+
+/**
+ * One control-DOWN signal against a session (#127, projection of
+ * `session_signaled`). A steer, an interrupt, or a resume — ledger-only, folded by
+ * no reducer; this row is the receipt and the provenance index.
+ *
+ * `id` is the `session_signaled` event's own `core_events.id` (text, like every
+ * `*_by_event_id` pointer), so a later signal's `supersedes_event_id` — a
+ * forward-only revision of an earlier steer — lands on `(room_id, id)` here and is
+ * refused unless it names a real prior signal in the same room. The three
+ * provenance fields are NEW and explicit, never `MessageReference` (there is no
+ * message kind here): `cause_message_id` (the channel message that caused the
+ * signal), `supersedes_event_id` (the earlier signal this revises), and
+ * `subscription_id` (the wait a `resume` consumes).
+ */
+export const sessionSignals = pgTable(
+  'session_signals',
+  {
+    /** The `core_events.id` of the `session_signaled` — the supersede-FK target. */
+    id: text('id').primaryKey(),
+    roomId: uuid('room_id')
+      .notNull()
+      .references(() => rooms.id, { onDelete: 'cascade' }),
+    /** The session this signals. Composite-FK'd into the same room. */
+    sessionId: uuid('session_id').notNull(),
+    kind: sessionSignalKind('kind').notNull(),
+    /**
+     * WHO SIGNALED — the authenticated actor's user id, or NULL for a model/system
+     * actor. The interrupt-authz trigger (drizzle) reads it: an `interrupt` is
+     * refused unless this names the session's plan's agent principal or that
+     * agent's owner. A `steer` is open to any member and leaves this at whatever the
+     * envelope carried.
+     */
+    signaledByUserId: uuid('signaled_by_user_id').references(() => users.id, {
+      onDelete: 'set null',
+    }),
+    signaledByKind: actorKind('signaled_by_kind').notNull(),
+    /** The channel message that caused this signal (mediated case). Same-room FK'd. */
+    causeMessageId: uuid('cause_message_id'),
+    /** A prior signal this forward-only revises (append-only; tail-discard is the harness's act). */
+    supersedesEventId: text('supersedes_event_id'),
+    /** The subscription a `resume` consumes. Same-room FK'd; NULL for steer/interrupt. */
+    subscriptionId: uuid('subscription_id'),
+    createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [
+    index('session_signals_session_idx').on(t.sessionId),
+    index('session_signals_room_kind_idx').on(t.roomId, t.kind),
+    /** The composite-FK target `supersedes_event_id` / `subscription_id` land on. */
+    uniqueIndex('session_signals_room_id_key').on(t.roomId, t.id),
+    /** One target session, in the same room. */
+    foreignKey({
+      name: 'session_signals_session_same_room_fk',
+      columns: [t.roomId, t.sessionId],
+      foreignColumns: [sessions.roomId, sessions.id],
+    }).onDelete('cascade'),
+    /** The cause message is in the same room — refuses a cross-room `causeMessageId`. */
+    foreignKey({
+      name: 'session_signals_cause_message_same_room_fk',
+      columns: [t.roomId, t.causeMessageId],
+      foreignColumns: [messages.roomId, messages.id],
+    }),
+    /** The superseded signal is a real prior signal in the same room (self-ref). */
+    foreignKey({
+      name: 'session_signals_supersedes_same_room_fk',
+      columns: [t.roomId, t.supersedesEventId],
+      foreignColumns: [t.roomId, t.id],
+    }),
+    /** The consumed subscription is in the same room. */
+    foreignKey({
+      name: 'session_signals_subscription_same_room_fk',
+      columns: [t.roomId, t.subscriptionId],
+      foreignColumns: [sessionSubscriptions.roomId, sessionSubscriptions.id],
+    }),
   ],
 );
 

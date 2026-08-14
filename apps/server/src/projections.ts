@@ -17,6 +17,8 @@ import {
   plans,
   proposalSources,
   proposals,
+  sessionSignals,
+  sessionSubscriptions,
   sessions,
   attachments as storedAttachments,
 } from '@atrium/db/schema';
@@ -110,6 +112,10 @@ export async function projectRoomEvent(
       return projectPlanRlimitSet(context, event);
     case 'draw_refused':
       return projectDrawRefused(context, event);
+    case 'session_signaled':
+      return projectSessionSignaled(context, event);
+    case 'session_subscribed':
+      return projectSessionSubscribed(context, event);
     default: {
       const exhaustive: never = event;
       throw new Error(`no projection for event ${JSON.stringify(exhaustive)}`);
@@ -866,6 +872,21 @@ async function projectSessionExit(
       `no open session "${event.sessionId}" to ${status} in room "${roomId}" — it does not exist here or has already exited`,
     );
   }
+  // A SESSION EXIT DISPOSES ITS WAITS (#127, #123 resolution point 6). Any still-
+  // pending subscription on this session can never match now — its session has
+  // concluded — so it is disposed here, in the same append transaction as the exit.
+  // Without this a wait outlives its session and blocks #119's plan-settle forever.
+  // Idempotent by the `status = 'pending'` predicate.
+  await tx
+    .update(sessionSubscriptions)
+    .set({ status: 'disposed', updatedAt: new Date(event.at) })
+    .where(
+      and(
+        eq(sessionSubscriptions.sessionId, event.sessionId),
+        eq(sessionSubscriptions.roomId, roomId),
+        eq(sessionSubscriptions.status, 'pending'),
+      ),
+    );
 }
 
 async function projectSessionSettled(
@@ -908,6 +929,23 @@ async function projectSignalRaised(
       createdAt: new Date(at),
     })
     .onConflictDoNothing();
+  // A `signal_raised` raised by `expire_subscription` (#127) carries the wait it
+  // disposes. Transition it `pending → expired` in THIS append transaction so the
+  // state change rides the ledger row and replays deterministically. Idempotent by
+  // the `status = 'pending'` predicate: a re-swept or replayed row touches zero
+  // rows. NULL for every ordinary escalation, which leaves this a no-op.
+  if (event.subscriptionId) {
+    await tx
+      .update(sessionSubscriptions)
+      .set({ status: 'expired', updatedAt: new Date(at) })
+      .where(
+        and(
+          eq(sessionSubscriptions.id, event.subscriptionId),
+          eq(sessionSubscriptions.roomId, roomId),
+          eq(sessionSubscriptions.status, 'pending'),
+        ),
+      );
+  }
 }
 
 /* ── the budget/rlimit enforcement projections (#118) ────────────────────────*/
@@ -966,4 +1004,127 @@ async function projectDrawRefused(
   _event: EventOf<'draw_refused'>,
 ): Promise<void> {
   // Intentionally empty: the durable ledger row is the whole receipt.
+}
+
+/* ── the signal/interrupt projections (#127) ─────────────────────────────────*/
+
+/**
+ * A control-DOWN signal against a session (#127). SIGNALS TARGET OPEN SESSIONS
+ * ONLY, as NEW enforcement (#123 resolution point 2): this reads `sessions.status`
+ * under the append lock, the same guarded-read shape `projectSessionOpened` uses,
+ * and a session that is missing or terminal throws — aborting the append, so a
+ * signal at a settled/failed session leaves NO ledger row and the caller gets a
+ * `nack`. The 0025 terminal-state trigger cannot do this: it guards the `sessions`
+ * ROW against an UPDATE, and a signal is a fresh ledger APPEND, not a row edit.
+ *
+ * The interrupt-vs-settle race is decided here by nothing more than the append
+ * lock: whichever of interrupt/settle commits first wins the ledger. An interrupt
+ * that lands first is a row on a still-open session and never blocks the exit —
+ * interrupt REQUESTS, exit CONCLUDES; a signal that arrives after the exit finds no
+ * open session and is refused. There is no interleaving in which both win.
+ *
+ * A `resume` is the #118 continuation draw: its budget check ran under this same
+ * lock in `commands.ts` (an over-slice resume was built as a `draw_refused` and
+ * never reaches here), so a `resume` that DID reach here is a granted draw and
+ * moves `authorized_draws` by exactly one — the same accounting `projectSession
+ * Opened` does — and marks the subscription it consumed `matched`.
+ */
+async function projectSessionSignaled(
+  { tx, roomId, actor, event: { id, at } }: ProjectionContext<RoomEvent>,
+  event: EventOf<'session_signaled'>,
+): Promise<void> {
+  const [target] = await tx
+    .select({ status: sessions.status, planId: sessions.planId })
+    .from(sessions)
+    .where(and(eq(sessions.id, event.sessionId), eq(sessions.roomId, roomId)))
+    .for('share');
+  if (!target) {
+    throw new CommandError(
+      'invalid',
+      `no session "${event.sessionId}" to signal in room "${roomId}" — it does not exist here`,
+    );
+  }
+  if (target.status !== 'open') {
+    throw new CommandError(
+      'invalid',
+      `session "${event.sessionId}" is ${target.status}, not open — a signal targets an open session only; an interrupt requests, an exit concludes, and this session has already exited`,
+    );
+  }
+  await tx.insert(sessionSignals).values({
+    id,
+    roomId,
+    sessionId: event.sessionId,
+    kind: event.kind,
+    signaledByUserId: actorUserId(actor),
+    signaledByKind: actor.kind,
+    causeMessageId: event.causeMessageId,
+    supersedesEventId: event.supersedesEventId,
+    subscriptionId: event.subscriptionId,
+    createdAt: new Date(at),
+  });
+  if (event.kind === 'resume') {
+    // The continuation draw is now GRANTED — the same +1 accounting a spawn takes
+    // (#118), under the same lock, so `authorized_draws` still equals the count of
+    // draws Atrium granted this plan by construction.
+    await tx
+      .update(plans)
+      .set({ authorizedDraws: sql`${plans.authorizedDraws} + 1`, updatedAt: new Date(at) })
+      .where(and(eq(plans.id, target.planId), eq(plans.roomId, roomId)));
+    if (event.subscriptionId) {
+      // Consume the wait: a matched subscription can neither expire nor match again.
+      await tx
+        .update(sessionSubscriptions)
+        .set({ status: 'matched', updatedAt: new Date(at) })
+        .where(
+          and(
+            eq(sessionSubscriptions.id, event.subscriptionId),
+            eq(sessionSubscriptions.roomId, roomId),
+            eq(sessionSubscriptions.status, 'pending'),
+          ),
+        );
+    }
+  }
+}
+
+/**
+ * A durable wait on a session (#127). SUBSCRIPTIONS TARGET OPEN SESSIONS ONLY,
+ * guarded the same way `projectSessionSignaled` is: a missing or terminal session
+ * throws and aborts the append, so a subscription on a concluded session leaves no
+ * ledger row and `nack`s. The row is born `pending`; it leaves that state by a
+ * `resume` match, an expiry sweep, or the session's exit (`projectSessionExit`).
+ */
+async function projectSessionSubscribed(
+  { tx, roomId, event: { id, at } }: ProjectionContext<RoomEvent>,
+  event: EventOf<'session_subscribed'>,
+): Promise<void> {
+  const [target] = await tx
+    .select({ status: sessions.status })
+    .from(sessions)
+    .where(and(eq(sessions.id, event.sessionId), eq(sessions.roomId, roomId)))
+    .for('share');
+  if (!target) {
+    throw new CommandError(
+      'invalid',
+      `no session "${event.sessionId}" to subscribe in room "${roomId}" — it does not exist here`,
+    );
+  }
+  if (target.status !== 'open') {
+    throw new CommandError(
+      'invalid',
+      `session "${event.sessionId}" is ${target.status}, not open — a subscription waits on an open session only`,
+    );
+  }
+  await tx.insert(sessionSubscriptions).values({
+    id: event.subscriptionId,
+    roomId,
+    sessionId: event.sessionId,
+    source: event.source,
+    matcher: event.matcher,
+    expiresAt: new Date(event.expiresAt),
+    causeMessageId: event.causeMessageId,
+    status: 'pending',
+    subscribedByEventId: id,
+    createdAt: new Date(at),
+    updatedAt: new Date(at),
+  });
 }
