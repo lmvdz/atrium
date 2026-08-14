@@ -1635,13 +1635,33 @@ export const proposals = pgTable(
     /**
      * Which execution session staged this reading, when one did (#116; the
      * proposal half of #114 T3's session→drafted index). Nullable because a
-     * person may stage a reading directly, without an execution session. The
-     * command derives the proposer from its authenticated principal and admits
-     * only an open session owned by that agent in this room; the composite
-     * `(room_id, session_id)` FK independently makes cross-room provenance
-     * impossible in every write path. Drizzle/0043 closes the lineage around
-     * direct projection writes too: when this is non-null, the session's parent
-     * plan must belong to `proposer_user_id` and the proposer must be an agent.
+     * person may stage a reading directly, without an execution session.
+     *
+     * ## Exactly how far this is checked, and where it stops
+     *
+     * CROSS-AGENT spoofing is refused, in two places that do not depend on each
+     * other. `record_proposal` derives the proposer from the authenticated
+     * principal and admits only an OPEN session whose plan's `agent_user_id` is
+     * that principal, in that room; and 0043/0044 make the same two conditions
+     * table facts, so a direct writer that bypasses the command cannot bind a
+     * reading to another agent's session or to one that has already exited. The
+     * composite `(room_id, session_id)` FK independently makes cross-room
+     * provenance impossible in every write path, and stays the sole authority
+     * for that condition (both triggers fall through to it).
+     *
+     * WITHIN one agent, this is the agent's word. `session_id` arrives as
+     * command payload on a connection authenticated at the AGENT level, not at
+     * the session level — one credential covers every session that agent owns —
+     * so an agent holding two open sessions may truthfully name either, and
+     * nothing here can tell which process actually produced the text. The
+     * server checks ownership and liveness; it does not check authorship. Read
+     * this column as "an agent asserted this session drafted it", not as "this
+     * session drafted it".
+     *
+     * Closing that last gap needs a per-session credential — the
+     * `execution_authority` binding — which is deferred to #132. Until it lands,
+     * do not build anything that treats a same-agent session attribution as
+     * adversarially sound.
      */
     sessionId: uuid('session_id'),
     decidedBy: uuid('decided_by').references(() => users.id, { onDelete: 'set null' }),

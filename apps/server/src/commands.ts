@@ -1343,6 +1343,15 @@ export function createCommandService({
             // particular, direct human staging and the interpretation worker
             // carry no pstree session. The edge is authoritative when present,
             // not a synthetic requirement when absent.
+            //
+            // "Authoritative" is bounded, and the bound is worth stating where
+            // the check is: this refuses a session belonging to ANOTHER agent,
+            // and a session that is no longer open. It cannot refuse an agent
+            // naming the wrong one of ITS OWN open sessions — `sessionId` is
+            // payload on a connection authenticated at the agent level, so
+            // within one agent this is that agent's word. The per-session
+            // credential that would close it is #132. See the `session_id`
+            // docblock in packages/db/src/schema.ts.
             if (command.sessionId === null) return;
             if (session.principalKind === 'human') {
               throw new CommandError(

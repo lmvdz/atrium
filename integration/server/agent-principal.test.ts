@@ -667,6 +667,212 @@ describe('a drafting session signs the proposal it stages', () => {
       .from(proposals);
     expect(row).toEqual({ sessionId: null, status: 'proposed' });
   });
+
+  /**
+   * ONE CLAUSE, ONE TEST — the three below exist because the guard had three
+   * conditions and the suite could see none of them.
+   *
+   * `record_proposal`'s session check is a conjunction: refuse a human outright,
+   * then admit only a session that is `open` AND whose plan's `agent_user_id` is
+   * the connected agent. Before these, deleting any one of those three left both
+   * suites green — the happy-path test above only ever presents an agent, an
+   * open session, and its own plan, so every clause was satisfied by the same
+   * fixture and none of them was load-bearing for a single assertion.
+   *
+   * Each test therefore holds the other two clauses TRUE and flips exactly one,
+   * and each asserts the *specific* refusal rather than merely `nack`: reverting
+   * the human clause still nacks (the session lookup then fails on the plan
+   * owner), and reverting the status clause still nacks (0044 refuses the insert
+   * at the table). Only the message separates "the clause did its job" from
+   * "something else downstream caught it".
+   */
+  it('refuses a person’s proposal that claims an execution session (the human clause)', async () => {
+    const agent = await agentInTheRoom('human-claim-scribe');
+    const person = await personInTheRoom('session-claiming-human');
+    await handle.db.insert(memberships).values([
+      { roomId: agent.channelRoomId, userId: agent.userId, role: 'member' },
+      { roomId: agent.channelRoomId, userId: person.userId, role: 'member' },
+    ]);
+    const [plan] = await handle.db
+      .insert(plans)
+      .values({
+        roomId: agent.channelRoomId,
+        agentUserId: agent.userId,
+        title: 'A plan a person has no session in',
+      })
+      .returning({ id: plans.id });
+    const [openSession] = await handle.db
+      .insert(sessions)
+      .values({
+        roomId: agent.channelRoomId,
+        planId: (plan as { id: string }).id,
+        harness: 'codex',
+        model: 'gpt-5.6-sol',
+        status: 'open',
+      })
+      .returning({ id: sessions.id });
+
+    // The session is real, open, in this room, and the person is a member here.
+    // Everything except who is asking is in order, so the only thing that can
+    // refuse this is the human clause.
+    const client = await connectWithCookie(person.userId, person.session.cookie);
+    await client.subscribe(agent.channelRoomId);
+    const statement = 'A person cannot sign a reading with a process’s name.';
+    const attempt = await client.command({
+      name: 'record_proposal',
+      roomId: agent.channelRoomId,
+      sessionId: (openSession as { id: string }).id,
+      proposal: {
+        type: 'claim',
+        payload: { statement, claimant: person.userId, verification: 'unverified' },
+        confidence: 1,
+        provenance: [],
+        quote: null,
+        interpretationId: null,
+      },
+    } as unknown as CommandInput);
+    expect(attempt.type).toBe('nack');
+    expect(JSON.stringify(attempt)).toContain(
+      'a directly staged human proposal cannot claim an execution session',
+    );
+
+    // And nothing landed: the refusal is before the append, not after it.
+    expect(await handle.db.select({ id: proposals.id }).from(proposals)).toEqual([]);
+  });
+
+  it('refuses an agent drafting against its own SETTLED session (the status clause)', async () => {
+    const agent = await agentInTheRoom('settled-session-scribe');
+    await handle.db
+      .insert(memberships)
+      .values({ roomId: agent.channelRoomId, userId: agent.userId, role: 'member' });
+    const [plan] = await handle.db
+      .insert(plans)
+      .values({
+        roomId: agent.channelRoomId,
+        agentUserId: agent.userId,
+        title: 'A plan whose session already exited',
+      })
+      .returning({ id: plans.id });
+    // Its own plan, its own room, its own agent — the ONLY thing wrong is that
+    // the process this reading claims to come from is already gone.
+    const [settled] = await handle.db
+      .insert(sessions)
+      .values({
+        roomId: agent.channelRoomId,
+        planId: (plan as { id: string }).id,
+        harness: 'codex',
+        model: 'gpt-5.6-sol',
+        status: 'settled',
+        exitSummary: 'the work landed and the process exited',
+      })
+      .returning({ id: sessions.id });
+
+    const scribe = await connectWithCookie(agent.userId, agent.session.cookie);
+    await scribe.subscribe(agent.channelRoomId);
+    const statement = 'A settled session cannot still be drafting.';
+    const attempt = await scribe.command({
+      name: 'record_proposal',
+      roomId: agent.channelRoomId,
+      sessionId: (settled as { id: string }).id,
+      proposal: {
+        type: 'claim',
+        payload: { statement, claimant: agent.userId, verification: 'unverified' },
+        confidence: 1,
+        provenance: [],
+        quote: null,
+        interpretationId: null,
+      },
+    } as unknown as CommandInput);
+    expect(attempt.type).toBe('nack');
+    expect(JSON.stringify(attempt)).toContain(
+      'the drafting session is unavailable to this agent in this room',
+    );
+    expect(await handle.db.select({ id: proposals.id }).from(proposals)).toEqual([]);
+
+    // And the table says it too (0044). 0043 asked only WHOSE session this is,
+    // which this row answers correctly — same agent, same room, its own plan —
+    // so before 0044 a direct writer could bind a reading to a process that had
+    // already published its exit summary, and every read model would render the
+    // receipt without a way to tell.
+    let lineageError = '';
+    try {
+      await handle.db.insert(proposals).values({
+        roomId: agent.channelRoomId,
+        type: 'claim',
+        payload: { statement, claimant: agent.userId, verification: 'unverified' },
+        confidence: 1,
+        proposerKind: 'agent',
+        proposerUserId: agent.userId,
+        stagedByKind: 'agent',
+        stagedById: agent.userId,
+        sessionId: (settled as { id: string }).id,
+      });
+    } catch (error) {
+      lineageError = describeDatabaseError(error);
+    }
+    expect(lineageError).toContain('proposals_session_is_open');
+  });
+
+  it('refuses an agent drafting against another agent’s session in the same room (the owner clause)', async () => {
+    const owner = await agentInTheRoom('owning-scribe');
+    const drafter = await agentInTheRoom('borrowing-scribe');
+    /**
+     * THE ROOM IS THE OWNER'S CHANNEL, NOT THE DRAFTER'S — and that is forced,
+     * not a preference.
+     *
+     * `plans_room_matches_agent_channel` (0021's lineage) makes a plan's room
+     * the agent's OWN channel, so two agents cannot both hold plans in one room:
+     * the only constructible same-room pair is one agent's channel with a second
+     * agent admitted to it as a member. That is this fixture. The drafter is a
+     * full member here — `requireMembership` passes, the session is open, it is
+     * in the room named on the command, and the composite FK is satisfied — so
+     * `plans.agent_user_id` is the sole remaining thing that can refuse it.
+     */
+    await handle.db.insert(memberships).values([
+      { roomId: owner.channelRoomId, userId: owner.userId, role: 'member' },
+      { roomId: owner.channelRoomId, userId: drafter.userId, role: 'member' },
+    ]);
+    const [ownersPlan] = await handle.db
+      .insert(plans)
+      .values({
+        roomId: owner.channelRoomId,
+        agentUserId: owner.userId,
+        title: 'The other agent’s plan',
+      })
+      .returning({ id: plans.id });
+    const [ownersSession] = await handle.db
+      .insert(sessions)
+      .values({
+        roomId: owner.channelRoomId,
+        planId: (ownersPlan as { id: string }).id,
+        harness: 'codex',
+        model: 'gpt-5.6-sol',
+        status: 'open',
+      })
+      .returning({ id: sessions.id });
+
+    const scribe = await connectWithCookie(drafter.userId, drafter.session.cookie);
+    await scribe.subscribe(owner.channelRoomId);
+    const statement = 'One agent must not sign with another agent’s process.';
+    const attempt = await scribe.command({
+      name: 'record_proposal',
+      roomId: owner.channelRoomId,
+      sessionId: (ownersSession as { id: string }).id,
+      proposal: {
+        type: 'claim',
+        payload: { statement, claimant: drafter.userId, verification: 'unverified' },
+        confidence: 1,
+        provenance: [],
+        quote: null,
+        interpretationId: null,
+      },
+    } as unknown as CommandInput);
+    expect(attempt.type).toBe('nack');
+    expect(JSON.stringify(attempt)).toContain(
+      'the drafting session is unavailable to this agent in this room',
+    );
+    expect(await handle.db.select({ id: proposals.id }).from(proposals)).toEqual([]);
+  });
 });
 
 describe('the certify boundary, against a session-borne non-human', () => {

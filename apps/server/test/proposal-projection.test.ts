@@ -101,4 +101,31 @@ describe('proposal projection session provenance', () => {
     expect(row.sessionId).toBeNull();
     expect(row.status).toBe('proposed');
   });
+
+  it('replays a historical row that has no sessionId key at all', async () => {
+    /**
+     * ABSENT is not the same shape as NULL, and only one of them is what the
+     * ledger already holds.
+     *
+     * Every `proposal_recorded` row written before the provenance edge existed —
+     * and every one the interpretation worker wrote before it was pinned to an
+     * explicit null — has no `sessionId` property whatsoever. `ProposalRecorded`
+     * marks the field `.nullable().optional()` precisely so those rows still
+     * parse, and the projection coalesces with `?? null` so they still land. A
+     * test that only ever passes an explicit null exercises the nullable half
+     * and leaves `.optional()` free to be dropped: the schema would then reject
+     * a replay of the room's own history, and nothing here would say so.
+     *
+     * So this deletes the key rather than setting it, which is the only version
+     * of this assertion that goes red if `.optional()` does.
+     */
+    const event = proposalEvent(null) as Partial<ReturnType<typeof proposalEvent>>;
+    delete event.sessionId;
+    expect('sessionId' in event).toBe(false);
+
+    const row = await projectedProposal(event as ReturnType<typeof proposalEvent>);
+
+    expect(row.sessionId).toBeNull();
+    expect(row.status).toBe('proposed');
+  });
 });

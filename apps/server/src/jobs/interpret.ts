@@ -414,7 +414,14 @@ export async function runInterpretation(
       const appended = await deps.ledger.append<RoomEvent>({
         roomId,
         actor: { kind: 'model', model: result.model },
-        build: ({ id, at }) => ({ id, at, type: 'proposal_recorded', proposal }),
+        // Explicitly no drafting session. The interpretation worker is not a
+        // pstree process — it has no plan, no session, and no agent principal to
+        // own one — so the edge is absent here as a fact about this writer, not
+        // as an omission. Stated rather than left to the schema's default for
+        // the same reason `stage_semantic_command` states it: `sessionId` is the
+        // one field on this event a reader would otherwise have to infer, and an
+        // inferred null looks identical to a forgotten one.
+        build: ({ id, at }) => ({ id, at, type: 'proposal_recorded', proposal, sessionId: null }),
         project: (ctx) => projectRoomEvent(ctx),
       });
       if (appended.issues.length > 0) {
