@@ -1444,3 +1444,25 @@ a builder that inherits them builds on. (3) A moving victim ACROSS families is t
 machine's signature, not the product's — HANDOFF.md had already recorded it at 8
 workers; suites grow back into old limits. The margin at 4 workers is thin and the
 map should know it.
+
+## #136 — the co-rendered echo (closed 2026-08-14, 3 rounds)
+
+The destination gate's one red unmasked it; a DOM observer measured it (46-83ms dual
+render, 2/8 runs); the fix is a render-time claim at the join point of two channels
+that were each individually correct — the literal check-relations-not-predicates class,
+found in production code by the campaign's own finish line. Round 3 (codex must-fix):
+the claim needed the server's own payload-agreement rule, byte-exact — the builder
+refused the brief's "trimmed text" because the server hashes unnormalized bytes and
+authoredBody exists to preserve them; trimming was the approximation the brief itself
+warned against.
+
+Process lessons: (1) when a fix filters by a key, ask what ELSE shares the key — the
+server already knew (reused key + different payload = conflict); mirroring an existing
+authority beats inventing an equivalence. (2) A brief's remedy sketch is a hypothesis
+the builder should refuse with evidence — twice now the measured answer beat the
+specified one (FOR KEY SHARE, trimmed-text). (3) `pnpm -r lint` and `pnpm -r unit`
+exit 0 having run NOTHING (root-level scripts, -r excludes the root) — a green light
+over an unexecuted check, adjacent to the AGENTS.md exit-code correction at 240b26e;
+the real gate commands are root pnpm lint / pnpm test. (4) A residual narrower hole
+(same key+body, differing attachments) is documented at the claim site instead of
+traded for a certain duplicate-regression — name the boundary, don't pretend it away.

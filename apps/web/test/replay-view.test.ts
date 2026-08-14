@@ -1587,6 +1587,109 @@ describe('live room view', () => {
     const view = liveRoomView(snapshot, 'alice', live);
     expect(view.records.map((record) => record.id)).toContain('pending:client-answer-a');
   });
+
+  /**
+   * #136 r3. The key is not just client-chosen, it is client-INSTANCE-chosen:
+   * `userId:timestamp:counter`, so two tabs of one account that send in the same
+   * millisecond mint the same `clientMessageId` with different words. The server
+   * refuses the second — a receipt found under the same key with a different
+   * payload fingerprint is a `conflict`, not a replay (`ledger.ts`) — and the
+   * refused echo stays in `live.pending` as a `failed` row so it can be seen and
+   * retried.
+   *
+   * Mutation: claim on (author, key) alone, ignoring the payload. The refused
+   * row is then hidden before its nack arrives and stays hidden forever after,
+   * and the person's typed sentence disappears from their own screen with no
+   * trace — silent loss where the failure mode this feature guards against is a
+   * visible, self-healing duplicate.
+   */
+  it('keeps a pending echo whose key collides with a committed row of different words', () => {
+    const snapshot = data();
+    const live: RoomView = {
+      roomId: 'room',
+      lastSeq: 1,
+      head: 2,
+      seenSeq: 1,
+      events: [],
+      // Same author, same key as the committed `m2` — a second tab, same
+      // millisecond — but the person typed something else entirely.
+      pending: [
+        {
+          clientMessageId: 'client-answer-a',
+          commandName: 'send_message',
+          replyToId: 'm1',
+          body: 'No, regeneration should block the request.',
+          at: '2026-08-02T12:01:00.000Z',
+          status: 'failed',
+          error: 'that retry key already names a different command payload',
+          retryable: false,
+          attachments: [],
+          references: [],
+        },
+      ],
+      presence: {},
+      typing: [],
+      subscribed: true,
+    };
+    const view = liveRoomView(snapshot, 'alice', live);
+
+    // The committed row renders as itself, and the refused echo survives beside
+    // it — these are two different messages that happen to share a key.
+    expect(view.records.map((record) => record.id)).toContain('m2');
+    expect(view.records.map((record) => record.id)).toContain('pending:client-answer-a');
+    expect(view.records.find((record) => record.id === 'pending:client-answer-a')?.text).toBe(
+      'No, regeneration should block the request.',
+    );
+    // And the nack is still handleable exactly as it was before the claim
+    // existed: the failed echo is on the timeline, not swallowed by it.
+    expect(view.entries.some((entry) => entry.id === 'pending:client-answer-a')).toBe(true);
+  });
+
+  /**
+   * The other side of the payload term: agreement is what the server calls a
+   * replay, so agreement is what the claim still fires on. Byte-exact, because
+   * the server hashes `body` verbatim — a whitespace-only difference is a
+   * `conflict` to it, so it must not be a match here.
+   */
+  it('claims the echo on an exact payload match and not on a near one', () => {
+    const snapshot = data();
+    const echo = (body: string): RoomView => ({
+      roomId: 'room',
+      lastSeq: 1,
+      head: 2,
+      seenSeq: 1,
+      events: [],
+      pending: [
+        {
+          clientMessageId: 'client-answer-a',
+          commandName: 'send_message',
+          replyToId: 'm1',
+          body,
+          at: '2026-08-02T12:01:00.000Z',
+          status: 'pending',
+          attachments: [],
+          references: [],
+        },
+      ],
+      presence: {},
+      typing: [],
+      subscribed: true,
+    });
+
+    const exact = liveRoomView(
+      snapshot,
+      'alice',
+      echo('Yes, while the previous page remains available.'),
+    );
+    expect(exact.records.some((record) => record.id.startsWith('pending:'))).toBe(false);
+
+    const whitespace = liveRoomView(
+      snapshot,
+      'alice',
+      echo('Yes, while the previous page remains available. '),
+    );
+    expect(whitespace.records.map((record) => record.id)).toContain('pending:client-answer-a');
+  });
 });
 
 /* ───────────────────────────────────────────────────────────────────────────
