@@ -1466,3 +1466,22 @@ over an unexecuted check, adjacent to the AGENTS.md exit-code correction at 240b
 the real gate commands are root pnpm lint / pnpm test. (4) A residual narrower hole
 (same key+body, differing attachments) is documented at the claim site instead of
 traded for a certain duplicate-regression — name the boundary, don't pretend it away.
+
+## #142 — the no-synthetic dogfood seed (closed 2026-08-14, 2 rounds)
+
+Codex built it; grok gauntleted it; opus fixed it. Round 1's must-fix was the
+"authority test pins the defect as correct" class: the smoke test's only flip was
+the one input checked before any write, so the non-atomic refusal paths (slug/email
+flips leaving orphan rows) read as idempotent. Round 2 made the whole seed one
+transaction — including Better Auth's own session insert, which would otherwise
+have been the single escaping write — and the flip tests now assert byte-equal
+snapshots after refusals.
+
+Process lessons: (1) a seed's idempotency claim is only as strong as its most
+write-adjacent flip; flip the inputs that are checked AFTER writes. (2) The merged
+tree caught what isolation hid twice in one landing: the harness reset had leaked
+workspaces through every suite run ever (640 rows), and the orchestrator's own
+verification had run the seed test as a file, not among the suite — the class
+hides exactly where you verify least. (3) A fix brief's env claim was half right
+and the builder shipped the sharper truth: NODE_ENV unset against a production DB
+is the shape no runtime refusal can see; the header is the only control there.
