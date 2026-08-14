@@ -515,6 +515,21 @@ describe('a resume is a draw, and it passes the #118 boundary', () => {
     const { planId, sessionId } = await openSession(2);
     const alice = await connect(ownerId, 'human');
 
+    // A machine reading staged straight into the read model: a `~`, no human
+    // touch. Snapshotted here because the GRANT is the branch that writes the
+    // purse, and the write-set claim has to hold on the branch that writes
+    // (#127 fix round 2, gauntlet finding E — the round-1 burst asserted
+    // covenant-stability only across branches that could not have moved it).
+    const objectId = randomUUID();
+    await handle.db.execute(sql`
+      INSERT INTO accepted_objects (id, room_id, type, payload, revision, accepted_by_kind, human_touched_at)
+      VALUES (${objectId}, ${room.roomId}::uuid, 'claim',
+              ${JSON.stringify({ statement: 'a machine read this', verification: 'unverified' })}::jsonb,
+              0, 'model', NULL)
+    `);
+    const objectsBefore = await handle.db.select().from(acceptedObjects);
+    const sliceBefore = (await planRow(planId))?.rlimitSlice;
+
     const granted = await alice.command({
       name: 'resume_session',
       roomId: room.roomId,
@@ -529,6 +544,10 @@ describe('a resume is a draw, and it passes the #118 boundary', () => {
     const rows = await signalRows(sessionId);
     expect(rows).toHaveLength(1);
     expect(rows[0]).toMatchObject({ kind: 'resume', subscriptionId: null });
+    // The DRAW moved and the COVENANT did not. A granted continuation spends the
+    // purse; it does not touch a `~`, and it does not touch the human-set ceiling.
+    expect(await handle.db.select().from(acceptedObjects)).toEqual(objectsBefore);
+    expect((await planRow(planId))?.rlimitSlice).toBe(sliceBefore);
 
     // The slice of 2 is now spent, so the SECOND continuation is refused.
     const refused = await alice.command({
@@ -550,6 +569,82 @@ describe('a resume is a draw, and it passes the #118 boundary', () => {
    * bob's resume acks as a grant — this test goes red on the nack and on the
    * unchanged draw count.
    */
+  /**
+   * THE SPEND BOUNDARY IS NOT COMMAND-DEEP (#127 fix round 2, gauntlet finding A).
+   *
+   * Round 1 checked the slice in `resume_session` only. A direct `ledger.append`
+   * of a `session_signaled {kind:'resume'}` never passes that command, so it
+   * reached the increment in `projectSessionSignaled` and moved
+   * `authorized_draws` past a spent slice with no `draw_refused` receipt anywhere
+   * — a free wake path around #118, one layer below the one that was closed.
+   *
+   * The projection now re-reads the plan's funding `FOR SHARE` for exactly the
+   * reason it already re-read target-open: the two guards bind DIFFERENT WRITERS.
+   *
+   * RED-ON-REVERT: delete the slice re-check in `projectSessionSignaled` and this
+   * append succeeds — the signal rows up and `authorized_draws` climbs to 2 on a
+   * slice of 1. Red on the throw, on the row count, and on the count.
+   */
+  it('refuses an over-slice resume at the PROJECTION when the command is bypassed', async () => {
+    const { planId, sessionId } = await openSession(1);
+    expect((await planRow(planId))?.authorizedDraws).toBe(1);
+
+    await expect(
+      server.ledger.append({
+        roomId: room.roomId,
+        actor: { kind: 'human', userId: ownerId },
+        build: ({ id, at }) => ({
+          id,
+          at,
+          type: 'session_signaled' as const,
+          roomId: room.roomId,
+          sessionId,
+          signalId: randomUUID(),
+          kind: 'resume' as const,
+          body: 'waking for free',
+          causeMessageId: null,
+          supersedesEventId: null,
+          subscriptionId: null,
+        }),
+        project: async (context) => {
+          const { projectRoomEvent } = await import('../../apps/server/src/projections.js');
+          await projectRoomEvent(context, {});
+        },
+      }),
+      // The PROJECTION's OWN sentence. The target-open guard beside it has a
+      // different one, so deleting either leaves the other's witness red — the
+      // shared-witness trap #122 named and this file exists to avoid.
+    ).rejects.toThrow(/refused at the PROJECTION's slice re-check/);
+
+    expect(await signalRows(sessionId)).toHaveLength(0);
+    expect((await planRow(planId))?.authorizedDraws).toBe(1);
+    // And no receipt was minted either: the append aborted, so the room has no
+    // record of a continuation that never happened.
+    expect(await refusalCount()).toBe(0);
+  });
+
+  /**
+   * A resume WITHIN the slice still gets through the projection's re-check, so
+   * the guard above is a boundary and not a wall. Without this half, deleting the
+   * whole resume branch would leave the over-slice test green.
+   *
+   * RED-ON-REVERT: make the projection's re-check refuse unconditionally (or read
+   * the slice as zero) and this granted continuation nacks.
+   */
+  it('lets a funded resume through the same projection re-check', async () => {
+    const { planId, sessionId } = await openSession(3);
+    const alice = await connect(ownerId, 'human');
+    const granted = await alice.command({
+      name: 'resume_session',
+      roomId: room.roomId,
+      sessionId,
+      body: 'carry on',
+    });
+    expect(granted.type).toBe('ack');
+    if (granted.type === 'ack') expect(granted.draw?.outcome).toBe('granted');
+    expect((await planRow(planId))?.authorizedDraws).toBe(2);
+  });
+
   it('refuses a bystander’s resume — a continuation spends somebody else’s slice', async () => {
     const { planId, sessionId } = await openSession(5);
     const bob = await connect(bystanderId, 'human');
@@ -768,6 +863,152 @@ describe('a subscription always ends', () => {
   });
 });
 
+/**
+ * A WAIT IS CONTROL OVER A PROCESS (#127 fix round 2, gauntlet finding B).
+ *
+ * Round 1 authorized `subscribe_session` in the command and NOWHERE else: the
+ * table had no raiser column to ask about, and the projection never asked. grok
+ * proved it by deleting the command clause and watching every test stay green.
+ * Registering a wait decides how long a session stays open and therefore how long
+ * its plan cannot settle (#119), so it is the agent principal's or its owner's
+ * act — enforced now in the same three places an interrupt is, and each of the
+ * three has its own witness below, with its own sentence.
+ */
+describe('a wait belongs to the agent or its owner, at all three layers', () => {
+  async function subscribeAs(client: TestClient, sessionId: string) {
+    return client.command({
+      name: 'subscribe_session',
+      roomId: room.roomId,
+      sessionId,
+      source: 'channel',
+      matcher: 'the migration lands',
+      expiresAt: new Date(Date.now() + 3_600_000).toISOString(),
+    });
+  }
+
+  /**
+   * The wait carries WHO asked for it, off the trusted envelope actor — the same
+   * provenance `session_signals` has carried since round 1, and the column the
+   * trigger below reads.
+   *
+   * RED-ON-REVERT: stop writing `raisedByUserId` in `projectSessionSubscribed`
+   * and the wait lands anonymous — red here, and the trigger's fail-closed NULL
+   * arm would then refuse every legitimate subscribe as well.
+   */
+  it('records the raiser of a wait from the ledger row’s trusted actor', async () => {
+    const { sessionId } = await openSession();
+    const alice = await connect(ownerId, 'human');
+    expect((await subscribeAs(alice, sessionId)).type).toBe('ack');
+
+    const [wait] = await handle.db.select().from(sessionSubscriptions);
+    expect(wait?.raisedByUserId).toBe(ownerId);
+  });
+
+  /**
+   * LAYER 1, THE COMMAND. A bystander cannot hold somebody else's session open.
+   *
+   * RED-ON-REVERT: delete the `requireSessionControl` call in `subscribe_session`
+   * and bob's wait acks and rows up — red on the nack, on the message, and on the
+   * zero-row assertion.
+   */
+  it('refuses a bystander’s subscribe at the command', async () => {
+    const { sessionId } = await openSession();
+    const bob = await connect(bystanderId, 'human');
+
+    const ack = await subscribeAs(bob, sessionId);
+    expect(ack.type).toBe('nack');
+    if (ack.type === 'nack') {
+      expect(ack.message).toContain('agent principal or the human who owns that agent');
+    }
+    expect(await handle.db.select().from(sessionSubscriptions)).toHaveLength(0);
+  });
+
+  /**
+   * LAYER 2, THE PROJECTION. A writer that reaches the fold without passing the
+   * command is asked the same question from this transaction's own read.
+   *
+   * RED-ON-REVERT: delete the lineage re-check in `projectSessionSubscribed` and
+   * bob's hand-built append lands a wait he has no authority over.
+   */
+  it('refuses a bystander’s wait at the PROJECTION when the command is bypassed', async () => {
+    const { sessionId } = await openSession();
+
+    await expect(
+      server.ledger.append({
+        roomId: room.roomId,
+        actor: { kind: 'human', userId: bystanderId },
+        build: ({ id, at }) => ({
+          id,
+          at,
+          type: 'session_subscribed' as const,
+          roomId: room.roomId,
+          sessionId,
+          subscriptionId: randomUUID(),
+          source: 'channel',
+          matcher: 'a wait bob has no business registering',
+          expiresAt: new Date(Date.now() + 3_600_000).toISOString(),
+        }),
+        project: async (context) => {
+          const { projectRoomEvent } = await import('../../apps/server/src/projections.js');
+          await projectRoomEvent(context, {});
+        },
+      }),
+      // Its own sentence, sharing no phrase with the command's refusal. The first
+      // draft of this guard reused the command's wording, and the command-level
+      // witness above then stayed GREEN with its clause deleted — this one caught
+      // the same input and said the same words. Two clauses, two sentences.
+    ).rejects.toThrow(/names a raiser who neither holds nor owns the process/);
+    expect(await handle.db.select().from(sessionSubscriptions)).toHaveLength(0);
+  });
+
+  /**
+   * LAYER 3, THE TABLE (drizzle/0046). The backstop that binds a repair script, a
+   * future projection, or any INSERT that never goes near this codebase.
+   *
+   * RED-ON-REVERT: drop `session_subscriptions_control_authorized` (or its
+   * trigger) and bob's hand-written wait lands.
+   */
+  it('refuses a hand-written wait raised by a member who owns nothing', async () => {
+    const { sessionId } = await openSession();
+    await violatesConstraint('session_subscriptions_control_authorized', () =>
+      handle.db.execute(sql`
+        INSERT INTO session_subscriptions (room_id, session_id, source, matcher, expires_at, raised_by_user_id)
+        VALUES (${room.roomId}::uuid, ${sessionId}::uuid, 'channel', 'anything',
+                now() + interval '1 hour', ${bystanderId}::uuid)
+      `),
+    );
+  });
+
+  /**
+   * FAIL CLOSED. "Nobody said who" must not resolve to the privileged answer —
+   * the direction 0018 named, and the same arm `session_signals` takes.
+   *
+   * RED-ON-REVERT: delete the `raised_by_user_id IS NULL` disjunct from
+   * `atrium_session_subscriptions_control_authorized` and an anonymous wait lands.
+   */
+  it('refuses a hand-written wait with no raiser at all', async () => {
+    const { sessionId } = await openSession();
+    await violatesConstraint('session_subscriptions_control_authorized', () =>
+      handle.db.execute(sql`
+        INSERT INTO session_subscriptions (room_id, session_id, source, matcher, expires_at)
+        VALUES (${room.roomId}::uuid, ${sessionId}::uuid, 'channel', 'anything',
+                now() + interval '1 hour')
+      `),
+    );
+  });
+
+  /** The owner's own hand-written wait is ACCEPTED — the rule is a rule, not a wall. */
+  it('accepts a hand-written wait raised by the agent’s owner', async () => {
+    const { sessionId } = await openSession();
+    await handle.db.execute(sql`
+      INSERT INTO session_subscriptions (room_id, session_id, source, matcher, expires_at, raised_by_user_id)
+      VALUES (${room.roomId}::uuid, ${sessionId}::uuid, 'channel', 'permitted',
+              now() + interval '1 hour', ${ownerId}::uuid)
+    `);
+    expect(await handle.db.select().from(sessionSubscriptions)).toHaveLength(1);
+  });
+});
+
 describe('the signal projections write their own tables and nothing else', () => {
   /**
    * THE PINNED WRITE-SET (#123 resolution 1, grok r1.9). A burst of steers and
@@ -779,15 +1020,22 @@ describe('the signal projections write their own tables and nothing else', () =>
    *     because there is no statement in these projections that could.
    *   * `plans.rlimit_slice` — the human-set ceiling has exactly one writer
    *     (`projectPlanRlimitSet`, from the human-only `set_plan_rlimit`).
-   *   * `plans.authorized_draws` — a steer and an interrupt are NOT draws. (A
-   *     granted RESUME is, by design, and moves it by exactly one; that is the
-   *     boundary tested above, and no resume appears in this burst.)
+   *   * `plans.authorized_draws` — a steer and an interrupt are NOT draws, and a
+   *     granted RESUME moves it by EXACTLY ONE.
    *
-   * RED-ON-REVERT: add any write to `accepted_objects`, `rlimit_slice` or
-   * `authorized_draws` to `projectSessionSignaled` or `projectSessionSubscribed`
-   * and one of the three snapshots below stops matching — this test goes red.
+   * The burst carries resume legs (#127 fix round 2, gauntlet finding E). Round 1
+   * ran steers, interrupts and subscribes only — every branch that CANNOT write
+   * the purse — so the assertion "the purse did not move" was true of a fold that
+   * never exercised the one branch that touches it. The purse column is therefore
+   * asserted as an EXACT ARITHMETIC here rather than as byte-stability: three
+   * resumes, three draws, and not a fourth from anywhere else in the burst.
+   *
+   * RED-ON-REVERT: add any write to `accepted_objects` or `rlimit_slice` to
+   * `projectSessionSignaled` or `projectSessionSubscribed` and a snapshot stops
+   * matching; move `authorized_draws` from any branch but the resume and the
+   * arithmetic stops matching — this test goes red.
    */
-  it('leaves accepted_objects, rlimit_slice and authorized_draws byte-stable under a signal burst', async () => {
+  it('leaves accepted_objects and rlimit_slice byte-stable under a signal burst, and moves the purse only by its resumes', async () => {
     const { planId, sessionId } = await openSession(50);
     const alice = await connect(ownerId, 'human');
     const bob = await connect(bystanderId, 'human');
@@ -844,8 +1092,21 @@ describe('the signal projections write their own tables and nothing else', () =>
       ).toBe('ack');
     }
 
-    // The burst really happened — 12 signals and 6 waits, all projected.
-    expect(await signalRows(sessionId)).toHaveLength(12);
+    // THE RESUME LEGS. The only branch in either projection that can write the
+    // purse, folded through the same real boundary as the rest of the burst.
+    for (let i = 0; i < 3; i += 1) {
+      const resumed = await alice.command({
+        name: 'resume_session',
+        roomId: room.roomId,
+        sessionId,
+        body: `carry on ${i}`,
+      });
+      expect(resumed.type).toBe('ack');
+      if (resumed.type === 'ack') expect(resumed.draw?.outcome).toBe('granted');
+    }
+
+    // The burst really happened — 12 signals, 3 resumes and 6 waits, all projected.
+    expect(await signalRows(sessionId)).toHaveLength(15);
     expect(await handle.db.select().from(sessionSubscriptions)).toHaveLength(6);
 
     const after = {
@@ -854,7 +1115,10 @@ describe('the signal projections write their own tables and nothing else', () =>
     };
     expect(after.objects).toEqual(before.objects);
     expect(after.plan?.rlimitSlice).toBe(before.plan?.rlimitSlice);
-    expect(after.plan?.authorizedDraws).toBe(before.plan?.authorizedDraws);
+    // Exactly three draws for exactly three resumes. Not "unchanged" — which the
+    // round-1 burst could assert only because it took no resume — and not "more
+    // than before", which any leak would also satisfy.
+    expect(after.plan?.authorizedDraws).toBe((before.plan?.authorizedDraws ?? 0) + 3);
     // And the session itself is untouched by being signaled: a steer is not an exit.
     const [row] = await handle.db.select().from(sessions).where(eq(sessions.id, sessionId));
     expect(row?.status).toBe('open');
@@ -894,10 +1158,15 @@ describe('the signal rules are facts about the tables, not only about the writer
   it('refuses a hand-written wait against a session that has exited', async () => {
     const { sessionId } = await openSession();
     await settle(sessionId);
+    // The raiser is the agent's OWNER, so the authorization trigger added in
+    // 0046 passes and this row reaches the clause under test. Without it the
+    // INSERT is refused by `session_subscriptions_control_authorized` instead —
+    // a different rule, and a witness that no longer witnesses what it names.
     await violatesConstraint('session_subscriptions_target_is_open', () =>
       handle.db.execute(sql`
-        INSERT INTO session_subscriptions (room_id, session_id, source, matcher, expires_at)
-        VALUES (${room.roomId}::uuid, ${sessionId}::uuid, 'channel', 'anything', now() + interval '1 hour')
+        INSERT INTO session_subscriptions (room_id, session_id, source, matcher, expires_at, raised_by_user_id)
+        VALUES (${room.roomId}::uuid, ${sessionId}::uuid, 'channel', 'anything',
+                now() + interval '1 hour', ${ownerId}::uuid)
       `),
     );
   });
@@ -932,6 +1201,55 @@ describe('the signal rules are facts about the tables, not only about the writer
   });
 
   /**
+   * NO RECEIPT, NO WAKE (#127 fix round 2, gauntlet finding A — the second half).
+   *
+   * `plans.authorized_draws` is moved by `projectSessionSignaled`, never by this
+   * table, so a hand-written `session_signals` row with kind='resume' is a wake
+   * receipt that cost NOTHING against #118's slice — a continuation #124 would
+   * read as granted, minted by anyone who can write the table. Requiring the
+   * `signaled_by_event_id` makes a ledger event the only way to mint one, and a
+   * ledger event is what runs the projection's slice re-check and the increment
+   * in the same transaction.
+   *
+   * RED-ON-REVERT: delete the `signaled_by_event_id IS NULL` arm from
+   * `atrium_session_signals_target_is_open` and this INSERT succeeds.
+   */
+  it('refuses a hand-written resume that names no ledger event', async () => {
+    const { sessionId } = await openSession();
+    await violatesConstraint('session_signals_resume_has_receipt', () =>
+      handle.db.execute(sql`
+        INSERT INTO session_signals (room_id, session_id, kind, raised_by_user_id)
+        VALUES (${room.roomId}::uuid, ${sessionId}::uuid, 'resume', ${ownerId}::uuid)
+      `),
+    );
+    expect(await signalRows(sessionId)).toHaveLength(0);
+  });
+
+  /**
+   * THE TRIGGER'S RESUME ARM (#127 fix round 2, gauntlet finding E). 0045's
+   * authorization trigger names `('interrupt', 'resume')`, and round 1 witnessed
+   * only the interrupt half — narrowing the arm to interrupt-only stayed green
+   * while a bystander could hand-write a continuation of somebody else's session.
+   *
+   * The row carries a `signaled_by_event_id` so it gets PAST the receipt arm
+   * above: one clause, one witness, and this one is about WHO, not about the
+   * receipt.
+   *
+   * RED-ON-REVERT: narrow `atrium_session_signals_interrupt_authorized`'s guard
+   * to `NOT IN ('interrupt')` and this INSERT succeeds.
+   */
+  it('refuses a hand-written resume raised by a member who owns nothing', async () => {
+    const { sessionId } = await openSession();
+    await violatesConstraint('session_signals_interrupt_authorized', () =>
+      handle.db.execute(sql`
+        INSERT INTO session_signals (room_id, session_id, kind, raised_by_user_id, signaled_by_event_id)
+        VALUES (${room.roomId}::uuid, ${sessionId}::uuid, 'resume', ${bystanderId}::uuid, ${randomUUID()})
+      `),
+    );
+    expect(await signalRows(sessionId)).toHaveLength(0);
+  });
+
+  /**
    * The same-room provenance edge, as DDL. RED-ON-REVERT: drop
    * `session_signals_cause_same_room_fk` and a signal can cite a message from a
    * room this one cannot see — the command's refusal would then be the only thing
@@ -947,5 +1265,109 @@ describe('the signal rules are facts about the tables, not only about the writer
         VALUES (${room.roomId}::uuid, ${sessionId}::uuid, 'steer', ${ownerId}::uuid, ${elsewhere}::uuid)
       `),
     );
+  });
+});
+
+/**
+ * THE TARGET-OPEN READ TAKES A ROW LOCK (#127 fix round 2, gauntlet finding C).
+ *
+ * Round 1's triggers read `sessions.status` with a bare SELECT, so a direct
+ * writer could read `open` from a snapshot while a settle committed underneath
+ * it and land a signal at a session that had already published its exit receipt
+ * — the command and the projection both hold the global append lock, but a
+ * writer that never passes them holds nothing.
+ *
+ * ## What is being measured, and why it is a lock and not a refusal
+ *
+ * A settle is a plain `UPDATE sessions SET status = …`, which takes a
+ * FOR NO KEY UPDATE row lock. So the witness holds exactly that lock in one
+ * transaction and asks whether the trigger's read in ANOTHER transaction waits
+ * for it. It must wait: that is what makes the status it read still true at
+ * commit.
+ *
+ * This is also why the lock is `FOR SHARE` and not the `FOR KEY SHARE` the
+ * finding suggested. FOR KEY SHARE does not conflict with FOR NO KEY UPDATE —
+ * it would have been a lock that locks nothing against a settle, and this test
+ * would fail with it. FOR SHARE conflicts, and this test passes.
+ *
+ * RED-ON-REVERT (both): remove `FOR SHARE OF s` from the function under test and
+ * the INSERT completes immediately against the held lock — red on the
+ * `settled` assertion below, which is the whole claim.
+ */
+describe('the target-open triggers read the session row under a lock', () => {
+  /**
+   * Hold a settle-strength lock on the session, then run `insert` from another
+   * connection and report whether it finished while the lock was held.
+   */
+  async function contendsWithASettle(
+    sessionId: string,
+    insert: () => Promise<unknown>,
+  ): Promise<'blocked' | 'landed'> {
+    let release!: () => void;
+    const held = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    // The lock must be HELD before the contending statement is fired. Firing it
+    // straight after starting the transaction races the transaction's own first
+    // statement, and an INSERT that beats the lock reports "landed" for a reason
+    // that has nothing to do with the trigger under test.
+    let locked!: () => void;
+    const holding = new Promise<void>((resolve) => {
+      locked = resolve;
+    });
+    const holder = handle.db.transaction(async (tx) => {
+      // Exactly the row lock a `settle_session` UPDATE takes on this row.
+      await tx.execute(
+        sql`SELECT id FROM sessions WHERE id = ${sessionId}::uuid FOR NO KEY UPDATE`,
+      );
+      locked();
+      await held;
+    });
+    await holding;
+
+    let landed = false;
+    const attempt = insert()
+      .then(() => {
+        landed = true;
+      })
+      .catch(() => {
+        // A refusal is still a completion: it means the trigger did not wait.
+        landed = true;
+      });
+
+    // Long enough that an unlocked read would have finished many times over.
+    await new Promise((resolve) => setTimeout(resolve, 750));
+    const verdict = landed ? 'landed' : 'blocked';
+    release();
+    await holder;
+    await attempt;
+    return verdict;
+  }
+
+  it('makes a signal INSERT wait for a settle-strength lock on its session', async () => {
+    const { sessionId } = await openSession();
+    expect(
+      await contendsWithASettle(sessionId, () =>
+        handle.db.execute(sql`
+          INSERT INTO session_signals (room_id, session_id, kind, raised_by_user_id)
+          VALUES (${room.roomId}::uuid, ${sessionId}::uuid, 'steer', ${ownerId}::uuid)
+        `),
+      ),
+      'the signals trigger read sessions.status without waiting for the settle holding its row',
+    ).toBe('blocked');
+  });
+
+  it('makes a wait INSERT wait for a settle-strength lock on its session', async () => {
+    const { sessionId } = await openSession();
+    expect(
+      await contendsWithASettle(sessionId, () =>
+        handle.db.execute(sql`
+          INSERT INTO session_subscriptions (room_id, session_id, source, matcher, expires_at, raised_by_user_id)
+          VALUES (${room.roomId}::uuid, ${sessionId}::uuid, 'channel', 'anything',
+                  now() + interval '1 hour', ${ownerId}::uuid)
+        `),
+      ),
+      'the subscriptions trigger read sessions.status without waiting for the settle holding its row',
+    ).toBe('blocked');
   });
 });

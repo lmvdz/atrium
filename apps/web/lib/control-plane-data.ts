@@ -139,7 +139,12 @@ export interface ControlPlanRow {
   readonly spentMicros: number;
   /** THE ENFORCED CEILING, in draws. Nullable = UNFUNDED (a ceiling of zero). */
   readonly rlimitSlice: number | null;
-  /** Draws granted so far — equals count(sessions) by construction (#118). */
+  /**
+   * Draws granted so far (#118, completed by #127): a draw is a SPAWN
+   * (`session_opened`) or a CONTINUE (`session_signaled {resume}`), so this is
+   * `count(sessions) + count(granted resumes)` — it stopped equalling
+   * `count(sessions)` the moment continuations existed.
+   */
   readonly authorizedDraws: number;
   readonly sessions: readonly ControlSessionRow[];
 }
@@ -206,7 +211,7 @@ export interface ControlPlaneData {
  * process operations (#116/#118) — what a person catches up on. `message_posted`
  * and the semantic verbs are the conversation's job, not the control plane's.
  */
-const LIFECYCLE_EVENT_TYPES = [
+export const LIFECYCLE_EVENT_TYPES = [
   'plan_opened',
   'plan_settled',
   'session_opened',
@@ -215,6 +220,19 @@ const LIFECYCLE_EVENT_TYPES = [
   'signal_raised',
   'plan_rlimit_set',
   'draw_refused',
+  /*
+   * The signal kinds (#127). They are here for a SPEND-SYMMETRY reason, not for
+   * completeness: `draw_refused` was already on this list, so a refused
+   * continuation was visible while the GRANTED one — the draw that actually
+   * moved `plans.authorized_draws` — was not. A catch-up surface that shows
+   * every refusal and no grant tells a person the slice is holding when it is
+   * being spent. `session_subscribed` joins it because a wait is what holds the
+   * session open and therefore what stops the plan settling (#119): a plan that
+   * will not close, with nothing on the surface saying why, is the state #127's
+   * horizon exists to end.
+   */
+  'session_signaled',
+  'session_subscribed',
 ] as const;
 
 /**

@@ -11,10 +11,12 @@ import {
   messages,
   objectRelations,
   objectSources,
+  plans,
   proposalSources,
   proposals,
   attachments as roomAttachments,
   rooms,
+  sessions,
   users,
   workspaces,
 } from '@atrium/db';
@@ -120,6 +122,7 @@ async function loadReplayDataSnapshot(database: Database, roomId: string) {
     roomCursor,
     referenceParticipants,
     referenceAttachments,
+    roomSessions,
   ] = await Promise.all([
     participantIds.length === 0
       ? Promise.resolve([])
@@ -202,6 +205,27 @@ async function loadReplayDataSnapshot(database: Database, roomId: string) {
               inArray(roomAttachments.id, referencedAttachmentIds),
             ),
           ),
+    // The fourth attention subject is a SESSION (#127), and an attention row can
+    // only be TITLED from the thing it is about. Without these rows a
+    // subscription-expiry escalation rendered as "an item whose semantic record
+    // is unavailable" — a true sentence about the wrong table, since the record
+    // exists and is simply a process rather than a proposition. Four columns and
+    // the parent plan's title: enough to name the process honestly, and nothing
+    // that would make the replay view a second control plane (that surface is
+    // `control-plane-data.ts`, and polish is #129's).
+    database
+      .select({
+        id: sessions.id,
+        planId: sessions.planId,
+        planTitle: plans.title,
+        harness: sessions.harness,
+        model: sessions.model,
+        status: sessions.status,
+      })
+      .from(sessions)
+      .innerJoin(plans, and(eq(plans.id, sessions.planId), eq(plans.roomId, sessions.roomId)))
+      .where(eq(sessions.roomId, roomId))
+      .orderBy(asc(sessions.createdAt), asc(sessions.id)),
   ]);
 
   const messagePositions = messageEvents.flatMap((event) => {
@@ -248,6 +272,7 @@ async function loadReplayDataSnapshot(database: Database, roomId: string) {
     objectSources: directObjectProvenance,
     relations,
     attention,
+    sessions: roomSessions,
     corrections: fixes,
     messagePositions,
     loadedThrough: roomCursor[0]?.loadedThrough ?? 0,
@@ -269,6 +294,7 @@ export type ReplayData = Omit<
   | 'referenceAttachments'
   | 'attention'
   | 'participants'
+  | 'sessions'
 > & {
   /**
    * Optional `principalKind` only for hand-built fixtures created before an
@@ -313,6 +339,14 @@ export type ReplayData = Omit<
       readonly subjectSessionId?: string | null;
     }
   >;
+  /**
+   * The room's processes, for titling a `session`-subject attention row (#127).
+   * Optional only so hand-built fixtures written before the fourth subject
+   * existed still typecheck; a real load always selects them. A `session` item
+   * whose session is absent falls back to the honest unavailable-record sentence
+   * rather than inventing a name.
+   */
+  readonly sessions?: LoadedReplayData['sessions'];
   /** Optional only so hand-built unit fixtures can describe pre-ledger imports. */
   readonly messagePositions?: LoadedReplayData['messagePositions'];
   /** Optional only for hand-built fixtures created before live route coordination. */

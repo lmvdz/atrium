@@ -8,6 +8,7 @@ import {
 } from '@atrium/core';
 import {
   acceptedObjects,
+  agents,
   attentionItems,
   corrections,
   messageReferences,
@@ -1062,6 +1063,49 @@ async function projectSessionSignaled(
     );
   }
 
+  // ── THE SLICE BOUNDARY, RE-READ HERE FOR A RESUME (#127 fix round 2, A) ────
+  //
+  // Round 1 checked the boundary in `resume_session` ONLY, and both foreign
+  // lineages found the same hole: a direct `ledger.append` of a
+  // `session_signaled {kind:'resume'}` never passes that command, so it reached
+  // the increment below and moved `authorized_draws` past a spent slice with no
+  // `draw_refused` receipt anywhere. That is the free wake path #118's boundary
+  // exists to close, one layer down.
+  //
+  // So the question is asked again HERE, from this transaction's own read, for
+  // exactly the reason the target-open question is asked again above: the two
+  // guards bind DIFFERENT WRITERS. `FOR SHARE` on the plan row, so the committed
+  // count and the human-set ceiling cannot move between this read and the
+  // increment eight lines down — and a NULL slice reads as a ceiling of ZERO,
+  // fail-closed, the same way `open_session` and `resume_session` read it.
+  //
+  // The refusal throws, which aborts the append: an over-slice resume that got
+  // here leaves NO signal row, NO increment, and NO ledger event.
+  if (event.kind === 'resume') {
+    const [funding] = await tx
+      .select({ slice: plans.rlimitSlice, authorizedDraws: plans.authorizedDraws })
+      .from(plans)
+      .where(and(eq(plans.id, target.planId), eq(plans.roomId, roomId)))
+      .for('share');
+    if (!funding) {
+      throw new CommandError(
+        'invalid',
+        `no plan "${target.planId}" in room "${roomId}" to draw against — refused at the PROJECTION's slice re-check; a continuation is a draw and a draw needs a plan`,
+      );
+    }
+    const slice = funding.slice ?? 0;
+    if (funding.authorizedDraws + 1 > slice) {
+      throw new CommandError(
+        'invalid',
+        // Its OWN sentence, distinct from every other refusal in this file and
+        // from the command's `draw_refused` receipt (#122's standing lesson): a
+        // shared string would let this clause be deleted while its witness
+        // stayed green on a neighbour's catch.
+        `resuming session "${event.sessionId}" would take draw ${funding.authorizedDraws + 1} of a slice of ${slice} — refused at the PROJECTION's slice re-check, which is the guard that binds a writer appending a resume without passing resume_session`,
+      );
+    }
+  }
+
   await tx.insert(sessionSignals).values({
     id: event.signalId,
     roomId,
@@ -1127,17 +1171,28 @@ async function projectSessionSignaled(
  * open forever and blocking #119's plan-settle with nothing owed to anybody.
  */
 async function projectSessionSubscribed(
-  { tx, roomId, event: { id } }: ProjectionContext<RoomEvent>,
+  { tx, roomId, actor, event: { id } }: ProjectionContext<RoomEvent>,
   event: EventOf<'session_subscribed'>,
 ): Promise<void> {
   // Subscriptions target open sessions only, for the same reason and by the same
   // read as `projectSessionSignaled` above: a wait registered against a process
   // that has already exited can never be matched and can only ever escalate.
+  //
+  // The lineage comes back on the same read (#127 fix round 2, B) because the
+  // authorization below needs it: `plans.agent_user_id` → `agents.owner_user_id`,
+  // the same two principals `requireSessionControl` compares against in the
+  // command and the same two the 0046 trigger looks up for the row.
   const [target] = await tx
-    .select({ status: sessions.status })
+    .select({
+      status: sessions.status,
+      agentUserId: plans.agentUserId,
+      ownerUserId: agents.ownerUserId,
+    })
     .from(sessions)
+    .innerJoin(plans, and(eq(plans.id, sessions.planId), eq(plans.roomId, sessions.roomId)))
+    .innerJoin(agents, eq(agents.userId, plans.agentUserId))
     .where(and(eq(sessions.id, event.sessionId), eq(sessions.roomId, roomId)))
-    .for('share');
+    .for('share', { of: sessions });
   if (!target) {
     throw new CommandError(
       'invalid',
@@ -1150,6 +1205,35 @@ async function projectSessionSubscribed(
       `session "${event.sessionId}" is ${target.status}, not open — a wait registered against a process that has already exited can never be matched, only escalated`,
     );
   }
+
+  // ── A WAIT IS CONTROL, RE-CHECKED HERE (#127 fix round 2, B) ───────────────
+  //
+  // Round 1 authorized a subscribe in `subscribe_session` and NOWHERE else, so a
+  // bystander's wait landed through any writer that did not pass that command —
+  // and grok proved the point by deleting the command clause and watching every
+  // test stay green. Registering a wait decides how long a session stays open and
+  // therefore how long its plan cannot settle (#119), which is control over
+  // somebody else's plan, so it belongs to the plan's agent principal or that
+  // agent's human owner.
+  //
+  // The actor is the TRUSTED envelope actor, never the payload (#21). A `model`
+  // or `system` append carries no user id and therefore fails CLOSED here — the
+  // same direction 0018 named and the same one the 0046 trigger takes for a NULL
+  // `raised_by_user_id`.
+  const raisedByUserId = actorUserId(actor);
+  if (raisedByUserId !== target.agentUserId && raisedByUserId !== target.ownerUserId) {
+    throw new CommandError(
+      'invalid',
+      // Its own sentence, sharing NO asserted phrase with
+      // `sessionControlAuthorizationRefusal` — the command's wording was reused
+      // here at first and the bystander-at-the-command witness stayed GREEN with
+      // its clause deleted, because this guard caught the same input and said the
+      // same thing. That is #122's standing lesson reproduced exactly, caught by
+      // running the revert, and fixed by making the two sentences different.
+      `the wait registered on session "${event.sessionId}" names a raiser who neither holds nor owns the process — refused at the PROJECTION, which is the guard that binds a writer registering a wait without passing subscribe_session`,
+    );
+  }
+
   await tx.insert(sessionSubscriptions).values({
     id: event.subscriptionId,
     roomId,
@@ -1158,6 +1242,10 @@ async function projectSessionSubscribed(
     matcher: event.matcher,
     expiresAt: new Date(event.expiresAt),
     status: 'waiting',
+    // The TRUSTED actor off the ledger row, exactly as `session_signals` carries
+    // its raiser. The 0046 authorization trigger reads this column, so a direct
+    // writer cannot dodge the lookup by writing a different one.
+    raisedByUserId,
     subscribedByEventId: id,
     createdAt: new Date(event.at),
     updatedAt: new Date(event.at),

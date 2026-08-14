@@ -96,6 +96,17 @@ function eventLine(type: string, actorKind: string): string {
       return `${who} funded a plan`;
     case 'draw_refused':
       return `a draw was refused — a plan's slice is spent`;
+    // #127. The line does not distinguish steer from interrupt from resume: the
+    // kind lives in the payload, and this surface reads the ledger row's TYPE.
+    // It says "may have drawn" rather than "drew" because that is what this row
+    // alone can support — a resume spends a draw and a steer does not, and
+    // claiming the stronger sentence from a row that cannot tell them apart is
+    // the synthesis this campaign refuses. The pairing with `draw_refused` above
+    // is the point: a granted continuation is now as visible as a refused one.
+    case 'session_signaled':
+      return `${who} signaled a running session — a resume among these spends a draw`;
+    case 'session_subscribed':
+      return `${who} left a session waiting until a horizon`;
     default:
       return type;
   }

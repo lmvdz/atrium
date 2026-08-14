@@ -1674,3 +1674,106 @@ describe('the receipt exposes certify + remove for a `~` reading', () => {
     expect(receipt.removable).toBe(false);
   });
 });
+
+/**
+ * THE FOURTH ATTENTION SUBJECT, RENDERED HONESTLY (#127 fix round 2, finding D).
+ *
+ * A subscription that expires unmatched escalates to the agent's owner as an
+ * attention item whose subject is a SESSION. Round 1 widened the vocabulary and
+ * left the renderer alone, so the item arrived titled "an item whose semantic
+ * record is unavailable" — true of the semantic tables and false about the room,
+ * which holds a complete record of that process — and, because the escalation is
+ * classed `blocking_question`, it offered `answer` as its primary action for a
+ * question nobody asked.
+ */
+describe('an attention item about a session names the session', () => {
+  const sessionAttention = (subjectId: string) =>
+    ({
+      id: 'a-session',
+      roomId: 'room',
+      userId: 'alice',
+      subjectKind: 'session' as const,
+      subjectId,
+      subjectObjectId: null,
+      subjectProposalId: null,
+      subjectMessageId: null,
+      subjectSessionId: subjectId,
+      class: 'blocking_question' as const,
+      reason: {
+        kind: 'subscription_expired' as const,
+        source: 'channel',
+        matcher: 'the migration lands',
+        expiresAt: at.toISOString(),
+      },
+      status: 'pending' as const,
+      createdAt: at,
+      resolvedAt: null,
+    }) as unknown as ReplayData['attention'][number];
+
+  const withSession = (): ReplayData => ({
+    ...data(),
+    attention: [sessionAttention('s1')],
+    sessions: [
+      {
+        id: 's1',
+        planId: 'p1',
+        planTitle: 'ship the migration',
+        harness: 'omp',
+        model: 'haiku',
+        status: 'open',
+      },
+    ] as unknown as ReplayData['sessions'],
+  });
+
+  /**
+   * Mutation: drop the `session` arm from the title, and the row falls back to
+   * "an item whose semantic record is unavailable" — a person is told the room
+   * has lost the record of a process the room can describe completely.
+   */
+  it('titles the row from the session, not from the missing-record fallback', () => {
+    const [item] = replayView(withSession(), 'alice').attention;
+    if (!item) throw new Error('the session attention item did not reach the view');
+    expect(item.title).toContain('omp/haiku');
+    expect(item.title).toContain('ship the migration');
+    expect(item.title).not.toContain('semantic record is unavailable');
+  });
+
+  /**
+   * Mutation: remove the `subscription_expired` arm from `actionsFor` and the
+   * `blocking_question` arm below it offers `answer` — a primary button inviting
+   * a person to answer a question that was never asked. The two verbs the ledger
+   * actually has for a stalled process are a continuation (which spends a draw)
+   * and an exit.
+   */
+  it('offers resume-or-close, and never offers to answer', () => {
+    const [item] = replayView(withSession(), 'alice').attention;
+    if (!item) throw new Error('the session attention item did not reach the view');
+    const ids = item.actions.map((action) => action.id);
+    expect(ids).not.toContain('answer');
+    expect(ids).toEqual(['resume', 'close']);
+    // The continuation says what it costs. A wake that hid its draw would be the
+    // same dishonesty the projection guards refuse, one layer up.
+    expect(item.actions[0]?.label).toContain('draw');
+  });
+
+  /**
+   * Mutation: invent a title when the session row is absent. The honest answer to
+   * "what process is this?" with no row to read is to say the record is
+   * unavailable — not to render a plausible name from the id.
+   */
+  it('falls back to the unavailable-record sentence when the session is not loaded', () => {
+    const [item] = replayView({ ...withSession(), sessions: [] }, 'alice').attention;
+    if (!item) throw new Error('the session attention item did not reach the view');
+    expect(item.title).toBe('an item whose semantic record is unavailable');
+  });
+
+  /**
+   * The escalation cites no message, because none exists: nobody said anything.
+   * Mutation: synthesize a citation and the row claims a provenance the ledger
+   * cannot support.
+   */
+  it('renders without a citation, because a wait is not something somebody said', () => {
+    const [item] = replayView(withSession(), 'alice').attention;
+    expect(item?.source).toBeNull();
+  });
+});

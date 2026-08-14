@@ -42,6 +42,7 @@ import type {
   ControlPlanRow,
   ControlSessionRow,
 } from '../lib/control-plane-data';
+import { LIFECYCLE_EVENT_TYPES } from '../lib/control-plane-data';
 import {
   ControlPin,
   type ControlPinItem,
@@ -957,5 +958,78 @@ describe('the review pane distinguishes no-artifact from an incomplete receipt',
     expect(cell?.textContent ?? '').not.toContain('produced no artifact');
     // And the artifact really is present in the pane.
     expect(container.querySelector('[data-artifact-branch]')?.textContent).toContain('feat/x');
+  });
+});
+
+/**
+ * SPEND SYMMETRY ON THE CATCH-UP SURFACE (#127 fix round 2, finding D).
+ *
+ * `draw_refused` was already a lifecycle kind, so a REFUSED continuation showed
+ * up on the unseen surface while the GRANTED one — the draw that actually moved
+ * `plans.authorized_draws` — did not. A surface that renders every refusal and no
+ * grant tells a person the slice is holding while it is being spent. The two
+ * #127 kinds join the allowlist, and each renders a sentence rather than falling
+ * through to its own type name.
+ */
+describe('the unseen surface shows a granted resume, not only a refused one', () => {
+  const noop = async () => ({ ok: true }) as const;
+  const armNoop = async () => ({ ok: true, attemptToken: 'tok' }) as const;
+
+  function linesFor(types: readonly string[]): string {
+    const data: ControlPlaneData = {
+      room: { id: 'room-1', name: 'fleet' },
+      viewerId: 'viewer-1',
+      agents: [],
+      decisions: [],
+      unseen: types.map((type, i) => ({
+        id: `ev-${i}`,
+        type,
+        actorKind: 'human' as const,
+        at: '2026-08-13T00:00:00.000Z',
+      })) as ControlEventRow[],
+      unseenTotal: types.length,
+      updatedAt: '2026-08-13T00:00:00.000Z',
+    };
+    render(
+      <ControlPlane
+        armAction={armNoop}
+        certifyAction={noop}
+        data={data}
+        disarmAction={noop}
+        roomSlug="fleet"
+        viewerId="viewer-1"
+        viewerKind="human"
+        workspaceSlug="acme"
+      />,
+    );
+    return document.querySelector('[data-surface="unseen"]')?.textContent ?? '';
+  }
+
+  /**
+   * Mutation: remove the two kinds from `LIFECYCLE_EVENT_TYPES` in
+   * `control-plane-data.ts` — the read model then never selects them and no
+   * render can show what it was not given. This asserts the ALLOWLIST names them.
+   */
+  it('keeps both #127 kinds on the lifecycle allowlist beside draw_refused', () => {
+    expect(LIFECYCLE_EVENT_TYPES).toContain('draw_refused');
+    expect(LIFECYCLE_EVENT_TYPES).toContain('session_signaled');
+    expect(LIFECYCLE_EVENT_TYPES).toContain('session_subscribed');
+  });
+
+  /**
+   * Mutation: delete the two `eventLine` arms — the switch's default returns the
+   * raw event type, so the surface prints `session_signaled` at a person. Red
+   * here on both the sentence and the leaked identifier.
+   */
+  it('renders a sentence for each, never the raw event type', () => {
+    const text = linesFor(['session_signaled', 'session_subscribed', 'draw_refused']);
+    expect(text).not.toContain('session_signaled');
+    expect(text).not.toContain('session_subscribed');
+    expect(text).toContain('signaled a running session');
+    expect(text).toContain('waiting until a horizon');
+    // The pairing that is the whole point: the refusal was always visible, and
+    // now the spend beside it is too.
+    expect(text).toContain("a plan's slice is spent");
+    expect(text).toContain('spends a draw');
   });
 });

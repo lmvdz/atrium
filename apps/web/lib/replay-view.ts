@@ -398,9 +398,15 @@ export function replayView(data: ReplayData, viewerId?: string) {
       title:
         (item.subjectKind === 'message'
           ? 'direct reference in a message'
-          : acceptedFromProposal
-            ? payloadText(acceptedFromProposal.type, acceptedFromProposal.payload)
-            : subject?.text) ??
+          : // The fourth subject is a PROCESS, not a proposition (#127). It has no
+            // semantic record to be missing, so titling it "an item whose semantic
+            // record is unavailable" was a true sentence about the wrong table —
+            // the record exists, in `sessions`, and this names it from there.
+            item.subjectKind === 'session'
+            ? sessionTitle(data, item.subjectId)
+            : acceptedFromProposal
+              ? payloadText(acceptedFromProposal.type, acceptedFromProposal.payload)
+              : subject?.text) ??
         (proposalSubject
           ? payloadText(proposalSubject.type, proposalSubject.payload)
           : 'an item whose semantic record is unavailable'),
@@ -1069,6 +1075,22 @@ function relationFacts(data: ReplayData, objectId: string): string[] {
   });
 }
 
+/**
+ * The name of the process an attention row is about (#127's fourth subject).
+ *
+ * Read from `sessions`, never invented: harness, model and the parent plan's
+ * title are what the room actually recorded about this process, and the status
+ * is there because an escalation about a session that has since exited must not
+ * read as one about a session still running. Returns `undefined` when the row is
+ * absent, which falls through to the unavailable-record sentence — the honest
+ * answer, rather than a plausible one.
+ */
+function sessionTitle(data: ReplayData, sessionId: string): string | undefined {
+  const session = data.sessions?.find((row) => row.id === sessionId);
+  if (!session) return undefined;
+  return `${session.status} session · ${session.harness}/${session.model} · ${session.planTitle}`;
+}
+
 function reasonFor(reason: ReplayData['attention'][number]['reason'], viewer: string): string {
   switch (reason.kind) {
     case 'decision_pending':
@@ -1111,6 +1133,34 @@ function actionsFor(
         ? [{ id: 'open', label: 'open source', emphasis: 'secondary' as const, statement: null }]
         : []),
       { id: 'dismiss', label: 'dismiss', emphasis: 'secondary' as const, statement: null },
+    ];
+  }
+  /*
+   * A SUBSCRIPTION THAT EXPIRED IS NOT A QUESTION (#127 fix round 2, finding D).
+   *
+   * The escalation is raised `blocking_question` — the class that stops the
+   * plan — and the class arm below therefore offered `answer` as its primary
+   * action. There is nothing to answer: nobody asked anything. The rationale
+   * says the viewer owns the agent whose session waited on nothing until its
+   * horizon passed, and the two things that can be done about that are the two
+   * things the ledger has verbs for — continue the process (`resume_session`, a
+   * DRAW against the plan's slice) or end it (`settle_session`). So those are
+   * the actions, and this arm comes BEFORE the class arms because the class is
+   * about urgency and the reason is about what happened.
+   *
+   * The labels say what each one costs. A continuation that quietly spent a
+   * draw would be exactly the free-wake dishonesty the rest of this ticket
+   * exists to close, one layer up in the interface.
+   */
+  if (reason === 'subscription_expired') {
+    return [
+      {
+        id: 'resume',
+        label: 'resume — spends a draw',
+        emphasis: 'primary' as const,
+        statement: null,
+      },
+      { id: 'close', label: 'close the session', emphasis: 'secondary' as const, statement: null },
     ];
   }
   if (attentionClass === 'needs_decision') {

@@ -323,6 +323,13 @@
       "when": 1788172800000,
       "tag": "0045_a_signal_reaches_a_running_session",
       "breakpoints": true
+    },
+    {
+      "idx": 46,
+      "version": "7",
+      "when": 1788259200000,
+      "tag": "0046_a_wake_receipt_needs_a_ledger_event",
+      "breakpoints": true
     }
   ]
 }

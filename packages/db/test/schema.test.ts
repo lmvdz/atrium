@@ -43,6 +43,28 @@ function migrationFiles(): string[] {
     .sort();
 }
 
+/**
+ * The LAST deployed definition of `core_events_payload_room_matches`, sliced out
+ * of the concatenated migration history.
+ *
+ * The constraint has been dropped and re-added several times (0007, 0023, 0028,
+ * 0045…), so the live rule is the final `ADD CONSTRAINT`, and only its text may
+ * be asked whether a kind has an arm. Searching the whole history instead finds
+ * the kind's name in its `ALTER TYPE … ADD VALUE` line and answers yes to a
+ * question it never asked — which is how the two #127 arms could be deleted with
+ * the parity test still green.
+ */
+function latestPayloadRoomCheck(migrations: string): string {
+  const marker = 'ADD CONSTRAINT "core_events_payload_room_matches" CHECK';
+  const start = migrations.lastIndexOf(marker);
+  expect(
+    start,
+    'no ADD CONSTRAINT for core_events_payload_room_matches in any migration',
+  ).toBeGreaterThan(-1);
+  const end = migrations.indexOf('--> statement-breakpoint', start);
+  return migrations.slice(start, end === -1 ? undefined : end);
+}
+
 function migrationSql(): string {
   const files = migrationFiles();
   expect(files.length).toBeGreaterThan(0);
@@ -295,7 +317,14 @@ describe('the durable ledger (issue #22)', () => {
     // Render the schema's CHECK expression to SQL text. The kind literals live in
     // the template verbatim, so a missing arm is a missing substring.
     const rendered = new PgDialect().sqlToQuery(check?.value as never).sql;
-    const migration = migrationSql();
+    // The migration side has to be narrowed to the CHECK ITSELF, not to the whole
+    // concatenated migration history (#127 fix round 2, finding E). Every kind
+    // name also appears in the `ALTER TYPE … ADD VALUE` that introduced it, so a
+    // whole-history `toContain` is satisfied by the enum label alone and says
+    // NOTHING about whether the CHECK has an arm for it — deleting both new arms
+    // from 0045 left this test green. Slicing to the last deployed definition of
+    // the constraint is what makes the assertion about the constraint.
+    const migration = latestPayloadRoomCheck(migrationSql());
     const lifecycleKinds = [
       'plan_opened',
       'plan_settled',
@@ -309,6 +338,13 @@ describe('the durable ledger (issue #22)', () => {
       // 0028. Same parity, two more kinds.
       'plan_rlimit_set',
       'draw_refused',
+      // The signal kinds (#127). Same parity, and this pin is the one the round-1
+      // gauntlet's finding E named: with these two absent from the list, deleting
+      // their arms from the CHECK left the suite 38/38 green — while a live append
+      // of either kind would have been refused outright by the fail-closed tail.
+      // That is the exact drift that once took ledger-only appends offline.
+      'session_signaled',
+      'session_subscribed',
     ];
     for (const kind of lifecycleKinds) {
       // In the schema (drift target) AND in the migration (deployed truth): if

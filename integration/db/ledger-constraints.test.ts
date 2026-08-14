@@ -3492,6 +3492,12 @@ describe('foreign keys — the audit is the catalog, not a paragraph', () => {
          the authority. The interrupt-authorization trigger reads it at WRITE time,
          which is when the question is asked. */
       'session_signals_raised_by_user_id_users_id_fk',
+      /* #127 fix round 2's. WHO REGISTERED A WAIT, on exactly the same terms as
+         the raiser above — registering a wait is control over a process, so the
+         table can now ask who asked, and `session_subscriptions_control_authorized`
+         reads this column at WRITE time. Nulls on deletion because the wait
+         happened and the ledger row holds the trusted actor. */
+      'session_subscriptions_raised_by_user_id_users_id_fk',
       /* #121's. WHO CERTIFIED a session, and who ARMED that certification.
          Both null on the identity's deletion for this list's own reason: the
          session's receipt outlives the person, and neither column is authority —

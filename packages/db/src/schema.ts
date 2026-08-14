@@ -1693,6 +1693,19 @@ export const sessionSubscriptions = pgTable(
     matchedByEventId: text('matched_by_event_id'),
     /** When the expiry sweep escalated it to the agent's owner. NULL until then. */
     escalatedAt: timestamp('escalated_at', { withTimezone: true }),
+    /**
+     * WHO registered the wait — the trusted actor off the ledger row, never the
+     * payload (#21's contract), exactly as `session_signals.raised_by_user_id` is
+     * written. Registering a wait is CONTROL over a process: it decides how long
+     * the session stays open and therefore how long its plan cannot settle
+     * (#119), so it is the agent principal's or its owner's act. The
+     * `session_subscriptions_control_authorized` trigger in drizzle/0046 reads
+     * THIS column, which is why it must exist: without it the table had no way to
+     * ask who was asking, and a bystander's hand-written wait landed (#127 round-1
+     * gauntlet finding B — the command clause could be deleted and every test
+     * stayed green).
+     */
+    raisedByUserId: uuid('raised_by_user_id').references(() => users.id, { onDelete: 'set null' }),
     /** The `core_events.id` of the `session_subscribed` that projected this. */
     subscribedByEventId: text('subscribed_by_event_id'),
     createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
