@@ -49,6 +49,12 @@ const APP_TABLES = [
   // is one FK refactor away from surviving a reset silently.
   'session_signals',
   'session_subscriptions',
+  // The funded-arm claims (#128). Named for the same reason the two above are:
+  // it cascades from `messages` and from `sessions` today, and a table cleared
+  // only as somebody else's cascade is one FK refactor away from surviving a
+  // reset silently — which for THIS table would leak a claim into the next test
+  // and refuse a draw nobody made.
+  'funded_arms',
   'sessions',
   'plans',
   'agents',

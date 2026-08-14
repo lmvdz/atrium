@@ -27,6 +27,7 @@ import {
   acceptedObjects,
   agents,
   coreEvents,
+  fundedArms,
   messages,
   objectSources,
   plans,
@@ -149,12 +150,23 @@ function sendMessageFingerprint(input: {
     size: number;
   }[];
   references: readonly z.infer<typeof MessageReference>[];
+  /**
+   * THE ROUTING RECEIPT IS PART OF THE DURABLE MEANING (#128). Two posts with
+   * the same words but different causes are two different appends, so the
+   * version string moves to `/v3` and the field joins the hash. Without both, a
+   * daemon that retried one key with a corrected cause would be handed the OLD
+   * event's receipt back and the corrected provenance would never land — a
+   * silent, replay-clean wrong answer, which is the worst shape an idempotency
+   * key can produce.
+   */
+  causeMessageId: string | null;
 }): string {
   const canonical = JSON.stringify([
-    'send_message/v2',
+    'send_message/v3',
     input.roomId,
     input.body,
     input.replyToId,
+    input.causeMessageId,
     input.attachments.map((attachment) => [
       attachment.id,
       attachment.key,
@@ -254,6 +266,12 @@ export const Command = z.discriminatedUnion('name', [
     /** Idempotency key; also what the sender's own optimistic echo matches on. */
     clientMessageId: z.string().min(1).max(128).nullable().default(null),
     replyToId: Id.nullable().default(null),
+    /**
+     * THE ANSWER ARM'S ROUTING RECEIPT (#128, #124 resolution 3). The same-room
+     * message this post answers as a routed loop turn. Nullable and defaulted,
+     * so every existing caller is unchanged.
+     */
+    causeMessageId: Id.nullable().default(null),
     attachments: AttachmentList,
     references: z.array(MessageReference).max(100).default([]),
   }),
@@ -359,6 +377,11 @@ export const Command = z.discriminatedUnion('name', [
     agentUserId: Id,
     title: z.string().min(1).max(200),
     budgetLimitMicros: z.number().int().nonnegative().nullable().default(null),
+    /**
+     * THE NEW-WORK ARM'S BOARD RECEIPT (#128, #124 resolution 3). A plan never
+     * draws, so this is provenance only and takes no `funded_arms` claim.
+     */
+    causeMessageId: Id.nullable().default(null),
   }),
   z.object({ name: z.literal('settle_plan'), roomId: Id, planId: Id }),
   z.object({
@@ -368,6 +391,12 @@ export const Command = z.discriminatedUnion('name', [
     planId: Id,
     harness: z.string().min(1).max(120),
     model: z.string().min(1).max(120),
+    /**
+     * THE NEW-WORK ARM'S PROCESS RECEIPT (#128, #124 resolutions 3 and 4). A
+     * spawn IS a draw, so a non-null cause is also CLAIMED: at most one funded
+     * arm per (room, cause message), across spawns and continues both.
+     */
+    causeMessageId: Id.nullable().default(null),
   }),
   z.object({
     name: z.literal('settle_session'),
@@ -745,9 +774,41 @@ export function sessionControlAuthorizationRefusal(verb: string, sessionId: stri
   return `"${verb}" is control over session "${sessionId}"'s running process, and only that session's agent principal or the human who owns that agent may send it — a room member may STEER a session (that append is public, receipted, and powerless over covenant and purse) and may not stop or continue somebody else's process. Nothing was appended`;
 }
 
-/** A provenance edge pointing outside the room (#123 resolution 4). */
+/**
+ * A provenance edge pointing outside the room (#123 resolution 4, widened to
+ * every routed append by #128/#124 resolution 3).
+ *
+ * THE COMMAND LAYER'S sentence, and only that layer's. The same rule is enforced
+ * twice more, in two places that bind different writers and say different
+ * things: `core_events_routing_cause_same_room` (drizzle/0047) raises its own
+ * message on the LEDGER row, because composite FKs do not bind JSON payloads;
+ * and the `*_cause_same_room_fk` composite FKs refuse the PROJECTION row as a
+ * raw constraint error. Three sentences, three witnesses — deleting this call
+ * reddens exactly the test that asserts this text (#122's standing lesson).
+ */
 export function causeMessageRefusal(causeMessageId: string, roomId: string): string {
-  return `causeMessageId "${causeMessageId}" names no message in room "${roomId}" — a signal's provenance edge is same-room by construction (the projection lands it on a composite (room_id, message_id) foreign key), so a cause from another room is not a cause this room can show. Nothing was appended`;
+  return `causeMessageId "${causeMessageId}" names no message in room "${roomId}" — a routing receipt's provenance edge is same-room by construction (the projection lands it on a composite (room_id, message_id) foreign key), so a cause from another room is not a cause this room can show. Nothing was appended`;
+}
+
+/**
+ * A SECOND FUNDED ARM FROM ONE CAUSE MESSAGE (#128, #124 resolution 4).
+ *
+ * The daemon-retry refusal, and the reason the resolution made this a build
+ * obligation rather than doctrine: "exactly one arm per message" is unobservable
+ * to Atrium (a daemon that decides twice and appends once is indistinguishable
+ * from one that decided once), but "at most one FUNDED arm per cause message" is
+ * a fact about draws Atrium itself granted, which it records and cannot be lied
+ * to about. So the observable half is enforced and the unobservable half is
+ * doctrine (`docs/agent-loop-doctrine.md`).
+ *
+ * Its OWN sentence, distinct from every draw refusal beside it: an over-slice
+ * draw is refused because the purse is empty and takes a durable `draw_refused`
+ * receipt; this one is refused because the purse ALREADY PAID for this message,
+ * and appends nothing at all. Two different facts, and a shared string would let
+ * either clause be deleted while the other's test stayed green.
+ */
+export function fundedArmRefusal(causeMessageId: string, roomId: string): string {
+  return `cause message "${causeMessageId}" has already funded a draw in room "${roomId}" — one channel message funds at most ONE arm (a spawn or a continue), so a second draw from it is a daemon retry of work the slice already paid for. Nothing was appended. If the first arm was wrong, settle or fail it and route the new work from a new message`;
 }
 
 /** A forward-only revision naming something that is not an earlier signal here. */
@@ -1300,6 +1361,32 @@ export function createCommandService({
     }
   }
 
+  /**
+   * AT MOST ONE FUNDED ARM PER CAUSE MESSAGE (#128, #124 resolution 4) — the
+   * command layer's half.
+   *
+   * Read under the append lock, so no second draw can claim the same cause
+   * between this read and the projection's INSERT eight lines of call stack
+   * later. `FOR SHARE` on the claim row for the same reason `open_session` takes
+   * it on the plan: the row this decision rests on must not move underneath it.
+   *
+   * The authority is `funded_arms_room_cause_pk` in drizzle/0047, which binds a
+   * writer that never passed this command. This is the legible refusal.
+   */
+  async function requireUnfundedCause(
+    tx: Tx,
+    roomId: string,
+    causeMessageId: string | null,
+  ): Promise<void> {
+    if (causeMessageId === null) return;
+    const [claimed] = await tx
+      .select({ sessionId: fundedArms.sessionId })
+      .from(fundedArms)
+      .where(and(eq(fundedArms.roomId, roomId), eq(fundedArms.causeMessageId, causeMessageId)))
+      .for('share');
+    if (claimed) throw new CommandError('invalid', fundedArmRefusal(causeMessageId, roomId));
+  }
+
   /** The provenance edge is same-room or it is not an edge (#123 resolution 4). */
   async function requireSameRoomCause(
     tx: Tx,
@@ -1451,6 +1538,10 @@ export function createCommandService({
             attachments: persistedAttachments,
             references: command.references,
           });
+          // The answer arm's routing receipt is same-room (#128). `prepare` runs
+          // inside the append transaction under the ledger lock, which is the
+          // same place the other four routed verbs ask it.
+          await requireSameRoomCause(tx, command.roomId, command.causeMessageId);
         };
         const build = ({ id, at }: { id: string; at: string }): RoomEvent => ({
           id,
@@ -1461,6 +1552,7 @@ export function createCommandService({
           body: command.body,
           replyToId: command.replyToId,
           clientMessageId: command.clientMessageId,
+          causeMessageId: command.causeMessageId,
           attachments: persistedAttachments,
           references: command.references,
         });
@@ -1497,6 +1589,7 @@ export function createCommandService({
               replyToId: command.replyToId,
               attachments: persistedAttachments,
               references: command.references,
+              causeMessageId: command.causeMessageId,
             }),
             expectedEventTypes: ['message_posted'],
           },
@@ -1560,6 +1653,12 @@ export function createCommandService({
               body: command.body,
               replyToId: null,
               clientMessageId: command.clientMessageId,
+              // `answer_message` is the COVENANT's answer verb — it binds an
+              // accepted object to an open question — not the routing
+              // trichotomy's answer ARM (#124 resolution 3), which is a plain
+              // `send_message`. It carries no routing receipt, and writing one
+              // here would let a certification masquerade as a loop turn.
+              causeMessageId: null,
               attachments: persistedAttachments,
               references: [],
             }),
@@ -1959,17 +2058,30 @@ export function createCommandService({
       // are minted server-side inside the build — like `send_message`'s
       // `messageId` — and read back off the appended event; the settle/raise
       // verbs name an existing entity the caller already holds.
+      // A PLAN NEVER DRAWS (#124 resolution 2). So `open_plan` gets the routing
+      // receipt and its same-room check, and does NOT get the funded-arm claim:
+      // two boards opened from one message are two free boards, and refusing
+      // them would be enforcement invented past the resolution. The purse is the
+      // thing being protected, and a plan does not touch it.
       case 'open_plan':
-        return appendAndProject(session, command.roomId, ({ id, at }) => ({
-          id,
-          at,
-          type: 'plan_opened',
-          roomId: command.roomId,
-          planId: randomUUID(),
-          agentUserId: command.agentUserId,
-          title: command.title,
-          budgetLimitMicros: command.budgetLimitMicros,
-        }));
+        return appendAndProject(
+          session,
+          command.roomId,
+          ({ id, at }) => ({
+            id,
+            at,
+            type: 'plan_opened',
+            roomId: command.roomId,
+            planId: randomUUID(),
+            agentUserId: command.agentUserId,
+            title: command.title,
+            budgetLimitMicros: command.budgetLimitMicros,
+            causeMessageId: command.causeMessageId,
+          }),
+          async (tx) => {
+            await requireSameRoomCause(tx, command.roomId, command.causeMessageId);
+          },
+        );
 
       case 'settle_plan':
         return appendAndProject(session, command.roomId, ({ id, at }) => ({
@@ -2003,6 +2115,13 @@ export function createCommandService({
           actor: actorOf(session),
           authorize: async (tx) => {
             await requireMembership(session, roomId, tx);
+            // The routing receipt, before the draw decision (#128). Both checks
+            // run under the append lock: a cross-room cause is refused outright,
+            // and a cause that already funded an arm is refused as a daemon
+            // retry — neither becomes a `draw_refused`, because a `draw_refused`
+            // is the receipt for an EMPTY PURSE and these two are not that.
+            await requireSameRoomCause(tx, roomId, command.causeMessageId);
+            await requireUnfundedCause(tx, roomId, command.causeMessageId);
             const [plan] = await tx
               .select({
                 status: plans.status,
@@ -2063,6 +2182,7 @@ export function createCommandService({
                   // rides the event onto the wire.
                   executionMode: executionInstanceId !== undefined ? 'provider' : 'external',
                   executionOwner: executionInstanceId ?? null,
+                  causeMessageId: command.causeMessageId,
                 },
           project: (context) => projectRoomEvent(context, projectionHooks),
         });
@@ -2442,6 +2562,12 @@ export function createCommandService({
             requireOpenTarget(target, command.name, command.sessionId, roomId);
             requireSessionControl(target, session, command.name, command.sessionId);
             await requireSameRoomCause(tx, roomId, command.causeMessageId);
+            // A CONTINUE IS A DRAW, so it claims the arm exactly as a spawn does
+            // (#128, #124 resolution 4). "Across draw-taking appends" is the
+            // resolution's own phrase, and this is the second of the two: a
+            // daemon that retries one message cannot spawn once and then resume
+            // from the same message, nor resume twice.
+            await requireUnfundedCause(tx, roomId, command.causeMessageId);
             await requireSupersededSignal(tx, roomId, command.sessionId, command.supersedesEventId);
             await requireWaitingSubscription(tx, roomId, command.sessionId, command.subscriptionId);
             // The same one line #118's spawn gate runs, against the same committed

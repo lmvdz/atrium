@@ -102,6 +102,25 @@ export const MessagePosted = z.object({
   replyToId: Id.nullable().default(null),
   /** The sender's idempotency key — also what its own optimistic echo matches on. */
   clientMessageId: z.string().min(1).nullable().default(null),
+  /**
+   * THE ANSWER ARM'S ROUTING RECEIPT (#128, #124 resolution 3).
+   *
+   * The same-room channel message a daemon consumed and answered with this post
+   * — the third arm of Glance §9.3's trichotomy. Nullable with a `null` default,
+   * which is the load-bearing half: every `message_posted` ever appended omits
+   * this key, and a replay must parse those rows into exactly the events they
+   * were before this field existed. The default is what makes the widening
+   * invisible to the fold (`test/protocol.test.ts` pins the omitted-key parse).
+   *
+   * Distinct from `replyToId` beside it. That is a threading edge a client
+   * renders; this is a claim about which message's routing produced this append.
+   *
+   * "An answer in a group room is just an attributed message, not a routing
+   * receipt" (#124 resolution 3) — so this stays null unless the daemon is
+   * answering in its own channel room, and the ledger-side room-match backstop
+   * refuses a cause from anywhere else regardless.
+   */
+  causeMessageId: Id.nullable().default(null),
   attachments: z.array(MessageAttachment).default([]),
   references: z.array(MessageReference).max(100).default([]),
 });
@@ -146,6 +165,15 @@ export const PlanOpened = z.object({
   title: z.string().min(1).max(200),
   /** The plan's rlimit slice, in micro-dollars. Placeholder (#115 owns enforcement). */
   budgetLimitMicros: Micros,
+  /**
+   * THE NEW-WORK ARM'S BOARD RECEIPT (#128, #124 resolution 3). The same-room
+   * message whose routing opened this board. Nullable-with-default so every
+   * `plan_opened` already in a ledger replays byte-identically.
+   *
+   * A plan never draws (#124 resolution 2), so this carries provenance and takes
+   * NO claim in `funded_arms`: two boards from one message spend nothing.
+   */
+  causeMessageId: Id.nullable().default(null),
 });
 export type PlanOpened = z.infer<typeof PlanOpened>;
 
@@ -186,6 +214,16 @@ export const SessionOpened = z.object({
    */
   executionMode: z.enum(['provider', 'external']).default('external'),
   executionOwner: z.string().min(1).max(200).nullable().default(null),
+  /**
+   * THE NEW-WORK ARM'S PROCESS RECEIPT (#128, #124 resolution 3). The same-room
+   * message whose routing spawned this session. Nullable-with-default so every
+   * `session_opened` already in a ledger replays byte-identically.
+   *
+   * A SPAWN IS A DRAW, so unlike `plan_opened`'s field a non-null value here
+   * also claims the cause in `funded_arms` (#124 resolution 4): a daemon retry
+   * of one message cannot fund a second session from it.
+   */
+  causeMessageId: Id.nullable().default(null),
 });
 export type SessionOpened = z.infer<typeof SessionOpened>;
 

@@ -215,6 +215,60 @@ describe('the ledger event union', () => {
   });
 
   /**
+   * REPLAY ≡ LIVE ACROSS THE THREE SHAPES #128 WIDENED.
+   *
+   * `causeMessageId` was added to `message_posted`, `plan_opened` and
+   * `session_opened` (#124 resolution 3). Three event shapes got a new key, and
+   * every row of those kinds already in a ledger OMITS it — a replay parses
+   * those rows with today's schema, so if the key were required, or defaulted to
+   * anything but `null`, the same ledger would yield different events before and
+   * after this change and the live ≡ replay guarantee would be gone.
+   *
+   * This is the omitted-key parse pin, and it asserts the VALUE, not merely that
+   * the parse succeeded: `undefined` would also "parse" under an `.optional()`
+   * and would then serialise differently on the way back out.
+   *
+   * RED-ON-REVERT: drop `.default(null)` from any of the three (leaving
+   * `.nullable()`) and that shape's parse throws; make it `.optional()` without
+   * a default and the `toBe(null)` assertion goes red on `undefined`; make it
+   * required and both go red.
+   */
+  it('parses a pre-#128 row of each widened kind, defaulting the routing receipt to null', () => {
+    const older: Array<[string, Record<string, unknown>]> = [
+      ['message_posted', { messageId: 'm1', body: 'before the field existed' }],
+      ['plan_opened', { planId: 'p1', agentUserId: 'a1', title: 'work' }],
+      ['session_opened', { sessionId: 's1', planId: 'p1', harness: 'claude', model: 'opus' }],
+    ];
+    for (const [type, extra] of older) {
+      const event = RoomEvent.parse({ id: `e-${type}`, at, type, roomId: 'r1', ...extra });
+      expect('causeMessageId' in event, type).toBe(true);
+      expect((event as { causeMessageId: string | null }).causeMessageId, type).toBe(null);
+    }
+  });
+
+  /**
+   * …AND A ROW THAT CARRIES ONE KEEPS IT (#128). The other half of the widening:
+   * a pin that only proves the omitted key defaults would stay green if the
+   * field were hard-coded to `null` and the payload's value thrown away, which
+   * is exactly how a routing receipt becomes ornament.
+   *
+   * RED-ON-REVERT: replace the field with `z.null().default(null)` — the
+   * omitted-key pin above stays green, and this one goes red.
+   */
+  it('keeps a routing receipt a widened event actually carries', () => {
+    const posted = RoomEvent.parse({
+      id: 'e1',
+      at,
+      type: 'message_posted',
+      roomId: 'r1',
+      messageId: 'm2',
+      body: 'the answer arm',
+      causeMessageId: 'm1',
+    });
+    expect((posted as { causeMessageId: string | null }).causeMessageId).toBe('m1');
+  });
+
+  /**
    * REPLAY ≡ LIVE ACROSS THE WIDENED `signal_raised` (#127).
    *
    * #127 widened `SignalRaised.subjectKind` from three subjects to four so a

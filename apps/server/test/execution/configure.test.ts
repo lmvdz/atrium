@@ -79,6 +79,9 @@ const openSession: Command = {
   planId: randomUUID(),
   harness: 'omp',
   model: 'haiku',
+  // #128: an in-process caller states the routing receipt rather than leaning on
+  // the schema default, because this object never goes through `Command.parse`.
+  causeMessageId: null,
 };
 
 beforeEach(async () => {

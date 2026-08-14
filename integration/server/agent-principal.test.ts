@@ -1945,6 +1945,7 @@ describe('the database does not take the application’s word for the kind', () 
             body: 'from outside the room',
             replyToId: null,
             clientMessageId: null,
+            causeMessageId: null,
             attachments: [],
             references: [],
           }),

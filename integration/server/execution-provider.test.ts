@@ -157,6 +157,7 @@ async function openPlan(commands = commandService()): Promise<string> {
     agentUserId: agentId,
     title: 'execution plan',
     budgetLimitMicros: null,
+    causeMessageId: null,
   });
   expect(ack.kind).toBe('appended');
   const [{ id } = { id: '' }] = await handle.db
@@ -401,6 +402,7 @@ describe('the artifact is PROVIDER-VERIFIED, not a caller assertion (#120 F2, re
       planId,
       harness: 'omp',
       model: 'haiku',
+      causeMessageId: null,
     });
     expect(opened.kind).toBe('appended');
     if (opened.kind !== 'appended' || opened.draw?.outcome !== 'granted') return;
@@ -458,6 +460,7 @@ async function resetSecondSession(planId: string): Promise<void> {
     planId,
     harness: 'omp',
     model: 'haiku',
+    causeMessageId: null,
   });
   if (opened.kind !== 'appended' || opened.draw?.outcome !== 'granted') return;
   const sessionId = opened.draw.sessionId;
@@ -668,6 +671,7 @@ async function openGrantedSession(
     planId,
     harness: 'omp',
     model: 'haiku',
+    causeMessageId: null,
   });
   expect(opened.kind).toBe('appended');
   if (opened.kind !== 'appended' || opened.draw?.outcome !== 'granted') {

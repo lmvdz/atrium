@@ -3547,6 +3547,18 @@ describe('foreign keys — the audit is the catalog, not a paragraph', () => {
       'core_events_room_id_rooms_id_fk',
       'corrections_object_same_room_fk',
       'corrections_room_id_rooms_id_fk',
+      /* #128's funded-arm claims. All three cascade for this list's own reason:
+         a claim is a fact about a draw taken in a room, from a message, into a
+         session, and it is meaningless once any of the three is gone. Note what
+         is NOT here — `messages_cause_same_room_fk`, `plans_cause_same_room_fk`
+         and `sessions_cause_same_room_fk` are NO ACTION, so this query (which
+         filters `confdeltype <> 'a'`) never sees them. That is deliberate and
+         matches `messages_reply_to_same_room_fk`: SET NULL on a composite FK
+         would try to null `room_id`, which is NOT NULL, so the action could only
+         ever fail, and no row of those tables is ever deleted individually. */
+      'funded_arms_cause_same_room_fk',
+      'funded_arms_room_id_rooms_id_fk',
+      'funded_arms_session_same_room_fk',
       'interpretations_message_id_messages_id_fk',
       'memberships_room_id_rooms_id_fk',
       'memberships_user_id_users_id_fk',

@@ -1169,6 +1169,23 @@ export const messages = pgTable(
     replyToId: uuid('reply_to_id'),
     /** Client-supplied idempotency key so a retried send never duplicates. */
     clientMessageId: text('client_message_id'),
+    /**
+     * THE ROUTING RECEIPT ON THE ANSWER ARM (#128, #124 resolution 3).
+     *
+     * The room message this one was posted in reply to as a ROUTED answer — the
+     * third arm of Glance §9.3's trichotomy, where the first two are a steer
+     * (`session_signals.cause_message_id`) and new work (`plans` / `sessions`
+     * below). Nullable, and null for almost every message ever written: a person
+     * typing in a channel routes nothing, and neither does an agent speaking on
+     * its own initiative.
+     *
+     * NOT `reply_to_id`, and the distinction is the reason this column exists.
+     * `reply_to_id` is a THREADING edge a client renders; this is a claim that a
+     * daemon consumed that message and this append is what it did about it. The
+     * two are independently nullable and an answer may carry either, both, or
+     * neither.
+     */
+    causeMessageId: uuid('cause_message_id'),
     /** `[{ key, name, contentType, size }]` — objects live in S3/MinIO. */
     attachments: jsonb('attachments').$type<MessageAttachment[]>().notNull().default([]),
     createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
@@ -1195,6 +1212,18 @@ export const messages = pgTable(
     foreignKey({
       name: 'messages_reply_to_same_room_fk',
       columns: [t.roomId, t.replyToId],
+      foreignColumns: [t.roomId, t.id],
+    }),
+    /**
+     * A routed answer's cause is a message in the SAME room (#128, #124
+     * resolution 3). The same composite shape `session_signals` uses for its
+     * steer receipt, for the same reason: routing appends land in the agent's
+     * channel room only, and a cause from another room is not a cause this room
+     * can show. NO ACTION for the reason the reply edge above gives.
+     */
+    foreignKey({
+      name: 'messages_cause_same_room_fk',
+      columns: [t.roomId, t.causeMessageId],
       foreignColumns: [t.roomId, t.id],
     }),
   ],
@@ -1395,6 +1424,21 @@ export const plans = pgTable(
      * `interrupt` are NOT draws and never touch this column.
      */
     authorizedDraws: bigint('authorized_draws', { mode: 'number' }).notNull().default(0),
+    /**
+     * THE ROUTING RECEIPT ON THE NEW-WORK ARM'S BOARD (#128, #124 resolution 3).
+     *
+     * The room message this plan was opened in response to. Nullable — a human
+     * opening a board by hand cites nothing, and the resolution names that case
+     * outright.
+     *
+     * A PLAN NEVER DRAWS (#124 resolution 2, grok r3): only session spawns and
+     * continues pass #118's slice boundary, so this column carries provenance and
+     * is deliberately EXEMPT from the funded-arm uniqueness in `funded_arms`. Two
+     * plans opened from one message are two free boards, which costs nothing and
+     * hides nothing; two FUNDED sessions from one message is a daemon retry that
+     * spent the slice twice, and that is what the uniqueness refuses.
+     */
+    causeMessageId: uuid('cause_message_id'),
     /** The `core_events.id` of the `plan_opened` that projected this. */
     openedByEventId: text('opened_by_event_id'),
     /** The `core_events.id` of the `plan_settled`, once it has settled. */
@@ -1407,6 +1451,12 @@ export const plans = pgTable(
     index('plans_agent_idx').on(t.agentUserId),
     /** The composite-FK target a session's parent edge lands on. */
     uniqueIndex('plans_room_id_key').on(t.roomId, t.id),
+    /** A plan's cause is a message in the SAME room (#128, #124 resolution 3). */
+    foreignKey({
+      name: 'plans_cause_same_room_fk',
+      columns: [t.roomId, t.causeMessageId],
+      foreignColumns: [messages.roomId, messages.id],
+    }),
     /** A slice is a count of draws — never negative. NULL (unfunded) is allowed. */
     check('plans_rlimit_slice_nonnegative', sql`${t.rlimitSlice} IS NULL OR ${t.rlimitSlice} >= 0`),
     /** Draws granted only ever counts up from zero. */
@@ -1574,6 +1624,19 @@ export const sessions = pgTable(
      * jam a future arm. The correlation the two dropped columns provided is the
      * nonce's job now, and it is a capability, not a counter.
      */
+    /**
+     * THE ROUTING RECEIPT ON THE NEW-WORK ARM'S PROCESS (#128, #124 resolution 3).
+     *
+     * The room message whose routing spawned this session. Nullable — a person
+     * opening a session by hand cites nothing.
+     *
+     * A SPAWN IS A DRAW, so unlike `plans.cause_message_id` this one is ALSO
+     * claimed in `funded_arms` when it is non-null: at most one funded arm per
+     * cause message, across spawns and continues both, so a daemon that retries
+     * the same message cannot fund two sessions from it (#124 resolution 4). The
+     * column here is the provenance; the claim row is the enforcement.
+     */
+    causeMessageId: uuid('cause_message_id'),
     /** The `core_events.id` of the `session_opened` that projected this. */
     openedByEventId: text('opened_by_event_id'),
     /** The `core_events.id` of the settling/failing event, once it exits. */
@@ -1646,6 +1709,12 @@ export const sessions = pgTable(
       columns: [t.roomId, t.planId],
       foreignColumns: [plans.roomId, plans.id],
     }).onDelete('cascade'),
+    /** A session's cause is a message in the SAME room (#128, #124 resolution 3). */
+    foreignKey({
+      name: 'sessions_cause_same_room_fk',
+      columns: [t.roomId, t.causeMessageId],
+      foreignColumns: [messages.roomId, messages.id],
+    }),
   ],
 );
 
@@ -1812,6 +1881,81 @@ export const sessionSignals = pgTable(
       'session_signals_subscription_is_a_resume',
       sql`${t.subscriptionId} IS NULL OR ${t.kind} = 'resume'`,
     ),
+  ],
+);
+
+/**
+ * AT MOST ONE FUNDED ARM PER CAUSE MESSAGE (#128, #124 resolution 4).
+ *
+ * One row per draw-taking routing append that named a cause. The primary key is
+ * `(room_id, cause_message_id)`, and that key IS the rule: a daemon that
+ * processes one channel message twice — a retry after a lost ack, a crash
+ * between the draw and its own bookkeeping, two loop instances racing the same
+ * message — cannot fund two sessions from it. The second claim collides and its
+ * whole append transaction aborts, so the second draw is not merely uncounted,
+ * it never happened.
+ *
+ * ## Why a table and not an index
+ *
+ * The draw-taking appends are TWO: `session_opened` (a spawn) and
+ * `session_signaled {kind:'resume'}` (a continue) — #115 decision 2's
+ * "spawns/continues", built across #118 and #127. They project into two
+ * different tables, and no unique index spans two tables. A shared claim table
+ * is the only spelling of "across draw-taking appends" that Postgres can
+ * actually enforce, which is why the uniqueness lives here rather than as a
+ * partial index on `sessions` that would silently miss every resume.
+ *
+ * ## What is NOT in here, deliberately
+ *
+ *  - `plan_opened`. A plan never draws (#124 resolution 2), so two boards from
+ *    one message spend nothing; `plans.cause_message_id` carries the provenance
+ *    and this table never sees it. Funding uniqueness is about the purse.
+ *  - `message_posted`. The answer arm is speech, not spend.
+ *  - `steer` and `interrupt`. Neither moves `plans.authorized_draws`.
+ *  - A draw with NO cause message. A human opening a session by hand cites
+ *    nothing, and "at most one arm per cause" says nothing about appends that
+ *    name no cause. `cause_message_id` is NOT NULL here because a row with a
+ *    null cause would claim nothing and collide with nothing — the projections
+ *    simply write no row in that case.
+ *  - A REFUSED draw. `draw_refused` grants nothing and funds nothing, so it
+ *    leaves the cause message unclaimed and a later, funded retry may take it.
+ */
+export const fundedArms = pgTable(
+  'funded_arms',
+  {
+    roomId: uuid('room_id')
+      .notNull()
+      .references(() => rooms.id, { onDelete: 'cascade' }),
+    /** The channel message this draw was routed from. NOT NULL — see the doc. */
+    causeMessageId: uuid('cause_message_id').notNull(),
+    /** Which draw-taking append claimed it: a spawn or a continue. */
+    arm: text('arm').notNull(),
+    /** The session the draw funded — the spawned one, or the resumed one. */
+    sessionId: uuid('session_id').notNull(),
+    /** The `core_events.id` of the append that took the draw. */
+    drawnByEventId: text('drawn_by_event_id'),
+    createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [
+    /** THE BACKSTOP. One funded arm per (room, cause message), full stop. */
+    primaryKey({
+      name: 'funded_arms_room_cause_pk',
+      columns: [t.roomId, t.causeMessageId],
+    }),
+    /** The cause is a message in THIS room — the same composite edge everywhere. */
+    foreignKey({
+      name: 'funded_arms_cause_same_room_fk',
+      columns: [t.roomId, t.causeMessageId],
+      foreignColumns: [messages.roomId, messages.id],
+    }).onDelete('cascade'),
+    /** The funded session is in THIS room. */
+    foreignKey({
+      name: 'funded_arms_session_same_room_fk',
+      columns: [t.roomId, t.sessionId],
+      foreignColumns: [sessions.roomId, sessions.id],
+    }).onDelete('cascade'),
+    /** The two draw-taking appends, and nothing else may claim an arm. */
+    check('funded_arms_arm_is_a_draw', sql`${t.arm} IN ('spawn', 'continue')`),
   ],
 );
 

@@ -431,6 +431,12 @@ export function createExecutionCoordinator(
       planId: input.planId,
       harness: input.harness,
       model: input.model,
+      // The ExecutionProvider's own spawn is not a ROUTED spawn (#128): nothing
+      // in this path came from a channel message, so it names no cause and takes
+      // no funded-arm claim. An in-process caller is explicit here rather than
+      // leaning on the schema default, because this object never goes through
+      // `Command.parse` and a default would be applied by nobody.
+      causeMessageId: null,
     });
 
     // ── THE BUDGET GUARD (#118) ──────────────────────────────────────────────

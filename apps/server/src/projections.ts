@@ -11,6 +11,7 @@ import {
   agents,
   attentionItems,
   corrections,
+  fundedArms,
   messageReferences,
   messages,
   objectRelations,
@@ -190,6 +191,10 @@ async function projectMessagePosted(
     body: event.body,
     replyToId: event.replyToId,
     clientMessageId: event.clientMessageId,
+    // The answer arm's routing receipt (#128). Lands on
+    // `messages_cause_same_room_fk`, so a cross-room cause that got past the
+    // command and past the ledger trigger still cannot become a row.
+    causeMessageId: event.causeMessageId,
     attachments: event.attachments,
   });
   if (event.attachments.length > 0) {
@@ -648,6 +653,59 @@ async function projectAttentionResolved(
  * row, so the covenant's `~`→`✓` is out of reach by construction (#114 T3).
  * ─────────────────────────────────────────────────────────────────────────── */
 
+/**
+ * CLAIM THE CAUSE MESSAGE'S ONE FUNDED ARM (#128, #124 resolution 4) — the
+ * projection layer's half, called by the two draw-taking appends and by nothing
+ * else.
+ *
+ * Three layers, as always, and they bind three different writers:
+ *
+ *   1. `commands.ts`'s `requireUnfundedCause` — the legible refusal on the
+ *      command path.
+ *   2. This read — binds a writer that reached the projection without passing
+ *      the command (a direct `ledger.append` of a `session_opened`).
+ *   3. `funded_arms_room_cause_pk` — binds a writer that reached the table
+ *      without passing either, and is the authority the other two describe.
+ *
+ * The sentence below is this layer's alone, deliberately unlike the command's:
+ * a shared string would make each layer's red-on-revert test assert the
+ * disjunction, so deleting this read would leave its own witness green on the
+ * command's catch (#122's standing lesson, which has now fired four times).
+ *
+ * A null cause claims nothing. `at most one arm per cause` says nothing about an
+ * append that names no cause, and a person opening a session by hand names none.
+ */
+async function claimFundedArm(
+  tx: Tx,
+  roomId: string,
+  eventId: string,
+  arm: 'spawn' | 'continue',
+  sessionId: string,
+  causeMessageId: string | null,
+  at: string,
+): Promise<void> {
+  if (causeMessageId === null) return;
+  const [claimed] = await tx
+    .select({ sessionId: fundedArms.sessionId, arm: fundedArms.arm })
+    .from(fundedArms)
+    .where(and(eq(fundedArms.roomId, roomId), eq(fundedArms.causeMessageId, causeMessageId)))
+    .for('share');
+  if (claimed) {
+    throw new CommandError(
+      'invalid',
+      `message "${causeMessageId}" already funded a ${claimed.arm} into session "${claimed.sessionId}" — refused at the PROJECTION's funded-arm claim, which is the guard that binds a writer appending a draw without passing open_session or resume_session`,
+    );
+  }
+  await tx.insert(fundedArms).values({
+    roomId,
+    causeMessageId,
+    arm,
+    sessionId,
+    drawnByEventId: eventId,
+    createdAt: new Date(at),
+  });
+}
+
 async function projectPlanOpened(
   { tx, roomId, event: { id } }: ProjectionContext<RoomEvent>,
   event: EventOf<'plan_opened'>,
@@ -659,6 +717,11 @@ async function projectPlanOpened(
     title: event.title,
     status: 'open',
     budgetLimitMicros: event.budgetLimitMicros,
+    // Provenance only — a plan never draws, so NO `funded_arms` claim (#124
+    // resolution 2). The absence of a claim here is deliberate and load-bearing:
+    // adding one would refuse a second free board from one message, which is
+    // enforcement nobody decided and which the purse does not need.
+    causeMessageId: event.causeMessageId,
     openedByEventId: id,
     createdAt: new Date(event.at),
     updatedAt: new Date(event.at),
@@ -793,9 +856,16 @@ async function projectSessionOpened(
     executionAuthority: providerOwned ? randomUUID() : null,
     executionHeartbeatAt: providerOwned ? new Date(event.at) : null,
     executionClaimedAt: null,
+    // The new-work arm's routing receipt (#128). Lands on
+    // `sessions_cause_same_room_fk`.
+    causeMessageId: event.causeMessageId,
     createdAt: new Date(event.at),
     updatedAt: new Date(event.at),
   });
+  // A SPAWN IS A DRAW, so it claims the cause message's one funded arm — in this
+  // same transaction, before the increment below, so a colliding retry aborts
+  // the whole append and moves `authorized_draws` by nothing at all.
+  await claimFundedArm(tx, roomId, id, 'spawn', event.sessionId, event.causeMessageId, event.at);
   // The draw is now GRANTED — record it in the committed authorized-draw
   // accounting (#118). One increment per session_opened, in this same append
   // transaction under the global ledger lock, so `authorized_draws` equals
@@ -1124,6 +1194,13 @@ async function projectSessionSignaled(
   });
 
   if (event.kind !== 'resume') return;
+
+  // A CONTINUE IS A DRAW TOO, so it claims the cause message's one funded arm,
+  // in this same transaction and before the increment (#128, #124 resolution 4).
+  // `steer` and `interrupt` never reach here: they spend nothing, so they claim
+  // nothing and a channel may steer one session a hundred times from one
+  // message. The uniqueness is about the PURSE, not about the conversation.
+  await claimFundedArm(tx, roomId, id, 'continue', event.sessionId, event.causeMessageId, event.at);
 
   // ── A RESUME IS A DRAW, AND THIS IS WHERE IT IS SPENT (#115 decision 2) ────
   //
