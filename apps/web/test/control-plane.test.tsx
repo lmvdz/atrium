@@ -1090,6 +1090,30 @@ describe('the review pane renders the real diff and test results (#145)', () => 
     expect(tabbed.container.querySelector('[data-diff-line="add"]')?.textContent).toContain('\t');
   });
 
+  it('FIX 3 (#145 r3): a Unicode line separator (U+2028) is neutralized, not a gutterless row', () => {
+    // Under `white-space: pre` a U+2028 (LINE SEPARATOR) breaks a visual line just
+    // like `\n`, forging a second diff row the gutter never marked — the same
+    // impersonation the raw newline is neutralized for. It, its sibling U+2029
+    // (PARAGRAPH SEPARATOR), and the bidi marks U+200E/U+200F/U+061C were NOT in the
+    // neutralization set, so they reached the DOM raw. All must become U+FFFD.
+    const line = '+const x = 1;  forged-row';
+    const { container } = pane(session({ status: 'settled', artifact: diffArtifact(line) }));
+    const text = container.querySelector('[data-diff-line="add"]')?.textContent ?? '';
+    expect(text).not.toContain(' '); // no gutterless line-break survives
+    expect(text).toContain('�');
+    // The whole newly-covered set, each neutralized to U+FFFD.
+    for (const forbidden of [' ', ' ', '‎', '‏', '؜']) {
+      cleanup();
+      const body = `+alpha${forbidden}omega`;
+      const r = pane(session({ status: 'settled', artifact: diffArtifact(body) }));
+      const t = r.container.querySelector('[data-diff-line="add"]')?.textContent ?? '';
+      expect(t).not.toContain(forbidden);
+      expect(t).toContain('�');
+    }
+    // RED ON REVERT: drop U+2028/2029/200E/200F/061C from CONTROL_CHARS and these
+    // reach the DOM raw — the U+2028 opening a gutterless visual diff row.
+  });
+
   it('an empty diff is an HONEST EMPTY, distinct from an absent one', () => {
     const empty = session({
       status: 'settled',

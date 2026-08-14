@@ -1073,8 +1073,13 @@ export const FILE_TEXT_MAX = 2000;
 const CONTROL_CHARS =
   // C0 controls except TAB (\u0009), DEL and C1 controls, plus the bidi
   // overrides (\u202A-\u202E) and isolates (\u2066-\u2069).
+  // Also the Unicode line/paragraph separators (\u2028 / \u2029) — under
+  // `white-space: pre` a U+2028 opens a visually separate diff line the gutter
+  // never marked, the same forged-row impersonation a raw newline would — plus
+  // the bidi marks (\u200E/\u200F LRM/RLM, \u061C Arabic letter mark) that reorder
+  // neighbouring runs the way the overrides do (#145 r3, FIX 3).
   // biome-ignore lint/suspicious/noControlCharactersInRegex: neutralizing them is the whole point.
-  /[\u0000-\u0008\u000A-\u001F\u007F-\u009F\u202A-\u202E\u2066-\u2069]/g;
+  /[\u0000-\u0008\u000A-\u001F\u007F-\u009F\u061C\u200E\u200F\u2028\u2029\u202A-\u202E\u2066-\u2069]/g;
 export function neutralizeControlChars(value: string): string {
   return value.replace(CONTROL_CHARS, '\uFFFD');
 }

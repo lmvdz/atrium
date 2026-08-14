@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { MAX_DIFF_FILES, MAX_DIFF_LINES } from '../src/execution/git.js';
+import { MAX_DIFF_FILES, MAX_DIFF_LINES, MAX_DIFF_TOTAL_BYTES } from '../src/execution/git.js';
 import { SessionDiffPayload, SessionTestsPayload } from '../src/room-events.js';
 
 /**
@@ -149,6 +149,58 @@ describe('FIX 3 — the aggregate ceiling at the durable boundary', () => {
   it('ACCEPTS a diff at the producer caps (the honest largest legal output)', () => {
     const result = SessionDiffPayload.safeParse(coherentDiff());
     expect(result.success).toBe(true);
+  });
+});
+
+describe('FIX 2 (#145 r3) — the aggregate byte ceiling counts UTF-8 bytes, not UTF-16 code units', () => {
+  it('REJECTS a Unicode-heavy diff whose UTF-8 size blows the cap though its String.length sits under it', () => {
+    // Every emoji is one code point but a UTF-16 SURROGATE PAIR (2 code units)
+    // and FOUR UTF-8 bytes. A line of 250 emoji is 500 code units (under the 501
+    // per-line cap) but 1000 bytes; 2000 such lines total 1,000,000 code units yet
+    // 2,000,000 bytes. Counting `.length` (UTF-16 code units) undercounts the real
+    // jsonb-row size by ~2×, so the buggy aggregate check waved this through.
+    const line = '\u{1F600}'.repeat(250); // 😀 × 250 → 500 code units, 1000 UTF-8 bytes
+    const lines = Array.from({ length: MAX_DIFF_LINES }, () => line);
+    const diff = {
+      files: [
+        {
+          path: 'src/unicode.ts',
+          status: 'modified' as const,
+          additions: MAX_DIFF_LINES,
+          deletions: 0,
+          binary: false,
+          hunks: [{ header: '@@ -1 +1 @@', lines }],
+        },
+      ],
+      fileCount: 1,
+      additions: MAX_DIFF_LINES,
+      deletions: 0,
+      truncated: true,
+    };
+
+    // The serialized size under each counting rule — the whole point of the fix.
+    let codeUnits = 0;
+    let utf8Bytes = 0;
+    for (const file of diff.files) {
+      codeUnits += file.path.length;
+      utf8Bytes += Buffer.byteLength(file.path, 'utf8');
+      for (const hunk of file.hunks) {
+        codeUnits += hunk.header.length;
+        utf8Bytes += Buffer.byteLength(hunk.header, 'utf8');
+        for (const l of hunk.lines) {
+          codeUnits += l.length;
+          utf8Bytes += Buffer.byteLength(l, 'utf8');
+        }
+      }
+    }
+    // The exact defect: String.length sits UNDER the ceiling, real UTF-8 sits OVER it.
+    expect(codeUnits).toBeLessThanOrEqual(MAX_DIFF_TOTAL_BYTES);
+    expect(utf8Bytes).toBeGreaterThan(MAX_DIFF_TOTAL_BYTES);
+
+    const result = SessionDiffPayload.safeParse(diff);
+    expect(result.success).toBe(false);
+    // RED ON REVERT: count `.length` instead of `Buffer.byteLength(_, 'utf8')` in the
+    // aggregate-bytes refine and this 2,000,000-byte diff parses at .length=1,000,0xx.
   });
 });
 

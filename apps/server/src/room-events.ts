@@ -343,14 +343,21 @@ export const SessionDiffPayload = z
       });
     }
     // ── FIX 3: the aggregate line and byte ceilings ────────────────────────────
+    // The byte ceiling counts ACTUAL UTF-8 bytes (the encoding the jsonb row is
+    // serialized in), not `String.length` UTF-16 code units — the latter undercounts
+    // a multi-byte code point up to ~4× (a single emoji is 1–2 code units but 4 bytes),
+    // so a Unicode-heavy diff could satisfy a `.length` bound while its real serialized
+    // size blew MAX_DIFF_TOTAL_BYTES (#145 r3, FIX 2).
     let totalLines = 0;
     let totalBytes = 0;
     for (const file of diff.files) {
-      totalBytes += file.path.length + (file.oldPath?.length ?? 0);
+      totalBytes +=
+        Buffer.byteLength(file.path, 'utf8') +
+        (file.oldPath ? Buffer.byteLength(file.oldPath, 'utf8') : 0);
       for (const hunk of file.hunks) {
-        totalBytes += hunk.header.length;
+        totalBytes += Buffer.byteLength(hunk.header, 'utf8');
         totalLines += hunk.lines.length;
-        for (const line of hunk.lines) totalBytes += line.length;
+        for (const line of hunk.lines) totalBytes += Buffer.byteLength(line, 'utf8');
       }
     }
     if (totalLines > MAX_DIFF_LINES) {

@@ -2240,6 +2240,35 @@ export function createCommandService({
               .join('; ')}`,
           );
         }
+        // ── THE ARTIFACT'S DIFF/TESTS ARE SCHEMA-CHECKED BEFORE THEY CAN PERSIST ──
+        //    (#145 r3, FIX 1) ────────────────────────────────────────────────────
+        //
+        // The wire path runs `Command.parse`, so `ExecutionArtifact` — with the
+        // `SessionDiff`/`SessionTests` coherence refine and the per-field + aggregate
+        // caps — has already vetted an inbound settle's `diff`/`tests`. But an
+        // in-process caller (the coordinator forwarding a provider `ExecutionReport`
+        // as a CONSTRUCTED command object) reaches `execute()` WITHOUT that parse, so
+        // an incoherent or over-limit diff would append durably and only red on the
+        // next read (the render shows "incomplete report" — honest, but an invalid
+        // artifact should never reach the jsonb row). Re-parse the artifact through
+        // the SAME schema here, at the durable settle boundary, so an incoherent
+        // diff (empty files with non-zero totals) or an over-cap payload is REFUSED
+        // at append, not merely at replay. This is the campaign's recurring
+        // "validate at every boundary, not only the wire" rule, restated for the
+        // in-process settle path exactly as `SettleReceiptBounds` above restates the
+        // receipt bounds. Revert this and a constructed settle carrying an incoherent
+        // diff persists durably.
+        if (command.artifact !== null) {
+          const artifactCheck = ExecutionArtifact.safeParse(command.artifact);
+          if (!artifactCheck.success) {
+            throw new CommandError(
+              'invalid',
+              `settle_session artifact is malformed and would break replay: ${artifactCheck.error.issues
+                .map((issue) => `${issue.path.join('.') || '(root)'}: ${issue.message}`)
+                .join('; ')}`,
+            );
+          }
+        }
         // ── IS THIS A TOKEN-AUTHORIZED PROVIDER SETTLE? (#120 round-7 F1) ────────
         //
         // Read the session's execution-authority record — `execution_mode` and the

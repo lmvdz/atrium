@@ -567,6 +567,83 @@ async function resetSecondSession(planId: string): Promise<void> {
   expect(await settledEventCount(sessionId)).toBe(0);
 }
 
+describe("the artifact's diff/tests are schema-checked at the settle boundary (#145 r3 FIX 1, red-on-revert)", () => {
+  it('REFUSES an in-process settle whose diff is incoherent — not persisted, not deferred to replay', async () => {
+    const planId = await openPlan();
+    await fundPlan(planId);
+
+    // Open a real granted session, then settle it OURSELVES with a CONSTRUCTED
+    // command object — exactly what the in-process coordinator does when it
+    // forwards a provider `ExecutionReport`. That path reaches `execute()` WITHOUT
+    // `Command.parse`, so the `SessionDiff` coherence refine (files-empty ⟺
+    // totals-zero) never ran on the wire. The artifact below is otherwise
+    // well-formed — real-looking branch/commit/remote strings — but its diff
+    // DECLARES one changed file while carrying none: the incoherent "no changes"
+    // lie the durable schema rejects. The real session authority is presented so
+    // the ONLY defect is the diff itself.
+    //
+    // The command service is wired with a PERMISSIVE verifier (always true) so the
+    // branch/commit passes the #120 provider-verification and clean-settle gates —
+    // ISOLATING the FIX 1 schema check as the only thing that can reject the
+    // incoherent diff. Without this, a fabricated commit would be refused by the
+    // downstream "no provider-verified artifact" rule and the schema guard would
+    // never be exercised. With the permissive verifier, revert the guard and this
+    // incoherent diff settles durably (see the revert assertions in the comment
+    // below); keep it and the diff is refused at the command boundary.
+    const commands = commandService(async () => true);
+    const opened = await commands.execute(agentSession, {
+      name: 'open_session',
+      roomId: room.roomId,
+      planId,
+      harness: 'omp',
+      model: 'haiku',
+      causeMessageId: null,
+    });
+    expect(opened.kind).toBe('appended');
+    if (opened.kind !== 'appended' || opened.draw?.outcome !== 'granted') return;
+    const sessionId = opened.draw.sessionId;
+
+    const incoherent: ExecutionArtifact = {
+      branch: sessionBranch(sessionId),
+      commit: 'cafebabecafebabecafebabecafebabecafebabe',
+      remote: artifactRepo.dir,
+      // FILES EMPTY yet totals non-zero — the biconditional the refine enforces.
+      diff: { files: [], fileCount: 1, additions: 1, deletions: 0, truncated: false },
+    };
+
+    // The settle boundary re-parses the artifact through `ExecutionArtifact` and
+    // REFUSES the incoherent diff at the command — before the append, before any
+    // git verification — rather than persisting a row that reds only on the next
+    // read.
+    await expect(
+      commands.execute(agentSession, {
+        name: 'settle_session',
+        roomId: room.roomId,
+        sessionId,
+        outcome: 'settled',
+        exitSummary: 'a coherent-looking receipt over an incoherent diff',
+        spendMicros: null,
+        contextPct: null,
+        artifact: incoherent,
+        authority: await sessionAuthority(sessionId),
+      }),
+    ).rejects.toThrow(/artifact is malformed and would break replay/);
+
+    // Nothing was appended — no session_settled row carries the incoherent diff.
+    expect(await settledEventCount(sessionId)).toBe(0);
+    // And the session is still open (the refused settle wrote no terminal).
+    const [row] = await handle.db
+      .select({ status: sessions.status, artifact: sessions.artifact })
+      .from(sessions)
+      .where(eq(sessions.id, sessionId));
+    expect(row?.status).toBe('open');
+    expect(row?.artifact).toBeNull();
+    // RED ON REVERT: drop the `ExecutionArtifact.safeParse(command.artifact)` guard
+    // at the settle boundary and this incoherent diff is appended durably, deferring
+    // rejection to a later read.
+  });
+});
+
 describe('a refused draw NEVER starts the adapter (#118, red-on-revert)', () => {
   it('runs no workspace and produces no artifact when the budget refuses the draw', async () => {
     // An UNFUNDED plan authorizes ZERO draws — every open_session refuses.
