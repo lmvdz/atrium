@@ -1,10 +1,10 @@
 import type { Actor, CoreEvent, CoreEventType, TrustedContext } from '@atrium/core';
 import {
   AttentionClass,
+  ProposalRecorded as CoreProposalRecorded,
   Id,
   ObjectAccepted,
   ObjectCorrected,
-  ProposalRecorded,
   ProposalRejected,
   ProposalSuperseded,
   RationaleReason,
@@ -59,6 +59,17 @@ const eventBase = {
   id: Id,
   at: Timestamp,
 };
+
+/**
+ * The core fold deliberately has no process-tree concepts, but the durable
+ * server event also carries the execution session that drafted a reading.
+ * Optional preserves replay of proposal rows written before this provenance
+ * edge was wired; every new command writes either a UUID or an explicit null.
+ */
+export const ProposalRecorded = CoreProposalRecorded.extend({
+  sessionId: Id.nullable().optional(),
+});
+export type ProposalRecorded = z.infer<typeof ProposalRecorded>;
 
 export const MAX_ATTACHMENT_BYTES = 25 * 1024 * 1024;
 

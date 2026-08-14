@@ -290,6 +290,7 @@ async function projectProposalRecorded(
     stagedById: actorId(record.stagedBy),
     quote: proposal.quote,
     status: record.status,
+    sessionId: event.sessionId ?? null,
     createdAt: new Date(proposal.createdAt),
   });
 

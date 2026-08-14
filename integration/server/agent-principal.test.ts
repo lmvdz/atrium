@@ -15,12 +15,14 @@ import {
   coreEvents,
   memberships,
   messages,
+  plans,
   proposals,
   rooms,
+  sessions,
   users,
   workspaceMembers,
 } from '@atrium/db';
-import { and, eq, sql } from 'drizzle-orm';
+import { and, eq, inArray, sql } from 'drizzle-orm';
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it } from 'vitest';
 import type { CommandInput } from '../../apps/server/src/commands.js';
 import { createLogger } from '../../apps/server/src/logger.js';
@@ -211,7 +213,7 @@ async function agentInTheRoom(name = 'scribe') {
     model: 'opus',
   });
   const session = await mintAgentSession({ auth, db: handle.db, userId: principal.userId });
-  return { ...principal, session };
+  return { ...principal, channelRoomId: (channel as { id: string }).id, session };
 }
 
 /** A person, admitted the same way, holding a session minted the same way. */
@@ -449,6 +451,221 @@ describe('an agent principal, from provisioning to the ledger', () => {
       id: agent.userId,
       type: 'message_posted',
     });
+  });
+});
+
+describe('a drafting session signs the proposal it stages', () => {
+  it('moves the projected session_id when only the drafting session changes', async () => {
+    const agent = await agentInTheRoom('session-scribe');
+    await handle.db
+      .insert(memberships)
+      .values({ roomId: agent.channelRoomId, userId: agent.userId, role: 'member' });
+    const [plan] = await handle.db
+      .insert(plans)
+      .values({
+        roomId: agent.channelRoomId,
+        agentUserId: agent.userId,
+        title: 'Trace the reading',
+      })
+      .returning({ id: plans.id });
+    const sessionA = randomUUID();
+    const sessionB = randomUUID();
+    await handle.db.insert(sessions).values([
+      {
+        id: sessionA,
+        roomId: agent.channelRoomId,
+        planId: (plan as { id: string }).id,
+        harness: 'codex',
+        model: 'gpt-5.6-sol',
+      },
+      {
+        id: sessionB,
+        roomId: agent.channelRoomId,
+        planId: (plan as { id: string }).id,
+        harness: 'codex',
+        model: 'gpt-5.6-sol',
+      },
+    ]);
+
+    const scribe = await connectWithCookie(agent.userId, agent.session.cookie);
+    await scribe.subscribe(agent.channelRoomId);
+    const body = 'The drafting session is part of this reading’s receipt.';
+    expect(
+      issuesOf(await scribe.command({ name: 'send_message', roomId: agent.channelRoomId, body })),
+    ).toEqual([]);
+    const [source] = await handle.db
+      .select({ id: messages.id })
+      .from(messages)
+      .where(and(eq(messages.roomId, agent.channelRoomId), eq(messages.body, body)));
+    const proposal = {
+      type: 'claim' as const,
+      payload: { statement: body, claimant: agent.userId, verification: 'unverified' as const },
+      confidence: 1,
+      provenance: [(source as { id: string }).id],
+      quote: body,
+      interpretationId: null,
+    };
+
+    // The two commands differ only in the execution session. A projector that
+    // stubs the edge to either constant passes one assertion and fails the pair.
+    for (const sessionId of [sessionA, sessionB]) {
+      expect(
+        issuesOf(
+          await scribe.command({
+            name: 'record_proposal',
+            roomId: agent.channelRoomId,
+            proposal,
+            sessionId,
+          } as CommandInput),
+        ),
+      ).toEqual([]);
+    }
+
+    const recorded = await handle.db
+      .select({ payload: coreEvents.payload })
+      .from(coreEvents)
+      .where(
+        and(eq(coreEvents.roomId, agent.channelRoomId), eq(coreEvents.type, 'proposal_recorded')),
+      )
+      .orderBy(coreEvents.seq);
+    const proposalIds = recorded.map(
+      (row) => (row.payload as { proposal: { id: string } }).proposal.id,
+    );
+    const projected = await handle.db
+      .select({ id: proposals.id, sessionId: proposals.sessionId })
+      .from(proposals)
+      .where(inArray(proposals.id, proposalIds));
+    const sessionByProposal = new Map(projected.map((row) => [row.id, row.sessionId]));
+    expect(proposalIds.map((id) => sessionByProposal.get(id))).toEqual([sessionA, sessionB]);
+
+    // The projection guard above is not the only writer. A direct insert that
+    // pairs this real same-room session with another agent is refused by 0043,
+    // while the existing composite FK remains responsible for cross-room ids.
+    const imposter = await provisionAgentPrincipal({
+      db: handle.db,
+      email: `imposter-${randomUUID()}@agents.invalid`,
+      displayName: 'imposter',
+    });
+    let lineageError = '';
+    try {
+      await handle.db.insert(proposals).values({
+        roomId: agent.channelRoomId,
+        type: 'claim',
+        payload: {
+          statement: 'Another agent must not inherit this session’s draft.',
+          claimant: imposter.userId,
+          verification: 'unverified',
+        },
+        confidence: 1,
+        proposerKind: 'agent',
+        proposerUserId: imposter.userId,
+        stagedByKind: 'agent',
+        stagedById: imposter.userId,
+        sessionId: sessionA,
+      });
+    } catch (error) {
+      lineageError = describeDatabaseError(error);
+    }
+    expect(lineageError).toContain('proposals_session_matches_agent');
+  });
+
+  it('refuses a cross-room session and keeps the database FK as the backstop', async () => {
+    const agent = await agentInTheRoom('room-one-scribe');
+    await handle.db
+      .insert(memberships)
+      .values({ roomId: agent.channelRoomId, userId: agent.userId, role: 'member' });
+    const other = await agentInTheRoom('room-two-scribe');
+    const [otherPlan] = await handle.db
+      .insert(plans)
+      .values({
+        roomId: other.channelRoomId,
+        agentUserId: other.userId,
+        title: 'Other room plan',
+      })
+      .returning({ id: plans.id });
+    const foreignSession = randomUUID();
+    await handle.db.insert(sessions).values({
+      id: foreignSession,
+      roomId: other.channelRoomId,
+      planId: (otherPlan as { id: string }).id,
+      harness: 'codex',
+      model: 'gpt-5.6-sol',
+    });
+
+    const scribe = await connectWithCookie(agent.userId, agent.session.cookie);
+    await scribe.subscribe(agent.channelRoomId);
+    const attempt = await scribe.command({
+      name: 'record_proposal',
+      roomId: agent.channelRoomId,
+      sessionId: foreignSession,
+      proposal: {
+        type: 'claim',
+        payload: {
+          statement: 'This must not borrow another room’s session.',
+          claimant: agent.userId,
+          verification: 'unverified',
+        },
+        confidence: 1,
+        provenance: [randomUUID()],
+        quote: 'This must not borrow another room’s session.',
+        interpretationId: null,
+      },
+    } as CommandInput);
+    expect(attempt.type).toBe('nack');
+    expect(JSON.stringify(attempt)).toContain('drafting session is unavailable');
+
+    let databaseError = '';
+    try {
+      await handle.db.insert(proposals).values({
+        roomId: agent.channelRoomId,
+        type: 'claim',
+        payload: {
+          statement: 'A direct writer cannot cross the room boundary either.',
+          claimant: agent.userId,
+          verification: 'unverified',
+        },
+        confidence: 1,
+        proposerKind: 'agent',
+        proposerUserId: agent.userId,
+        stagedByKind: 'agent',
+        stagedById: agent.userId,
+        sessionId: foreignSession,
+      });
+    } catch (error) {
+      databaseError = describeDatabaseError(error);
+    }
+    expect(databaseError).toContain('proposals_session_same_room_fk');
+  });
+
+  it('keeps direct human staging legal, nullable, and proposed (~)', async () => {
+    const person = await personInTheRoom('direct-stager');
+    const client = await connectWithCookie(person.userId, person.session.cookie);
+    await client.subscribe(room.roomId);
+    expect(
+      issuesOf(
+        await client.command({
+          name: 'record_proposal',
+          roomId: room.roomId,
+          proposal: {
+            type: 'claim',
+            payload: {
+              statement: 'A person may stage this without an execution session.',
+              claimant: person.userId,
+              verification: 'unverified',
+            },
+            confidence: 1,
+            provenance: [],
+            quote: null,
+            interpretationId: null,
+          },
+        } as unknown as CommandInput),
+      ),
+    ).toEqual([]);
+
+    const [row] = await handle.db
+      .select({ sessionId: proposals.sessionId, status: proposals.status })
+      .from(proposals);
+    expect(row).toEqual({ sessionId: null, status: 'proposed' });
   });
 });
 

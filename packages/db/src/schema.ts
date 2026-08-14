@@ -1633,17 +1633,15 @@ export const proposals = pgTable(
     quote: text('quote'),
     status: proposalStatus('status').notNull().default('proposed'),
     /**
-     * Which session staged this reading, when a session did (#116; the proposal
-     * half of #114 T3's session→drafted index). Nullable and still null in
-     * practice after #117: that ticket widened `proposer_kind` so an agent
-     * session may DRAFT — `draftToProposal` now admits an agent session and marks
-     * the reading `proposer_kind='agent'` with the agent's `proposer_user_id` —
-     * but the session *id* is not carried on the `proposal_recorded` event yet,
-     * so there is nothing for the projection to file here. The proposer is
-     * identified (by its `users` row); wiring the session-id provenance edge is
-     * the remaining half and needs the id threaded onto the event, which the
-     * proposer widening does not. Kept composite `(room_id, session_id)` so the
-     * provenance cannot cross a room the day it is populated.
+     * Which execution session staged this reading, when one did (#116; the
+     * proposal half of #114 T3's session→drafted index). Nullable because a
+     * person may stage a reading directly, without an execution session. The
+     * command derives the proposer from its authenticated principal and admits
+     * only an open session owned by that agent in this room; the composite
+     * `(room_id, session_id)` FK independently makes cross-room provenance
+     * impossible in every write path. Drizzle/0043 closes the lineage around
+     * direct projection writes too: when this is non-null, the session's parent
+     * plan must belong to `proposer_user_id` and the proposer must be an agent.
      */
     sessionId: uuid('session_id'),
     decidedBy: uuid('decided_by').references(() => users.id, { onDelete: 'set null' }),

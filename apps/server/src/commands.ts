@@ -253,7 +253,13 @@ export const Command = z.discriminatedUnion('name', [
     attachments: AttachmentList,
     references: z.array(MessageReference).max(100).default([]),
   }),
-  z.object({ name: z.literal('record_proposal'), roomId: Id, proposal: ProposalDraft }),
+  z.object({
+    name: z.literal('record_proposal'),
+    roomId: Id,
+    proposal: ProposalDraft,
+    /** The execution session drafting this reading; null for direct human staging. */
+    sessionId: Id.nullable().default(null),
+  }),
   z.object({
     name: z.literal('stage_semantic_command'),
     roomId: Id,
@@ -1322,12 +1328,50 @@ export function createCommandService({
       }
 
       case 'record_proposal':
-        return appendAndProject(session, command.roomId, ({ id, at }) => ({
-          id,
-          at,
-          type: 'proposal_recorded',
-          proposal: draftToProposal(command.proposal, command.roomId, at, session),
-        }));
+        return appendAndProject(
+          session,
+          command.roomId,
+          ({ id, at }) => ({
+            id,
+            at,
+            type: 'proposal_recorded',
+            proposal: draftToProposal(command.proposal, command.roomId, at, session),
+            sessionId: command.sessionId,
+          }),
+          async (tx) => {
+            // Not every proposal has an execution process behind it. In
+            // particular, direct human staging and the interpretation worker
+            // carry no pstree session. The edge is authoritative when present,
+            // not a synthetic requirement when absent.
+            if (command.sessionId === null) return;
+            if (session.principalKind === 'human') {
+              throw new CommandError(
+                'invalid',
+                'a directly staged human proposal cannot claim an execution session',
+              );
+            }
+            const [draftingSession] = await tx
+              .select({ id: sessions.id })
+              .from(sessions)
+              .innerJoin(plans, eq(plans.id, sessions.planId))
+              .where(
+                and(
+                  eq(sessions.id, command.sessionId),
+                  eq(sessions.roomId, command.roomId),
+                  eq(sessions.status, 'open'),
+                  eq(plans.roomId, command.roomId),
+                  eq(plans.agentUserId, session.userId),
+                ),
+              )
+              .limit(1);
+            if (!draftingSession) {
+              throw new CommandError(
+                'invalid',
+                'the drafting session is unavailable to this agent in this room',
+              );
+            }
+          },
+        );
 
       case 'stage_semantic_command': {
         let source: { body: string } | undefined;
@@ -1372,6 +1416,7 @@ export function createCommandService({
                 id,
                 at,
                 type: 'proposal_recorded',
+                sessionId: null,
                 proposal: draftToProposal(
                   {
                     type: parsed.type,
