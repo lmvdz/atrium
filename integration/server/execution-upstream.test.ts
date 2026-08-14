@@ -56,6 +56,22 @@ import { openDatabase, resetDatabase, type SeededRoom, seedRoom } from '../suppo
  * The FLIP is here too: the same coordinator, same provider, same harness, with
  * NO upstream configured, and the empty-trunk behaviour is byte-for-byte what
  * #120 shipped.
+ *
+ * ## Why this wires the provider BY HAND (#141 r2)
+ *
+ * `env.ts` now refuses to boot real-repo mode under `EXECUTION_PROVIDER=worktree`
+ * — the honest boundary: that provider's harness is unsandboxed and can rewrite
+ * a push destination through git config, which no path guard can see. See
+ * `docs/real-repo-execution.md`.
+ *
+ * This file constructs the provider directly, which is not a path an operator
+ * can configure, and does so deliberately: the mechanics under test — the seeded
+ * trunk, the real diff, the fetchable branch, the byte-identical upstream — are
+ * exactly what the #138 sandbox provider will inherit, and they are worth
+ * measuring against a real harness now rather than being unmeasured until then.
+ * The harness here is `rm <known file>`, written by this test, not arbitrary
+ * code. The boot refusal itself has its own witness, at the config layer, in
+ * `apps/server/test/execution/upstream-guards.test.ts`.
  */
 
 const run = promisify(execFile);

@@ -127,6 +127,22 @@ export function resetGitBinaryCacheForTest(): void {
  * destination. `fetch` is read-only at the source — verified by the integration
  * witness, which hashes every file in the upstream before and after a full
  * session and asserts byte-identity.
+ *
+ * ## What "never" is quantified over (#141 r2 — the honest boundary)
+ *
+ * Everything above is about ATRIUM'S code, and holds unconditionally. It is not
+ * a claim about the HARNESS. The worktree provider's harness is arbitrary,
+ * unsandboxed code with write access to its worktree's git config, and
+ * `git config url.<upstream>.pushInsteadOf <artifact-dir>` makes git rewrite the
+ * destination of `pushArtifactBranch`'s own push — same argv, every check here
+ * satisfied, ref created in the upstream. No path guard in this file can see it,
+ * and no guard-shaped fix exists: a harness that can write git config can push
+ * to the upstream directly.
+ *
+ * So the CLAIM is scoped rather than the guard re-decorated. `env.ts` refuses to
+ * boot real-repo mode under `EXECUTION_PROVIDER=worktree` at all; it is available
+ * on `shim` (which runs no harness command) and, once #138 lands, under real
+ * containment. The functions below are what the sandboxed provider will inherit.
  */
 export const UPSTREAM_IS_NEVER_WRITTEN =
   'the execution upstream is fetched from and never written to (#141)';
@@ -679,6 +695,10 @@ export const PUSH_INTO_UPSTREAM_REFUSAL =
  *
  * `upstream`, when given, is the configured execution upstream: opening the
  * artifact repo anywhere that overlaps it is refused BEFORE the first `mkdir`.
+ * Its location is CANONICALISED first (#141 r2) — a loopback `file://` spelling
+ * and a symlinked destination both name the same directory as a plain path, and
+ * a `file://` URL that cannot be canonicalised throws rather than being read as
+ * "remote, therefore no overlap".
  */
 export async function createArtifactRepo(
   dir: string,

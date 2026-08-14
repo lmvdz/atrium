@@ -1,4 +1,5 @@
-import { isAbsolute, resolve, sep } from 'node:path';
+import { realpathSync } from 'node:fs';
+import { basename, dirname, isAbsolute, join, resolve, sep } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 /**
@@ -44,31 +45,178 @@ export interface UpstreamSeed {
  */
 export const UPSTREAM_URL_SCHEMES = ['https://', 'http://', 'ssh://', 'git://', 'file://'] as const;
 
-/** Is this a syntactically acceptable upstream location? */
-export function isAcceptableUpstreamUrl(url: string): boolean {
-  if (url.startsWith('-')) return false;
-  if (isAbsolute(url)) return true;
-  return UPSTREAM_URL_SCHEMES.some((scheme) => url.startsWith(scheme));
+/** The same allowlist as protocols, which is what a parsed URL actually reports. */
+const UPSTREAM_URL_PROTOCOLS: ReadonlySet<string> = new Set(
+  UPSTREAM_URL_SCHEMES.map((scheme) => scheme.replace('//', '')),
+);
+
+/** The protocols that are meaningless without a host to reach. */
+const AUTHORITY_REQUIRED: ReadonlySet<string> = new Set(['https:', 'http:', 'ssh:', 'git:']);
+
+/**
+ * A host that is plausibly a host — and, load-bearing, is NOT an argv flag.
+ *
+ * `new URL('ssh://-oProxyCommand=curl|sh/repo')` parses: `ssh:` is a non-special
+ * scheme, so its authority is an *opaque host* and `=` is legal in one. The
+ * prefix check this replaced accepted that string outright, and `-o…` reaching
+ * git's ssh transport is a command-execution primitive. So the host is
+ * allowlisted to a hostname/IP shape, and a leading `-` is refused twice over.
+ */
+function isPlausibleHost(host: string): boolean {
+  if (host === '') return false;
+  if (host.startsWith('[') && host.endsWith(']')) return /^\[[0-9A-Fa-f:.]+\]$/.test(host);
+  return /^[A-Za-z0-9](?:[A-Za-z0-9._-]*[A-Za-z0-9])?$/.test(host);
 }
 
 /**
- * The LOCAL absolute path an upstream names, or `null` when it is remote.
+ * Is this a syntactically acceptable upstream location?
  *
- * Only a local upstream can be overlapped by a directory this server writes, so
- * only a local upstream has an overlap question to answer. A `file://` URL is
- * resolved the same way a bare path is — otherwise the same directory would be
- * spelled two ways, one checked and one not.
+ * PARSED, not prefix-matched (#141 r2). The prefix check this replaced answered
+ * `startsWith('ssh://')`, which is true of `ssh://-oProxyCommand=…` and of the
+ * hostless `https://`; and it answered *false* for `HTTPS://host/repo`, which is
+ * the same URL git itself accepts — schemes are case-insensitive. Both halves of
+ * that are wrong in the same way: a string prefix is not a URL.
+ *
+ * The allowlist is unchanged in spirit — an absolute local path, or one of
+ * `UPSTREAM_URL_SCHEMES` — but it is now checked against the parse:
+ *
+ *  - the protocol must be on the allowlist (case-folded by the parser, so
+ *    `HTTPS://` and `https://` are the one thing they always were);
+ *  - `https`/`http`/`ssh`/`git` must carry a real authority, so bare `https://`
+ *    and flag-shaped hosts are refused rather than handed to git;
+ *  - `file://` must carry a path and may carry NO query or fragment — `?`/`#`
+ *    are not path characters, and a `file://` URL wearing one is a value whose
+ *    two readers (this module and git) would disagree about.
+ */
+export function isAcceptableUpstreamUrl(url: string): boolean {
+  if (url.startsWith('-')) return false;
+  if (isAbsolute(url)) return true;
+  let parsed: URL;
+  try {
+    parsed = new URL(url);
+  } catch {
+    return false;
+  }
+  if (!UPSTREAM_URL_PROTOCOLS.has(parsed.protocol)) return false;
+  if (parsed.username.startsWith('-') || parsed.password.startsWith('-')) return false;
+  if (AUTHORITY_REQUIRED.has(parsed.protocol)) return isPlausibleHost(parsed.hostname);
+  // `file:` — an authority is optional, but a PATH is not, and the host (when
+  // present) decides local-vs-remote in `upstreamLocalPath`, not here.
+  if (parsed.search !== '' || parsed.hash !== '') return false;
+  if (parsed.pathname === '' || parsed.pathname === '/') return false;
+  return parsed.hostname === '' || isPlausibleHost(parsed.hostname);
+}
+
+/**
+ * REFUSAL 6 — a `file://` URL nobody can canonicalise is REFUSED, never read as
+ * "not local" (#141 r2).
+ *
+ * The defect this closes: `upstreamLocalPath` used to `try { fileURLToPath(url) }
+ * catch { return null }`, and `fileURLToPath` throws `ERR_INVALID_FILE_URL_HOST`
+ * on any `file://` URL with a non-empty host. So `file://127.0.0.1/srv/atrium`
+ * returned `null` — read by every caller as "the upstream is remote, there is no
+ * overlap question" — while git happily resolved it to the local directory
+ * `/srv/atrium`. All four overlap guards no-opped on a spelling of the very path
+ * they exist to protect. A swallowed parse failure is not an absence of danger;
+ * it is an absence of knowledge, and the two must not share a return value.
+ */
+export const UPSTREAM_UNPARSEABLE_URL_REFUSAL =
+  'refusing an execution upstream file:// URL this server cannot canonicalise to a directory ' +
+  '(#141) — an unreadable location is not evidence that it is remote, and treating it as remote ' +
+  'is what silently disables every overlap check';
+
+/**
+ * The `file://` hosts that name THIS machine. RFC 8089 makes an empty host and
+ * `localhost` equivalent to a local path; the loopback literals are the same
+ * claim spelled numerically, and git resolves all of them to the local path.
+ * Anything else is a genuinely remote host and stays remote.
+ */
+const LOOPBACK_FILE_HOSTS: ReadonlySet<string> = new Set([
+  'localhost',
+  '127.0.0.1',
+  '[::1]',
+  '::1',
+]);
+
+/**
+ * The LOCAL absolute path an upstream names, or `null` when it is genuinely
+ * REMOTE. Throws `UPSTREAM_UNPARSEABLE_URL_REFUSAL` when it is neither.
+ *
+ * Three outcomes, because there are three states and the old two-state return
+ * merged the dangerous one into the safe one:
+ *
+ *  - **local** — an absolute path, or a `file://` URL whose host is absent or a
+ *    loopback alias (`localhost`, `127.0.0.1`, `[::1]`). Node's `fileURLToPath`
+ *    refuses the numeric spellings outright, so the host is stripped first and
+ *    the path taken from the parse.
+ *  - **remote** (`null`) — every other scheme, and a `file://` URL naming some
+ *    OTHER host, which is a different machine's filesystem and cannot be
+ *    overlapped by a directory here.
+ *  - **unparseable** (throw) — a `file://` URL that is neither. Fail closed.
  */
 export function upstreamLocalPath(url: string): string | null {
   if (isAbsolute(url)) return resolve(url);
-  if (url.startsWith('file://')) {
+  let parsed: URL;
+  try {
+    parsed = new URL(url);
+  } catch {
+    // Not a URL at all and not an absolute path — `isAcceptableUpstreamUrl`
+    // refuses this shape; from here it is simply not a local directory.
+    return null;
+  }
+  if (parsed.protocol !== 'file:') return null;
+  const host = parsed.hostname.toLowerCase();
+  if (host !== '' && !LOOPBACK_FILE_HOSTS.has(host)) return null;
+  if (parsed.search !== '' || parsed.hash !== '') {
+    throw new Error(`${UPSTREAM_UNPARSEABLE_URL_REFUSAL}: ${url.slice(0, 120)}`);
+  }
+  const hostless = new URL(url);
+  hostless.host = '';
+  try {
+    const path = fileURLToPath(hostless);
+    if (path === '') throw new Error('empty path');
+    return resolve(path);
+  } catch {
+    throw new Error(`${UPSTREAM_UNPARSEABLE_URL_REFUSAL}: ${url.slice(0, 120)}`);
+  }
+}
+
+/**
+ * The longest EXISTING prefix of `path`, dereferenced, with the not-yet-existing
+ * tail re-appended.
+ *
+ * `resolve()` is pure lexical algebra: it collapses `..` and normalises
+ * separators and knows nothing about the filesystem. A symlink is precisely a
+ * path whose lexical spelling and real location differ, so an artifact dir that
+ * is a symlink INTO the upstream resolves to something that does not look like
+ * the upstream at all — and then `init --bare` writes through it. The directory
+ * usually does not exist yet at check time (the server is about to create it),
+ * which is why this walks up to the deepest component that DOES exist: a
+ * symlinked parent is the same hazard one level up.
+ */
+function canonicalize(path: string): string {
+  const start = resolve(path);
+  const tail: string[] = [];
+  let current = start;
+  for (;;) {
     try {
-      return resolve(fileURLToPath(url));
+      const real = realpathSync(current);
+      return tail.length === 0 ? real : join(real, ...tail);
     } catch {
-      return null;
+      const parent = dirname(current);
+      // Reached the filesystem root without finding anything that exists — there
+      // is nothing to dereference, so the lexical answer is the only answer.
+      if (parent === current) return start;
+      tail.unshift(basename(current));
+      current = parent;
     }
   }
-  return null;
+}
+
+/** Same directory, or one inside the other — purely lexically. */
+function lexicalOverlap(left: string, right: string): boolean {
+  if (left === right) return true;
+  return left.startsWith(right + sep) || right.startsWith(left + sep);
 }
 
 /**
@@ -78,14 +226,33 @@ export function upstreamLocalPath(url: string): string | null {
  * Equality alone is not the question. An artifact repo at
  * `<upstream>/.git/atrium-artifacts` is not equal to the upstream and would
  * still write inside it, which is exactly the write the invariant forbids. So
- * containment counts, in both directions, and the comparison is on RESOLVED
- * paths so `/repo` and `/repo/../repo` cannot be two different answers.
+ * containment counts, in both directions.
+ *
+ * And LEXICAL containment alone is not the question either (#141 r2). The check
+ * is run three ways and any one of them saying "overlap" is an overlap, because
+ * this guard's only acceptable failure direction is a false refusal:
+ *
+ *  1. **resolved** — `/repo` and `/repo/../repo` are one directory.
+ *  2. **dereferenced** — `canonicalize` above. A symlinked scratch or artifact
+ *     dir pointing into the upstream is the same write with a different name.
+ *  3. **case-folded** — on a case-insensitive filesystem (macOS's default, NTFS)
+ *     `/Repos/Atrium` and `/repos/atrium` are ONE directory, and neither of the
+ *     first two comparisons notices. Folding costs a false refusal on a
+ *     case-SENSITIVE host holding two dirs that differ only in case; that is a
+ *     configuration an operator can rename their way out of, and the other
+ *     direction is a silent write to somebody's repository.
  */
 export function pathsOverlap(a: string, b: string): boolean {
   const left = resolve(a);
   const right = resolve(b);
-  if (left === right) return true;
-  return left.startsWith(right + sep) || right.startsWith(left + sep);
+  const realLeft = canonicalize(a);
+  const realRight = canonicalize(b);
+  return (
+    lexicalOverlap(left, right) ||
+    lexicalOverlap(realLeft, realRight) ||
+    lexicalOverlap(left.toLowerCase(), right.toLowerCase()) ||
+    lexicalOverlap(realLeft.toLowerCase(), realRight.toLowerCase())
+  );
 }
 
 /**
@@ -113,7 +280,7 @@ export const UPSTREAM_REF_REFUSAL =
 export const UPSTREAM_URL_REFUSAL =
   'refusing an execution upstream location git would resolve as a flag, an ext:: transport, or ' +
   'a cwd-relative path (#141) — name an absolute directory or a ' +
-  `${UPSTREAM_URL_SCHEMES.join(' / ')} URL`;
+  `${UPSTREAM_URL_SCHEMES.join(' / ')} URL with a real authority where the scheme needs one`;
 
 /**
  * Validate a seed at the boundary, before either half reaches an argv.

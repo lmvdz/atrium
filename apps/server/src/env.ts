@@ -349,7 +349,7 @@ export type MigrationEnv = z.infer<typeof BaseEnvSchema>;
  * `ATRIUM_TRUSTED_PROXY_HOPS` is here for the same reason and a sharper one.
  * This process binds a port, so it *has* a peer address for every caller — but
  * only a deployment can say whether that address is the caller or a proxy's.
- * Unset, `clientIp` believes nothing and the rate limiter's IP dimension is
+ * Unset, `clientIp` believes nothing and the rate limiter’s IP dimension is
  * inert while looking configured, which is exactly what round 2 shipped into
  * compose. `0` is a perfectly good answer ("nothing is in front of me", which is
  * true of a published port on a single-node VPS); what is not acceptable is
@@ -569,19 +569,68 @@ function assertExecutionUpstreamSafe(env: Env, problems: string[]): void {
         `sandbox seam builds no scratch repo, so an upstream under EXECUTION_PROVIDER=${env.EXECUTION_PROVIDER} would be silently inert`,
     );
   }
+  // ── THE HONEST BOUNDARY (#141 r2) ─────────────────────────────────────────
+  //
+  // Everything else in this seam enforces THE UPSTREAM IS NEVER WRITTEN against
+  // ATRIUM'S OWN code paths, and it holds there unconditionally. It does not
+  // hold against the HARNESS, and the worktree provider's harness is
+  // deliberately unsandboxed: it is an arbitrary command running as this user,
+  // with write access to its worktree's git config. One line —
+  //   git config url.<upstream>.pushInsteadOf <artifact-dir>
+  // — is inherited by the adapter's own later `git push <artifact-dir> …`
+  // (worktrees share the common dir, so the harness's config is the adapter's
+  // config), and git silently rewrites the destination to the upstream. The
+  // overlap guards never see it: the argv still says the artifact dir.
+  //
+  // There is no fix for that inside this seam. A guard is not a boundary when
+  // the thing it guards against is arbitrary local code — a harness that can
+  // write git config can also just run `git push <upstream>` itself. The only
+  // real answer is the containment #138 buys (docker/gVisor), which is not
+  // built. So the CLAIM is scoped to the truth rather than the guard being
+  // re-decorated: real-repo mode is not available under this provider at all.
+  //
+  // The shim provider is unaffected — it runs no harness command, so there is
+  // nothing that could write a config, and its push is Atrium's own argv.
+  if (env.EXECUTION_PROVIDER === 'worktree') {
+    problems.push(
+      '  EXECUTION_UPSTREAM_URL: real-repo mode is unavailable under the UNSANDBOXED worktree ' +
+        "provider — its harness is arbitrary code holding write access to the session's git " +
+        'config, and one url.<upstream>.pushInsteadOf line silently redirects the later push ' +
+        'this adapter makes into the upstream, which no path-overlap guard can see. THE UPSTREAM ' +
+        'IS NEVER WRITTEN holds against the code in this repo unconditionally and against a hostile ' +
+        'harness only under the sandbox provider (#138, docker/gVisor), which is not built yet. ' +
+        'Use EXECUTION_PROVIDER=shim, or wait for #138.',
+    );
+  }
   if (!isAcceptableUpstreamUrl(url)) {
     problems.push(
       '  EXECUTION_UPSTREAM_URL: must name an absolute directory or a ' +
         `${UPSTREAM_URL_SCHEMES.join(' / ')} URL — a leading dash, an ext:: transport or a ` +
         'cwd-relative path is not a repository and is refused',
     );
+    // Already refused on SHAPE. Asking where it points would add a second
+    // sentence about a value that is not a location at all — and the campaign's
+    // disjointness rule is one fixture, one guard: two refusals for one input is
+    // how a witness ends up "passing" on the wrong guard's message.
+    return;
   }
   // ── The write-overlap gate: the reason this function exists ────────────────
   //
   // Equality is not the question — an artifact repo at `<upstream>/.git/atrium`
   // is not equal to the upstream and would still be written INSIDE it. So the
   // check is containment, in both directions, on resolved paths.
-  const upstreamPath = upstreamLocalPath(url);
+  //
+  // `upstreamLocalPath` THROWS on a `file://` URL it cannot canonicalise rather
+  // than returning "remote" (#141 r2) — a swallowed parse failure used to turn
+  // every check below into a no-op. Boot surfaces it as a problem like any
+  // other, so the operator sees it beside the rest rather than as a stack trace.
+  let upstreamPath: string | null;
+  try {
+    upstreamPath = upstreamLocalPath(url);
+  } catch (error) {
+    problems.push(`  EXECUTION_UPSTREAM_URL: ${(error as Error).message}`);
+    return;
+  }
   if (upstreamPath !== null) {
     const written: Array<[string, string | undefined]> = [
       ['EXECUTION_SCRATCH_DIR', env.EXECUTION_SCRATCH_DIR],
