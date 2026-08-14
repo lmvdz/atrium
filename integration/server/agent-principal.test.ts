@@ -3,20 +3,26 @@ import {
   createAtriumAuth,
   getAtriumSession,
   mintAgentSession,
+  provisionAgentConfig,
   provisionAgentPrincipal,
   sessionCookieHeader,
 } from '@atrium/auth';
 import type { DatabaseHandle } from '@atrium/db';
 import {
   acceptedObjects,
+  agents,
   attentionItems,
   coreEvents,
   memberships,
   messages,
+  plans,
+  proposals,
+  rooms,
+  sessions,
   users,
   workspaceMembers,
 } from '@atrium/db';
-import { and, eq, sql } from 'drizzle-orm';
+import { and, eq, inArray, sql } from 'drizzle-orm';
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it } from 'vitest';
 import type { CommandInput } from '../../apps/server/src/commands.js';
 import { createLogger } from '../../apps/server/src/logger.js';
@@ -163,7 +169,9 @@ beforeEach(async () => {
   server = await startTestServer(handle, {
     // The real seam. Every other integration suite uses the stub, because their
     // questions are not about who is connected; this one's is.
-    session: { authenticateUpgrade: createUpgradeAuthenticator({ auth, logger }) },
+    session: {
+      authenticateUpgrade: createUpgradeAuthenticator({ auth, db: handle.db, logger }),
+    },
   });
 });
 
@@ -184,8 +192,28 @@ async function agentInTheRoom(name = 'scribe') {
     displayName: name,
   });
   await admit(principal.userId);
+  // An operating agent must have an owner sidecar (#116 fix r2): `mintAgentSession`
+  // now refuses an agent with no `agents` row. Give it a channel room it owns and
+  // a human owner (ada) so the config — and therefore the session — can exist.
+  const [channel] = await handle.db
+    .insert(rooms)
+    .values({
+      workspaceId: room.workspaceId,
+      slug: `chan-${name}-${randomUUID()}`,
+      name: `${name}'s channel`,
+    })
+    .returning({ id: rooms.id });
+  await provisionAgentConfig({
+    db: handle.db,
+    userId: principal.userId,
+    ownerUserId: room.people.ada as string,
+    channelRoomId: (channel as { id: string }).id,
+    host: 'localhost',
+    harness: 'claude',
+    model: 'opus',
+  });
   const session = await mintAgentSession({ auth, db: handle.db, userId: principal.userId });
-  return { ...principal, session };
+  return { ...principal, channelRoomId: (channel as { id: string }).id, session };
 }
 
 /** A person, admitted the same way, holding a session minted the same way. */
@@ -242,12 +270,53 @@ describe('an agent principal, from provisioning to the ledger', () => {
     // Read back through the library, from the cookie, by the same function the
     // WebSocket upgrade and every web page call. Catches: minting a row that no
     // real code path would accept, which is what a hand-built session would be.
-    const resolved = await getAtriumSession(auth, new Headers({ cookie: agent.session.cookie }));
+    const resolved = await getAtriumSession(
+      auth,
+      new Headers({ cookie: agent.session.cookie }),
+      handle.db,
+    );
     expect(resolved).toMatchObject({
       userId: agent.userId,
       principalKind: 'agent',
       emailVerified: true,
     });
+  });
+
+  it('stops resolving an agent session once its owner sidecar is deleted (#116 fix r3, F-C)', async () => {
+    /**
+     * The round-2 leak, from the post-mint side. `mintAgentSession` refuses an
+     * agent with NO sidecar — but a cookie outlives its mint. An agent that WAS
+     * configured, minted a session, and then had its `agents` row deleted
+     * (`DELETE FROM agents WHERE user_id = …`) still presents a valid Better
+     * Auth session, and round 2 kept letting it operate: ownerless, the "chain
+     * terminates at a human" invariant (#114) bypassed for the life of the
+     * cookie.
+     *
+     * `getAtriumSession` re-reads the sidecar on every resolution now, so the
+     * live cookie fails closed the moment the owner is gone — the same recheck
+     * the mint did, run again where the session is actually used.
+     *
+     * RED without the fix: a kind-only `getAtriumSession` returns a usable agent
+     * session here regardless of whether any `agents` row exists.
+     */
+    const agent = await agentInTheRoom();
+    const headers = new Headers({ cookie: agent.session.cookie });
+
+    // Live and usable while the sidecar exists.
+    expect(await getAtriumSession(auth, headers, handle.db)).toMatchObject({
+      userId: agent.userId,
+      principalKind: 'agent',
+    });
+
+    // De-sidecar it. `agents.channel_room_id` is referenced by nothing that
+    // blocks the delete; the row is the agent's config, and removing it removes
+    // the owner.
+    await handle.db.delete(agents).where(eq(agents.userId, agent.userId));
+
+    // The same cookie, the same function — now no session at all. Not a human,
+    // not a downgraded agent: null, the fail-closed verdict `principalKind ===
+    // null` gets.
+    expect(await getAtriumSession(auth, headers, handle.db)).toBeNull();
   });
 
   it('refuses to mint a session for a person — this is not a sign-in bypass', async () => {
@@ -258,6 +327,22 @@ describe('an agent principal, from provisioning to the ledger', () => {
     const person = await personInTheRoom();
     await expect(mintAgentSession({ auth, db: handle.db, userId: person.userId })).rejects.toThrow(
       /is a human principal/,
+    );
+  });
+
+  it('refuses to mint a session for an agent with NO owner sidecar (#116 fix r2)', async () => {
+    // The round-1 leak: an agent principal provisioned but never CONFIGURED had
+    // no `agents` row and so no `owner_user_id`, yet round 1 minted it a session
+    // and let it operate — the "chain terminates at a human" invariant bypassed.
+    // `mintAgentSession` now reads the config row, not just the kind: no sidecar,
+    // no session. Catches: dropping the agents-row check back to a kind-only test.
+    const bare = await provisionAgentPrincipal({
+      db: handle.db,
+      email: `bare-${randomUUID()}@agents.invalid`,
+      displayName: 'bare',
+    });
+    await expect(mintAgentSession({ auth, db: handle.db, userId: bare.userId })).rejects.toThrow(
+      /has no config sidecar/,
     );
   });
 
@@ -366,6 +451,427 @@ describe('an agent principal, from provisioning to the ledger', () => {
       id: agent.userId,
       type: 'message_posted',
     });
+  });
+});
+
+describe('a drafting session signs the proposal it stages', () => {
+  it('moves the projected session_id when only the drafting session changes', async () => {
+    const agent = await agentInTheRoom('session-scribe');
+    await handle.db
+      .insert(memberships)
+      .values({ roomId: agent.channelRoomId, userId: agent.userId, role: 'member' });
+    const [plan] = await handle.db
+      .insert(plans)
+      .values({
+        roomId: agent.channelRoomId,
+        agentUserId: agent.userId,
+        title: 'Trace the reading',
+      })
+      .returning({ id: plans.id });
+    const sessionA = randomUUID();
+    const sessionB = randomUUID();
+    await handle.db.insert(sessions).values([
+      {
+        id: sessionA,
+        roomId: agent.channelRoomId,
+        planId: (plan as { id: string }).id,
+        harness: 'codex',
+        model: 'gpt-5.6-sol',
+      },
+      {
+        id: sessionB,
+        roomId: agent.channelRoomId,
+        planId: (plan as { id: string }).id,
+        harness: 'codex',
+        model: 'gpt-5.6-sol',
+      },
+    ]);
+
+    const scribe = await connectWithCookie(agent.userId, agent.session.cookie);
+    await scribe.subscribe(agent.channelRoomId);
+    const body = 'The drafting session is part of this reading’s receipt.';
+    expect(
+      issuesOf(await scribe.command({ name: 'send_message', roomId: agent.channelRoomId, body })),
+    ).toEqual([]);
+    const [source] = await handle.db
+      .select({ id: messages.id })
+      .from(messages)
+      .where(and(eq(messages.roomId, agent.channelRoomId), eq(messages.body, body)));
+    const proposal = {
+      type: 'claim' as const,
+      payload: { statement: body, claimant: agent.userId, verification: 'unverified' as const },
+      confidence: 1,
+      provenance: [(source as { id: string }).id],
+      quote: body,
+      interpretationId: null,
+    };
+
+    // The two commands differ only in the execution session. A projector that
+    // stubs the edge to either constant passes one assertion and fails the pair.
+    for (const sessionId of [sessionA, sessionB]) {
+      expect(
+        issuesOf(
+          await scribe.command({
+            name: 'record_proposal',
+            roomId: agent.channelRoomId,
+            proposal,
+            sessionId,
+          } as CommandInput),
+        ),
+      ).toEqual([]);
+    }
+
+    const recorded = await handle.db
+      .select({ payload: coreEvents.payload })
+      .from(coreEvents)
+      .where(
+        and(eq(coreEvents.roomId, agent.channelRoomId), eq(coreEvents.type, 'proposal_recorded')),
+      )
+      .orderBy(coreEvents.seq);
+    const proposalIds = recorded.map(
+      (row) => (row.payload as { proposal: { id: string } }).proposal.id,
+    );
+    const projected = await handle.db
+      .select({ id: proposals.id, sessionId: proposals.sessionId })
+      .from(proposals)
+      .where(inArray(proposals.id, proposalIds));
+    const sessionByProposal = new Map(projected.map((row) => [row.id, row.sessionId]));
+    expect(proposalIds.map((id) => sessionByProposal.get(id))).toEqual([sessionA, sessionB]);
+
+    // The projection guard above is not the only writer. A direct insert that
+    // pairs this real same-room session with another agent is refused by 0043,
+    // while the existing composite FK remains responsible for cross-room ids.
+    const imposter = await provisionAgentPrincipal({
+      db: handle.db,
+      email: `imposter-${randomUUID()}@agents.invalid`,
+      displayName: 'imposter',
+    });
+    let lineageError = '';
+    try {
+      await handle.db.insert(proposals).values({
+        roomId: agent.channelRoomId,
+        type: 'claim',
+        payload: {
+          statement: 'Another agent must not inherit this session’s draft.',
+          claimant: imposter.userId,
+          verification: 'unverified',
+        },
+        confidence: 1,
+        proposerKind: 'agent',
+        proposerUserId: imposter.userId,
+        stagedByKind: 'agent',
+        stagedById: imposter.userId,
+        sessionId: sessionA,
+      });
+    } catch (error) {
+      lineageError = describeDatabaseError(error);
+    }
+    expect(lineageError).toContain('proposals_session_matches_agent');
+  });
+
+  it('refuses a cross-room session and keeps the database FK as the backstop', async () => {
+    const agent = await agentInTheRoom('room-one-scribe');
+    await handle.db
+      .insert(memberships)
+      .values({ roomId: agent.channelRoomId, userId: agent.userId, role: 'member' });
+    const other = await agentInTheRoom('room-two-scribe');
+    const [otherPlan] = await handle.db
+      .insert(plans)
+      .values({
+        roomId: other.channelRoomId,
+        agentUserId: other.userId,
+        title: 'Other room plan',
+      })
+      .returning({ id: plans.id });
+    const foreignSession = randomUUID();
+    await handle.db.insert(sessions).values({
+      id: foreignSession,
+      roomId: other.channelRoomId,
+      planId: (otherPlan as { id: string }).id,
+      harness: 'codex',
+      model: 'gpt-5.6-sol',
+    });
+
+    const scribe = await connectWithCookie(agent.userId, agent.session.cookie);
+    await scribe.subscribe(agent.channelRoomId);
+    const attempt = await scribe.command({
+      name: 'record_proposal',
+      roomId: agent.channelRoomId,
+      sessionId: foreignSession,
+      proposal: {
+        type: 'claim',
+        payload: {
+          statement: 'This must not borrow another room’s session.',
+          claimant: agent.userId,
+          verification: 'unverified',
+        },
+        confidence: 1,
+        provenance: [randomUUID()],
+        quote: 'This must not borrow another room’s session.',
+        interpretationId: null,
+      },
+    } as CommandInput);
+    expect(attempt.type).toBe('nack');
+    expect(JSON.stringify(attempt)).toContain('drafting session is unavailable');
+
+    let databaseError = '';
+    try {
+      await handle.db.insert(proposals).values({
+        roomId: agent.channelRoomId,
+        type: 'claim',
+        payload: {
+          statement: 'A direct writer cannot cross the room boundary either.',
+          claimant: agent.userId,
+          verification: 'unverified',
+        },
+        confidence: 1,
+        proposerKind: 'agent',
+        proposerUserId: agent.userId,
+        stagedByKind: 'agent',
+        stagedById: agent.userId,
+        sessionId: foreignSession,
+      });
+    } catch (error) {
+      databaseError = describeDatabaseError(error);
+    }
+    expect(databaseError).toContain('proposals_session_same_room_fk');
+  });
+
+  it('keeps direct human staging legal, nullable, and proposed (~)', async () => {
+    const person = await personInTheRoom('direct-stager');
+    const client = await connectWithCookie(person.userId, person.session.cookie);
+    await client.subscribe(room.roomId);
+    expect(
+      issuesOf(
+        await client.command({
+          name: 'record_proposal',
+          roomId: room.roomId,
+          proposal: {
+            type: 'claim',
+            payload: {
+              statement: 'A person may stage this without an execution session.',
+              claimant: person.userId,
+              verification: 'unverified',
+            },
+            confidence: 1,
+            provenance: [],
+            quote: null,
+            interpretationId: null,
+          },
+        } as unknown as CommandInput),
+      ),
+    ).toEqual([]);
+
+    const [row] = await handle.db
+      .select({ sessionId: proposals.sessionId, status: proposals.status })
+      .from(proposals);
+    expect(row).toEqual({ sessionId: null, status: 'proposed' });
+  });
+
+  /**
+   * ONE CLAUSE, ONE TEST — the three below exist because the guard had three
+   * conditions and the suite could see none of them.
+   *
+   * `record_proposal`'s session check is a conjunction: refuse a human outright,
+   * then admit only a session that is `open` AND whose plan's `agent_user_id` is
+   * the connected agent. Before these, deleting any one of those three left both
+   * suites green — the happy-path test above only ever presents an agent, an
+   * open session, and its own plan, so every clause was satisfied by the same
+   * fixture and none of them was load-bearing for a single assertion.
+   *
+   * Each test therefore holds the other two clauses TRUE and flips exactly one,
+   * and each asserts the *specific* refusal rather than merely `nack`: reverting
+   * the human clause still nacks (the session lookup then fails on the plan
+   * owner), and reverting the status clause still nacks (0044 refuses the insert
+   * at the table). Only the message separates "the clause did its job" from
+   * "something else downstream caught it".
+   */
+  it('refuses a person’s proposal that claims an execution session (the human clause)', async () => {
+    const agent = await agentInTheRoom('human-claim-scribe');
+    const person = await personInTheRoom('session-claiming-human');
+    await handle.db.insert(memberships).values([
+      { roomId: agent.channelRoomId, userId: agent.userId, role: 'member' },
+      { roomId: agent.channelRoomId, userId: person.userId, role: 'member' },
+    ]);
+    const [plan] = await handle.db
+      .insert(plans)
+      .values({
+        roomId: agent.channelRoomId,
+        agentUserId: agent.userId,
+        title: 'A plan a person has no session in',
+      })
+      .returning({ id: plans.id });
+    const [openSession] = await handle.db
+      .insert(sessions)
+      .values({
+        roomId: agent.channelRoomId,
+        planId: (plan as { id: string }).id,
+        harness: 'codex',
+        model: 'gpt-5.6-sol',
+        status: 'open',
+      })
+      .returning({ id: sessions.id });
+
+    // The session is real, open, in this room, and the person is a member here.
+    // Everything except who is asking is in order, so the only thing that can
+    // refuse this is the human clause.
+    const client = await connectWithCookie(person.userId, person.session.cookie);
+    await client.subscribe(agent.channelRoomId);
+    const statement = 'A person cannot sign a reading with a process’s name.';
+    const attempt = await client.command({
+      name: 'record_proposal',
+      roomId: agent.channelRoomId,
+      sessionId: (openSession as { id: string }).id,
+      proposal: {
+        type: 'claim',
+        payload: { statement, claimant: person.userId, verification: 'unverified' },
+        confidence: 1,
+        provenance: [],
+        quote: null,
+        interpretationId: null,
+      },
+    } as unknown as CommandInput);
+    expect(attempt.type).toBe('nack');
+    expect(JSON.stringify(attempt)).toContain(
+      'a directly staged human proposal cannot claim an execution session',
+    );
+
+    // And nothing landed: the refusal is before the append, not after it.
+    expect(await handle.db.select({ id: proposals.id }).from(proposals)).toEqual([]);
+  });
+
+  it('refuses an agent drafting against its own SETTLED session (the status clause)', async () => {
+    const agent = await agentInTheRoom('settled-session-scribe');
+    await handle.db
+      .insert(memberships)
+      .values({ roomId: agent.channelRoomId, userId: agent.userId, role: 'member' });
+    const [plan] = await handle.db
+      .insert(plans)
+      .values({
+        roomId: agent.channelRoomId,
+        agentUserId: agent.userId,
+        title: 'A plan whose session already exited',
+      })
+      .returning({ id: plans.id });
+    // Its own plan, its own room, its own agent — the ONLY thing wrong is that
+    // the process this reading claims to come from is already gone.
+    const [settled] = await handle.db
+      .insert(sessions)
+      .values({
+        roomId: agent.channelRoomId,
+        planId: (plan as { id: string }).id,
+        harness: 'codex',
+        model: 'gpt-5.6-sol',
+        status: 'settled',
+        exitSummary: 'the work landed and the process exited',
+      })
+      .returning({ id: sessions.id });
+
+    const scribe = await connectWithCookie(agent.userId, agent.session.cookie);
+    await scribe.subscribe(agent.channelRoomId);
+    const statement = 'A settled session cannot still be drafting.';
+    const attempt = await scribe.command({
+      name: 'record_proposal',
+      roomId: agent.channelRoomId,
+      sessionId: (settled as { id: string }).id,
+      proposal: {
+        type: 'claim',
+        payload: { statement, claimant: agent.userId, verification: 'unverified' },
+        confidence: 1,
+        provenance: [],
+        quote: null,
+        interpretationId: null,
+      },
+    } as unknown as CommandInput);
+    expect(attempt.type).toBe('nack');
+    expect(JSON.stringify(attempt)).toContain(
+      'the drafting session is unavailable to this agent in this room',
+    );
+    expect(await handle.db.select({ id: proposals.id }).from(proposals)).toEqual([]);
+
+    // And the table says it too (0044). 0043 asked only WHOSE session this is,
+    // which this row answers correctly — same agent, same room, its own plan —
+    // so before 0044 a direct writer could bind a reading to a process that had
+    // already published its exit summary, and every read model would render the
+    // receipt without a way to tell.
+    let lineageError = '';
+    try {
+      await handle.db.insert(proposals).values({
+        roomId: agent.channelRoomId,
+        type: 'claim',
+        payload: { statement, claimant: agent.userId, verification: 'unverified' },
+        confidence: 1,
+        proposerKind: 'agent',
+        proposerUserId: agent.userId,
+        stagedByKind: 'agent',
+        stagedById: agent.userId,
+        sessionId: (settled as { id: string }).id,
+      });
+    } catch (error) {
+      lineageError = describeDatabaseError(error);
+    }
+    expect(lineageError).toContain('proposals_session_is_open');
+  });
+
+  it('refuses an agent drafting against another agent’s session in the same room (the owner clause)', async () => {
+    const owner = await agentInTheRoom('owning-scribe');
+    const drafter = await agentInTheRoom('borrowing-scribe');
+    /**
+     * THE ROOM IS THE OWNER'S CHANNEL, NOT THE DRAFTER'S — and that is forced,
+     * not a preference.
+     *
+     * `plans_room_matches_agent_channel` (0021's lineage) makes a plan's room
+     * the agent's OWN channel, so two agents cannot both hold plans in one room:
+     * the only constructible same-room pair is one agent's channel with a second
+     * agent admitted to it as a member. That is this fixture. The drafter is a
+     * full member here — `requireMembership` passes, the session is open, it is
+     * in the room named on the command, and the composite FK is satisfied — so
+     * `plans.agent_user_id` is the sole remaining thing that can refuse it.
+     */
+    await handle.db.insert(memberships).values([
+      { roomId: owner.channelRoomId, userId: owner.userId, role: 'member' },
+      { roomId: owner.channelRoomId, userId: drafter.userId, role: 'member' },
+    ]);
+    const [ownersPlan] = await handle.db
+      .insert(plans)
+      .values({
+        roomId: owner.channelRoomId,
+        agentUserId: owner.userId,
+        title: 'The other agent’s plan',
+      })
+      .returning({ id: plans.id });
+    const [ownersSession] = await handle.db
+      .insert(sessions)
+      .values({
+        roomId: owner.channelRoomId,
+        planId: (ownersPlan as { id: string }).id,
+        harness: 'codex',
+        model: 'gpt-5.6-sol',
+        status: 'open',
+      })
+      .returning({ id: sessions.id });
+
+    const scribe = await connectWithCookie(drafter.userId, drafter.session.cookie);
+    await scribe.subscribe(owner.channelRoomId);
+    const statement = 'One agent must not sign with another agent’s process.';
+    const attempt = await scribe.command({
+      name: 'record_proposal',
+      roomId: owner.channelRoomId,
+      sessionId: (ownersSession as { id: string }).id,
+      proposal: {
+        type: 'claim',
+        payload: { statement, claimant: drafter.userId, verification: 'unverified' },
+        confidence: 1,
+        provenance: [],
+        quote: null,
+        interpretationId: null,
+      },
+    } as unknown as CommandInput);
+    expect(attempt.type).toBe('nack');
+    expect(JSON.stringify(attempt)).toContain(
+      'the drafting session is unavailable to this agent in this room',
+    );
+    expect(await handle.db.select({ id: proposals.id }).from(proposals)).toEqual([]);
   });
 });
 
@@ -504,39 +1010,220 @@ describe('the certify boundary, against a session-borne non-human', () => {
     expect(await handle.db.select().from(acceptedObjects)).toEqual([]);
   });
 
-  it('refuses an agent’s attempt to stage a proposal rather than recording it as a person’s', async () => {
-    // `Proposer` is `human | model` and has no agent variant, so the two moves
-    // available were to write an agent's reading down as a human's — the r9
-    // defect with a new author — or to refuse it. It refuses, by name.
+  it('stages a claim, an open_question and a decision as ~, a person certifies one to ✓ (confirmed), and the session may certify none (#117)', async () => {
+    // The ticket, driven end to end. #117 widened `proposer_kind` so a SESSION
+    // may DRAFT a `~`: `record_proposal` is participation (open to an agent), and
+    // `draftToProposal` derives the proposer from the session, so an agent's
+    // reading lands under `proposer_kind='agent'` with its own id — a machine
+    // reading held to the receipt gate, NOT a person's. What did not widen is
+    // certification: the agent may certify none of the readings it staged, nor the
+    // one a person did.
     //
-    // Catches: `draftToProposal` going back to an unconditional
-    // `{ kind: 'human', userId: session.userId }`, which would put a machine's
-    // reading into the room wearing a member's name and skipping the receipt gate
-    // a human acceptance skips.
+    // The covenant assertions, each with the guard reverting it goes red:
+    //  - staging lands as `~` under the agent (guard: `draftToProposal`'s agent
+    //    arm — revert to refuse and the stage nacks);
+    //  - a decision is staged the same way but is doubly barred from `✓`: never
+    //    machine-mintable (decision_acceptance), and the agent may not certify it
+    //    anyway — it stays `proposed`, a `~` no machine can raise;
+    //  - a person moves the claim to `✓`, and the projection reads it CONFIRMED —
+    //    `accepted_by_kind='human'`, `human_touched_at` set — which is what a `✓`
+    //    IS (guard: `actorMatchesProposer` human→true and the human accept path,
+    //    the far end that must still hold);
+    //  - the agent moves none — claim, open_question, or decision (guard: the
+    //    covenant gate refusing every certification-class command from a non-human;
+    //    revert it and the agent's `accept_proposal` reaches the reducer and
+    //    auto-accepts its own `~` into an unconfirmed object this asserts absent).
+    //
+    // The reducer-level halves of the fold — an agent accepting its OWN reading
+    // mints a `~` not a `✓` (`actorMatchesProposer`'s agent arm; the receipt's
+    // machine/human split in `escalation.ts`; the self-staged gate for `agent`) —
+    // are unreachable from a socket, because the covenant gate refuses an agent's
+    // certification before the reducer runs. Those are pinned where they live:
+    // `packages/core/test/authority-matrix.test.ts` (the widened `agent` citation
+    // and the agent-accepted-`~` epistemic reading) and
+    // `packages/core/test/acceptance.test.ts` (the receipt machine/human split).
     const agent = await agentInTheRoom();
+    const person = await personInTheRoom();
     const scribe = await connectWithCookie(agent.userId, agent.session.cookie);
     await scribe.subscribe(room.roomId);
 
-    const attempt = await scribe.command({
-      name: 'record_proposal',
-      roomId: room.roomId,
-      proposal: {
-        type: 'claim',
-        payload: {
-          statement: 'The flag is off in production.',
-          claimant: room.people.ada as string,
-          verification: 'unverified',
-        },
-        confidence: 1,
-        provenance: [],
-        quote: null,
-        interpretationId: null,
-      },
-    } as unknown as CommandInput);
+    // A machine reading carries a receipt — a real cited message and a verbatim
+    // quote — so the agent posts the messages it will read out of. Posting is
+    // participation, which an agent may do.
+    const claimBody = 'The flag is off in production.';
+    const questionBody = 'Do we keep the flag after launch?';
+    for (const body of [claimBody, questionBody]) {
+      expect(
+        issuesOf(await scribe.command({ name: 'send_message', roomId: room.roomId, body })),
+      ).toEqual([]);
+    }
+    const posted = await handle.db
+      .select({ id: messages.id, body: messages.body })
+      .from(messages)
+      .where(and(eq(messages.roomId, room.roomId), eq(messages.authorId, agent.userId)));
+    const idOf = (body: string) =>
+      (posted.find((m) => m.body === body) as { id: string } | undefined)?.id ??
+      (() => {
+        throw new Error(`no message for ${body}`);
+      })();
 
-    expect(attempt.type).toBe('nack');
-    expect(JSON.stringify(attempt)).toContain('may not stage a proposal');
-    expect((await actorRows()).filter((row) => row.type === 'proposal_recorded')).toEqual([]);
+    // Stage a claim and an open_question. Both are `record_proposal`, and the
+    // proposer is the session's own — never a value the socket chose.
+    expect(
+      issuesOf(
+        await scribe.command({
+          name: 'record_proposal',
+          roomId: room.roomId,
+          proposal: {
+            type: 'claim',
+            payload: { statement: claimBody, claimant: agent.userId, verification: 'unverified' },
+            confidence: 1,
+            provenance: [idOf(claimBody)],
+            quote: claimBody,
+            interpretationId: null,
+          },
+        } as unknown as CommandInput),
+      ),
+    ).toEqual([]);
+    expect(
+      issuesOf(
+        await scribe.command({
+          name: 'record_proposal',
+          roomId: room.roomId,
+          proposal: {
+            type: 'open_question',
+            payload: { question: questionBody },
+            confidence: 1,
+            provenance: [idOf(questionBody)],
+            quote: questionBody,
+            interpretationId: null,
+          },
+        } as unknown as CommandInput),
+      ),
+    ).toEqual([]);
+
+    // …and a DECISION, the type no machine may ever certify. Staging it is still
+    // participation (a `~`), so it lands; what it can never do is become a `✓`.
+    const decisionBody = 'Keep the flag on after launch.';
+    expect(
+      issuesOf(
+        await scribe.command({ name: 'send_message', roomId: room.roomId, body: decisionBody }),
+      ),
+    ).toEqual([]);
+    const decisionMsg = await handle.db
+      .select({ id: messages.id })
+      .from(messages)
+      .where(and(eq(messages.roomId, room.roomId), eq(messages.body, decisionBody)));
+    const decisionMsgId = (decisionMsg[0] as { id: string }).id;
+    expect(
+      issuesOf(
+        await scribe.command({
+          name: 'record_proposal',
+          roomId: room.roomId,
+          proposal: {
+            type: 'decision',
+            payload: { statement: decisionBody, decidedBy: agent.userId },
+            confidence: 1,
+            provenance: [decisionMsgId],
+            quote: decisionBody,
+            interpretationId: null,
+          },
+        } as unknown as CommandInput),
+      ),
+    ).toEqual([]);
+
+    // All three landed as `~`, under the agent's OWN identity — not a person's, and
+    // not a model's. Read from the projection the product writes, not the ack.
+    const staged = await handle.db
+      .select({
+        id: proposals.id,
+        type: proposals.type,
+        status: proposals.status,
+        proposerKind: proposals.proposerKind,
+        proposerUserId: proposals.proposerUserId,
+        proposerModel: proposals.proposerModel,
+      })
+      .from(proposals)
+      .where(eq(proposals.roomId, room.roomId));
+    expect(staged).toHaveLength(3);
+    for (const p of staged) {
+      expect(p.proposerKind, `${p.type} proposer kind`).toBe('agent');
+      expect(p.proposerUserId, `${p.type} proposer id`).toBe(agent.userId);
+      expect(p.proposerModel, `${p.type} proposer model`).toBeNull();
+      // `proposed` is the `~`: a staged reading, no `✓` yet.
+      expect(p.status, `${p.type} status`).toBe('proposed');
+    }
+    const claimId = (staged.find((p) => p.type === 'claim') as { id: string }).id;
+    const questionId = (staged.find((p) => p.type === 'open_question') as { id: string }).id;
+    const decisionId = (staged.find((p) => p.type === 'decision') as { id: string }).id;
+
+    // A person in the room certifies ONE — the claim — to `✓`.
+    const human = await connectWithCookie(person.userId, person.session.cookie);
+    await human.subscribe(room.roomId);
+    expect(
+      issuesOf(
+        await human.command({
+          name: 'accept_proposal',
+          roomId: room.roomId,
+          proposalId: claimId,
+        } as CommandInput),
+      ),
+    ).toEqual([]);
+    const certified = await handle.db
+      .select({
+        proposalId: acceptedObjects.proposalId,
+        acceptedBy: acceptedObjects.acceptedBy,
+        acceptedByKind: acceptedObjects.acceptedByKind,
+        humanTouchedAt: acceptedObjects.humanTouchedAt,
+      })
+      .from(acceptedObjects)
+      .where(eq(acceptedObjects.roomId, room.roomId));
+    expect(certified).toHaveLength(1);
+    // `✓` BECAUSE a person accepted it — the agent staged the reading, the person
+    // certified it, and `acceptedBy` is who the room answers to. The projection
+    // reads CONFIRMED, which is what a `✓` IS: `epistemicStateOf` is
+    // `isHuman(acceptedBy) || humanTouchedAt !== null`, and both halves say so
+    // here — the accepter's kind is `human` and the human-touch instant is set.
+    const object = certified[0] as {
+      proposalId: string;
+      acceptedBy: string | null;
+      acceptedByKind: string;
+      humanTouchedAt: Date | null;
+    };
+    expect(object.proposalId).toBe(claimId);
+    expect(object.acceptedBy).toBe(person.userId);
+    expect(object.acceptedByKind).toBe('human');
+    expect(object.humanTouchedAt).not.toBeNull();
+
+    // The session may certify NONE — not the open_question it staged, not the
+    // decision it staged, and not its own claim (already `✓`). Each refused for
+    // being a certification, by what the session IS, before anything is appended.
+    for (const [label, proposalId] of [
+      ['the open_question it staged', questionId],
+      ['the decision it staged', decisionId],
+      ['its own claim', claimId],
+    ] as const) {
+      const attempt = await scribe.command({
+        name: 'accept_proposal',
+        roomId: room.roomId,
+        proposalId,
+      } as CommandInput);
+      expect(attempt.type, label).toBe('nack');
+      const said = JSON.stringify(attempt);
+      expect(said, label).toContain('is a certification');
+      expect(said, label).toContain('may draft a reading');
+    }
+
+    // Nothing new was certified: still exactly the one the person accepted. The
+    // open_question and the decision the agent staged are both still `~`
+    // (`proposed`) — a machine raised neither to a `✓`.
+    expect(await handle.db.select().from(acceptedObjects)).toHaveLength(1);
+    const stillProposed = await handle.db
+      .select({ id: proposals.id, status: proposals.status })
+      .from(proposals)
+      .where(and(eq(proposals.roomId, room.roomId), eq(proposals.status, 'proposed')));
+    const proposedIds = stillProposed.map((p) => (p as { id: string }).id).sort();
+    expect(proposedIds).toEqual([questionId, decisionId].sort());
   });
 
   it('lets an agent do everything a member does that is not certification', async () => {
@@ -1258,6 +1945,7 @@ describe('the database does not take the application’s word for the kind', () 
             body: 'from outside the room',
             replyToId: null,
             clientMessageId: null,
+            causeMessageId: null,
             attachments: [],
             references: [],
           }),

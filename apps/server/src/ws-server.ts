@@ -824,6 +824,9 @@ export function createRealtimeServer(options: RealtimeOptions): RealtimeServer {
             roomSeq: result.roomSeq,
             eventId: result.event.id,
             issues: result.issues,
+            // `open_session` carries the draw outcome; every other command leaves
+            // it undefined (#118 fix r2, HIGH-3).
+            ...(result.draw ? { draw: result.draw } : {}),
           });
           // Including the sender: the ack carries the position, the event
           // carries the canonical body, and a client that rendered its own

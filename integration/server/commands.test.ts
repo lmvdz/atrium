@@ -70,6 +70,7 @@ const send = (
   roomId,
   body,
   clientMessageId,
+  causeMessageId: null,
   replyToId: null,
   attachments: [],
   references: [],
@@ -513,6 +514,7 @@ describe('send_message', () => {
           body: `batch row ${index}`,
           replyToId: null,
           clientMessageId: `batch-${index}`,
+          causeMessageId: null,
           attachments: [],
           references: [],
         })),
@@ -1512,7 +1514,7 @@ describe('the proposal → acceptance boundary, over the wire', () => {
      */
     expect(refused.type).toBe('ack');
     expect(refused).toMatchObject({
-      issues: [expect.stringContaining('nobody validates their own attribution to a model')],
+      issues: [expect.stringContaining('nobody validates their own attribution to a machine')],
     });
 
     // No object, and the proposal is still open for somebody else to judge.

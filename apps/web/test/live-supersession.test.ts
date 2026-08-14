@@ -52,6 +52,7 @@ describe('live supersession request state', () => {
         type: 'decision' as const,
         payload: { statement: 'old', decidedBy: null, status: 'superseded' as const },
         proposalId: null,
+        sessionId: null,
         interpretationId: null,
         retractedAt: null,
         supersededById: 'new',

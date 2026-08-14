@@ -21,6 +21,19 @@ import {
 const environment = serverEnvironment();
 
 /**
+ * Compile every route before the workers are released (#131).
+ *
+ * Playwright runs `globalSetup` AFTER `webServer` reports ready and BEFORE the
+ * first worker starts, which is the only window in the run where this cost can
+ * be paid without a test clock open over it. `webServer`'s readiness probe hits
+ * ONE url; `next dev` builds the rest on demand, so without this the gate
+ * releases four workers at a server that still has to compile almost everything
+ * they are about to ask for. See `e2e/support/warm-servers.mjs` for the measured
+ * before/after — this is not a timeout, and no timeout in this file moved.
+ */
+const globalSetup = './e2e/support/warm-servers.mjs';
+
+/**
  * The width the shell declares as its floor, and the height the vertical
  * workspace split needs before the conversation pane can overflow at all.
  * `MINIMUM_WIDTH` in `src/components/frame/AppFrame.tsx` is the authority for
@@ -35,6 +48,7 @@ export default defineConfig({
   // its own config (`playwright.destination.config.ts`, `test:e2e:destination`).
   // The dev suite ignores it so the fast gate is not asked to boot `next build`.
   testIgnore: /destination-scenario\.spec\.ts/,
+  globalSetup,
   fullyParallel: true,
   forbidOnly: !!process.env.CI,
   retries: process.env.CI ? 1 : 0,

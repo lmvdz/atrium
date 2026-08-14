@@ -1,3 +1,4 @@
+import { randomUUID } from 'node:crypto';
 import {
   createAtriumAuth,
   describeUnknown,
@@ -10,12 +11,19 @@ import { createAttachmentSigner } from './attachments.js';
 import { createCommandService } from './commands.js';
 import { loadEnv } from './env.js';
 import { createEventBus } from './event-bus.js';
+import {
+  createExecutionOwnership,
+  createExecutionProvider,
+  wireExecutionCoordinator,
+} from './execution/configure.js';
+import { reconcileWedgedSessions } from './execution/reconcile.js';
 import { createAcceptanceProvider } from './jobs/acceptance-provider.js';
 import { createGatewayProvider } from './jobs/provider.js';
-import { createLedger } from './ledger.js';
+import { createLedger, type Tx } from './ledger.js';
 import { createLogger } from './logger.js';
 import { startQueue } from './queue.js';
 import { createMembershipAuthorizer } from './session.js';
+import { sweepExpiredSubscriptions } from './subscriptions.js';
 import { createSessionResolver, createUpgradeAuthenticator } from './ws-auth.js';
 import { createRealtimeServer } from './ws-server.js';
 
@@ -167,17 +175,197 @@ async function main(): Promise<void> {
     secretAccessKey: env.S3_SECRET_ACCESS_KEY,
   });
 
-  const commands = createCommandService({
+  /* ---------------------------------------------------------------------------
+   * THE EXECUTION PROVIDER (#120), AND WHY IT IS DISABLED BY DEFAULT.
+   *
+   * When `EXECUTION_PROVIDER` is set, a granted `session_opened` resolves an
+   * isolated workspace, runs a harness, and settles back to `session_settled` /
+   * `session_failed` with the artifact — driven directly (no channel loop yet).
+   * Unset, execution is DISABLED and this is the receipt: a session opens and
+   * settles only when something else settles it. A process that would spawn real
+   * work off inbound traffic must be opted into out loud, exactly as the
+   * interpretation worker is. A `draw_refused` never reaches the adapter — the
+   * wrapper fires only on `draw.outcome === 'granted'` (#118).
+   *
+   * Phase 1 (the provider + the durable artifact repo + the artifact verifier)
+   * runs BEFORE the command service, so the verifier can be injected into it:
+   * a `settle_session` artifact is trusted only if it names a real object the
+   * provider pushed to its durable remote (#120 F2). Disabled, no verifier is
+   * wired and any caller-supplied artifact is dropped — the safe default.
+   * ------------------------------------------------------------------------- */
+  const executionRuntime = await createExecutionProvider({ env, logger });
+  if (executionRuntime === null) {
+    logger.info('execution is DISABLED — set EXECUTION_PROVIDER to run granted sessions', {});
+  }
+
+  // This process's execution instance id — the value stamped as a granted provider
+  // session's lease OWNER at grant, and the id the coordinator's claim matches on
+  // (#120 round-6). Reused from the bus so logs correlate, or a fresh id when there
+  // is no bus; either way it is unique per boot, so a prior boot's leases carry a
+  // DIFFERENT id and its heartbeats stop, which is what lets reconciliation tell a
+  // dead owner's session from this process's live one.
+  const executionInstanceId = bus.instanceId ?? randomUUID();
+
+  // The projection side effects that must commit with an append. Named once and
+  // shared, so the command service and the subscription-expiry sweep (#127) run
+  // the SAME hooks — a second literal here would be a second answer to "what else
+  // commits with a ledger row", free to drift from the first.
+  const projectionHooks = routing
+    ? {
+        onMessagePosted: ({ tx, roomId }: { tx: Tx; roomId: string }) =>
+          queue.enqueueInterpretation(tx, roomId),
+      }
+    : {};
+
+  const baseCommands = createCommandService({
     db: database.db,
     ledger,
     authorizer: createMembershipAuthorizer(database.db),
     attachmentCapabilities: attachments,
-    projectionHooks: routing
-      ? {
-          onMessagePosted: ({ tx, roomId }) => queue.enqueueInterpretation(tx, roomId),
-        }
-      : {},
+    verifyArtifact: executionRuntime?.verifyArtifact,
+    // Present iff a provider is wired: a granted `open_session` then records a
+    // `provider`-mode execution-authority record (owner = this instance, a
+    // capability token) in the SAME transaction as the draw (#120 round-6 F1).
+    // Absent, every session is `external` (external-settle mode).
+    executionInstanceId: executionRuntime ? executionInstanceId : undefined,
+    projectionHooks,
   });
+
+  const executionOwnership = executionRuntime
+    ? createExecutionOwnership({ db: database.db, instanceId: executionInstanceId, logger })
+    : null;
+  const executionWiring =
+    executionRuntime && executionOwnership
+      ? wireExecutionCoordinator({
+          provider: executionRuntime.provider,
+          commands: baseCommands,
+          logger,
+          ownership: executionOwnership,
+        })
+      : null;
+  const commands = executionWiring?.commands ?? baseCommands;
+
+  /**
+   * How often this process keeps its ownership leases warm and sweeps for a dead
+   * owner's wedge (#120 round-5 F4). Comfortably under the stale threshold so a
+   * live owner's lease never reads as stale between beats.
+   */
+  const EXECUTION_HEARTBEAT_MS = 5_000;
+  /**
+   * How long a lease may go without a heartbeat before its owner is presumed dead
+   * and its session reconciled. Six heartbeats of slack, so event-loop jitter on a
+   * live owner never trips it — but a crashed owner's wedge clears within seconds.
+   */
+  const EXECUTION_LEASE_STALE_MS = 30_000;
+
+  /**
+   * How long shutdown waits for in-flight executions (#120 round-3 F5). Well
+   * under the 30s force-exit watchdog, and deliberately NOT long enough for a
+   * ten-minute harness — the grace is for the run that is seconds from its
+   * settle, and anything longer is startup reconciliation's job.
+   */
+  const EXECUTION_DRAIN_GRACE_MS = 10_000;
+
+  /* ---------------------------------------------------------------------------
+   * STARTUP RECONCILIATION (#120 round-3 F5).
+   *
+   * Before a single socket is accepted: any session the LAST process left `open`
+   * has a draw already spent against its plan's human-set slice and no execution
+   * alive to produce its receipt. It gets `session_failed` — an honest exit for a
+   * run that was killed, not a fabricated clean one — so a crash costs a receipt
+   * that says so rather than a permanent wedge nobody can clear.
+   *
+   * It runs on the BASE command service on purpose. The wrapper only fires the
+   * coordinator on a granted `open_session`, which this never issues, and running
+   * a reconciliation through the wrapper would be one more path to reason about
+   * for no gain.
+   *
+   * It reconciles ONLY a session whose OWNERSHIP LEASE has gone stale (#120
+   * round-5 F4) — a dead owner's wedge. An external-settle session holds no lease
+   * and is never touched, whether this boot runs execution or not; a live peer's
+   * session has a fresh heartbeat and is left running. This replaces the round-4
+   * boot flag, which force-failed live external sessions on a disabled→enabled
+   * reboot and killed a concurrent instance's running sessions. It runs on EVERY
+   * boot (not gated on execution): a disabled boot can still safely clear a prior
+   * enabled boot's crash wedge, because "stale lease" is the whole predicate.
+   * ------------------------------------------------------------------------- */
+  const reconciled = await reconcileWedgedSessions({
+    db: database.db,
+    commands: baseCommands,
+    logger,
+    staleAfterMs: EXECUTION_LEASE_STALE_MS,
+  });
+  if (reconciled.found > 0) {
+    logger.warn('startup reconciled sessions left open by a previous process', {
+      found: reconciled.found,
+      failed: reconciled.failed,
+      unreconciled: reconciled.unreconciled,
+    });
+  }
+
+  /* ---------------------------------------------------------------------------
+   * THE OWNERSHIP HEARTBEAT + PERIODIC SWEEP (#120 round-5 F4, round-6 F8).
+   *
+   * Two jobs, deliberately split by which boots they run on:
+   *
+   *   * The HEARTBEAT keeps THIS process's own leases warm, and only a boot that
+   *     runs execution owns any — so it fires only when `executionOwnership` is
+   *     present. Heartbeat FIRST, so this process's live leases are fresh before
+   *     the sweep reads them.
+   *   * The SWEEP reconciles any lease that has gone stale — a dead owner's wedge.
+   *     It runs on EVERY boot regardless of whether execution is enabled this boot
+   *     (#120 round-6 F8): a DISABLED boot must still be able to clear a prior
+   *     ENABLED boot's crash wedge, because "stale lease" is the whole predicate
+   *     and reconciliation settles through the ordinary command path. Gating the
+   *     sweep on the provider being wired would leave a wedge un-cleared for as
+   *     long as the operator ran with execution off.
+   *
+   * Both are best-effort: a failure is logged and the next beat retries, never
+   * takes the process down.
+   * ------------------------------------------------------------------------- */
+  const executionSweepTimer: NodeJS.Timeout = setInterval(() => {
+    void (async () => {
+      try {
+        if (executionOwnership) await executionOwnership.heartbeat();
+        const swept = await reconcileWedgedSessions({
+          db: database.db,
+          commands: baseCommands,
+          logger,
+          staleAfterMs: EXECUTION_LEASE_STALE_MS,
+        });
+        if (swept.found > 0) {
+          logger.warn('periodic sweep reconciled sessions with a dead execution owner', {
+            found: swept.found,
+            failed: swept.failed,
+            unreconciled: swept.unreconciled,
+          });
+        }
+        // THE SUBSCRIPTION EXPIRY SWEEP (#127). Rides the same beat as the
+        // execution sweep and for the same reason: both turn a silently wedged
+        // process into something a person can see. A wait past its mandatory
+        // horizon is marked `expired` and escalated to the agent's OWNER, so an
+        // unmatched subscribe cannot hold a session open forever and block its
+        // plan's settle (#119) with nothing owed to anybody. Runs on EVERY boot,
+        // execution enabled or not: a wait is a ledger fact, not a provider one.
+        const waits = await sweepExpiredSubscriptions({
+          db: database.db,
+          ledger,
+          logger,
+          projectionHooks,
+        });
+        if (waits.escalated > 0 || waits.skipped > 0) {
+          logger.warn('periodic sweep escalated expired session subscriptions', {
+            found: waits.found,
+            escalated: waits.escalated,
+            skipped: waits.skipped,
+          });
+        }
+      } catch (error) {
+        logSafely('execution heartbeat/sweep failed', () => ({ error: describeUnknown(error) }));
+      }
+    })();
+  }, EXECUTION_HEARTBEAT_MS);
+  executionSweepTimer.unref();
 
   let ready = false;
   const realtime = createRealtimeServer({
@@ -195,7 +383,7 @@ async function main(): Promise<void> {
     attachments,
     // #26, arrived. The stub is gone; this is Better Auth reading the same
     // cookie the web app mints, over the same tables.
-    session: { authenticateUpgrade: createUpgradeAuthenticator({ auth, logger }) },
+    session: { authenticateUpgrade: createUpgradeAuthenticator({ auth, db: database.db, logger }) },
     // A WebSocket handshake is not same-origin-protected and carries cookies,
     // so the browser's `Origin` is checked against the same origin Better Auth
     // trusts on the HTTP side.
@@ -204,7 +392,7 @@ async function main(): Promise<void> {
     // And a socket does not get to outlive the session that opened it. This
     // rides the membership revalidation pass rather than a sweep of its own —
     // see `revalidateSessions` in ws-server.ts.
-    revalidateSession: createSessionResolver({ auth, logger }),
+    revalidateSession: createSessionResolver({ auth, db: database.db, logger }),
     revalidateTtlMs: env.WS_REVALIDATE_TTL_MS,
   });
   signalProjectionChanged = (roomId) => realtime.projectionChanged(roomId);
@@ -222,15 +410,51 @@ async function main(): Promise<void> {
     logger.info('shutting down', { signal });
 
     // Force-exit if anything hangs; a stuck shutdown is worse than a hard one.
+    // Comfortably longer than the execution drain grace below, so the drain gets
+    // its full window instead of being pre-empted by its own watchdog.
     const forced = setTimeout(() => {
       logger.error('graceful shutdown timed out, forcing exit');
       process.exit(1);
-    }, 15_000);
+    }, 30_000);
     forced.unref();
 
     try {
+      clearInterval(executionSweepTimer);
       await realtime.close();
       await queue.stop();
+      // In-flight executions get a BOUNDED grace before anything they depend on
+      // is torn down (#120 round-3 F5). The order is the point: the socket server
+      // is already closed (no new `open_session` can be granted), so this drains a
+      // set that can only shrink, and it happens BEFORE the scratch repo is
+      // deleted and the database is closed — the two things a settling run needs.
+      // Reverting the order severs a run mid-settle and hands it to startup
+      // reconciliation, which is the backstop, not the plan.
+      if (executionWiring) {
+        const stranded = await executionWiring.drainExecutions(EXECUTION_DRAIN_GRACE_MS);
+        if (stranded > 0) {
+          logger.warn('shutting down with executions still running', { count: stranded });
+        }
+      }
+      // CANCEL whatever the drain grace did not settle (#120 round-7 F4). The
+      // grace above buys the common case — a run seconds from its settle — its
+      // receipt; this kills the rest before we tear their workspace out from under
+      // them. Without it, `SIGTERM` deleted scratch and `process.exit`'d while a
+      // harness child (or a remote sandbox) kept executing loose — an orphaned
+      // process spending against a session Atrium had already abandoned. Ordered
+      // AFTER the drain (so a settling run is not severed early) and BEFORE the
+      // scratch dispose (so nothing is still writing into a directory we delete).
+      if (executionRuntime) {
+        try {
+          await executionRuntime.provider.cancelAll();
+        } catch (error) {
+          logSafely('cancelling in-flight executions failed', () => ({
+            error: describeUnknown(error),
+          }));
+        }
+      }
+      // Tears down the SCRATCH working repo only; the DURABLE artifact repo is
+      // left intact so settled receipts still resolve after shutdown (#120 F3).
+      if (executionRuntime) await executionRuntime.dispose();
       await database.close();
       logger.info('shutdown complete');
       process.exit(0);

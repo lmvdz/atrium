@@ -26,7 +26,7 @@ import {
   defaultAcceptanceConfig,
   typeCertifiableFromText,
 } from './policy.js';
-import type { Proposal, StoredProposal } from './proposal.js';
+import { type Proposal, proposerIsMachine, type StoredProposal } from './proposal.js';
 import { appendEvent, compareCursor } from './reduce.js';
 import { type CoreState, canonicalJson, type ObjectRecord } from './state.js';
 
@@ -660,7 +660,11 @@ export function decideAcceptance(
   // question is whether anybody supplied words, so the test is `hasContent`.
   const windowIsAbsent =
     messages === undefined || messages.length === 0 || !messages.some((m) => hasContent(m.body));
-  if (proposal.proposer.kind === 'model' && windowIsAbsent) {
+  // A machine reading — `model` or `agent` (#117) — is never accepted on trust:
+  // the window is its receipt. A human is the receipt for their own reading and
+  // is not asked for one. The gate is machine-vs-human (`proposerIsMachine`),
+  // not model-vs-everything — an agent takes the identical path a model does.
+  if (proposerIsMachine(proposal.proposer) && windowIsAbsent) {
     return {
       ...base,
       // The purest window-fact there is: nothing about this reading was read.
@@ -670,10 +674,10 @@ export function decideAcceptance(
       rule: 'missing_message_context',
       reason:
         messages === undefined
-          ? 'no message window was supplied, so the receipt could not be checked — a model reading is never accepted on trust; supply the messages it cites'
+          ? 'no message window was supplied, so the receipt could not be checked — a machine reading is never accepted on trust; supply the messages it cites'
           : messages.length === 0
-            ? 'an empty message window was supplied, so the receipt could not be checked — an empty window is not a window; a model reading is never accepted on trust'
-            : `a message window of ${messages.length} message${messages.length === 1 ? '' : 's'} was supplied and not one of them has any words in it, so the receipt could not be checked — a window with nothing in it is not a window; a model reading is never accepted on trust`,
+            ? 'an empty message window was supplied, so the receipt could not be checked — an empty window is not a window; a machine reading is never accepted on trust'
+            : `a message window of ${messages.length} message${messages.length === 1 ? '' : 's'} was supplied and not one of them has any words in it, so the receipt could not be checked — a window with nothing in it is not a window; a machine reading is never accepted on trust`,
     };
   }
 

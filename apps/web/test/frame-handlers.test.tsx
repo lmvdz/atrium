@@ -333,7 +333,61 @@ const NOT_FORWARDED: readonly {
   readonly edge: string;
   readonly handler: string;
   readonly why: string;
-}[] = [];
+}[] = [
+  /**
+   * `HoldToAct.onBegin` fires the instant a hold STARTS, and it exists for
+   * exactly one caller: #121's certification, where the server has to stamp its
+   * own clock at the start of the interval it will later measure. Before it, a
+   * server was only ever told about a hold once the hold was over, so it could do
+   * nothing but believe the duration it was handed — which is the
+   * client-supplied-timing defect the arm→confirm protocol removes.
+   *
+   * The two attention cards do NOT forward it, and this is a decision rather than
+   * an oversight. An attention action is answered inside the room: `onArm` gives
+   * the caller the full measured `Arming` at completion, which is what goes on the
+   * record, and nothing in that lane has a second clock to start. Threading a
+   * handler no caller implements up through `Pin` and the frame would add three
+   * more dead seams and one more thing to keep in sync — the cost the exemption
+   * ledger exists to let a reviewer weigh instead of paying silently.
+   *
+   * IF an attention action ever needs a server-measured hold, delete these two
+   * entries: the sweep goes red until the prop is threaded, which is the point.
+   */
+  {
+    edge: 'AttentionCard→HoldToAct',
+    handler: 'onBegin',
+    why: 'no attention action starts a clock the browser is not the authority on; #121 certify is the only caller, and it renders its own HoldToAct',
+  },
+  {
+    edge: 'AttentionCompact→HoldToAct',
+    handler: 'onBegin',
+    why: 'same as the open card — the compressed row renders the same control for the same in-room answers',
+  },
+  /**
+   * `HoldToAct.onCancel` is the MIRROR of `onBegin`, added in #121 round 4 for
+   * CS-3: it fires when a hold is released before it completes, so a caller that
+   * started something on begin (the certify's server arm) can undo it on cancel
+   * (the server disarm). It exists for the same single caller and is exempted for
+   * the same reason — an in-room attention action starts no server clock on begin,
+   * so it has nothing to disarm on cancel. Threading a handler no attention caller
+   * implements up through `Pin` and the frame would add the same dead seams the
+   * `onBegin` exemption above weighs and declines.
+   *
+   * IF an attention action ever needs a server-measured hold, delete these two
+   * entries alongside the `onBegin` pair: the sweep goes red until both are
+   * threaded, which is the point.
+   */
+  {
+    edge: 'AttentionCard→HoldToAct',
+    handler: 'onCancel',
+    why: 'the mirror of onBegin — no attention action arms a server clock to disarm; #121 certify is the only caller, and it renders its own HoldToAct',
+  },
+  {
+    edge: 'AttentionCompact→HoldToAct',
+    handler: 'onCancel',
+    why: 'same as the open card — the compressed row renders the same control for the same in-room answers',
+  },
+];
 
 const FRAME = FRAME_SOURCE;
 

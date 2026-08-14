@@ -305,11 +305,15 @@ export function instantKey(at: string): string {
  * code; they are the existing `isHuman` gates, which now have an identified
  * machine to refuse instead of only an anonymous one.
  *
- * `Proposer` (`proposal.ts`) is deliberately **not** widened alongside this. A
- * proposal's proposer decides whether the acceptance engine asks for a receipt
- * window and whether θ applies, and those are acceptance-semantics questions
- * this variant does not answer. Until they are answered, `apps/server` refuses
- * to stage a proposal from an agent session rather than mislabelling it human.
+ * `Proposer` (`proposal.ts`) gained its own `agent` variant in #117, and the
+ * answer to the two acceptance-semantics questions was the covenant-preserving
+ * one: an agent proposer is a MACHINE proposer. The acceptance engine asks it
+ * for a receipt window and applies θ exactly as it does a `model` — the receipt
+ * is a property of the citations, not of which sort of machine read them — so
+ * `apps/server` now stages an agent session's reading as `proposer_kind='agent'`
+ * (its own `userId`) rather than refusing it. What did **not** move is the
+ * certification boundary: an agent hits every `isHuman` gate as a model does, so
+ * the widening opens WHO may STAGE a `~` and nothing about who may certify `✓`.
  */
 export const Actor = z.discriminatedUnion('kind', [
   z.object({ kind: z.literal('human'), userId: Id }),

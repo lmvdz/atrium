@@ -8,7 +8,7 @@ import {
   RelationKind,
 } from '@atrium/core';
 import { is } from 'drizzle-orm';
-import { getTableConfig, PgTable } from 'drizzle-orm/pg-core';
+import { getTableConfig, PgDialect, PgTable } from 'drizzle-orm/pg-core';
 import { describe, expect, it } from 'vitest';
 import * as authSchemaModule from '../src/auth-schema.js';
 import * as schemaModule from '../src/schema.js';
@@ -41,6 +41,28 @@ function migrationFiles(): string[] {
   return readdirSync(migrationsDir)
     .filter((f) => f.endsWith('.sql'))
     .sort();
+}
+
+/**
+ * The LAST deployed definition of `core_events_payload_room_matches`, sliced out
+ * of the concatenated migration history.
+ *
+ * The constraint has been dropped and re-added several times (0007, 0023, 0028,
+ * 0045…), so the live rule is the final `ADD CONSTRAINT`, and only its text may
+ * be asked whether a kind has an arm. Searching the whole history instead finds
+ * the kind's name in its `ALTER TYPE … ADD VALUE` line and answers yes to a
+ * question it never asked — which is how the two #127 arms could be deleted with
+ * the parity test still green.
+ */
+function latestPayloadRoomCheck(migrations: string): string {
+  const marker = 'ADD CONSTRAINT "core_events_payload_room_matches" CHECK';
+  const start = migrations.lastIndexOf(marker);
+  expect(
+    start,
+    'no ADD CONSTRAINT for core_events_payload_room_matches in any migration',
+  ).toBeGreaterThan(-1);
+  const end = migrations.indexOf('--> statement-breakpoint', start);
+  return migrations.slice(start, end === -1 ? undefined : end);
 }
 
 function migrationSql(): string {
@@ -234,7 +256,7 @@ describe('the durable ledger (issue #22)', () => {
     expect(eventType.enumValues).not.toContain('typing');
   });
 
-  it('splits the enum into the reducer’s six and the ledger-only two', () => {
+  it('splits the enum into the reducer’s six and the ledger-only rest', () => {
     // Pinned by value on both sides, because the direction that bites is the
     // one a `satisfies` cannot express: a seventh core type added to
     // @atrium/core and forgotten here compiles, is classified as ledger-only,
@@ -249,8 +271,90 @@ describe('the durable ledger (issue #22)', () => {
       'object_corrected',
       'relation_added',
     ]);
+    // The ledger-only set is `message_posted`/`attention_resolved` plus the six
+    // agent/plan/session lifecycle kinds (#116). Every one is in the enum and
+    // NONE is a core type — which is the schema half of "the covenant reducer is
+    // untouched": adding any of the six to `coreEventTypeSet` would move it out
+    // of this list and into the fold, and this pins that it did not.
     const ledgerOnly = eventType.enumValues.filter((v) => !isCoreEventType(v));
-    expect(ledgerOnly).toEqual(['message_posted', 'attention_resolved']);
+    expect(ledgerOnly).toEqual([
+      'message_posted',
+      'attention_resolved',
+      'plan_opened',
+      'plan_settled',
+      'session_opened',
+      'session_settled',
+      'session_failed',
+      'signal_raised',
+      // The budget/rlimit enforcement kinds (#118): the human-only slice
+      // set/raise, and the durable draw refusal. Ledger-only like the six above —
+      // the covenant reducer folds neither, so adding either to `coreEventTypeSet`
+      // would move it out of this list, and this pins that it did not.
+      'plan_rlimit_set',
+      'draw_refused',
+      // The signal/interrupt kinds (#127): control DOWN into a running session,
+      // and a durable wait. Ledger-only for the same reason as everything above
+      // them — a steer is coordination, not the room's understanding, and the
+      // covenant reducer folds neither. Adding either to `coreEventTypeSet` would
+      // move it out of this list, and this pins that it did not.
+      'session_signaled',
+      'session_subscribed',
+    ]);
+  });
+
+  it('keeps the payload-room CHECK in step with migration 0023 — all six lifecycle arms (#116 fix r2)', () => {
+    // Round-1 gauntlet, finding 5: migration 0023 added six lifecycle arms to
+    // `core_events_payload_room_matches`, but `schema.ts`'s CASE omitted them. It
+    // failed CLOSED (the `coalesce(…, false)` tail refuses an un-enumerated kind),
+    // so it was safe — but a future `drizzle-kit generate` would reinstate the
+    // stale CASE and take all six lifecycle appends offline. This is the parity
+    // assertion that catches that drift: the CHECK `schema.ts` DECLARES must name
+    // every lifecycle kind the MIGRATION deployed.
+    const check = getTableConfig(coreEvents).checks.find(
+      (c) => c.name === 'core_events_payload_room_matches',
+    );
+    expect(check, 'core_events_payload_room_matches must exist in schema.ts').toBeTruthy();
+    // Render the schema's CHECK expression to SQL text. The kind literals live in
+    // the template verbatim, so a missing arm is a missing substring.
+    const rendered = new PgDialect().sqlToQuery(check?.value as never).sql;
+    // The migration side has to be narrowed to the CHECK ITSELF, not to the whole
+    // concatenated migration history (#127 fix round 2, finding E). Every kind
+    // name also appears in the `ALTER TYPE … ADD VALUE` that introduced it, so a
+    // whole-history `toContain` is satisfied by the enum label alone and says
+    // NOTHING about whether the CHECK has an arm for it — deleting both new arms
+    // from 0045 left this test green. Slicing to the last deployed definition of
+    // the constraint is what makes the assertion about the constraint.
+    const migration = latestPayloadRoomCheck(migrationSql());
+    const lifecycleKinds = [
+      'plan_opened',
+      'plan_settled',
+      'session_opened',
+      'session_settled',
+      'session_failed',
+      'signal_raised',
+      // The budget/rlimit enforcement kinds (#118) join the same CHECK: each
+      // declares a top-level roomId, so the fail-closed tail would refuse an
+      // append of either until this arm is present in BOTH schema.ts and migration
+      // 0028. Same parity, two more kinds.
+      'plan_rlimit_set',
+      'draw_refused',
+      // The signal kinds (#127). Same parity, and this pin is the one the round-1
+      // gauntlet's finding E named: with these two absent from the list, deleting
+      // their arms from the CHECK left the suite 38/38 green — while a live append
+      // of either kind would have been refused outright by the fail-closed tail.
+      // That is the exact drift that once took ledger-only appends offline.
+      'session_signaled',
+      'session_subscribed',
+    ];
+    for (const kind of lifecycleKinds) {
+      // In the schema (drift target) AND in the migration (deployed truth): if
+      // either forgets a kind, the two are out of step and this fails.
+      expect(rendered, `schema.ts CHECK omits '${kind}'`).toContain(kind);
+      expect(migration, `migration omits '${kind}'`).toContain(kind);
+    }
+    // The fail-closed tail must survive: a ninth kind with no room policy is still
+    // refused, not waved through.
+    expect(rendered.toLowerCase()).toContain('false)');
   });
 
   it('carries the trusted actor as two columns, and no actor in the payload', () => {

@@ -53,8 +53,8 @@
       "id": "empty_window_engine",
       "why": "The same hole in the acceptance engine, which the attention panel reads through.",
       "file": "src/acceptance.ts",
-      "find": "  if (proposal.proposer.kind === 'model' && windowIsAbsent) {",
-      "replace": "  if (proposal.proposer.kind === 'model' && messages === undefined) {",
+      "find": "  if (proposerIsMachine(proposal.proposer) && windowIsAbsent) {",
+      "replace": "  if (proposerIsMachine(proposal.proposer) && messages === undefined) {",
       "catches": [
         "refuses `messages: []` at the engine, exactly as it refuses no messages",
         "refuses `messages: []` at the attention panel, with a receipt for the silence"
@@ -75,8 +75,8 @@
       "id": "validator_quote_requirement_dropped",
       "why": "The validator stops requiring a quote of a model reading that names somebody.",
       "file": "src/escalation.ts",
-      "find": "  if (fromModel && normalizedQuote.length === 0) {",
-      "replace": "  if (false && fromModel && normalizedQuote.length === 0) {",
+      "find": "  if (fromMachine && normalizedQuote.length === 0) {",
+      "replace": "  if (false && fromMachine && normalizedQuote.length === 0) {",
       "catches": [
         "does not let a padded citation list plus an empty quote flip attribution",
         "covers every problem kind it declares",
@@ -87,7 +87,7 @@
       "id": "attribution_fallback_restored",
       "why": "r2's citation-list fallback comes back: with no bearing message, any cited author supports the attribution. This is the padding attack.",
       "file": "src/escalation.ts",
-      "find": "    const supported = bearing\n      ? bearing.authorId === attributed\n      : fromModel\n        ? false\n        : cited.some((message) => message.authorId === attributed);",
+      "find": "    const supported = bearing\n      ? bearing.authorId === attributed\n      : fromMachine\n        ? false\n        : cited.some((message) => message.authorId === attributed);",
       "replace": "    const supported = bearing\n      ? bearing.authorId === attributed\n      : cited.some((message) => message.authorId === attributed);",
       "catches": [
         "does not let a padded citation list plus an empty quote flip attribution",
@@ -98,7 +98,7 @@
       "id": "quote_bearing_disabled",
       "why": "r2 gauntlet, major 1: the quote no longer has to carry the sentence being minted. Cite Bob's 'yes', mint 'Bob will deploy'.",
       "file": "src/escalation.ts",
-      "find": "    if (fromModel) {\n      const statement = subject.statement ?? '';",
+      "find": "    if (fromMachine) {\n      const statement = subject.statement ?? '';",
       "replace": "    if (false) {\n      const statement = subject.statement ?? '';",
       "catches": [
         "refuses a verbatim, correctly attributed quote that carries a different sentence",
@@ -111,8 +111,8 @@
       "id": "min_quote_length_unenforced",
       "why": "minQuoteLength goes back to being a blockquote-detection knob only.",
       "file": "src/escalation.ts",
-      "find": "    if (fromModel && normalizedQuote.length < policy.minQuoteLength) {",
-      "replace": "    if (false && fromModel && normalizedQuote.length < policy.minQuoteLength) {",
+      "find": "    if (fromMachine && normalizedQuote.length < policy.minQuoteLength) {",
+      "replace": "    if (false && fromMachine && normalizedQuote.length < policy.minQuoteLength) {",
       "catches": [
         "enforces minQuoteLength on the acceptance path, not only on blockquotes",
         "covers every problem kind it declares"
@@ -218,7 +218,7 @@
       "id": "declarative_open_question_allowed",
       "why": "r7's mirror. Deletes the refusal of a declarative sentence minted as an `open_question` — the type with the lowest θ_auto in the table (0.6 against a claim's 0.7), so a reading routed through it clears a bar its own type would not.",
       "file": "src/escalation.ts",
-      "find": "    if (\n      fromModel &&\n      subject.type === 'open_question' &&\n      !readsAsQuestion(normalizeForReceipt(subject.statement ?? ''))\n    ) {",
+      "find": "    if (\n      fromMachine &&\n      subject.type === 'open_question' &&\n      !readsAsQuestion(normalizeForReceipt(subject.statement ?? ''))\n    ) {",
       "replace": "    if (false) {",
       "catches": [
         "covers every problem kind it declares",
@@ -448,8 +448,8 @@
       "id": "subject_kind_default_restored",
       "why": "An attention item that silently defaults to 'object' points #22's foreign key at a proposal id.",
       "file": "src/attention.ts",
-      "find": "export const AttentionSubjectKind = z.enum(['object', 'proposal', 'message']);",
-      "replace": "export const AttentionSubjectKind = z.enum(['object', 'proposal', 'message']).default('object');",
+      "find": "export const AttentionSubjectKind = z.enum(['object', 'proposal', 'message', 'session']);",
+      "replace": "export const AttentionSubjectKind = z.enum(['object', 'proposal', 'message', 'session']).default('object');",
       "catches": ["has no default for subjectKind — the wrong value there is unfalsifiable"]
     },
     {
@@ -490,8 +490,8 @@
       "id": "validator_quote_requirement_rescoped",
       "why": "The same rescoping in the validator both the engine and the reducer run.",
       "file": "src/escalation.ts",
-      "find": "  if (fromModel && normalizedQuote.length === 0) {",
-      "replace": "  if (fromModel && (subject.type === 'claim' || subject.type === 'commitment') && normalizedQuote.length === 0) {",
+      "find": "  if (fromMachine && normalizedQuote.length === 0) {",
+      "replace": "  if (fromMachine && (subject.type === 'claim' || subject.type === 'commitment') && normalizedQuote.length === 0) {",
       "catches": [
         "requires a quote from a model reading of every type, not only the two that name a person",
         "refuses a model objective minted with no quote against a window of empty bodies",
@@ -747,7 +747,7 @@
       "id": "later_correction_unseen",
       "why": "Stops acceptance looking past the cited messages, so a window holding \"We will deploy production Friday.\" followed by \"Correction: we will not deploy production Friday.\" certifies the first on a proposal that cites only it.",
       "file": "src/escalation.ts",
-      "find": "    if (fromModel && cited.length > 0 && hasContent(subject.statement)) {\n      const revisited = laterRevision(",
+      "find": "    if (fromMachine && cited.length > 0 && hasContent(subject.statement)) {\n      const revisited = laterRevision(",
       "replace": "    if (false && cited.length > 0 && hasContent(subject.statement)) {\n      const revisited = laterRevision(",
       "catches": [
         "refuses to certify a sentence a later message in the window corrects",
@@ -758,7 +758,7 @@
       "id": "speech_act_unchecked",
       "why": "Lets a question be minted as a claim. The payload schemas require only a nonempty string and the receipt proves string equality, so \"Would we deploy production Friday?\" as a Claim has a perfect receipt and turns somebody's question into their position.",
       "file": "src/escalation.ts",
-      "find": "    if (\n      fromModel &&\n      subject.type !== 'open_question' &&\n      !isAssertion(normalizeForReceipt(subject.statement ?? ''))\n    ) {",
+      "find": "    if (\n      fromMachine &&\n      subject.type !== 'open_question' &&\n      !isAssertion(normalizeForReceipt(subject.statement ?? ''))\n    ) {",
       "replace": "    if (\n      false &&\n      subject.type !== 'open_question' &&\n      !isAssertion(normalizeForReceipt(subject.statement ?? ''))\n    ) {",
       "catches": ["does not mint a question as a claim"]
     },

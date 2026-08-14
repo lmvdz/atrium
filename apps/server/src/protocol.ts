@@ -143,6 +143,18 @@ export type ServerFrame =
       roomSeq: number | null;
       eventId: string | null;
       issues: string[];
+      /**
+       * `open_session` only: the authorized-draw outcome (#118 fix r2, HIGH-3). A
+       * draw either GRANTED a session (`granted`, with the id) or was REFUSED
+       * against the plan's budget (`refused`, `reason=budget`, with the slice and
+       * the committed count). Both outcomes append and ack with empty `issues` — a
+       * `session_opened` vs a durable `draw_refused` — so `issues` cannot tell them
+       * apart. This is how a caller/adapter knows whether it actually got a session
+       * rather than proceeding as if a refused draw opened one. Absent otherwise.
+       */
+      draw?:
+        | { outcome: 'granted'; sessionId: string }
+        | { outcome: 'refused'; reason: 'budget'; slice: number; authorizedDraws: number };
     }
   | { type: 'nack'; commandId: string; code: CommandErrorCode | 'malformed'; message: string }
   | { type: 'presence'; roomId: string; userId: string; state: PresenceState; at: string }

@@ -8,6 +8,85 @@ Standing record of what this project's process gets wrong and right, kept so fut
 
 ---
 
+## Execution authority (#120 round-6 design consolidation)
+
+Round 5 closed each execution finding with a separate mechanism — a lease claimed
+in `runGranted`, an artifact rule scoped to the boot's verifier, an owner check on
+settle, a report bounds-check in `commands.ts` — and the seams *between* those
+mechanisms became the round-5 defect cluster both foreign lineages converged on.
+This round replaces the scatter with ONE record and derives every guard from it.
+
+**THE RECORD.** A session's *execution authority* is four facts, written in the
+SAME ledger transaction as `session_opened` (`projectSessionOpened`), so a granted
+draw is BORN with determinate authority and no window exists where a spent draw
+has none:
+
+- `execution_mode` — `provider` (a wired ExecutionProvider owns this session's
+  execution and its terminal) or `external` (no provider this boot; an external
+  member settles it — the documented external-settle mode). Decided at grant from
+  whether execution is wired, carried in the `session_opened` event so replay is
+  deterministic.
+- `execution_owner` — the instance id of the granting process, stamped at grant
+  for a `provider` session (NULL for `external`). Also carried in the event.
+- `execution_authority` — an unforgeable capability token (a random UUID), minted
+  at grant for a `provider` session, ROW-ONLY: never in the event, never on the
+  wire (`toWire` broadcasts the whole event, so a secret in it would leak to every
+  room member). Its value need not survive replay — a replayed session is already
+  terminal or is a wedge the reconciler reads the row for — so minting it in the
+  projection is correct, and it is the same class of process-liveness bookkeeping
+  the lease columns already are.
+- `execution_heartbeat_at` — stamped at grant so an unclaimed-but-granted provider
+  session is reconcilable the moment its granting process dies.
+
+**WHAT THE CAPABILITY AUTHORIZES.** `execution_authority` is the capability to
+write a `provider` session's terminal — BOTH `settled` and `failed`. `settle_session`
+of a `provider`-mode session is refused unless the caller presents the matching
+token; a room member (opener included) never sees it, so cannot forge either
+outcome. The token is held only by in-process trusted components: the coordinator
+obtains it from `claim`, the reconciler reads it off the row. Neither is the wire.
+
+**THE CLAIM (F5).** `ExecutionOwnership.claim` is a single guarded UPDATE that
+transitions `unclaimed → running` EXACTLY ONCE (`execution_claimed_at IS NULL`
+guard) and RETURNS the session's STORED context (`plan_id/harness/model`) plus the
+authority token. The coordinator builds `SessionContext` from that return value,
+never from its caller's `GrantedSession` payload, so caller-supplied plan/harness/
+model can no longer override the row. A re-entrant claim matches zero rows.
+
+**HOW EACH FINDING IS CLOSED BY THE RECORD:**
+
+1. *Draw commits then leases separately → kill-between → spent, unleased,
+   never-reconciled (campaign-stopping).* The lease (owner + heartbeat + mode +
+   token) is written IN the `session_opened` transaction. There is no "between".
+2/3/6. *Opener preempts the provider with a fabricated `settled` OR `failed`;
+   artifact policy bound to the boot verifier not the session; a clean settle at
+   settle-time boot state.* A `provider` session's terminal requires the capability
+   token (covers both outcomes); a clean `settled` requires a provider-verified
+   artifact keyed on the ROW's `execution_mode`, not on `verifyArtifact !==
+   undefined` this boot.
+4. *Guard optional via omitting `db`/`ownership` at construction.* `ownership` is
+   REQUIRED on the coordinator; a test passes an in-memory fake, it can no longer
+   be omitted into silence. `configureExecution`/`index.ts` always wire it.
+5. *Re-entrant claim; caller data trusted over the row.* The claim is once-only and
+   returns stored context (above).
+7. *Malformed/`undefined` provider report leaves the session open.* The report is
+   parsed with a runtime schema INSIDE the coordinator's failure boundary; an
+   invalid or missing report synthesizes a failed receipt.
+8 (+3). *Reconciliation tied to the boot's provider config.* The stale-lease sweep
+   runs on a timer on EVERY boot regardless of whether execution is enabled; the
+   heartbeat is scoped to `status='open'` (never a completed run); reconcile throws
+   → `unreconciled` unless an exit actually appended.
+
+**git (grok F2, git.ts:315).** Pinning `GIT_DIR`/`GIT_WORK_TREE` alone left the
+per-worktree gitdir's `commondir` and `HEAD` FILES writable by a same-UID harness:
+rewriting `$GIT_DIR/commondir` at a victim repo and `$GIT_DIR/HEAD` at `refs/heads/
+main` redirected the adapter's OWN commit onto the victim's trunk. The adapter now
+also pins `GIT_COMMON_DIR` (captured at resolve) so a rewritten `commondir` is
+ignored, and re-asserts `HEAD` to the session branch before its own commit so a
+rewritten `HEAD` cannot move a victim's `main`. Occupancy-not-provenance in
+worktree mode stays a documented known boundary (needs the BUY sandbox).
+
+---
+
 ## Campaign to date — day-one retrospective (2026-08-01)
 
 **Shape of the campaign so far**: 1 research pre-map (design corpus, 6 prototype versions mined) → map #1 charted with 17 decision tickets → 15 decisions + 3 research tickets resolved in ~one day → 9 build tickets graduated → 3 gauntlets run, all FAIL on round 1, all producing fix rounds that made the work *more architectural*, not more patched.
@@ -649,6 +728,35 @@ This is the general form of nearly every defect in this campaign, and it belongs
 
 **Process note — a record validated against its own cursor is not validated** (#22 r8, 2026-08-01). The client's durable journal parsed every envelope strictly and then checked one thing about the record: `lastSeq === events.at(-1).roomSeq`. That is a check on the *last element*, and it says nothing about the ones before it — so `{events:[{roomSeq:9},{roomSeq:2}], lastSeq:2}` was self-consistent, loaded clean, and got the real event at 9 applied a **second** time when catch-up delivered it, under a file whose first paragraph says "nothing is ever applied out of order, and nothing is applied twice". Two absolute sentences, and the schema added for them checked neither. Lesson kept: **when a claim is about a sequence, the check has to quantify over the sequence — an agreement between two endpoints is not an invariant about what lies between them.** Asking the same question of the same record's other field found a second one for free (the entries' `roomId` was never compared to the key's), which is the general shape: **the field you did check is the one you thought about, so go and enumerate the ones you did not.**
 
+---
+
+## Phase 3 closed-ticket entries (2026-08-12 →)
+
+**#116 — the agent/plan/session schema + core + projection (the Phase-3 trunk)** (closed 2026-08-12, 3 gauntlet rounds + 1 test-only follow-up, both foreign lineages every round). The trunk decision: agent → plan → session at fixed depth on Atrium's schema (agents sidecar owned by a human = init anchor; plans = process groups; sessions = processes that draft/settle/fail to a receipt and never spawn). Rounds:
+- **Lint gate before the substance.** The branch reported "lint green except pre-existing" but `pnpm lint` exited 1 — a single *unformatted committed fixture* (`mutants/mutants.json`) emitted one biome **formatter** error, which tipped the whole `biome check .` past `--max-diagnostics` and surfaced a pre-existing info as the reported error. Fixed by `biome format --write` on that one file (JSON data byte-identical). Two lessons: **a formatter error is error-severity where lint-rule violations are only warnings — one unformatted data file fails the gate for the whole repo via the diagnostic cap**; and, caught while verifying, **`npx <tool>` in a worktree with no `node_modules` silently fetches an unrelated same-named package** (`biome@0.3.3`) that reports exit 0 doing nothing — the empty `git status` after a `--write` was the tell. (This also resolved #105: AGENTS.md claimed lint "exits 1, and always has"; measured, it exits 0.)
+- **r2 (codex gpt-5.6-sol + grok-4.5):** covenant HELD both lineages. Four real gaps: F-A a settled plan could gain new sessions (`projectSessionOpened` never read `plans.status`, command-path); F-B terminality was only an app predicate, not a table fact; F-C the owner sidecar was checked only at mint, never re-verified where the agent operates (the fail-open-on-missing-identity class, 4× in #89); F-D two false-green tests. Budget-not-enforced correctly routed OUT to #115/#118.
+- **r3 (both lineages on the fix diff):** A/B/C CLOSED by both — concurrency-safe parent-open read (`FOR SHARE` vs the settle's exclusive lock + the append advisory lock), `0025` terminal-state triggers, sidecar re-join threaded through every `getAtriumSession` caller and fail-closed on a query throw. One finding, on F-D only.
+- **r3.1 (test-only):** the covenant "certified census" guard was an incomplete proxy — room-filtered and counting only `human_touched_at`, omitting the `isHuman(acceptedBy)` half of `epistemicStateOf`. Made it global + full-predicate, proven red-on-revert two ways.
+
+**The process lesson worth keeping — the two foreign lineages are complementary, not redundant, and the disagreement is where the truth is.** On the SAME F-D test grok returned CLEAN and codex returned a finding; adjudicating against the code (`.where(eq(roomId, room.roomId))` and a `humanTouchedAt`-only filter) showed codex right and grok's rebuttal (byte-equal + total catches it) held only for the *seeded* row, not a kind-flip on another object or a cross-room certification. Neither lineage alone would have closed the guard: grok verified the concurrency and call-site coverage codex asserted more briefly; codex caught the census gap grok waved off. Run both, then **adjudicate every finding against the code — a CLEAN verdict is a hypothesis too.** Corollary carried from the whole ticket: the guard that certifies the covenant is the one most in danger of certifying itself, so it gets the hardest flip-the-input.
+
+**#117 — widen `proposer_kind` so a session can DRAFT a `~`** (closed 2026-08-12, 2 gauntlet rounds, both foreign lineages). Added an `agent` proposer variant (reusing #96's `Actor{kind:'agent'}`) so a session-borne agent can stage a claim/open_question; acceptance stays type-keyed, so a machine's reading is `~` until a human certifies. Rounds:
+- **r1 (both lineages, convergent):** campaign-stopping path CLOSED by both (no agent draft reaches `✓`). Both *independently* built the same HIGH finding — `selfStagedReadingRefusal` (`authority.ts:556`) was widened everywhere except itself, still keyed on `kind==='model'`, so a human staging an agent-dressed reading and self-accepting it folded to `✓`. Plus a shared MEDIUM (the 0026 CHECK didn't verify the proposer is agent-kind) and a test-pin gap.
+- **r2 (both lineages):** F4 CLOSED by both, and the critical new-regression check passed — widening the gate to `proposerIsMachine` does NOT over-refuse a later human certifying an agent's honest draft, because the gate keys on `stagedBy===actor` FIRST (only the stager re-accepting their own reading is refused). codex found one more (F5: the 0027 trigger guards future writes but not pre-existing rows) — adjudicated nil-exposure because 0026+0027 co-ship (no deployed window for a dirty row) and it's dishonest-attribution-not-certify; folded the belt-and-suspenders validation into #118.
+
+**The process lesson worth keeping — "widen a kind" is a whole-graph edit, and the gate it skips is the one that matters.** The proposer widening touched a dozen sites correctly and skipped exactly one: the self-blessing refusal, whose entire job is to stop a stager certifying their own machine reading. Both lineages found it because the flip-test is mechanical — *flip the proposer label from model to agent; does a gate that should fire stop firing?* Lesson: **when you add a member to an enum that a security predicate switches on, enumerate every predicate that reads the old members and prove each was widened — a `=== 'model'` that should have become `!== 'human'` is invisible to typecheck and to every test that never stages the new kind.** The second-round corollary: widening a refusal risks the mirror defect (over-refusing a legitimate path), so the fix's gauntlet must construct the *intended* path and prove it still works, not only the abuse path.
+
+**#118 — enforce the plan rlimit at the spend/authorization boundary** (closed 2026-08-13, 2 gauntlet rounds + 1 test-hardening, both foreign lineages every round). A plan's human-set `rlimit_slice` (in draws); `open_session` is an authorized draw checked under the global append advisory lock; `set_plan_rlimit` is a human-only `authorizes-spend` class (the covenant extended from certify to SPEND). Rounds:
+- **r1 — the disjoint-defect-set case, at its sharpest.** grok returned CLEAN, 7/7. codex returned 7 findings including **two campaign-stopping** — the load-bearing one: **an unfunded plan (NULL slice) authorized UNLIMITED draws** (the check ran only `if (slice !== null)`, so enforcement was opt-in / fail-OPEN), which an agent reaches by opening its own plan. grok read the NULL default and did not flag its semantics; codex built the exploit. Also caught: `authorized_draws` not backfilled (undercount on upgrade), a refused draw returning an `ack` indistinguishable from a grant, the F5 fold-in placed in an already-journaled migration, and a race test masked by an in-process mutex.
+- **r2:** the fail-closed fix (NULL → 0 draws) CLOSED by both, with the regression check passing (no bootstrap deadlock — a human funds from their own socket). codex found the race test still non-deterministic (Promise.all, no barrier → could pass with the lock removed).
+- **r2.1:** rewrote the race test with a third-connection `FOR UPDATE` barrier; proven 5× green with the lock, 5× red without, 5× green restored.
+
+**The process lesson worth keeping — a budget default must fail CLOSED, and only a second lineage will tell you it doesn't.** The single most dangerous line in the feature was the *absence* of enforcement: a default that means "unlimited" turns a spend gate into an opt-in suggestion, and the machine that opens its own plan is the one who benefits. One lineage waved the NULL default through as ordinary; the other made it a runaway. Two lessons: **(1) for any by-construction guarantee, the DEFAULT/empty/unset case is the one to attack first — "unenforced" reads as "fine" to a reviewer looking at the enforced path, exactly the [[allowlist-the-compliant-form]] failure mode in a new dress; (2) on a trust/spend/concurrency boundary, a single CLEAN verdict is worth little — it was the disagreement between the two foreign lineages that surfaced the campaign-stopping hole, and neither alone would have.** Corollary carried on concurrency tests: a race test that uses `Promise.all` without a barrier proves nothing repeatably — it must be built so the guard's removal *reliably* fails it, or it is a false-green that certifies the lock it never exercised.
+
+**#119 — a plan may not settle while a child session is still open** (closed 2026-08-13, 1 gauntlet round + 1 hardening, both foreign lineages; the LAST schema-foundation lane). The mirror of #116 F-A, built the same two ways: an app-path guarded read + a `0031` terminal-transition trigger. Both lineages confirmed the COMMAND path closed on both interleavings (serialized by the global advisory lock). Findings were all backstop/test/hygiene: the trigger over-claimed "table fact" (a `BEFORE UPDATE EXISTS` can't see an uncommitted concurrent raw INSERT — command path fine, raw-concurrent not), the migration didn't validate pre-existing violations (same class as #118 CS-2), and three test-quality gaps (an app-guard test the trigger masked, a vacuously-passing control, no deterministic race test). Hardening: honest migration language, a pre-existing-violation `DO $$` guard, message-specific app-guard assertion, precondition-asserting control, and a barrier race test.
+
+**The process lesson worth keeping — when you cannot produce a red-on-revert, the invariant may be stronger than the finding assumed; verify that, don't fabricate the red.** The hardening brief demanded the race test fail when one named line (`ledger.ts:975`'s advisory lock) is reverted. It didn't — 5× with the line and 5× without, still green. The builder chased the cause instead of faking a failure and found that `atrium_append_core_event` (0008) takes the same lock *unconditionally* and a guard trigger refuses any lock-less insert — so the protection is defense-in-depth beyond the single line, and no one revert turns it into a silent violation. Lesson: **a red-on-revert that won't go red is data, not a failure to comply — either the guard is dead (bad) or it is redundantly protected (good), and the only way to know is to trace it; a builder that reports "I could not make it fail, and here is why" is doing the job, a builder that manufactures a plausible red is defeating it.** This is the flip side of the false-green rule: the same rigor that says "a test that cannot fail proves nothing" also says "a test that refuses to fail is a fact to explain, not a box to force-check."
+
 ## Anti-staleness doctrine
 
 Nothing in this project is allowed to be true only at time of writing. Rules:
@@ -1228,3 +1336,133 @@ campaign RETRO — preserved verbatim so no lesson is lost.
 **Process note — two correct lanes can compose into a dead product path, and git has nothing to flag** (merge train → `merge/foundation`, 2026-08-02). `fix/realtime-r11` defined the receipt window as **exactly the cited messages**; `fix/core-engine-r12` **refused any window that ends at the citations**. Each lane was internally consistent, each passed a terminal blind review with its own probes, and neither rule existed on `main`. Merged, the SQL cannot produce a window the TypeScript will certify — **every non-human acceptance is refused and the model path is dead** — and **git produced not one conflict marker**, because the two rules live in different files and different languages. Lesson kept: **a merge conflict is a syntactic collision, and the dangerous class is semantic — two lanes editing *different* files can contradict each other, and nothing in the tooling looks for it.** This is the "property measurable on neither branch" lesson at its hardest edge: the earlier instance was two lanes disagreeing about a *number*; this one is two lanes agreeing to break the product. Practical form: when two lanes both touch one invariant from opposite sides — a producer and its checker, a schema and its validator, a writer and its reader — **the integration suite is the only instrument that will see it, so run it on the merged tree before believing a green typecheck.** It was one red integration test that surfaced this, out of 135.
 
 **Process note — a fail-closed merge defect is the lucky one; ask what the fail-open version would have looked like** (merge train, 2026-08-02). Assembling the tree moved a fan-out membership check into a shared package and **took the query while leaving the key** — `userId:roomId` on one side against a NUL separator on the other. Every lookup missed, so the revalidation pass revoked *every* subscriber, and three integration tests went red immediately. The builder's own framing is the keeper: **it failed in the lucky direction.** Two sides agreeing on a *wrong* key would have found everybody "still a member", silently stopped revoking anyone, and left the suite green. Lesson kept: **when a merge defect is caught loudly, spend a minute on the symmetric version that would have been caught by nothing — that is the one to write a test against.** Two details worth carrying: a **third** spelling was then found in a fixture helper with **reversed argument order**, so the fix was one function rather than two agreeing ones; and the raw NUL byte made the file report as `data` to `file(1)`, so **`grep` skipped it entirely** and a search for the identifier came back empty while the function sat inside it — a search returning nothing is not evidence that nothing is there.
+
+---
+
+## #120 — the ExecutionProvider seam (2026-08-13, 7 rounds)
+
+Closed after a 6-round dual-lineage gauntlet + a design-consolidation round 7. Merged to int/phase3 @ e6ddd55.
+
+**Lesson — patching instances of a class leaves the siblings; consolidate the class.** The seam took five patch rounds that each fixed the specific defect a critic named and left its sibling open: the round-1 git-env fix was a *denylist* (strip `GIT_DIR`) that left the `GIT_CONFIG_*`/`core.hooksPath` config-injection sibling (both foreign lineages exfiltrated secrets through it); the round-4/5 ownership-lease *mechanism* spawned a whole cluster (draw-commits-before-lease, re-entrant claim, boot-bound policy, fabricated-failure preempt). What finally worked was round 6's **one grant-time execution-authority record** written in the same transaction as `session_opened` — a fresh adversary could not re-break any of the cluster it replaced. **When a critic keeps finding a new way past the same guard, the guard is at the wrong altitude; design the invariant, don't patch the instance.**
+
+**Lesson — a recurring finding across rounds is a principle you haven't stated.** "Settlement/reconciliation must not depend on the opener's *current* membership" surfaced in rounds 4, 5, AND 6 before round 7 stated it: the capability token IS the settlement authority; a provider-bound settle appends as the `system` actor the append-boundary trigger (0018) exempts, needing no current membership. Three rounds of "wedged session" were one unstated principle.
+
+**Lesson — triage findings by reachability against the goal.** Once the wire-reachable covenant breaks were closed, the remaining findings all needed a DB fault, a held lock, raw SQL, or the opt-in unsandboxed provider. Under a "working-state first" directive those were filed as hardening (#125) rather than ground into zero — the destination scenario (deterministic shim, valid inputs) never hits them. Adjudicate reachability, not just severity labels.
+
+## #121 — the pin/tree/surfaces control plane (2026-08-13, 8 rounds + browser critic)
+
+Closed after 8 dual-lineage rounds + a page-driving browser critic that verified the rendered surface CLEAN on the covenant. Merged to int/phase3 @ e6ddd55.
+
+**Lesson — a fix that threads a client-supplied authority value becomes the next round's hole.** To bind a certification to the *reviewed* artifact and correlate the disarm, successive rounds threaded client values — an *optional* `reviewedDigest` (omit it → certify unreviewed work) and a client-minted `attemptSeq` wall-clock (jam it to MAX_SAFE_INTEGER → DoS the certify forever). Round 5 had *deliberately* kept the confirm nonce server-internal for exactly this reason; rounds 6-7 re-learned it. The root fix was making the whole capability **server-authoritative** — a server-issued attempt token, a *required* validated digest, `clock_timestamp` timing. **A capability that trusts a client-supplied value to prove authority is not a capability.**
+
+**Lesson — a bad gauntlet run reads exactly like a failing one; adjudicate against the code.** Round 8's re-gauntlet returned 5 "campaign-stopping" findings — all of them defects already fixed in rounds 5-7, cited with stale round-4 line numbers, while grok emitted no verdict. Cause: a sed-chain bug left the critic prompt referencing the round-4 sha/framing. Caught by reading the actual code at the reviewed sha (every claim was false against the tree) and re-running clean (grok CLEAN, codex one LOW copy). **A missing verdict is never a pass; a finding is a hypothesis; check both against the tree before believing either.**
+
+## Merge #120 × #121 → int/phase3 (2026-08-13)
+
+**Lesson (fresh instance of the standing semantic-merge rule) — two seams can agree to break the data path with zero conflict, and the *existing* suites will pass both ways.** #120 wrote the produced artifact onto the ledger *event*; #121's certify read the `sessions.artifact` *column*. Merged, the artifact reached the event but never the column → certify always saw `no_artifact`, with not one git conflict. The kicker: the full suite passed **with and without** the fix, because certify tests seed the column directly and execution tests assert only the event — *nothing had ever composed the seam*. The composition test that reds-on-revert had to be written for the merge. **When two lanes are a producer and its consumer of the same fact, a passing suite on each is no evidence they compose; write the test that exercises the join, on the merged tree.**
+
+**Process lesson — verify a builder's actual branch state, never its final message.** Two builder/tooling failures this campaign were recovered only by checking real state: one builder ended on "I'll wait for the e2e Monitor" without committing (its complete work sat uncommitted in the worktree — salvaged, verified, pushed); and the load-hazard of a finished agent's orphaned headless-chrome pinning ~3 cores for over an hour. Reap on every completion; a task-notification is not proof of a clean finish.
+
+## #122 — the session→proposal provenance edge (closed 2026-08-13, 2 rounds)
+
+Built by codex gpt-5.6-sol via the lane script (first codex-built lane of this campaign);
+gauntleted by grok-4.5 + a fresh executing opus (builder lineage changed, so the critic set
+changed to keep three lineages honest). Round 1 caught: three guard clauses with no witness
+(delete any, both suites stay green) and no DB backstop on session liveness — a settled
+session accepted a direct-insert proposal; the interpret worker still writing the old
+envelope, unpinned; and "un-spoofably" overclaiming what is enforced (cross-agent, not
+intra-agent — #132 owns the execution-authority binding). Round 2: one red-on-revert test
+per clause with a DISTINCT witness — the refusal message, not the nack, is the assertion,
+because downstream backstops also nack; 0044 replaces 0043's function (append-only) to
+require the session be open; the omitted-key test pins .optional() replay compatibility.
+
+Process lessons: (1) a guard of N conjunctive clauses needs N witnesses — a shared nack
+assertion tests the disjunction, not the clauses; the message text is what separates "this
+clause did its job" from "something downstream caught it". (2) The codex sandbox cannot run
+docker, and said so — "0 tests executed" reported honestly is the lane working, not failing;
+the orchestrator owns the integration verification it cannot perform. (3) The enriched
+ticket decayed in three places (journal number, already-landed DDL, line ranges) and the
+builder caught all three because the dispatch said verify-don't-inherit; and the fix brief
+itself carried an impossible fixture (two agents' plans in one room) that the tree's own
+trigger refused — the builder re-derived the constructible form instead of forcing it.
+
+## #127 — signal/interrupt on the spine (closed 2026-08-13, 2 rounds)
+
+Opus built it; codex + grok gauntleted it blind; opus fixed it. Round 1's headline
+(codex, campaign-stopping): the resume spend boundary lived only in the command's
+authorize closure — the generic append path incremented without checking and a raw
+insert minted a wake receipt with zero draws counted. The fix is the repo's own
+pattern applied one layer deeper: the PROJECTION re-checks the slice (as it already
+re-checked target-open, and for the same reason — 0025-class triggers cannot nack a
+later append), and the trigger refuses a receipt no ledger event stands behind.
+
+Process lessons: (1) an enforcement that must hold against every writer needs
+restating at every layer that writes — command, projection, trigger — and each
+restatement needs its OWN witness with a DISJOINT refusal sentence; the shared-
+sentence trap has now fired three times in two tickets (caught live each time only
+because the reverts were actually run). (2) A specified lock class is a hypothesis:
+FOR KEY SHARE read as correct, and measurement showed it does not conflict with a
+settle's UPDATE — ornament shipped as safety. The builder measured instead of
+inheriting. (3) A whole-history toContain over migrations is a false-green shape:
+the ALTER TYPE ADD VALUE line satisfied the pin meant for the CHECK constraint —
+slice assertions to the last deployed statement. (4) tail masks exit codes — the
+third time this campaign; it is now a reflex to re-run unpiped before believing
+any gate.
+
+## #128 — the channel loop's Atrium-side contract (closed 2026-08-13, 1 round + micro-fix)
+
+Opus built; codex + grok gauntleted blind; near-clean round — codex FINDINGS 1 note
+(a test comment claimed a mutation that would not go red; the orchestrator applied the
+adjudicated two-line remedy directly and added the explicit two-null-cause witness),
+grok VERDICT CLEAN with executed parse/refusal checks. The funded-arm claim TABLE
+(not index — no unique index spans the two draw-projecting tables) survived spawn+spawn,
+spawn+resume, resume+resume, replay, and cascade attacks from both lineages.
+
+Process lessons: (1) a RED-ON-REVERT comment is itself a claim that can be false — the
+witness table is only as honest as its parenthetical reasoning, and a critic who checks
+the CLAIM (not just the test) catches it. (2) When enforcement spans two projection
+tables, the constraint that "should" be an index is a table — write down WHY in the
+receipt or every reviewer will go hunting for the index. (3) grok's clean verdict still
+carried the campaign's next ticket (spawn lacks the projection-layer slice re-check
+resume got) — a clean verdict with notes is a frontier report, not just a pass.
+
+## #131 — the e2e flake class (closed 2026-08-13, 1 round)
+
+The "reconnect family flake" was neither reconnect nor a family: the webServer gate
+declared readiness after ONE route compiled, then released four workers to race Next's
+on-demand compiler inside their own test clocks. The stated falsifier fired — a test
+with no sockets and no database was the worst victim — killing every reconnect
+hypothesis at once. Fix: warm all 13 routes serially in globalSetup, in the window
+where nothing is timed; no timeout moved. Cold 4-worker runs went 171/3 in 7.7m →
+174/174 in 4.3m, three consecutive.
+
+Process lessons: (1) name the falsifier before the fix — it converted two failing
+specs' shared adjective ("reconnect") from a mechanism into a coincidence in one run.
+(2) The ticket's own evidence was wrong (load "≤2.1" was a between-runs reading;
+during-run is 7.5–18.3) — a builder that re-measures the ticket's claims catches what
+a builder that inherits them builds on. (3) A moving victim ACROSS families is the
+machine's signature, not the product's — HANDOFF.md had already recorded it at 8
+workers; suites grow back into old limits. The margin at 4 workers is thin and the
+map should know it.
+
+## #136 — the co-rendered echo (closed 2026-08-14, 3 rounds)
+
+The destination gate's one red unmasked it; a DOM observer measured it (46-83ms dual
+render, 2/8 runs); the fix is a render-time claim at the join point of two channels
+that were each individually correct — the literal check-relations-not-predicates class,
+found in production code by the campaign's own finish line. Round 3 (codex must-fix):
+the claim needed the server's own payload-agreement rule, byte-exact — the builder
+refused the brief's "trimmed text" because the server hashes unnormalized bytes and
+authoredBody exists to preserve them; trimming was the approximation the brief itself
+warned against.
+
+Process lessons: (1) when a fix filters by a key, ask what ELSE shares the key — the
+server already knew (reused key + different payload = conflict); mirroring an existing
+authority beats inventing an equivalence. (2) A brief's remedy sketch is a hypothesis
+the builder should refuse with evidence — twice now the measured answer beat the
+specified one (FOR KEY SHARE, trimmed-text). (3) `pnpm -r lint` and `pnpm -r unit`
+exit 0 having run NOTHING (root-level scripts, -r excludes the root) — a green light
+over an unexecuted check, adjacent to the AGENTS.md exit-code correction at 240b26e;
+the real gate commands are root pnpm lint / pnpm test. (4) A residual narrower hole
+(same key+body, differing attachments) is documented at the claim site instead of
+traded for a certain duplicate-regression — name the boundary, don't pretend it away.

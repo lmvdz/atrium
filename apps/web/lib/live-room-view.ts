@@ -31,6 +31,17 @@ export interface LiveUnreadWindow {
   readonly throughSeq: number;
 }
 
+/**
+ * The payload terms a committed row and its optimistic echo must agree on for
+ * the row to be the echo's own commit rather than a key collision. Encoded as
+ * an array so no body can impersonate a different (body, replyToId) pair by
+ * containing the separator — the same reason the server's fingerprint is a
+ * `JSON.stringify` of an array rather than a concatenation.
+ */
+function payloadSignature(body: string, replyToId: string | null): string {
+  return JSON.stringify([body, replyToId]);
+}
+
 /** A projection invalidation bypasses the durable event-sequence guard. */
 export function shouldRefreshLiveRoute(
   reason: 'state' | 'projection',
@@ -48,7 +59,92 @@ export function liveRoomView(
 ) {
   const base = replayView(data, viewerId);
   const participantName = new Map(base.participants.map((person) => [person.id, person.name]));
-  const pendingRecords: MessageRecord[] = live.pending.map((pending) => ({
+  /**
+   * The committed row claims its own echo, here, in the same render.
+   *
+   * #136. The two halves of a send arrive on two unsynchronised channels: the
+   * durable row reaches `data` when `router.refresh()` re-reads the route from
+   * the database, and the optimistic echo leaves `live.pending` when the
+   * socket's own `message_posted` event is applied (`reconcilePending`). Each
+   * half is correct; nothing related them. So any refresh whose *server* render
+   * postdates the commit but whose *client* commit predates the event renders
+   * both — the same message twice, once as `data-origin="seeded"` with its real
+   * id and once as `data-origin="typed"` with `pending:…`.
+   *
+   * That window is normally a few milliseconds, which is why it read as a
+   * flake. A socket drop across the commit stretches it to a whole reconnect:
+   * the event is delayed until the resubscribe's catch-up, while
+   * `projection_changed` (which `shouldRefreshLiveRoute` deliberately lets
+   * bypass the event-sequence guard) and the post-load refresh chain keep
+   * pulling the committed row in from the database meanwhile.
+   *
+   * Relating them cannot be done on either channel alone — each one only ever
+   * sees its own half. It can be done here, because this is the one place that
+   * holds both at once: an echo whose durable row is already in this very
+   * projection is not pending, it is delivered. Dropping it in the same
+   * expression that renders the durable row makes the swap atomic by
+   * construction — there is no frame in which both exist, whichever signal wins
+   * the race, and no reachable state in which a stuck echo outlives its own
+   * message.
+   *
+   * Matched on `clientMessageId`, on the row being the viewer's own, *and* on
+   * the payload agreeing — all three, because the key alone does not identify a
+   * message even within one author.
+   *
+   * The key is minted client-side as `userId:timestamp:counter`
+   * (`realtime.ts`'s `sendMessage`), so it is unique per client INSTANCE, not
+   * per person: two tabs of the same account that send inside the same
+   * millisecond mint the same key. The server does not treat that as one
+   * message — `appendBatch` looks the receipt up on
+   * (room, actor, commandName, key) and, when the payload fingerprint differs,
+   * raises `conflict: that retry key already names a different command payload`
+   * (`apps/server/src/ledger.ts`). One tab's send commits; the other is
+   * REFUSED, and `reconcilePending` leaves that refusal in `live.pending` as a
+   * `failed` row so the person can see it and retry.
+   *
+   * A key-only claim would hide exactly that row — before the nack arrives and,
+   * because the failed echo never leaves `pending`, permanently after it. The
+   * person's typed words would vanish from their own composer with no trace,
+   * which is the wrong direction to fail in: a duplicate is a visible cosmetic
+   * flaw that the next event heals, a swallowed message is silent data loss.
+   *
+   * So the claim mirrors the server's own same-vs-conflict rule. The server
+   * compares a hash of the send's payload, and it hashes `body` VERBATIM —
+   * `sendMessageFingerprint` takes `command.body` with no normalisation, and
+   * `authoredBody` deliberately hands it every authored byte. Equality here is
+   * therefore exact, not trimmed: a body differing only in whitespace is a
+   * conflict to the server, and approximating it away is the same silent hide
+   * in a narrower case. `replyToId` joins it on the same reasoning — it is the
+   * other fingerprint term this projection holds verbatim off its own stored
+   * column (an `answer_message` row writes `replyToId: null`, which is what its
+   * pending arm compares as).
+   *
+   * The remaining fingerprint terms (attachments, references, causeMessageId)
+   * are deliberately not compared: this projection holds them enriched or not
+   * at all, so comparing them would risk the opposite error — failing to claim
+   * a genuine echo and reinstating the duplicate this exists to remove. Being
+   * stricter than the server can only ever cost a duplicate; being looser costs
+   * a message.
+   */
+  const committedPayloads = new Map<string, Set<string>>();
+  for (const message of data.messages) {
+    if (message.authorId !== viewerId || typeof message.clientMessageId !== 'string') continue;
+    const payloads = committedPayloads.get(message.clientMessageId) ?? new Set<string>();
+    payloads.add(payloadSignature(message.body, message.replyToId ?? null));
+    committedPayloads.set(message.clientMessageId, payloads);
+  }
+  const unclaimedPending = live.pending.filter(
+    (pending) =>
+      !committedPayloads
+        .get(pending.clientMessageId)
+        ?.has(
+          payloadSignature(
+            pending.body,
+            pending.commandName === 'send_message' ? pending.replyToId : null,
+          ),
+        ),
+  );
+  const pendingRecords: MessageRecord[] = unclaimedPending.map((pending) => ({
     id: `pending:${pending.clientMessageId}`,
     at: clock(pending.at),
     actor: base.viewer.name,
@@ -69,7 +165,7 @@ export function liveRoomView(
     })),
   }));
   const pendingEntries = pendingRecords.map((record, index) => {
-    const pending = live.pending[index];
+    const pending = unclaimedPending[index];
     return messageEntry(record, {
       state: TALK,
       body:

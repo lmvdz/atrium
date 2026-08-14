@@ -6,6 +6,7 @@ import {
   getAtriumSession,
   guardedErrorLog,
 } from '@atrium/auth';
+import type { Database } from '@atrium/db';
 import type { Logger } from './logger.js';
 
 /**
@@ -42,6 +43,13 @@ export type RevalidateSession = (headers: Headers) => Promise<AtriumSession | nu
 export interface UpgradeAuthOptions {
   auth: AtriumAuth;
   logger: Logger;
+  /**
+   * The database handle `getAtriumSession` re-checks the agent owner sidecar
+   * against (#116 fix r3, F-C). Threaded through because a socket is
+   * re-validated for as long as it lives, so a de-sidecar'd agent's live socket
+   * must fail the same recheck the handshake does — one definition, both seams.
+   */
+  db: Database;
 }
 
 export function createUpgradeAuthenticator(options: UpgradeAuthOptions): AuthenticateUpgrade {
@@ -64,13 +72,13 @@ export function createUpgradeAuthenticator(options: UpgradeAuthOptions): Authent
  * that let it exist. Every failure mode ends in `null`.
  */
 export function createSessionResolver(options: UpgradeAuthOptions): RevalidateSession {
-  const { auth, logger } = options;
+  const { auth, db, logger } = options;
   const logSafely = guardedErrorLog(logger);
 
   return async function resolveSession(headers) {
     let session: AtriumSession | null;
     try {
-      session = await getAtriumSession(auth, headers);
+      session = await getAtriumSession(auth, headers, db);
     } catch (error) {
       // A database blip must read as "not authenticated", never as "sure, come
       // in" — and never as "reject with whatever the driver threw", which is

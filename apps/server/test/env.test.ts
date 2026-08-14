@@ -506,3 +506,34 @@ describe('assertProductionSafe', () => {
     ).toThrow(/APP_URL/);
   });
 });
+
+describe('loadEnv — the execution provider gate (#120)', () => {
+  it('accepts the deterministic shim with a scratch dir', () => {
+    const env = loadEnv({ ...DEV, EXECUTION_PROVIDER: 'shim', EXECUTION_SCRATCH_DIR: '/tmp/x' });
+    expect(env.EXECUTION_PROVIDER).toBe('shim');
+  });
+
+  it('refuses the UNSANDBOXED worktree provider without the explicit opt-in (F1)', () => {
+    // Everything else present — only the opt-in is missing.
+    expect(() =>
+      loadEnv({
+        ...DEV,
+        EXECUTION_PROVIDER: 'worktree',
+        EXECUTION_SCRATCH_DIR: '/tmp/x',
+        EXECUTION_HARNESS_COMMAND: '["bash","-lc","true"]',
+      }),
+    ).toThrow(/EXECUTION_ALLOW_UNSANDBOXED/);
+  });
+
+  it('accepts worktree once the unsandboxed risk is opted into out loud (F1)', () => {
+    const env = loadEnv({
+      ...DEV,
+      EXECUTION_PROVIDER: 'worktree',
+      EXECUTION_SCRATCH_DIR: '/tmp/x',
+      EXECUTION_HARNESS_COMMAND: '["bash","-lc","true"]',
+      EXECUTION_ALLOW_UNSANDBOXED: '1',
+    });
+    expect(env.EXECUTION_PROVIDER).toBe('worktree');
+    expect(env.EXECUTION_ALLOW_UNSANDBOXED).toBe(true);
+  });
+});

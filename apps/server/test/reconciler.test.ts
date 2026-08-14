@@ -48,6 +48,7 @@ function entry(roomId: string, roomSeq: number): LedgerEntry {
       messageId: `m${roomSeq}`,
       body: 'hi',
       replyToId: null,
+      causeMessageId: null,
       clientMessageId: null,
       attachments: [],
       references: [],

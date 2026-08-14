@@ -30,6 +30,19 @@ export default defineConfig({
       // the same reason as the other three: the suite must never depend on build
       // order, and what the compiler checks has to be what the runner runs.
       { find: /^@atrium\/auth$/, replacement: src('./packages/auth/src/index.ts') },
+      /**
+       * `server-only` — the same alias `apps/web/vitest.config.ts` carries, and
+       * for the same reason.
+       *
+       * The package's job is to make a client bundle fail loudly if it pulls in a
+       * server module: its default export throws on import. There is no client
+       * bundle here — this runner IS the server, on a real Postgres — so the
+       * throw would only prevent the suite from exercising the modules whose
+       * server-side behaviour it exists to test (#121's certify path is the first
+       * one). The target is `server-only/empty.js`, the module the package itself
+       * exports under the `react-server` condition; it is not a stub written here.
+       */
+      { find: /^server-only$/, replacement: src('./apps/web/node_modules/server-only/empty.js') },
     ],
   },
   test: {

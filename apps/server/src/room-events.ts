@@ -1,11 +1,14 @@
 import type { Actor, CoreEvent, CoreEventType, TrustedContext } from '@atrium/core';
 import {
+  AttentionClass,
+  AttentionSubjectKind,
+  ProposalRecorded as CoreProposalRecorded,
   Id,
   ObjectAccepted,
   ObjectCorrected,
-  ProposalRecorded,
   ProposalRejected,
   ProposalSuperseded,
+  RationaleReason,
   RelationAdded,
   Timestamp,
 } from '@atrium/core';
@@ -58,6 +61,17 @@ const eventBase = {
   at: Timestamp,
 };
 
+/**
+ * The core fold deliberately has no process-tree concepts, but the durable
+ * server event also carries the execution session that drafted a reading.
+ * Optional preserves replay of proposal rows written before this provenance
+ * edge was wired; every new command writes either a UUID or an explicit null.
+ */
+export const ProposalRecorded = CoreProposalRecorded.extend({
+  sessionId: Id.nullable().optional(),
+});
+export type ProposalRecorded = z.infer<typeof ProposalRecorded>;
+
 export const MAX_ATTACHMENT_BYTES = 25 * 1024 * 1024;
 
 export const MessageAttachment = z.object({
@@ -88,6 +102,25 @@ export const MessagePosted = z.object({
   replyToId: Id.nullable().default(null),
   /** The sender's idempotency key — also what its own optimistic echo matches on. */
   clientMessageId: z.string().min(1).nullable().default(null),
+  /**
+   * THE ANSWER ARM'S ROUTING RECEIPT (#128, #124 resolution 3).
+   *
+   * The same-room channel message a daemon consumed and answered with this post
+   * — the third arm of Glance §9.3's trichotomy. Nullable with a `null` default,
+   * which is the load-bearing half: every `message_posted` ever appended omits
+   * this key, and a replay must parse those rows into exactly the events they
+   * were before this field existed. The default is what makes the widening
+   * invisible to the fold (`test/protocol.test.ts` pins the omitted-key parse).
+   *
+   * Distinct from `replyToId` beside it. That is a threading edge a client
+   * renders; this is a claim about which message's routing produced this append.
+   *
+   * "An answer in a group room is just an attributed message, not a routing
+   * receipt" (#124 resolution 3) — so this stays null unless the daemon is
+   * answering in its own channel room, and the ledger-side room-match backstop
+   * refuses a cause from anywhere else regardless.
+   */
+  causeMessageId: Id.nullable().default(null),
   attachments: z.array(MessageAttachment).default([]),
   references: z.array(MessageReference).max(100).default([]),
 });
@@ -102,6 +135,335 @@ export const AttentionResolved = z.object({
 });
 export type AttentionResolved = z.infer<typeof AttentionResolved>;
 
+/* ─────────────────────────────────────────────────────────────────────────
+ * The agent/plan/session lifecycle — six more ledger-only kinds (#116)
+ *
+ * These live HERE, not in `@atrium/core`'s `events.ts`, and that placement is
+ * the load-bearing part: they must never join `CoreEvent`. The covenant reducer
+ * folds six kinds and grows no concept of a plan or a session; these ride the
+ * ledger for a `room_seq` and an append order, and `projections.ts` turns them
+ * into rows in `plans` / `sessions` / `attention_items`. `isCoreEvent` returns
+ * false for every one (they are not in `coreEventTypes`), so folding a room's
+ * core-typed subsequence is identical with them present or absent — which is the
+ * flip-the-input proof that the covenant is untouched.
+ *
+ * Every one carries a top-level `roomId`, the same shape `message_posted` has,
+ * so `core_events_payload_room_matches` (extended in drizzle/0023) accepts them
+ * and `declaredRoomId` reads their room straight off the payload.
+ * ───────────────────────────────────────────────────────────────────────── */
+
+const Micros = z.number().int().nonnegative().nullable().default(null);
+
+/** A plan opened — a board created for an agent's work in its channel. */
+export const PlanOpened = z.object({
+  ...eventBase,
+  type: z.literal('plan_opened'),
+  roomId: Id,
+  planId: Id,
+  /** The agent whose work this plan groups — a `users` id of an agent principal. */
+  agentUserId: Id,
+  title: z.string().min(1).max(200),
+  /** The plan's rlimit slice, in micro-dollars. Placeholder (#115 owns enforcement). */
+  budgetLimitMicros: Micros,
+  /**
+   * THE NEW-WORK ARM'S BOARD RECEIPT (#128, #124 resolution 3). The same-room
+   * message whose routing opened this board. Nullable-with-default so every
+   * `plan_opened` already in a ledger replays byte-identically.
+   *
+   * A plan never draws (#124 resolution 2), so this carries provenance and takes
+   * NO claim in `funded_arms`: two boards from one message spend nothing.
+   */
+  causeMessageId: Id.nullable().default(null),
+});
+export type PlanOpened = z.infer<typeof PlanOpened>;
+
+/** A plan settled — its receipt is written; it indexes its sessions' receipts. */
+export const PlanSettled = z.object({
+  ...eventBase,
+  type: z.literal('plan_settled'),
+  roomId: Id,
+  planId: Id,
+});
+export type PlanSettled = z.infer<typeof PlanSettled>;
+
+/**
+ * A session opened under a plan. `planId` is the session's ONE parent — the
+ * pstree edge, enforced by the schema's composite FK. There is no
+ * `parentSessionId` field here, deliberately: a session never spawns, and the
+ * payload has no place to say it did.
+ */
+export const SessionOpened = z.object({
+  ...eventBase,
+  type: z.literal('session_opened'),
+  roomId: Id,
+  sessionId: Id,
+  planId: Id,
+  harness: z.string().min(1).max(120),
+  model: z.string().min(1).max(120),
+  /**
+   * THE EXECUTION-AUTHORITY RECORD, decided at grant (#120 round-6). `provider`
+   * means a wired ExecutionProvider owns this session's execution and its
+   * terminal; `external` means an outside member settles it (external-settle
+   * mode). `executionOwner` is the granting process's instance id for a provider
+   * session, NULL for external. Both ride the event so replay reconstructs the
+   * grant-time authority deterministically. The capability TOKEN does NOT ride
+   * here — it is minted row-only in the projection so it never reaches the wire
+   * (`toWire` broadcasts the whole event). Defaulted so a pre-round-6 event (or an
+   * in-process caller that predates the field) folds as an external session, which
+   * is exactly its historical behaviour.
+   */
+  executionMode: z.enum(['provider', 'external']).default('external'),
+  executionOwner: z.string().min(1).max(200).nullable().default(null),
+  /**
+   * THE NEW-WORK ARM'S PROCESS RECEIPT (#128, #124 resolution 3). The same-room
+   * message whose routing spawned this session. Nullable-with-default so every
+   * `session_opened` already in a ledger replays byte-identically.
+   *
+   * A SPAWN IS A DRAW, so unlike `plan_opened`'s field a non-null value here
+   * also claims the cause in `funded_arms` (#124 resolution 4): a daemon retry
+   * of one message cannot fund a second session from it.
+   */
+  causeMessageId: Id.nullable().default(null),
+});
+export type SessionOpened = z.infer<typeof SessionOpened>;
+
+/**
+ * The verified artifact a session's execution produced (#120): a branch and the
+ * commit it points at, in the scratch git remote the ExecutionProvider controls.
+ *
+ * It rides the exit event's payload — a `~` fact about the process, indexed by
+ * the ledger row, NOT a covenant `✓`. The branch is never `main` and is never
+ * merged: the land is a human `✓`, so a settled session references a branch
+ * waiting for one rather than one the adapter certified. Nullable, because a
+ * failing harness produces no verifiable object.
+ */
+export const ExecutionArtifact = z.object({
+  branch: z.string().min(1).max(200),
+  commit: z.string().min(1).max(64),
+  remote: z.string().min(1).max(1000),
+});
+export type ExecutionArtifact = z.infer<typeof ExecutionArtifact>;
+
+/** The two spellings of an exit receipt (§9.5). Both non-epistemic (#114 T3). */
+const sessionExit = {
+  roomId: Id,
+  sessionId: Id,
+  /** The exit receipt prose. */
+  exitSummary: z.string().max(4000).nullable().default(null),
+  /** Final spend, micro-dollars. */
+  spendMicros: Micros,
+  /** Final context fill, 0..1. */
+  contextPct: z.number().min(0).max(1).nullable().default(null),
+  /**
+   * The verified artifact this exit produced (#120), or `null`. Carried in the
+   * ledger payload — the durable, receipt-indexed reference to the branch/commit
+   * the session's work became; the ledger event remains the index (the ticket's
+   * "reuse the ledger"). On the integrated tree the settle projection ALSO
+   * persists its branch+commit into `sessions.artifact` (#121's `SessionArtifact`
+   * slot), so #121's control-plane review pane certifies exactly the artifact
+   * #120 produced. `remote` is #120's internal scratch pointer and is not copied.
+   */
+  artifact: ExecutionArtifact.nullable().default(null),
+};
+
+/**
+ * A session settled — a clean exit. Writes the session's exit receipt
+ * (`sessions.status/exit_summary/spend`) and NOTHING on `accepted_objects`: a
+ * settle can never flip a `~` to a `✓` (#114 T3), and the projection proves it
+ * by touching only the `sessions` row.
+ */
+export const SessionSettled = z.object({
+  ...eventBase,
+  type: z.literal('session_settled'),
+  ...sessionExit,
+});
+export type SessionSettled = z.infer<typeof SessionSettled>;
+
+/** A session failed — an exit owed attention until triaged. Also non-epistemic. */
+export const SessionFailed = z.object({
+  ...eventBase,
+  type: z.literal('session_failed'),
+  ...sessionExit,
+});
+export type SessionFailed = z.infer<typeof SessionFailed>;
+
+/**
+ * A signal raised — escalation, which reuses attention (#112). It names an
+ * existing room subject (an object, a proposal or a message — the same closed
+ * vocabulary `attention_items` already carries) and a participant to escalate
+ * to, and `projectSignalRaised` writes one `attention_items` row for them. The
+ * `class` and `reason` are `@atrium/core`'s own attention types, validated here
+ * so the wire cannot invent an attention shape core would refuse to render —
+ * and imported as types only, so nothing in core changes. Full signal semantics
+ * beyond this escalation are #115 / the signal build.
+ */
+export const SignalRaised = z.object({
+  ...eventBase,
+  type: z.literal('signal_raised'),
+  roomId: Id,
+  /** The participant this escalates to — a `users` id (`attention_items.user_id`). */
+  targetUserId: Id,
+  /** Which table `subjectId` names — the existing attention subject vocabulary. */
+  /**
+   * Which table `subjectId` names. WIDENED to four in #127: a subscription that
+   * expires unmatched escalates to the agent's owner, and that item is about the
+   * SESSION still waiting — the three older subjects cannot name one, and an
+   * attention item pointing at a stand-in subject is worse than a wider enum.
+   * Purely additive, so every payload that parsed before still parses (pinned in
+   * `test/protocol.test.ts`).
+   */
+  subjectKind: AttentionSubjectKind,
+  subjectId: Id,
+  class: AttentionClass,
+  reason: RationaleReason,
+});
+export type SignalRaised = z.infer<typeof SignalRaised>;
+
+/* ── the budget/rlimit enforcement boundary (#118, from #115's resolution) ────
+ *
+ * Both ledger-only, like the lifecycle six: they ride the spine for a `room_seq`
+ * and never join `CoreEvent`. `plan_rlimit_set` is the human-only
+ * spend-authorization that sets/raises a plan's slice; `draw_refused` is the
+ * durable receipt a spawn takes when the slice is spent. Neither touches an
+ * `accepted_objects` judgement column — a spend-authorization is a SPEND syscall
+ * (#115), not a covenant `✓`.
+ * ───────────────────────────────────────────────────────────────────────── */
+
+/**
+ * A plan's rlimit slice set or raised — the human act that funds the plan. The
+ * command that produces it (`set_plan_rlimit`) is human-only, refused for a
+ * non-human before the append exactly as a machine trying to certify is: no
+ * machine-authored path raises a slice (#115 decision 4). `slice` is a count of
+ * authorized draws — spawns/continues — this plan may be granted.
+ */
+export const PlanRlimitSet = z.object({
+  ...eventBase,
+  type: z.literal('plan_rlimit_set'),
+  roomId: Id,
+  planId: Id,
+  /** The new ceiling on authorized draws. Non-negative; may raise or lower. */
+  slice: z.number().int().nonnegative(),
+});
+export type PlanRlimitSet = z.infer<typeof PlanRlimitSet>;
+
+/**
+ * A draw refused at the authorization boundary — the durable, receipted refusal
+ * a spawn takes when its plan's slice is spent (#118, #115 decision 2). It is a
+ * ROW, not a silent stop-after: `reason=budget`, carrying the slice and the
+ * committed authorized-draw count it was checked against, so the refusal is
+ * visible and reconciles. No `sessions` row is created and no draw is granted —
+ * the whole point is that the draw did NOT happen.
+ */
+export const DrawRefused = z.object({
+  ...eventBase,
+  type: z.literal('draw_refused'),
+  roomId: Id,
+  /** The plan whose slice refused this draw. */
+  planId: Id,
+  /** Why the draw was refused. Only `budget` today; a closed set that may grow. */
+  reason: z.literal('budget'),
+  /** The plan's slice at the moment of refusal — what the draw was checked against. */
+  slice: z.number().int().nonnegative(),
+  /** The committed authorized-draw count at refusal. `+ 1 > slice` is why. */
+  authorizedDraws: z.number().int().nonnegative(),
+  /** The harness/model the refused spawn would have run — for the receipt. */
+  harness: z.string().min(1).max(120),
+  model: z.string().min(1).max(120),
+});
+export type DrawRefused = z.infer<typeof DrawRefused>;
+
+/* ── the signal/interrupt boundary (#127, from #123's resolution) ────────────
+ *
+ * Two more ledger-only kinds. They ride the spine for a `room_seq` and an append
+ * order and **neither ever joins `CoreEvent`** — the reducer does not fold them
+ * and must not grow a concept of them: a steer is coordination, not the room's
+ * understanding (#123 resolution 1). `isCoreEvent` is false for both because
+ * neither is in `coreEventTypes`, so a room's core-typed subsequence — and
+ * therefore its whole covenant state — is byte-for-byte identical whether a
+ * hundred signals are present or absent.
+ *
+ * ## THE PINNED WRITE-SET, for both (#123 resolution 1, grok r1.9)
+ *
+ * `projectSessionSignaled` writes `session_signals` (and, for a resume, the
+ * matched `session_subscriptions` row and the plan's committed draw count);
+ * `projectSessionSubscribed` writes `session_subscriptions`. NEITHER writes any
+ * column of `accepted_objects`, and neither writes `plans.rlimit_slice` — the
+ * human-set ceiling has exactly one writer and it is `projectPlanRlimitSet`.
+ * `plans.authorized_draws` is untouched by `steer` and `interrupt` and moves by
+ * exactly one for a GRANTED resume, because a resume is a draw (#115 decision 2)
+ * and the alternative is a free wake path around #118. `integration/server/
+ * signal-events.test.ts` folds a signal burst and asserts those tables byte-stable.
+ * ─────────────────────────────────────────────────────────────────────────── */
+
+/** What a signal into a running session IS. See `signalKind` in the schema. */
+export const SignalKind = z.enum(['steer', 'interrupt', 'resume']);
+export type SignalKind = z.infer<typeof SignalKind>;
+
+/**
+ * Control DOWN into a running session (#123 resolution 2/4).
+ *
+ * `steer` is guidance, `interrupt` is a request to stop, `resume` is a
+ * CONTINUATION DRAW that has passed #118's slice boundary under the append lock
+ * exactly as `open_session` does — an over-slice resume never appears as one of
+ * these at all; it appends a `draw_refused` instead. There is no free wake.
+ *
+ * The three provenance fields are explicit rather than a reused
+ * `MessageReference` (#123 resolution 4): that vocabulary has no `message` kind,
+ * so the shape the draft assumed was unrepresentable.
+ *
+ *  - `causeMessageId` — the same-room message a mediated signal came from,
+ *    composite-FK'd in the projection. Nullable: a signal typed straight at the
+ *    session cites nothing.
+ *  - `supersedesEventId` — forward-only revision of an earlier signal. The ledger
+ *    is append-only, so a revision NAMES its predecessor; discarding the
+ *    superseded tail is the harness's act, reported in the session receipt.
+ *  - `subscriptionId` — `resume` only (a DB check holds it to that), naming the
+ *    wait this continuation pays out.
+ */
+export const SessionSignaled = z.object({
+  ...eventBase,
+  type: z.literal('session_signaled'),
+  roomId: Id,
+  sessionId: Id,
+  /** The `session_signals` row this event mints — server-minted, like `messageId`. */
+  signalId: Id,
+  kind: SignalKind,
+  /** The steer's words or the interrupt's reason. */
+  body: z.string().max(4000).nullable().default(null),
+  causeMessageId: Id.nullable().default(null),
+  supersedesEventId: Id.nullable().default(null),
+  subscriptionId: Id.nullable().default(null),
+});
+export type SessionSignaled = z.infer<typeof SessionSignaled>;
+
+/**
+ * A durable WAIT registered against a running session (#123 resolution 6).
+ *
+ * `expiresAt` is MANDATORY — no `.nullable()`, no default — and that is the
+ * whole point of the event existing in this shape. An unmatched subscribe with
+ * no horizon holds a session open forever, blocks its plan from ever settling
+ * (#119), and owes nobody anything; the gauntlet found exactly that. So a
+ * subscription ends one of three ways: matched into a resume draw, expired into
+ * the agent owner's attention, or disposed by its own session's exit.
+ *
+ * `source` and `matcher` are opaque strings. What a wait MEANS is #124's
+ * daemon's business; that it exists, targets an open session, and ends is this
+ * ledger's.
+ */
+export const SessionSubscribed = z.object({
+  ...eventBase,
+  type: z.literal('session_subscribed'),
+  roomId: Id,
+  sessionId: Id,
+  /** The `session_subscriptions` row this event mints — server-minted. */
+  subscriptionId: Id,
+  source: z.string().min(1).max(200),
+  matcher: z.string().min(1).max(2000),
+  /** MANDATORY. A wait with no horizon is a wedge; this is the horizon. */
+  expiresAt: Timestamp,
+});
+export type SessionSubscribed = z.infer<typeof SessionSubscribed>;
+
 /** The payload union, before the no-actor guard. */
 const RoomEventVariants = z.discriminatedUnion('type', [
   ProposalRecorded,
@@ -112,6 +474,16 @@ const RoomEventVariants = z.discriminatedUnion('type', [
   RelationAdded,
   MessagePosted,
   AttentionResolved,
+  PlanOpened,
+  PlanSettled,
+  SessionOpened,
+  SessionSettled,
+  SessionFailed,
+  SignalRaised,
+  PlanRlimitSet,
+  DrawRefused,
+  SessionSignaled,
+  SessionSubscribed,
 ]);
 
 /**
@@ -183,7 +555,19 @@ export function needsMessageWindow(event: RoomEvent, actor: Actor): boolean {
 }
 
 /** Ledger-only kinds: real history, but nothing the reducer folds. */
-export type ServerEvent = MessagePosted | AttentionResolved;
+export type ServerEvent =
+  | MessagePosted
+  | AttentionResolved
+  | PlanOpened
+  | PlanSettled
+  | SessionOpened
+  | SessionSettled
+  | SessionFailed
+  | SignalRaised
+  | PlanRlimitSet
+  | DrawRefused
+  | SessionSignaled
+  | SessionSubscribed;
 
 /** True when @atrium/core's `reduce` consumes this event. */
 export function isCoreEvent(event: RoomEvent): event is CoreEvent {
@@ -216,6 +600,16 @@ export function declaredRoomId(event: RoomEvent): string | null {
       return event.relation.roomId;
     case 'message_posted':
     case 'attention_resolved':
+    case 'plan_opened':
+    case 'plan_settled':
+    case 'session_opened':
+    case 'session_settled':
+    case 'session_failed':
+    case 'signal_raised':
+    case 'plan_rlimit_set':
+    case 'draw_refused':
+    case 'session_signaled':
+    case 'session_subscribed':
       return event.roomId;
     case 'proposal_rejected':
     case 'proposal_superseded':

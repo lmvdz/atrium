@@ -89,6 +89,218 @@ describe('the ledger event union', () => {
     expect(forgedCore.success).toBe(false);
   });
 
+  /**
+   * The six agent/plan/session lifecycle kinds are ledger-only (#116). This is
+   * the unit half of "the covenant reducer is untouched": every one parses as a
+   * `RoomEvent`, every one is `isCoreEvent === false`, and NONE is in
+   * `coreEventTypes` — so folding a room's core-typed subsequence is byte-for-byte
+   * identical whether they are present or absent. `coreEventTypes` staying six is
+   * the whole claim; the `folds exactly six` test above pins the count, and this
+   * pins that the new kinds did not sneak into it.
+   *
+   * Catches: adding any of the six to `coreEventTypeSet`/`coreEventTypes`, which
+   * would make the reducer try to fold a plan and `CoreState` grow a concept of
+   * one — the exact thing #114's resolution forbids.
+   */
+  it('treats the six lifecycle kinds as ledger-only, out of the covenant fold', () => {
+    const samples: Array<[string, Record<string, unknown>]> = [
+      ['plan_opened', { planId: 'p1', agentUserId: 'a1', title: 'work' }],
+      ['plan_settled', { planId: 'p1' }],
+      ['session_opened', { sessionId: 's1', planId: 'p1', harness: 'claude', model: 'opus' }],
+      ['session_settled', { sessionId: 's1' }],
+      ['session_failed', { sessionId: 's1' }],
+      [
+        'signal_raised',
+        {
+          targetUserId: 'u1',
+          subjectKind: 'message',
+          subjectId: 'm1',
+          class: 'blocking_question',
+          reason: { kind: 'question_names_you', question: 'which cutover?' },
+        },
+      ],
+    ];
+    for (const [type, extra] of samples) {
+      const event = RoomEvent.parse({ id: `e-${type}`, at, type, roomId: 'r1', ...extra });
+      expect(isCoreEvent(event), type).toBe(false);
+      expect(declaredRoomId(event), type).toBe('r1');
+      expect((coreEventTypes as readonly string[]).includes(type), type).toBe(false);
+    }
+    // The count is unchanged: the covenant still folds exactly six.
+    expect(coreEventTypes).toHaveLength(6);
+  });
+
+  /**
+   * The ledger's no-actor guard covers the lifecycle kinds too (#116, #21's
+   * contract). They never reach `CoreEvent.parse`, so without `RoomEvent`'s own
+   * `superRefine` a `plan_opened` could smuggle an `actor` key into the payload —
+   * and the table's `core_events_payload_has_no_actor` check would then refuse it
+   * three inferences from the cause. Refused here, at the schema, instead.
+   */
+  it('refuses an actor in a lifecycle payload', () => {
+    const forged = RoomEvent.safeParse({
+      id: 'e1',
+      at,
+      actor: { kind: 'agent', userId: 'a1' },
+      type: 'session_opened',
+      roomId: 'r1',
+      sessionId: 's1',
+      planId: 'p1',
+      harness: 'claude',
+      model: 'opus',
+    });
+    expect(forged.success).toBe(false);
+    expect(forged.error?.issues.some((issue) => issue.path[0] === 'actor')).toBe(true);
+  });
+
+  /**
+   * THE SIGNAL/INTERRUPT KINDS ARE LEDGER-ONLY TOO (#127, #123 resolution 1).
+   *
+   * The same claim the lifecycle test above makes, made again for the two new
+   * kinds because it is the claim the whole decision rests on: a steer is
+   * coordination, not the room's understanding, so the reducer must never fold
+   * one. Both parse as a `RoomEvent`, both are `isCoreEvent === false`, neither is
+   * in `coreEventTypes`, and the covenant still folds exactly six.
+   *
+   * RED-ON-REVERT: add either type to `coreEventTypeSet` / `coreEventTypes` and
+   * the `isCoreEvent` and `includes` assertions go red, and so does the count.
+   */
+  it('treats the signal/interrupt kinds as ledger-only, out of the covenant fold', () => {
+    const samples: Array<[string, Record<string, unknown>]> = [
+      ['session_signaled', { sessionId: 's1', signalId: 'sig1', kind: 'steer' }],
+      [
+        'session_subscribed',
+        {
+          sessionId: 's1',
+          subscriptionId: 'sub1',
+          source: 'channel',
+          matcher: 'the migration lands',
+          expiresAt: at,
+        },
+      ],
+    ];
+    for (const [type, extra] of samples) {
+      const event = RoomEvent.parse({ id: `e-${type}`, at, type, roomId: 'r1', ...extra });
+      expect(isCoreEvent(event), type).toBe(false);
+      expect(declaredRoomId(event), type).toBe('r1');
+      expect((coreEventTypes as readonly string[]).includes(type), type).toBe(false);
+    }
+    expect(coreEventTypes).toHaveLength(6);
+  });
+
+  /**
+   * A SUBSCRIPTION HAS NO SPELLING WITHOUT A HORIZON (#123 resolution 6).
+   *
+   * `expiresAt` is mandatory in the event, not merely validated in the command —
+   * so the wedge shape (a wait that holds a session open forever and blocks its
+   * plan's settle with nothing owed to anybody) cannot be written down at all,
+   * including by an in-process caller that never goes through `Command.parse`.
+   *
+   * RED-ON-REVERT: give `expiresAt` a `.nullable().default(null)` or an
+   * `.optional()` and this parse succeeds — the test goes red.
+   */
+  it('refuses a subscription with no expiry — the horizon is mandatory', () => {
+    const horizonless = RoomEvent.safeParse({
+      id: 'e1',
+      at,
+      type: 'session_subscribed',
+      roomId: 'r1',
+      sessionId: 's1',
+      subscriptionId: 'sub1',
+      source: 'channel',
+      matcher: 'anything',
+    });
+    expect(horizonless.success).toBe(false);
+    expect(horizonless.error?.issues.some((issue) => issue.path[0] === 'expiresAt')).toBe(true);
+  });
+
+  /**
+   * REPLAY ≡ LIVE ACROSS THE THREE SHAPES #128 WIDENED.
+   *
+   * `causeMessageId` was added to `message_posted`, `plan_opened` and
+   * `session_opened` (#124 resolution 3). Three event shapes got a new key, and
+   * every row of those kinds already in a ledger OMITS it — a replay parses
+   * those rows with today's schema, so if the key were required, or defaulted to
+   * anything but `null`, the same ledger would yield different events before and
+   * after this change and the live ≡ replay guarantee would be gone.
+   *
+   * This is the omitted-key parse pin, and it asserts the VALUE, not merely that
+   * the parse succeeded: `undefined` would also "parse" under an `.optional()`
+   * and would then serialise differently on the way back out.
+   *
+   * RED-ON-REVERT: drop `.default(null)` from any of the three (leaving
+   * `.nullable()`) and that shape's parse throws; make it `.optional()` without
+   * a default and the `toBe(null)` assertion goes red on `undefined`; make it
+   * required and both go red.
+   */
+  it('parses a pre-#128 row of each widened kind, defaulting the routing receipt to null', () => {
+    const older: Array<[string, Record<string, unknown>]> = [
+      ['message_posted', { messageId: 'm1', body: 'before the field existed' }],
+      ['plan_opened', { planId: 'p1', agentUserId: 'a1', title: 'work' }],
+      ['session_opened', { sessionId: 's1', planId: 'p1', harness: 'claude', model: 'opus' }],
+    ];
+    for (const [type, extra] of older) {
+      const event = RoomEvent.parse({ id: `e-${type}`, at, type, roomId: 'r1', ...extra });
+      expect('causeMessageId' in event, type).toBe(true);
+      expect((event as { causeMessageId: string | null }).causeMessageId, type).toBe(null);
+    }
+  });
+
+  /**
+   * …AND A ROW THAT CARRIES ONE KEEPS IT (#128). The other half of the widening:
+   * a pin that only proves the omitted key defaults would stay green if the
+   * field were hard-coded to `null` and the payload's value thrown away, which
+   * is exactly how a routing receipt becomes ornament.
+   *
+   * RED-ON-REVERT: replace the field with `z.null().default(null)` — the
+   * omitted-key pin above stays green, and this one goes red.
+   */
+  it('keeps a routing receipt a widened event actually carries', () => {
+    const posted = RoomEvent.parse({
+      id: 'e1',
+      at,
+      type: 'message_posted',
+      roomId: 'r1',
+      messageId: 'm2',
+      body: 'the answer arm',
+      causeMessageId: 'm1',
+    });
+    expect((posted as { causeMessageId: string | null }).causeMessageId).toBe('m1');
+  });
+
+  /**
+   * REPLAY ≡ LIVE ACROSS THE WIDENED `signal_raised` (#127).
+   *
+   * #127 widened `SignalRaised.subjectKind` from three subjects to four so a
+   * subscription-expiry escalation can name the SESSION it is about. A widening
+   * must not change how an OLDER row folds: every `signal_raised` already in a
+   * ledger names one of the original three, and a replay parses those rows with
+   * today's schema. This pins that all three still parse, and that the new
+   * subject parses too — so the same ledger yields the same events before and
+   * after the change.
+   *
+   * RED-ON-REVERT: narrow the enum back (dropping `session`) and the fourth case
+   * fails; replace it rather than widening it (e.g. `z.enum(['session'])`) and the
+   * first three fail — either direction is caught.
+   */
+  it('parses every signal_raised subject, old and new, so a replay is unchanged', () => {
+    for (const subjectKind of ['object', 'proposal', 'message', 'session'] as const) {
+      const raised = RoomEvent.parse({
+        id: `e-${subjectKind}`,
+        at,
+        type: 'signal_raised',
+        roomId: 'r1',
+        targetUserId: 'u1',
+        subjectKind,
+        subjectId: 'x1',
+        class: 'blocking_question',
+        reason: { kind: 'question_names_you', question: 'which cutover?' },
+      });
+      expect(raised.type === 'signal_raised' && raised.subjectKind, subjectKind).toBe(subjectKind);
+      expect(isCoreEvent(raised), subjectKind).toBe(false);
+    }
+  });
+
   it('refuses presence — it is not a kind of event at all (#14)', () => {
     expect(
       RoomEvent.safeParse({ id: 'e1', at, type: 'presence_changed', roomId: 'r1' }).success,
@@ -152,6 +364,21 @@ describe('ClientFrame', () => {
       'reject_proposal',
       'set_typing',
       'advance_seen',
+      // The agent/plan/session lifecycle verbs (#116).
+      'open_plan',
+      'settle_plan',
+      'open_session',
+      'settle_session',
+      'raise_signal',
+      // The budget/rlimit spend-authorization (#118): human-only slice set/raise.
+      'set_plan_rlimit',
+      // The signal/interrupt boundary (#127). `resume_session` is its OWN verb
+      // rather than a third `kind` on `signal_session`, because a resume SPENDS a
+      // plan's slice and a steer does not — a verb whose authorization you cannot
+      // read off its name is a verb nobody checks correctly.
+      'signal_session',
+      'resume_session',
+      'subscribe_session',
     ];
     const declared = Command.options.map((option) => option.shape.name.value);
     expect([...declared].sort()).toEqual([...names].sort());

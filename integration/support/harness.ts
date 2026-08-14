@@ -43,6 +43,21 @@ const APP_TABLES = [
   'accepted_objects',
   'proposals',
   'interpretations',
+  // The signal/interrupt projections (#127). Named explicitly rather than left to
+  // CASCADE from `sessions`: the reset's contract is that every app table is
+  // emptied, and a table that only ever gets cleared as somebody else's cascade
+  // is one FK refactor away from surviving a reset silently.
+  'session_signals',
+  'session_subscriptions',
+  // The funded-arm claims (#128). Named for the same reason the two above are:
+  // it cascades from `messages` and from `sessions` today, and a table cleared
+  // only as somebody else's cascade is one FK refactor away from surviving a
+  // reset silently — which for THIS table would leak a claim into the next test
+  // and refuse a draw nobody made.
+  'funded_arms',
+  'sessions',
+  'plans',
+  'agents',
   'messages',
   'memberships',
   'rooms',

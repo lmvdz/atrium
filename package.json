@@ -25,7 +25,8 @@
     "db:generate": "pnpm --filter @atrium/db generate",
     "db:migrate": "pnpm --filter @atrium/db migrate",
     "infra:up": "docker compose up -d postgres minio",
-    "infra:down": "docker compose down"
+    "infra:down": "docker compose down",
+    "seed:controlplane": "pnpm --filter \"./packages/*\" build && pnpm --filter @atrium/server exec tsx ../../scripts/seed-controlplane.ts"
   },
   "devDependencies": {
     "@biomejs/biome": "2.5.6",

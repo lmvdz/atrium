@@ -11,6 +11,11 @@ export { AttentionCompact } from './attention/AttentionCompact';
 export { CrossRoomJump } from './attention/CrossRoomJump';
 export { nextPageLabel, Pin } from './attention/Pin';
 export { Trailer } from './attention/Trailer';
+export { ControlPin } from './control/ControlPin';
+export { ControlPlane } from './control/ControlPlane';
+export { ControlSurfaces } from './control/ControlSurfaces';
+export { ProcessTree } from './control/ProcessTree';
+export { ReviewPane } from './control/ReviewPane';
 export {
   AppFrame,
   WorkspaceMark,

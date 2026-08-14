@@ -833,8 +833,8 @@
       "kind": "file",
       "why": "The drizzle event_type enum grows a value the database does not have. _CoreEventTypeCoverage asserts only that every core event type is in the enum, so this compiles. It pins that a comparison exists at all — and it is honest to say it does not discriminate r7 from r6, because r6 compared Object.keys(OWN_KEY) against eventType.enumValues and this trips that too. The direction r7 added is the database growing a kind TypeScript has not heard of, which cannot be a mutant at all: ALTER TYPE ... ADD VALUE is irreversible, so it would leak a ninth kind into every later file in the run. That half is verified by hand and the test says so.",
       "file": "packages/db/src/schema.ts",
-      "find": "  'message_posted',\n  'attention_resolved',\n]);",
-      "replace": "  'message_posted',\n  'attention_resolved',\n  'ninth_kind',\n]);",
+      "find": "  'session_subscribed',\n]);",
+      "replace": "  'session_subscribed',\n  'ninth_kind',\n]);",
       "catches": ["takes its list of kinds from the deployed enum, not from a TypeScript constant"]
     },
     {
@@ -948,10 +948,10 @@
       "id": "the_socket_chooses_the_proposer",
       "suite": "integration",
       "kind": "file",
-      "why": "#22 r9 D1, the command-layer half. draftToProposal mints the proposer from the session; this makes it a passthrough of whatever the caller named, which is r8's model branch generalized to both spellings. ProposalDraft no longer carries the field, so the mutated code reads a key zod strips and the proposal reaches the ledger with no proposer at all — CoreEvent.parse refuses it, and the tests that assert a socket-staged proposal is filed under the session and accepted into an object stop passing. Recorded honestly: a faithful reintroduction of r8's behaviour needs the schema field back as well, which is a second site and is not expressible in one substitution. What this pins is that the derivation exists at all and is not read from the draft.",
+      "why": "#22 r9 D1, the command-layer half. draftToProposal mints the proposer from the session's own principal kind — human or, since #117, agent — never from the caller; this makes it a passthrough of whatever the caller named. ProposalDraft no longer carries the field, so the mutated code reads a key zod strips and the proposal reaches the ledger with no proposer at all — CoreEvent.parse refuses it, and the tests that assert a socket-staged proposal is filed under the session and accepted into an object stop passing. What this pins is that the derivation exists at all and is not read from the draft.",
       "file": "apps/server/src/commands.ts",
-      "find": "    proposer: { kind: 'human', userId: session.userId },\n",
-      "replace": "    proposer: (draft as unknown as { proposer: Proposal['proposer'] }).proposer,\n",
+      "find": "  const proposer: Proposal['proposer'] =\n    session.principalKind === 'agent'\n      ? { kind: 'agent', userId: session.userId }\n      : { kind: 'human', userId: session.userId };\n",
+      "replace": "  const proposer: Proposal['proposer'] =\n    (draft as unknown as { proposer: Proposal['proposer'] }).proposer;\n",
       "catches": [
         "files a human proposal under the session, not under the name the client sent",
         "records a proposal as `proposed` and accepts it into an object"
@@ -1256,12 +1256,22 @@
       "kind": "file",
       "file": "apps/server/src/commands.ts",
       "why": "The command-layer certification gate removed, leaving only the reducer's fold — #96 r2's finding 3. Every certification by a non-human still ends with no object in accepted_objects, so a fold-only suite stays green; what changes is that each attempt INSERTS a core_events row and comes back as an `ack` carrying `issues` rather than a nack. A client that renders acks and ignores `issues` shows the room a certification that did not happen, and the ledger grows durable history saying a machine tried to mint one.",
-      "find": "    if (!isHuman(actorOf(session)) && certificationClassOf(command.name) === 'certifies') {",
-      "replace": "    if (false as boolean) {",
+      "find": "      if (klass === 'certifies') {",
+      "replace": "      if (false as boolean) {",
       "catches": [
         "refuses every certification-class command from an agent, before anything is appended",
         "refuses an agent’s acceptance of a person’s decision proposal, and writes nothing"
       ]
+    },
+    {
+      "id": "a_machine_authorizes_its_own_spend",
+      "suite": "integration",
+      "kind": "file",
+      "file": "apps/server/src/commands.ts",
+      "why": "The command-layer SPEND gate removed (#118, #115 decision 4). Setting or raising a plan's rlimit slice is a human-only certification class; with this arm neutered a non-human set_plan_rlimit is no longer refused before the append, so a machine can raise its own (or any) plan's budget — the campaign-stopping act the gate exists to refuse. The projection still lands a plan_rlimit_set row, so the slice actually moves.",
+      "find": "      if (klass === 'authorizes-spend') {",
+      "replace": "      if (false as boolean) {",
+      "catches": ["refuses a machine raising its own slice, and lets a human raise it"]
     },
     {
       "id": "a_machine_retires_what_a_person_confirmed",
@@ -1298,6 +1308,157 @@
       "find": "            if (!isHuman(actorOf(session))) {\n              const confirmed = epistemicStateOf(retired) === 'confirmed';",
       "replace": "            if (!isHuman(actorOf(session)) && epistemicStateOf(retired) !== 'confirmed') {\n              const confirmed = epistemicStateOf(retired) === 'confirmed';",
       "catches": ["refuses an agent’s supersession of a human-accepted claim, and the claim stands"]
+    },
+    {
+      "id": "agents_owner_is_human_trigger_dropped",
+      "suite": "integration",
+      "kind": "sql",
+      "why": "#116's init anchor removed. Dropping agents_owner_is_human lets an agents row name a non-human owner, so the ownership chain no longer terminates at a person by schema — the exact claim #114 makes and #116 builds. The trigger function is left in place; only the binding is dropped and re-created from 0021, so the restore re-deploys the shipped definition rather than a copied one.",
+      "apply": "DROP TRIGGER \"agents_owner_is_human\" ON public.agents",
+      "restoreFrom": ["CREATE TRIGGER \"agents_owner_is_human\""],
+      "restoreMigration": "0021_agent_config_sidecar.sql",
+      "catches": ["REFUSES an agents row whose owner is not a human"]
+    },
+    {
+      "id": "agents_user_is_agent_trigger_dropped",
+      "suite": "integration",
+      "kind": "sql",
+      "why": "The other half of #116's kind pair removed. Dropping agents_user_is_agent lets a person's uuid hold agent config, blurring the human/agent line the covenant's isHuman gates rest on (#90). Trigger binding dropped and re-created from 0021.",
+      "apply": "DROP TRIGGER \"agents_user_is_agent\" ON public.agents",
+      "restoreFrom": ["CREATE TRIGGER \"agents_user_is_agent\""],
+      "restoreMigration": "0021_agent_config_sidecar.sql",
+      "catches": ["REFUSES an agents row whose user is not an agent"]
+    },
+    {
+      "id": "plans_room_matches_agent_channel_trigger_dropped",
+      "suite": "integration",
+      "kind": "sql",
+      "why": "Way 3 of the pstree invariant removed (#116). Dropping plans_room_matches_agent_channel lets an agent open a plan in a room that is not its channel, so a plan is no longer agent-scoped in the channel the agent owns. Trigger binding dropped and re-created from 0022.",
+      "apply": "DROP TRIGGER \"plans_room_matches_agent_channel\" ON public.plans",
+      "restoreFrom": ["CREATE TRIGGER \"plans_room_matches_agent_channel\""],
+      "restoreMigration": "0022_plan_and_session_projections.sql",
+      "catches": ["REFUSES a plan whose room is not its agent's channel"]
+    },
+    {
+      "id": "sessions_plan_same_room_fk_dropped",
+      "suite": "integration",
+      "kind": "sql",
+      "why": "Way 1 of the pstree invariant removed (#116). Dropping the (room_id, plan_id) composite FK lets a session point at a plan that does not exist or lives in another room — the 'exactly one parent, same room' guarantee gone. The unique index it targeted (plans_room_id_key) is left in place; the constraint is dropped and re-added from 0022.",
+      "apply": "ALTER TABLE public.sessions DROP CONSTRAINT sessions_plan_same_room_fk",
+      "restoreFrom": ["ALTER TABLE \"sessions\" ADD CONSTRAINT \"sessions_plan_same_room_fk\""],
+      "restoreMigration": "0022_plan_and_session_projections.sql",
+      "catches": [
+        "REFUSES a session whose plan does not exist",
+        "REFUSES a session whose plan lives in another room"
+      ]
+    },
+    {
+      "id": "agents_channel_owned_fk_dropped",
+      "suite": "integration",
+      "kind": "sql",
+      "why": "#116 fix r2's reciprocity FK removed. Dropping agents_channel_owned_fk lets an agent's channel_room_id point at a room it does not own — a room whose rooms.agent_user_id is NULL, a human, or a different agent — reopening the round-1 leak, and un-freezing channel_room_id so a channel change can orphan an agent's plans (finding 1). The unique rooms_id_agent_user_id_key index it targets is left in place; the constraint is dropped and re-added from 0024.",
+      "apply": "ALTER TABLE public.agents DROP CONSTRAINT agents_channel_owned_fk",
+      "restoreFrom": ["ALTER TABLE \"agents\" ADD CONSTRAINT \"agents_channel_owned_fk\""],
+      "restoreMigration": "0024_agent_channel_reciprocity.sql",
+      "catches": [
+        "REFUSES an agents row whose channel room it does not own (reciprocity)",
+        "REFUSES a channel pointing at a room a DIFFERENT agent owns (reciprocity)",
+        "makes channel_room_id immutable, so a channel change cannot orphan plans (finding 1)"
+      ]
+    },
+    {
+      "id": "rooms_agent_user_is_agent_trigger_dropped",
+      "suite": "integration",
+      "kind": "sql",
+      "why": "#116 fix r2's reciprocal-kind guard removed. Dropping rooms_agent_user_is_agent lets a room name a non-agent (a human or a model) as its agent_user_id — the half the composite FK cannot state, since reciprocity binds only from the agent side. Trigger binding dropped and re-created from 0024.",
+      "apply": "DROP TRIGGER \"rooms_agent_user_is_agent\" ON public.rooms",
+      "restoreFrom": ["CREATE TRIGGER \"rooms_agent_user_is_agent\""],
+      "restoreMigration": "0024_agent_channel_reciprocity.sql",
+      "catches": ["REFUSES naming a non-agent as a room owner (rooms_agent_user_is_agent)"]
+    },
+    {
+      "id": "plans_room_matches_agent_channel_insert_only",
+      "suite": "integration",
+      "kind": "sql",
+      "why": "#116 fix r2 coverage: the round-1 pstree triggers fire BEFORE INSERT OR UPDATE but only INSERT was tested, so a regression to INSERT-only would have stayed green. This recreates the trigger as INSERT-only (CREATE OR REPLACE TRIGGER, PG14+), so a plan can be MOVED out of its agent's channel by UPDATE. restorePrelude drops the mutant binding; the restore re-creates the real BEFORE INSERT OR UPDATE trigger from 0022.",
+      "apply": "CREATE OR REPLACE TRIGGER \"plans_room_matches_agent_channel\" BEFORE INSERT ON \"plans\" FOR EACH ROW EXECUTE FUNCTION \"atrium_plans_room_matches_agent_channel\"()",
+      "restorePrelude": ["DROP TRIGGER \"plans_room_matches_agent_channel\" ON \"plans\""],
+      "restoreFrom": ["CREATE TRIGGER \"plans_room_matches_agent_channel\""],
+      "restoreMigration": "0022_plan_and_session_projections.sql",
+      "catches": [
+        "REFUSES moving a plan out of its agent's channel by UPDATE (way 3, under mutation)",
+        "REFUSES re-pointing a plan's agent to one whose channel differs, by UPDATE"
+      ]
+    },
+    {
+      "id": "agents_owner_is_human_insert_only",
+      "suite": "integration",
+      "kind": "sql",
+      "why": "#116 fix r2 coverage: agents_owner_is_human recreated INSERT-only, so an agent's owner can be flipped to a non-human by UPDATE. The INSERT arm still fires, so the round-1 INSERT test stays green; only the UPDATE flip goes red. Restored to BEFORE INSERT OR UPDATE from 0021.",
+      "apply": "CREATE OR REPLACE TRIGGER \"agents_owner_is_human\" BEFORE INSERT ON \"agents\" FOR EACH ROW EXECUTE FUNCTION \"atrium_agents_owner_is_human\"()",
+      "restorePrelude": ["DROP TRIGGER \"agents_owner_is_human\" ON \"agents\""],
+      "restoreFrom": ["CREATE TRIGGER \"agents_owner_is_human\""],
+      "restoreMigration": "0021_agent_config_sidecar.sql",
+      "catches": [
+        "REFUSES changing an agent owner to a non-human by UPDATE (way 4, under mutation)"
+      ]
+    },
+    {
+      "id": "agents_user_is_agent_insert_only",
+      "suite": "integration",
+      "kind": "sql",
+      "why": "#116 fix r2 coverage: agents_user_is_agent recreated INSERT-only, so a config's user_id can be re-keyed onto a human by UPDATE. The BEFORE UPDATE arm is what refuses that; with it gone the refusal falls to a different constraint, so the test that names agents_user_is_agent goes red. Restored to BEFORE INSERT OR UPDATE from 0021.",
+      "apply": "CREATE OR REPLACE TRIGGER \"agents_user_is_agent\" BEFORE INSERT ON \"agents\" FOR EACH ROW EXECUTE FUNCTION \"atrium_agents_user_is_agent\"()",
+      "restorePrelude": ["DROP TRIGGER \"agents_user_is_agent\" ON \"agents\""],
+      "restoreFrom": ["CREATE TRIGGER \"agents_user_is_agent\""],
+      "restoreMigration": "0021_agent_config_sidecar.sql",
+      "catches": [
+        "REFUSES changing an agent config to a human user_id by UPDATE (way 4, under mutation)"
+      ]
+    },
+    {
+      "id": "rooms_agent_user_is_agent_insert_only",
+      "suite": "integration",
+      "kind": "sql",
+      "why": "#116 fix r2 coverage: the new rooms_agent_user_is_agent recreated INSERT-only, so a room can be re-pointed at a non-agent owner by UPDATE. Rooms are seeded with agent_user_id NULL and claimed by UPDATE, so the UPDATE arm is the load-bearing one. Restored to BEFORE INSERT OR UPDATE from 0024.",
+      "apply": "CREATE OR REPLACE TRIGGER \"rooms_agent_user_is_agent\" BEFORE INSERT ON \"rooms\" FOR EACH ROW EXECUTE FUNCTION \"atrium_rooms_agent_user_is_agent\"()",
+      "restorePrelude": ["DROP TRIGGER \"rooms_agent_user_is_agent\" ON \"rooms\""],
+      "restoreFrom": ["CREATE TRIGGER \"rooms_agent_user_is_agent\""],
+      "restoreMigration": "0024_agent_channel_reciprocity.sql",
+      "catches": ["REFUSES naming a non-agent as a room owner (rooms_agent_user_is_agent)"]
+    },
+    {
+      "id": "plan_settle_ignores_row_count",
+      "suite": "integration",
+      "kind": "file",
+      "why": "#116 fix r2, finding 4: reverts projectPlanSettled to the round-1 UPDATE that neither scopes to an open plan nor checks a row changed. A settle of a ghost/cross-room plan then commits and acks, and a re-settle rewrites a settled plan — a plan could exit more than once.",
+      "file": "apps/server/src/projections.ts",
+      "find": "  const settled = await tx\n    .update(plans)\n    .set({ status: 'settled', settledByEventId: id, updatedAt: new Date(event.at) })\n    .where(and(eq(plans.id, event.planId), eq(plans.roomId, roomId), eq(plans.status, 'open')))\n    .returning({ id: plans.id });\n  if (settled.length === 0) {\n    throw new CommandError(\n      'invalid',\n      `no open plan \"${event.planId}\" to settle in room \"${roomId}\" — it does not exist here or has already settled`,\n    );\n  }\n",
+      "replace": "  await tx\n    .update(plans)\n    .set({ status: 'settled', settledByEventId: id, updatedAt: new Date(event.at) })\n    .where(and(eq(plans.id, event.planId), eq(plans.roomId, roomId)));\n",
+      "catches": ["refuses re-settling a plan, and settling a ghost plan (one exit per plan)"]
+    },
+    {
+      "id": "session_exit_ignores_row_count",
+      "suite": "integration",
+      "kind": "file",
+      "why": "#116 fix r2, finding 4: reverts projectSessionExit to the round-1 UPDATE with no open-status scope and no row-count check. A settle of a nonexistent session commits and acks, and a second exit flips settled<->failed — two contradictory exit receipts for one process.",
+      "file": "apps/server/src/projections.ts",
+      "find": "  const exited = await tx\n    .update(sessions)\n    .set({\n      status,\n      exitSummary: event.exitSummary,\n      spendMicros: event.spendMicros ?? 0,\n      contextPct: event.contextPct,\n      // THE PRODUCED ARTIFACT LANDS IN THE ROW HERE — the #120×#121 seam.\n      // #120's ExecutionProvider mints the verified artifact (`{branch, commit,\n      // remote}`) and carries it on the exit event; #121's control-plane review\n      // pane certifies `sessions.artifact` (`SessionArtifact`). The two were\n      // built apart — #120's projection wrote no column (there was none) and\n      // #121's column named #120 as \"the eventual writer at settle time\" without\n      // one. On the integrated tree the settle projection IS that writer: it\n      // persists the event's branch+commit into the column so the produced\n      // artifact is exactly what the human reviews and lands. `remote` is #120's\n      // internal scratch pointer and is not a review fact, so it is dropped;\n      // diff/test fields are not on #120's ExecutionArtifact and stay absent (a\n      // merge artifact carries branch+commit, per the column doc). Null exit\n      // artifact leaves the slot null — an external/audit/failed exit.\n      artifact: event.artifact\n        ? { branch: event.artifact.branch, commit: event.artifact.commit }\n        : null,\n      settledByEventId: eventId,\n      updatedAt: new Date(event.at),\n    })\n    .where(\n      and(\n        eq(sessions.id, event.sessionId),\n        eq(sessions.roomId, roomId),\n        eq(sessions.status, 'open'),\n      ),\n    )\n    .returning({ id: sessions.id });\n  if (exited.length === 0) {\n    throw new CommandError(\n      'invalid',\n      `no open session \"${event.sessionId}\" to ${status} in room \"${roomId}\" — it does not exist here or has already exited`,\n    );\n  }",
+      "replace": "  await tx\n    .update(sessions)\n    .set({\n      status,\n      exitSummary: event.exitSummary,\n      spendMicros: event.spendMicros ?? 0,\n      contextPct: event.contextPct,\n      // THE PRODUCED ARTIFACT LANDS IN THE ROW HERE — the #120×#121 seam.\n      // #120's ExecutionProvider mints the verified artifact (`{branch, commit,\n      // remote}`) and carries it on the exit event; #121's control-plane review\n      // pane certifies `sessions.artifact` (`SessionArtifact`). The two were\n      // built apart — #120's projection wrote no column (there was none) and\n      // #121's column named #120 as \"the eventual writer at settle time\" without\n      // one. On the integrated tree the settle projection IS that writer: it\n      // persists the event's branch+commit into the column so the produced\n      // artifact is exactly what the human reviews and lands. `remote` is #120's\n      // internal scratch pointer and is not a review fact, so it is dropped;\n      // diff/test fields are not on #120's ExecutionArtifact and stay absent (a\n      // merge artifact carries branch+commit, per the column doc). Null exit\n      // artifact leaves the slot null — an external/audit/failed exit.\n      artifact: event.artifact\n        ? { branch: event.artifact.branch, commit: event.artifact.commit }\n        : null,\n      settledByEventId: eventId,\n      updatedAt: new Date(event.at),\n    })\n    .where(and(eq(sessions.id, event.sessionId), eq(sessions.roomId, roomId)));",
+      "catches": [
+        "refuses a SECOND exit for a session, so settled cannot flip to failed",
+        "refuses settling a session that does not exist, and writes nothing"
+      ]
+    },
+    {
+      "id": "mint_agent_session_skips_config",
+      "suite": "integration",
+      "kind": "file",
+      "why": "#116 fix r2, finding 3: removes mintAgentSession's require-a-config-sidecar check, back to the round-1 kind-only test. A bare agent identity with no agents row — and therefore no owner_user_id — is then handed a session and can operate, bypassing 'the ownership chain terminates at a human'.",
+      "file": "packages/auth/src/principal.ts",
+      "find": "  const [config] = await input.db\n    .select({ ownerUserId: agents.ownerUserId })\n    .from(agents)\n    .where(eq(agents.userId, input.userId))\n    .limit(1);\n  if (!config) {\n    throw new Error(\n      `mintAgentSession: agent \"${input.userId}\" has no config sidecar and so no owner — an agent operates only once it has an owner_user_id (agents row); provision its config before minting a session`,\n    );\n  }\n",
+      "replace": "",
+      "catches": ["refuses to mint a session for an agent with NO owner sidecar (#116 fix r2)"]
     }
   ]
 }

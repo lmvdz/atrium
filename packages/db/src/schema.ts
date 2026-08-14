@@ -86,7 +86,7 @@ export const proposalStatus = pgEnum('proposal_status', [
   'superseded',
 ]);
 
-export const proposerKind = pgEnum('proposer_kind', ['model', 'human']);
+export const proposerKind = pgEnum('proposer_kind', ['model', 'human', 'agent']);
 
 export const relationKind = pgEnum('relation_kind', [
   'supersedes',
@@ -104,6 +104,62 @@ export const attentionClass = pgEnum('attention_class', [
 ]);
 
 export const attentionStatus = pgEnum('attention_status', ['pending', 'resolved', 'dismissed']);
+
+/**
+ * A plan's process-group lifecycle (#116, from #114's resolution). A plan is a
+ * board, not a process — it has no context window — so its states are only the
+ * two a folder of work moves through: `open` while it holds sessions, `settled`
+ * once its receipt is written. Projected from the ledger-only `plan_opened` /
+ * `plan_settled` events; NOT a covenant state, and nothing here flips a `~`.
+ */
+export const planStatus = pgEnum('plan_status', ['open', 'settled']);
+
+/**
+ * A session's process lifecycle (#116). A session is a process — it settles or
+ * fails, and it never spawns (the pstree invariant; see `sessions`). `settled`
+ * and `failed` are the two exit receipts §9.5 names, kept apart because a
+ * failure is owed attention until triaged and a settlement is not. Projected
+ * from `session_opened` / `session_settled` / `session_failed`.
+ *
+ * **This is process state, not epistemic state (#114 T3).** A session settling
+ * or failing is a receipt about the *process*; it writes `sessions.status` and
+ * touches no `accepted_objects` judgement column, so it can never move a `~` to
+ * a `✓`. The two receipts are deliberately separate.
+ */
+export const sessionStatus = pgEnum('session_status', ['open', 'settled', 'failed']);
+
+/**
+ * The three things a signal into a running session can BE (#127, from #123
+ * resolution 2). Deliberately three labels and not a free string: `steer` is
+ * guidance any room member may append, `interrupt` is a request to stop that
+ * only the session's agent principal or that agent's owner may make, and
+ * `resume` is a CONTINUATION DRAW — it passes #118's slice boundary exactly as a
+ * spawn does, so there is no free wake path.
+ *
+ * Mastra's `debounce`/`batch` are deliberately NOT here: they are delivery
+ * optimizations, and the ledger records acts (#123 resolution 2).
+ */
+export const signalKind = pgEnum('signal_kind', ['steer', 'interrupt', 'resume']);
+
+/**
+ * A durable wait's disposition (#127, from #123 resolution 6). A subscription is
+ * never allowed to sit open forever — that is exactly the shape that blocks
+ * #119's plan-settle with nothing to look at:
+ *
+ *  - `waiting` — live, and before its `expires_at`.
+ *  - `matched` — a `session_signaled {kind:'resume'}` named it; the wait paid out
+ *    as a continuation draw.
+ *  - `expired` — its `expires_at` passed unmatched. The sweep escalates it to the
+ *    agent's owner as `signal_raised`: the wait becomes owed ATTENTION.
+ *  - `disposed` — its session took its exit first, so there is nothing left to
+ *    wake. Session exit disposes its subscriptions (`projectSessionExit`).
+ */
+export const subscriptionStatus = pgEnum('subscription_status', [
+  'waiting',
+  'matched',
+  'expired',
+  'disposed',
+]);
 
 /**
  * Closed alphabet for durable authored references.
@@ -136,7 +192,13 @@ export const messageReferenceKind = pgEnum('message_reference_kind', [
  */
 /** Checked-text vocabulary; exported for core/schema parity without a phantom DB enum. */
 export const attentionSubjectKind = {
-  enumValues: ['object', 'proposal', 'message'] as const,
+  // `session` joins the three in #127: a subscription that expires unmatched
+  // escalates to the agent's owner, and that item is about the SESSION still
+  // waiting. Held in parity with @atrium/core's own enum by
+  // `_AttentionSubjectKindParity` at the foot of this file, and fail-closed in
+  // the store by `attention_items_subject_kind_allowlist` plus the fourth
+  // generated column and its composite same-room FK.
+  enumValues: ['object', 'proposal', 'message', 'session'] as const,
 };
 
 /**
@@ -189,6 +251,45 @@ export const eventType = pgEnum('event_type', [
   'relation_added',
   'message_posted',
   'attention_resolved',
+  // ── the agent/plan/session lifecycle (#116) ──────────────────────────────
+  //
+  // Six ledger-only kinds, added to the enum but KEPT OUT of `coreEventTypes`
+  // below — the reducer folds none of them and `CoreState` has no concept of a
+  // plan or a session, exactly the standing `message_posted` and
+  // `attention_resolved` hold. They ride `core_events` for their `room_seq` and
+  // their append order; the `plans`/`sessions` tables and `attention_items` are
+  // their projections. `_CoreEventTypeCoverage` still holds because it is
+  // one-way (every core type is storable), and `event_type` is a strict
+  // superset by design. The RoomEvent zod schemas live in
+  // `apps/server/src/room-events.ts`, NOT in `@atrium/core`'s `events.ts`, so
+  // they never join `CoreEvent`.
+  'plan_opened',
+  'plan_settled',
+  'session_opened',
+  'session_settled',
+  'session_failed',
+  'signal_raised',
+  // ── the budget/rlimit enforcement boundary (#118, from #115's resolution) ──
+  //
+  // Two more ledger-only kinds, KEPT OUT of `coreEventTypes` exactly as the six
+  // above are. `plan_rlimit_set` is the human-only spend-authorization that sets
+  // or raises a plan's `rlimit_slice`; `draw_refused` is the durable, receipted
+  // refusal a spawn takes when the slice is spent — "a row that won't balance",
+  // not a silent stop. Neither mints or moves a `✓`: the covenant reducer folds
+  // neither, and `plans`/`sessions` are still their only projections.
+  'plan_rlimit_set',
+  'draw_refused',
+  // ── the signal/interrupt boundary (#127, from #123's resolution) ──────────
+  //
+  // Two more ledger-only kinds, KEPT OUT of `coreEventTypes` exactly as the
+  // eight above are. `session_signaled` is control DOWN into a running session
+  // (`steer | interrupt | resume`); `session_subscribed` is a durable WAIT with
+  // a mandatory expiry. Neither is ever folded: a steer is coordination, not the
+  // room's understanding (#123 resolution 1). The third signal word,
+  // `signal_raised`, is escalation UP and is unchanged — three meanings, three
+  // names, no overloading (#123 resolution 7).
+  'session_signaled',
+  'session_subscribed',
 ]);
 
 /**
@@ -329,6 +430,25 @@ export const rooms = pgTable(
     slug: text('slug').notNull(),
     name: text('name').notNull(),
     createdBy: uuid('created_by').references(() => users.id, { onDelete: 'set null' }),
+    /**
+     * The agent whose **channel** this room is (#116, from #114 T1). An agent
+     * has ONE channel — a room it OWNS — distinct from the many rooms it is a
+     * member of: plans and sessions pin in that channel, escalations climb to a
+     * group room's pin via attention. Nullable because almost every room is a
+     * group channel with no owning agent, and `unique` because a room is at most
+     * one agent's channel and an agent has at most one channel. `set null` on
+     * the agent's deletion rather than cascading the room away: the channel's
+     * history outlives the identity, the same way a person's messages do.
+     *
+     * `drizzle/0021` adds this as the reciprocal of `agents.channel_room_id`. It
+     * began as a readable back-reference, but `drizzle/0024`'s composite FK
+     * `agents_channel_owned_fk (channel_room_id, user_id) → rooms(id, agent_user_id)`
+     * makes it an ENFORCED edge: an agent's channel must be a room that names it
+     * here. The `rooms_agent_user_is_agent` trigger (0024) holds the other half a
+     * foreign key cannot — that when set, this names an `agent`-kind user, not a
+     * person or a model.
+     */
+    agentUserId: uuid('agent_user_id').references(() => users.id, { onDelete: 'set null' }),
     createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
     archivedAt: timestamp('archived_at', { withTimezone: true }),
   },
@@ -336,6 +456,15 @@ export const rooms = pgTable(
   (t) => [
     uniqueIndex('rooms_workspace_slug_key').on(t.workspaceId, t.slug),
     index('rooms_workspace_idx').on(t.workspaceId),
+    // At most one agent per channel and at most one channel per agent.
+    uniqueIndex('rooms_agent_user_id_key').on(t.agentUserId),
+    /**
+     * The composite-FK TARGET `agents_channel_owned_fk` lands on (#116 fix r2,
+     * drizzle/0024). `id` is already unique, so this pins nothing new about rooms;
+     * it exists only so a foreign key can reference (id, agent_user_id) and hold
+     * an agent's channel to a room it owns.
+     */
+    uniqueIndex('rooms_id_agent_user_id_key').on(t.id, t.agentUserId),
   ],
 );
 
@@ -769,8 +898,10 @@ export const coreEvents = pgTable(
      * Two clauses, and the first is the one that closes the class:
      *
      *  1. **The set of room-bearing keys present is exactly the set this kind's
-     *     shape declares** — one for the five kinds that carry a room, and *empty*
-     *     for the three that name a subject instead. A key belonging to another
+     *     shape declares** — one for the eleven kinds that carry a room (the five
+     *     originals plus the six agent/plan/session lifecycle kinds #116 added to
+     *     the enum and to migration 0023, mirrored here), and *empty* for the
+     *     three that name a subject instead. A key belonging to another
      *     kind's shape is not ignored, it is a refusal, so there is nothing to
      *     smuggle. This also closes the room-less kinds, which under the coalesce
      *     were satisfied by *anything* because the fall-through reached the column.
@@ -823,6 +954,16 @@ export const coreEvents = pgTable(
         WHEN 'relation_added' THEN ARRAY['relation.roomId']
         WHEN 'message_posted' THEN ARRAY['roomId']
         WHEN 'attention_resolved' THEN ARRAY['roomId']
+        WHEN 'plan_opened' THEN ARRAY['roomId']
+        WHEN 'plan_settled' THEN ARRAY['roomId']
+        WHEN 'session_opened' THEN ARRAY['roomId']
+        WHEN 'session_settled' THEN ARRAY['roomId']
+        WHEN 'session_failed' THEN ARRAY['roomId']
+        WHEN 'signal_raised' THEN ARRAY['roomId']
+        WHEN 'plan_rlimit_set' THEN ARRAY['roomId']
+        WHEN 'draw_refused' THEN ARRAY['roomId']
+        WHEN 'session_signaled' THEN ARRAY['roomId']
+        WHEN 'session_subscribed' THEN ARRAY['roomId']
         WHEN 'proposal_rejected' THEN ARRAY[]::text[]
         WHEN 'proposal_superseded' THEN ARRAY[]::text[]
         WHEN 'object_corrected' THEN ARRAY[]::text[]
@@ -832,6 +973,16 @@ export const coreEvents = pgTable(
         WHEN 'relation_added' THEN ${t.payload}->'relation'->>'roomId'
         WHEN 'message_posted' THEN ${t.payload}->>'roomId'
         WHEN 'attention_resolved' THEN ${t.payload}->>'roomId'
+        WHEN 'plan_opened' THEN ${t.payload}->>'roomId'
+        WHEN 'plan_settled' THEN ${t.payload}->>'roomId'
+        WHEN 'session_opened' THEN ${t.payload}->>'roomId'
+        WHEN 'session_settled' THEN ${t.payload}->>'roomId'
+        WHEN 'session_failed' THEN ${t.payload}->>'roomId'
+        WHEN 'signal_raised' THEN ${t.payload}->>'roomId'
+        WHEN 'plan_rlimit_set' THEN ${t.payload}->>'roomId'
+        WHEN 'draw_refused' THEN ${t.payload}->>'roomId'
+        WHEN 'session_signaled' THEN ${t.payload}->>'roomId'
+        WHEN 'session_subscribed' THEN ${t.payload}->>'roomId'
         ELSE ${t.roomId}::text
       END, false)`,
     ),
@@ -1018,6 +1169,23 @@ export const messages = pgTable(
     replyToId: uuid('reply_to_id'),
     /** Client-supplied idempotency key so a retried send never duplicates. */
     clientMessageId: text('client_message_id'),
+    /**
+     * THE ROUTING RECEIPT ON THE ANSWER ARM (#128, #124 resolution 3).
+     *
+     * The room message this one was posted in reply to as a ROUTED answer — the
+     * third arm of Glance §9.3's trichotomy, where the first two are a steer
+     * (`session_signals.cause_message_id`) and new work (`plans` / `sessions`
+     * below). Nullable, and null for almost every message ever written: a person
+     * typing in a channel routes nothing, and neither does an agent speaking on
+     * its own initiative.
+     *
+     * NOT `reply_to_id`, and the distinction is the reason this column exists.
+     * `reply_to_id` is a THREADING edge a client renders; this is a claim that a
+     * daemon consumed that message and this append is what it did about it. The
+     * two are independently nullable and an answer may carry either, both, or
+     * neither.
+     */
+    causeMessageId: uuid('cause_message_id'),
     /** `[{ key, name, contentType, size }]` — objects live in S3/MinIO. */
     attachments: jsonb('attachments').$type<MessageAttachment[]>().notNull().default([]),
     createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
@@ -1044,6 +1212,18 @@ export const messages = pgTable(
     foreignKey({
       name: 'messages_reply_to_same_room_fk',
       columns: [t.roomId, t.replyToId],
+      foreignColumns: [t.roomId, t.id],
+    }),
+    /**
+     * A routed answer's cause is a message in the SAME room (#128, #124
+     * resolution 3). The same composite shape `session_signals` uses for its
+     * steer receipt, for the same reason: routing appends land in the agent's
+     * channel room only, and a cause from another room is not a cause this room
+     * can show. NO ACTION for the reason the reply edge above gives.
+     */
+    foreignKey({
+      name: 'messages_cause_same_room_fk',
+      columns: [t.roomId, t.causeMessageId],
       foreignColumns: [t.roomId, t.id],
     }),
   ],
@@ -1087,6 +1267,695 @@ export const interpretations = pgTable(
   (t) => [
     uniqueIndex('interpretations_message_version_key').on(t.messageId, t.interpretationVersion),
     index('interpretations_status_idx').on(t.status),
+  ],
+);
+
+/* ── the agent / plan / session trunk (#116, from #114's resolution) ─────── */
+
+/**
+ * An agent's config sidecar. **An agent IS a `users` row** with
+ * `principal_kind = 'agent'` (#96, drizzle/0017); this 1:1 table (PK = the
+ * agent's `user_id`) carries the config that has no place on `users`, which
+ * Better Auth shares. Kept off `users` for that reason, and keyed by it so the
+ * two are one identity.
+ *
+ * ## The chain terminates at a human, BY SCHEMA (#114's init anchor)
+ *
+ * `owner_user_id` is NOT NULL and, by the `agents_owner_is_human` trigger
+ * (drizzle/0021, modelled on 0017's immutable-`principal_kind` reads), points
+ * at a `users` row whose `principal_kind` is `human`. `user_id` points, by the
+ * `agents_user_is_agent` trigger, at one whose kind is `agent`. So "the
+ * ownership chain ends at a person" is not a convention the app maintains — it
+ * is a pair of triggers, on the same axis 0017 uses, that refuse the row
+ * otherwise. Neither read takes a lock: `principal_kind` is immutable, so there
+ * is no update to race.
+ *
+ * The budget/host/harness/model columns are the §9.2 "who owns what number"
+ * placeholders — the budget ROOT lives here, a plan takes an rlimit slice, a
+ * session spends. Enforcement is #115; this only carries the numbers.
+ */
+export const agents = pgTable(
+  'agents',
+  {
+    /** The agent principal this configures — 1:1 with the `users` row. */
+    userId: uuid('user_id')
+      .primaryKey()
+      .references(() => users.id, { onDelete: 'cascade' }),
+    /**
+     * The human who owns this agent. NOT NULL — an agent always has an owner —
+     * and held to a `human` principal by `agents_owner_is_human`. `restrict`, so
+     * an owner cannot be deleted out from under the agent it is accountable for.
+     */
+    ownerUserId: uuid('owner_user_id')
+      .notNull()
+      .references(() => users.id, { onDelete: 'restrict' }),
+    /**
+     * The room that is this agent's channel — the one it OWNS (#114 T1),
+     * reciprocal to `rooms.agent_user_id`. NOT NULL: an agent has exactly one
+     * channel. This is the column the pstree room trigger keys on — a plan's
+     * room must equal its agent's `channel_room_id`.
+     */
+    channelRoomId: uuid('channel_room_id')
+      .notNull()
+      .references(() => rooms.id, { onDelete: 'cascade' }),
+    /** Where the agent's harness runs. Config placeholder (#115 owns semantics). */
+    host: text('host').notNull(),
+    /** The default harness a session under this agent runs (a session may override). */
+    harness: text('harness').notNull(),
+    /** The default model. */
+    model: text('model').notNull(),
+    /** The agent's budget root, in micro-dollars. Nullable = no cap set yet. */
+    budgetLimitMicros: bigint('budget_limit_micros', { mode: 'number' }),
+    createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [
+    index('agents_owner_idx').on(t.ownerUserId),
+    uniqueIndex('agents_channel_room_key').on(t.channelRoomId),
+    /**
+     * Reciprocity: an agent's channel is a room IT owns (#116 fix r2,
+     * drizzle/0024). `(channel_room_id, user_id) → rooms(id, agent_user_id)` holds
+     * `rooms.agent_user_id = agents.user_id` for the channel — refused at INSERT
+     * and under UPDATE of either side, closing the round-1 leak where a channel
+     * could point at a room owned by NULL / a human / a different agent. With the
+     * unique `rooms_agent_user_id_key` (one channel per agent) this also makes
+     * `channel_room_id` immutable as a theorem: there is no other room the agent
+     * owns to move the channel to, so the plan-orphaning UPDATE has no legal
+     * spelling. `plans_room_matches_agent_channel` (0022) then needs no lock, as
+     * its comment already assumed.
+     */
+    foreignKey({
+      name: 'agents_channel_owned_fk',
+      columns: [t.channelRoomId, t.userId],
+      foreignColumns: [rooms.id, rooms.agentUserId],
+    }).onDelete('cascade'),
+  ],
+);
+
+/**
+ * A plan — a process group projected from the ledger-only `plan_opened` /
+ * `plan_settled` events. A board, not a process: progress, a spend rollup, a
+ * receipt index; no context window and no terminal (§4). Truth stays on the
+ * spine; this table is a projection of it.
+ *
+ * The `(room_id, id)` unique index is the **composite-FK target** a session's
+ * parent edge lands on: a session's `(room_id, plan_id)` points here, so a
+ * session and its plan are always in one room. `agent_user_id` ties the plan to
+ * its agent, and the `plans_room_matches_agent_channel` trigger (drizzle/0022)
+ * refuses any plan whose `room_id` is not that agent's `channel_room_id` — the
+ * third of the four ways the pstree invariant is a DB fact.
+ */
+export const plans = pgTable(
+  'plans',
+  {
+    id: uuid('id').primaryKey().defaultRandom(),
+    roomId: uuid('room_id')
+      .notNull()
+      .references(() => rooms.id, { onDelete: 'cascade' }),
+    /** The agent whose work this plan groups. */
+    agentUserId: uuid('agent_user_id')
+      .notNull()
+      .references(() => agents.userId, { onDelete: 'cascade' }),
+    title: text('title').notNull(),
+    status: planStatus('status').notNull().default('open'),
+    /** The rlimit slice this plan may spend, in micro-dollars. Nullable placeholder. */
+    budgetLimitMicros: bigint('budget_limit_micros', { mode: 'number' }),
+    /** Rollup of its sessions' spend, in micro-dollars. */
+    spentMicros: bigint('spent_micros', { mode: 'number' }).notNull().default(0),
+    /**
+     * THE ENFORCED CEILING (#118, #115's resolution decision 1). A human-set
+     * ceiling on the number of *authorized draws* — spawns/continues — this plan
+     * may be granted. `NULL` means UNFUNDED: fail CLOSED, a ceiling of ZERO —
+     * every draw is refused until a human sets a finite slice (#118 fix r2, CS-1;
+     * `commands.ts`'s `open_session` reads a null slice as 0, not as "no limit").
+     * A finite value is a hard ceiling, and the ONLY writer of it is
+     * `projectPlanRlimitSet`, from the human-only `set_plan_rlimit` verb — no
+     * machine-authored path raises a slice (that path is refused before the
+     * append, like a machine trying to certify; `commands.ts`).
+     *
+     * Denominated in DRAWS, not micro-dollars, and that is the whole point: the
+     * enforced quantity is the count of draws Atrium itself GRANTED, which it
+     * records and cannot be lied to about — so a session under-reporting its spend
+     * (`spent_micros`, `sessions.spend_micros`) cannot get one more draw than the
+     * slice funds. The `~` dollar layer (`budget_limit_micros` intent,
+     * `spent_micros` reported spend) is STRUCTURALLY SEPARATE and never the
+     * enforcement variable; a divergence between the two is a row that won't
+     * balance, surfaced to the human, not a gate.
+     */
+    rlimitSlice: bigint('rlimit_slice', { mode: 'number' }),
+    /**
+     * The committed authorized-draw accounting: how many draws Atrium has granted
+     * under this plan. Incremented by exactly one inside the same append
+     * transaction as each draw it grants, under the global ledger lock, so it
+     * cannot be forged. This is the number the draw gate reads and compares to
+     * `rlimit_slice` — never the adapter-reported `spent_micros`.
+     *
+     * ## A draw is a SPAWN **or** a CONTINUE (#127, from #115 decision 2)
+     *
+     * #115 defined the slice as authorized "spawns/continues", and #118 built only
+     * the spawn half — so this column's original sentence said it "equals
+     * `count(sessions)` for the plan by construction". That identity was an
+     * artifact of the missing half, not the invariant: #123's resolution point 2
+     * makes RESUME a draw, and `projectSessionSignaled` increments this column by
+     * one for a granted `session_signaled {kind:'resume'}` exactly as
+     * `projectSessionOpened` does for a `session_opened`. So the identity is now
+     * `count(sessions) + count(granted resumes)`, and a resume that would exceed
+     * the slice takes the same durable `draw_refused` receipt a spawn does. The
+     * enforced quantity is unchanged: draws Atrium itself granted. `steer` and
+     * `interrupt` are NOT draws and never touch this column.
+     */
+    authorizedDraws: bigint('authorized_draws', { mode: 'number' }).notNull().default(0),
+    /**
+     * THE ROUTING RECEIPT ON THE NEW-WORK ARM'S BOARD (#128, #124 resolution 3).
+     *
+     * The room message this plan was opened in response to. Nullable — a human
+     * opening a board by hand cites nothing, and the resolution names that case
+     * outright.
+     *
+     * A PLAN NEVER DRAWS (#124 resolution 2, grok r3): only session spawns and
+     * continues pass #118's slice boundary, so this column carries provenance and
+     * is deliberately EXEMPT from the funded-arm uniqueness in `funded_arms`. Two
+     * plans opened from one message are two free boards, which costs nothing and
+     * hides nothing; two FUNDED sessions from one message is a daemon retry that
+     * spent the slice twice, and that is what the uniqueness refuses.
+     */
+    causeMessageId: uuid('cause_message_id'),
+    /** The `core_events.id` of the `plan_opened` that projected this. */
+    openedByEventId: text('opened_by_event_id'),
+    /** The `core_events.id` of the `plan_settled`, once it has settled. */
+    settledByEventId: text('settled_by_event_id'),
+    createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
+    updatedAt: timestamp('updated_at', { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [
+    index('plans_room_status_idx').on(t.roomId, t.status),
+    index('plans_agent_idx').on(t.agentUserId),
+    /** The composite-FK target a session's parent edge lands on. */
+    uniqueIndex('plans_room_id_key').on(t.roomId, t.id),
+    /** A plan's cause is a message in the SAME room (#128, #124 resolution 3). */
+    foreignKey({
+      name: 'plans_cause_same_room_fk',
+      columns: [t.roomId, t.causeMessageId],
+      foreignColumns: [messages.roomId, messages.id],
+    }),
+    /** A slice is a count of draws — never negative. NULL (unfunded) is allowed. */
+    check('plans_rlimit_slice_nonnegative', sql`${t.rlimitSlice} IS NULL OR ${t.rlimitSlice} >= 0`),
+    /** Draws granted only ever counts up from zero. */
+    check('plans_authorized_draws_nonnegative', sql`${t.authorizedDraws} >= 0`),
+  ],
+);
+
+/**
+ * A session — a process projected from `session_opened` / `session_settled` /
+ * `session_failed`. Own context and spend, any harness; it settles or fails to
+ * a receipt and it **never spawns** (§4, §9).
+ *
+ * ## The pstree invariant, by construction (#114, four ways)
+ *
+ *  1. `plan_id` is NOT NULL and its `(room_id, plan_id)` composite FK lands on
+ *     `plans(room_id, id)` — so a session has **exactly one** parent, in the
+ *     **same room**. One parent, one room, enforced.
+ *  2. **There is no `parent_session_id` column here, or anywhere.** A session
+ *     cannot be another session's parent because there is no FK by which it
+ *     could be — you cannot violate a constraint that does not exist (#111's
+ *     strongest form). Depth is fixed at agent → plan → session because those
+ *     are the only parent FKs that exist.
+ *
+ * `sessions.status` / `exit_summary` / `spend_micros` are the session-EXIT
+ * receipt — process state, **non-epistemic (#114 T3)**. A `session_settled` or
+ * `session_failed` writes only these; it touches no `accepted_objects`
+ * judgement column and so can never flip a `~` to a `✓`.
+ */
+
+/**
+ * The execution artifact a settled session produced — #120's ExecutionProvider
+ * output, surfaced in #121's review pane. All fields optional: the shape a merge
+ * carries (branch + commit) differs from what a test run carries (pass/fail
+ * counts), and an audit session carries neither. `diffStat` is a rendered
+ * summary line (`+128 −34 · 6 files`), not structured hunks — the control plane
+ * shows the shape of the change, and the terminal is the break-glass detail.
+ */
+export interface SessionArtifact {
+  /** The branch the work landed on, when it produced one. */
+  readonly branch?: string;
+  /** The commit sha, when it produced one. */
+  readonly commit?: string;
+  /** A one-line diff summary — additions, deletions, files touched. */
+  readonly diffStat?: string;
+  /** Tests that passed, when the session ran a suite. */
+  readonly testsPassed?: number;
+  /** Tests that failed, when the session ran a suite. */
+  readonly testsFailed?: number;
+  /** A free one-line note about the artifact — kept short, system voice. */
+  readonly summary?: string;
+}
+
+export const sessions = pgTable(
+  'sessions',
+  {
+    id: uuid('id').primaryKey().defaultRandom(),
+    roomId: uuid('room_id')
+      .notNull()
+      .references(() => rooms.id, { onDelete: 'cascade' }),
+    /** The plan that is this session's one parent. NOT NULL — see the table doc. */
+    planId: uuid('plan_id').notNull(),
+    /** This session's harness process. */
+    harness: text('harness').notNull(),
+    /** The model it runs. */
+    model: text('model').notNull(),
+    status: sessionStatus('status').notNull().default('open'),
+    /** Its own context-window fill, 0..1. Never aggregated (§9.2). Nullable. */
+    contextPct: real('context_pct'),
+    /** Its own spend, in micro-dollars. */
+    spendMicros: bigint('spend_micros', { mode: 'number' }).notNull().default(0),
+    /** The session's exit receipt prose, once it settles or fails. */
+    exitSummary: text('exit_summary'),
+    /**
+     * THE EXECUTION ARTIFACT (#120's forward slot, #121's review pane).
+     *
+     * What a settled session PRODUCED — the branch/commit it landed on, a diff
+     * stat, and a test summary — so the control-plane review pane can show diff +
+     * tests + receipt + artifact rather than only the exit prose. Nullable: a
+     * session with no code output (an audit, a dry-run) leaves it null, and a
+     * settled session that predates its ExecutionProvider leaves it null too. The
+     * #120 ExecutionProvider is the eventual writer at settle time; until it
+     * lands, this is the slot it fills, populated directly for a seeded session.
+     * It is non-epistemic (#114 T3), the same as `exit_summary` beside it: a
+     * process receipt, never an `accepted_objects` `~`→`✓`.
+     */
+    artifact: jsonb('artifact').$type<SessionArtifact>(),
+    /**
+     * WHO LANDED THIS SESSION — the human who certified it, and only ever a
+     * human. NULL until a person formally certifies (#121's hold-to-arm land),
+     * and held to a `human` principal by the `sessions_certified_by_is_human`
+     * trigger (drizzle/0032): certification is the covenant's human-only act made
+     * a table fact, so no non-human path — no machine, no voice — can write a
+     * name here even with triggers left on. `SET NULL` on the human's deletion:
+     * the session's receipt outlives the identity, the same as its channel does.
+     */
+    certifiedBy: uuid('certified_by').references(() => users.id, { onDelete: 'set null' }),
+    /** When the certification was armed and committed. NULL until certified. */
+    certifiedAt: timestamp('certified_at', { withTimezone: true }),
+    /**
+     * How long the human held the arm control, measured — the asymmetric-friction
+     * receipt (#102/#110). Recorded so a certification carries evidence it was a
+     * deliberate hold, not a click. NULL until certified.
+     */
+    certifiedHeldMs: integer('certified_held_ms'),
+    /**
+     * WHO ARMED THE PENDING CERTIFICATION, and WHEN — stamped by the SERVER.
+     *
+     * #121 fix round. The first cut of the certify path took the hold's timing
+     * from the CLIENT: the Server Action accepted `armedAt` and `heldMs` off the
+     * request, so `{ heldMs: 999999 }` from `curl` certified a session without
+     * anybody having held anything, and `{ heldMs: 0 }` did too. The asymmetric
+     * friction the covenant asks for was measured entirely on the attacker's
+     * side of the wire.
+     *
+     * These two columns are the fix. Arming is its own server round-trip and
+     * `certify_armed_at` is written as `now()` INSIDE the database, never from a
+     * value a request carried. Certification then computes the held duration as
+     * `now() - certify_armed_at` in SQL and refuses anything under the required
+     * hold. There is no client-supplied timing left to forge, and the recorded
+     * `certified_held_ms` is a measurement rather than a claim.
+     *
+     * `certify_armed_by` is held to a `human` principal by the
+     * `sessions_certify_armed_by_is_human` trigger (drizzle/0033), the same way
+     * `certified_by` is by 0032: the arm is half of the human-only act, so a
+     * machine may not perform it either.
+     */
+    certifyArmedBy: uuid('certify_armed_by').references(() => users.id, { onDelete: 'set null' }),
+    /** The SERVER's clock at the arm — `now()`, never a value a request sent. */
+    certifyArmedAt: timestamp('certify_armed_at', { withTimezone: true }),
+    /**
+     * THE ARM'S SINGLE-USE ATTEMPT ID — a `now()`-armed hold is a specific
+     * attempt, not a 120s standing permission.
+     *
+     * #121 fix round, CS-3 finished. The gauntlet found that a server arm survived
+     * its whole TTL and "a later direct confirm spends it": the arm was a window,
+     * not a token. `certify_arm_nonce` is stamped with a fresh `gen_random_uuid()`
+     * at arm and CONSUMED (set null) by the confirm that spends it, so the confirm
+     * honours only an arm minted by `armCertification` (the one path that stamps a
+     * nonce) and only once. A hand-forged or leaked arm without a live nonce is not
+     * a confirmable attempt. NULL whenever no hold is pending. Cleared on disarm.
+     */
+    certifyArmNonce: uuid('certify_arm_nonce'),
+    /**
+     * A DIGEST OF THE ARTIFACT THE HOLD WAS ARMED OVER — so the signature binds to
+     * the artifact the person REVIEWED, not merely to "an" artifact.
+     *
+     * #121 fix round, CS-1 finished. 0034 freezes the artifact once certified, but
+     * between arm and confirm the artifact is still mutable: render A, change it to
+     * B, confirm → 0034 froze B under a `✓` for work nobody reviewed. The arm now
+     * records `md5(artifact::text)` of what was on screen; the confirm recomputes
+     * it and REFUSES if the artifact changed underneath the hold. `md5` of jsonb's
+     * canonical text is stable for equal jsonb. NULL when no hold is pending;
+     * consumed (set null) by the confirm and cleared on disarm.
+     */
+    certifyArmedArtifactDigest: text('certify_armed_artifact_digest'),
+    /*
+     * ROUND 7 removed `certify_arm_seq` and `certify_cancel_seq` (drizzle/0040).
+     * Round 6 threaded a CLIENT-minted, strictly-monotonic `attemptSeq` through the
+     * arm/disarm/confirm and raised it into a session-global cancel watermark. That
+     * was the round-7 finding-2 hole: any member could `disarm(MAX_SAFE_INTEGER)`
+     * and jam every honest arm forever, and cross-client clock skew did it by
+     * accident. The attempt is SERVER-ISSUED now — `certify_arm_nonce` is the whole
+     * of it, minted by `armCertification` and returned to the client, which hands it
+     * back on the confirm and disarm. No client number reaches the row, so none can
+     * jam a future arm. The correlation the two dropped columns provided is the
+     * nonce's job now, and it is a capability, not a counter.
+     */
+    /**
+     * THE ROUTING RECEIPT ON THE NEW-WORK ARM'S PROCESS (#128, #124 resolution 3).
+     *
+     * The room message whose routing spawned this session. Nullable — a person
+     * opening a session by hand cites nothing.
+     *
+     * A SPAWN IS A DRAW, so unlike `plans.cause_message_id` this one is ALSO
+     * claimed in `funded_arms` when it is non-null: at most one funded arm per
+     * cause message, across spawns and continues both, so a daemon that retries
+     * the same message cannot fund two sessions from it (#124 resolution 4). The
+     * column here is the provenance; the claim row is the enforcement.
+     */
+    causeMessageId: uuid('cause_message_id'),
+    /** The `core_events.id` of the `session_opened` that projected this. */
+    openedByEventId: text('opened_by_event_id'),
+    /** The `core_events.id` of the settling/failing event, once it exits. */
+    settledByEventId: text('settled_by_event_id'),
+    /**
+     * EXECUTION-OWNERSHIP LEASE (#120 round-5 F4) — process-liveness bookkeeping,
+     * NOT covenant state and NOT written by the ledger projection. The instance id
+     * of the process whose ExecutionProvider is running this session, set when the
+     * coordinator claims the session and NULL for a session no local execution
+     * owns (the documented external-settle mode). Startup/periodic reconciliation
+     * reads it to tell a wedge THIS lineage must recover (leased, owner gone) from
+     * a live external-settle session (never leased) it must leave alone — replacing
+     * the round-4 boot-flag proxy that force-failed live external sessions on a
+     * disabled→enabled reboot and killed a peer instance's running sessions.
+     */
+    executionOwner: text('execution_owner'),
+    /**
+     * Last heartbeat from the owning process (#120 round-5 F4). Bumped on a timer
+     * while the owner runs; a lease whose heartbeat has gone stale is a dead
+     * owner's, and only THOSE are reconciled — a fresh heartbeat is a live owner,
+     * whether this process or a concurrent peer, and its session is left running.
+     */
+    executionHeartbeatAt: timestamp('execution_heartbeat_at', { withTimezone: true }),
+    /**
+     * EXECUTION-AUTHORITY RECORD (#120 round-6) — the mode this session's
+     * execution runs under, decided AT GRANT and written in the `session_opened`
+     * transaction. `provider` = a wired ExecutionProvider owns its execution and
+     * its terminal; `external` = no provider this boot, an outside member settles
+     * it (the documented external-settle mode). NULL for pre-migration rows, read
+     * as `external`. This is what a settle reads to know whether the capability
+     * token is required — bound to the SESSION, never to the boot's verifier.
+     */
+    executionMode: text('execution_mode'),
+    /**
+     * The unforgeable settlement CAPABILITY for a provider session (#120 round-6),
+     * minted at grant. Authorizes writing this session's terminal — settled OR
+     * failed. ROW-ONLY: never in the ledger event, never broadcast, so a room
+     * member (opener included) cannot forge either outcome. Held by the coordinator
+     * (via `claim`) and the reconciler (via a row read). NULL for external.
+     */
+    executionAuthority: text('execution_authority'),
+    /**
+     * NULL while a granted provider session is unclaimed; set exactly once when the
+     * coordinator claims it (#120 round-6, unclaimed → running). The claim's guarded
+     * UPDATE keys on this being NULL, so a re-entrant claim matches zero rows.
+     */
+    executionClaimedAt: timestamp('execution_claimed_at', { withTimezone: true }),
+    createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
+    updatedAt: timestamp('updated_at', { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [
+    index('sessions_plan_idx').on(t.planId),
+    index('sessions_room_status_idx').on(t.roomId, t.status),
+    /** Reconciliation scans open, leased sessions by heartbeat (#120 round-5 F4). */
+    index('sessions_execution_owner_idx').on(t.status, t.executionOwner, t.executionHeartbeatAt),
+    /** The claim keys on an unclaimed provider session (#120 round-6). */
+    index('sessions_execution_claim_idx')
+      .on(t.executionMode, t.executionClaimedAt)
+      .where(sql`${t.status} = 'open'`),
+    /** The composite-FK target for provenance edges (`accepted_objects`/`proposals`). */
+    uniqueIndex('sessions_room_id_key').on(t.roomId, t.id),
+    /**
+     * The one parent, in the same room. `plan_id` NOT NULL above makes it exactly
+     * one; this composite FK makes it the same room's plan. There is no second
+     * parent FK and no `parent_session_id`, so this is the whole of a session's
+     * upward edge — agent → plan → session, and nothing deeper.
+     */
+    foreignKey({
+      name: 'sessions_plan_same_room_fk',
+      columns: [t.roomId, t.planId],
+      foreignColumns: [plans.roomId, plans.id],
+    }).onDelete('cascade'),
+    /** A session's cause is a message in the SAME room (#128, #124 resolution 3). */
+    foreignKey({
+      name: 'sessions_cause_same_room_fk',
+      columns: [t.roomId, t.causeMessageId],
+      foreignColumns: [messages.roomId, messages.id],
+    }),
+  ],
+);
+
+/* ── the signal/interrupt boundary (#127, from #123's resolution) ────────────
+ *
+ * Two projections of two ledger-only events, and they are the ONLY tables those
+ * events write. The pinned write-set: `session_signals` and
+ * `session_subscriptions` and nothing else — no `accepted_objects` column, no
+ * `plans.rlimit_slice`, and (for `steer`/`interrupt`) no `plans.authorized_draws`.
+ * A steer is coordination, not the room's understanding, and coordination has no
+ * route to a `✓`. The single deliberate exception is a granted `resume`, which IS
+ * a draw and moves `authorized_draws` by exactly one under #118's boundary —
+ * #115 decision 2's "spawns/continues", finally built.
+ * ─────────────────────────────────────────────────────────────────────────── */
+
+/**
+ * A durable WAIT registered by a running session (#127; #123 resolution 6).
+ *
+ * `expires_at` is NOT NULL and that is the whole design. An unmatched subscribe
+ * used to be a way to hold a session open forever with nothing owed to anybody:
+ * the plan could never settle (#119), and no human ever learned why. So a
+ * subscription has exactly three ways to end — matched into a resume draw,
+ * expired into the owner's attention, or disposed by its session's own exit —
+ * and `status` records which. `matcher` and `source` are opaque here on purpose:
+ * what a wait means is the daemon's business (#124), and the ledger's business is
+ * that the wait exists, targets an OPEN session, and ends.
+ */
+export const sessionSubscriptions = pgTable(
+  'session_subscriptions',
+  {
+    id: uuid('id').primaryKey().defaultRandom(),
+    roomId: uuid('room_id')
+      .notNull()
+      .references(() => rooms.id, { onDelete: 'cascade' }),
+    /** The session that is waiting. Same room, by the composite FK below. */
+    sessionId: uuid('session_id').notNull(),
+    /** Where the awaited thing comes from — opaque to Atrium, the daemon's word. */
+    source: text('source').notNull(),
+    /** What would satisfy the wait — opaque; #124 interprets it, this table stores it. */
+    matcher: text('matcher').notNull(),
+    /** MANDATORY. A wait with no horizon is a wedge; this is the horizon. */
+    expiresAt: timestamp('expires_at', { withTimezone: true }).notNull(),
+    status: subscriptionStatus('status').notNull().default('waiting'),
+    /** The `core_events.id` of the `session_signaled {resume}` that matched it. */
+    matchedByEventId: text('matched_by_event_id'),
+    /** When the expiry sweep escalated it to the agent's owner. NULL until then. */
+    escalatedAt: timestamp('escalated_at', { withTimezone: true }),
+    /**
+     * WHO registered the wait — the trusted actor off the ledger row, never the
+     * payload (#21's contract), exactly as `session_signals.raised_by_user_id` is
+     * written. Registering a wait is CONTROL over a process: it decides how long
+     * the session stays open and therefore how long its plan cannot settle
+     * (#119), so it is the agent principal's or its owner's act. The
+     * `session_subscriptions_control_authorized` trigger in drizzle/0046 reads
+     * THIS column, which is why it must exist: without it the table had no way to
+     * ask who was asking, and a bystander's hand-written wait landed (#127 round-1
+     * gauntlet finding B — the command clause could be deleted and every test
+     * stayed green).
+     */
+    raisedByUserId: uuid('raised_by_user_id').references(() => users.id, { onDelete: 'set null' }),
+    /** The `core_events.id` of the `session_subscribed` that projected this. */
+    subscribedByEventId: text('subscribed_by_event_id'),
+    createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
+    updatedAt: timestamp('updated_at', { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [
+    index('session_subscriptions_session_idx').on(t.roomId, t.sessionId, t.status),
+    /** The expiry sweep's index: waiting subscriptions, oldest horizon first. */
+    index('session_subscriptions_expiry_idx').on(t.expiresAt).where(sql`${t.status} = 'waiting'`),
+    /** The composite-FK target a resume's `subscription_id` lands on. */
+    uniqueIndex('session_subscriptions_room_id_key').on(t.roomId, t.id),
+    /** One row per ledger event — a re-projection cannot mint a second wait. */
+    uniqueIndex('session_subscriptions_event_key').on(t.subscribedByEventId),
+    /** One room, one session — a wait can never name a session it cannot see. */
+    foreignKey({
+      name: 'session_subscriptions_session_same_room_fk',
+      columns: [t.roomId, t.sessionId],
+      foreignColumns: [sessions.roomId, sessions.id],
+    }).onDelete('cascade'),
+  ],
+);
+
+/**
+ * A signal appended into a running session (#127; #123 resolution 2/4).
+ *
+ * Ledger-only and non-epistemic: this table is the whole projection. It writes no
+ * judgement column, so `steer`ing a session can no more flip a `~` to a `✓` than
+ * settling one can (#114 T3).
+ *
+ * ## The provenance fields are explicit, and are NOT `MessageReference`
+ *
+ * #123's draft reached for `MessageReference` and the gauntlet found it
+ * unrepresentable — that vocabulary has no `message` kind (`room-events.ts`), and
+ * `routedFrom` existed nowhere at all. So the edges are named outright:
+ *
+ *  - `cause_message_id` — the room message a mediated steer came from. Nullable
+ *    (a steer typed straight at the session cites nothing), and composite-FK'd on
+ *    `(room_id, message_id)` so a cause from ANOTHER room is impossible in every
+ *    write path, not merely refused by the command.
+ *  - `supersedes_event_id` — forward-only revision of an earlier steer. The
+ *    ledger is append-only, so a revision is a new row that NAMES the one it
+ *    replaces; discarding the superseded tail is the harness's act, reported in
+ *    the session receipt, never a rewrite of history here.
+ *  - `subscription_id` — `resume` only, held to that by
+ *    `session_signals_subscription_is_a_resume`. A steer does not pay out a wait.
+ */
+export const sessionSignals = pgTable(
+  'session_signals',
+  {
+    id: uuid('id').primaryKey().defaultRandom(),
+    roomId: uuid('room_id')
+      .notNull()
+      .references(() => rooms.id, { onDelete: 'cascade' }),
+    /** The session being signaled. Open at append time — see the 0045 trigger. */
+    sessionId: uuid('session_id').notNull(),
+    kind: signalKind('kind').notNull(),
+    /** The steer's words, or the interrupt's reason. Nullable. */
+    body: text('body'),
+    /** The room message this signal was mediated from. Same room, by FK. */
+    causeMessageId: uuid('cause_message_id'),
+    /** The `core_events.id` of an earlier signal this one revises. */
+    supersedesEventId: text('supersedes_event_id'),
+    /** `resume` only: the wait this continuation pays out. */
+    subscriptionId: uuid('subscription_id'),
+    /**
+     * WHO signaled — the trusted actor off the ledger row, never the payload.
+     * The interrupt-authorization trigger reads this column, so it is the same
+     * value the command checked, and a direct writer cannot dodge the check by
+     * writing a different one.
+     */
+    raisedByUserId: uuid('raised_by_user_id').references(() => users.id, { onDelete: 'set null' }),
+    /** The `core_events.id` of the `session_signaled` that projected this. */
+    signaledByEventId: text('signaled_by_event_id'),
+    createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [
+    index('session_signals_session_idx').on(t.roomId, t.sessionId, t.createdAt),
+    /** One row per ledger event — a re-projection cannot mint a second signal. */
+    uniqueIndex('session_signals_event_key').on(t.signaledByEventId),
+    /** A signal can never name a session from another room. */
+    foreignKey({
+      name: 'session_signals_session_same_room_fk',
+      columns: [t.roomId, t.sessionId],
+      foreignColumns: [sessions.roomId, sessions.id],
+    }).onDelete('cascade'),
+    /**
+     * THE SAME-ROOM PROVENANCE EDGE (#123 resolution 4). A cross-room
+     * `causeMessageId` is refused by the DDL, so the command's own check is the
+     * clean error message and this is the authority.
+     */
+    foreignKey({
+      name: 'session_signals_cause_same_room_fk',
+      columns: [t.roomId, t.causeMessageId],
+      foreignColumns: [messages.roomId, messages.id],
+    }).onDelete('cascade'),
+    /** A resume names a wait in its own room, or none. */
+    foreignKey({
+      name: 'session_signals_subscription_same_room_fk',
+      columns: [t.roomId, t.subscriptionId],
+      foreignColumns: [sessionSubscriptions.roomId, sessionSubscriptions.id],
+    }).onDelete('cascade'),
+    /** Only a resume pays out a wait — a steer carrying one is a category error. */
+    check(
+      'session_signals_subscription_is_a_resume',
+      sql`${t.subscriptionId} IS NULL OR ${t.kind} = 'resume'`,
+    ),
+  ],
+);
+
+/**
+ * AT MOST ONE FUNDED ARM PER CAUSE MESSAGE (#128, #124 resolution 4).
+ *
+ * One row per draw-taking routing append that named a cause. The primary key is
+ * `(room_id, cause_message_id)`, and that key IS the rule: a daemon that
+ * processes one channel message twice — a retry after a lost ack, a crash
+ * between the draw and its own bookkeeping, two loop instances racing the same
+ * message — cannot fund two sessions from it. The second claim collides and its
+ * whole append transaction aborts, so the second draw is not merely uncounted,
+ * it never happened.
+ *
+ * ## Why a table and not an index
+ *
+ * The draw-taking appends are TWO: `session_opened` (a spawn) and
+ * `session_signaled {kind:'resume'}` (a continue) — #115 decision 2's
+ * "spawns/continues", built across #118 and #127. They project into two
+ * different tables, and no unique index spans two tables. A shared claim table
+ * is the only spelling of "across draw-taking appends" that Postgres can
+ * actually enforce, which is why the uniqueness lives here rather than as a
+ * partial index on `sessions` that would silently miss every resume.
+ *
+ * ## What is NOT in here, deliberately
+ *
+ *  - `plan_opened`. A plan never draws (#124 resolution 2), so two boards from
+ *    one message spend nothing; `plans.cause_message_id` carries the provenance
+ *    and this table never sees it. Funding uniqueness is about the purse.
+ *  - `message_posted`. The answer arm is speech, not spend.
+ *  - `steer` and `interrupt`. Neither moves `plans.authorized_draws`.
+ *  - A draw with NO cause message. A human opening a session by hand cites
+ *    nothing, and "at most one arm per cause" says nothing about appends that
+ *    name no cause. `cause_message_id` is NOT NULL here because a row with a
+ *    null cause would claim nothing and collide with nothing — the projections
+ *    simply write no row in that case.
+ *  - A REFUSED draw. `draw_refused` grants nothing and funds nothing, so it
+ *    leaves the cause message unclaimed and a later, funded retry may take it.
+ */
+export const fundedArms = pgTable(
+  'funded_arms',
+  {
+    roomId: uuid('room_id')
+      .notNull()
+      .references(() => rooms.id, { onDelete: 'cascade' }),
+    /** The channel message this draw was routed from. NOT NULL — see the doc. */
+    causeMessageId: uuid('cause_message_id').notNull(),
+    /** Which draw-taking append claimed it: a spawn or a continue. */
+    arm: text('arm').notNull(),
+    /** The session the draw funded — the spawned one, or the resumed one. */
+    sessionId: uuid('session_id').notNull(),
+    /** The `core_events.id` of the append that took the draw. */
+    drawnByEventId: text('drawn_by_event_id'),
+    createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [
+    /** THE BACKSTOP. One funded arm per (room, cause message), full stop. */
+    primaryKey({
+      name: 'funded_arms_room_cause_pk',
+      columns: [t.roomId, t.causeMessageId],
+    }),
+    /** The cause is a message in THIS room — the same composite edge everywhere. */
+    foreignKey({
+      name: 'funded_arms_cause_same_room_fk',
+      columns: [t.roomId, t.causeMessageId],
+      foreignColumns: [messages.roomId, messages.id],
+    }).onDelete('cascade'),
+    /** The funded session is in THIS room. */
+    foreignKey({
+      name: 'funded_arms_session_same_room_fk',
+      columns: [t.roomId, t.sessionId],
+      foreignColumns: [sessions.roomId, sessions.id],
+    }).onDelete('cascade'),
+    /** The two draw-taking appends, and nothing else may claim an arm. */
+    check('funded_arms_arm_is_a_draw', sql`${t.arm} IN ('spawn', 'continue')`),
   ],
 );
 
@@ -1140,6 +2009,38 @@ export const proposals = pgTable(
      */
     quote: text('quote'),
     status: proposalStatus('status').notNull().default('proposed'),
+    /**
+     * Which execution session staged this reading, when one did (#116; the
+     * proposal half of #114 T3's session→drafted index). Nullable because a
+     * person may stage a reading directly, without an execution session.
+     *
+     * ## Exactly how far this is checked, and where it stops
+     *
+     * CROSS-AGENT spoofing is refused, in two places that do not depend on each
+     * other. `record_proposal` derives the proposer from the authenticated
+     * principal and admits only an OPEN session whose plan's `agent_user_id` is
+     * that principal, in that room; and 0043/0044 make the same two conditions
+     * table facts, so a direct writer that bypasses the command cannot bind a
+     * reading to another agent's session or to one that has already exited. The
+     * composite `(room_id, session_id)` FK independently makes cross-room
+     * provenance impossible in every write path, and stays the sole authority
+     * for that condition (both triggers fall through to it).
+     *
+     * WITHIN one agent, this is the agent's word. `session_id` arrives as
+     * command payload on a connection authenticated at the AGENT level, not at
+     * the session level — one credential covers every session that agent owns —
+     * so an agent holding two open sessions may truthfully name either, and
+     * nothing here can tell which process actually produced the text. The
+     * server checks ownership and liveness; it does not check authorship. Read
+     * this column as "an agent asserted this session drafted it", not as "this
+     * session drafted it".
+     *
+     * Closing that last gap needs a per-session credential — the
+     * `execution_authority` binding — which is deferred to #132. Until it lands,
+     * do not build anything that treats a same-agent session attribution as
+     * adversarially sound.
+     */
+    sessionId: uuid('session_id'),
     decidedBy: uuid('decided_by').references(() => users.id, { onDelete: 'set null' }),
     decidedAt: timestamp('decided_at', { withTimezone: true }),
     rejectedReason: text('rejected_reason'),
@@ -1147,13 +2048,19 @@ export const proposals = pgTable(
   },
   (t) => [
     index('proposals_room_status_idx').on(t.roomId, t.status),
+    foreignKey({
+      name: 'proposals_session_same_room_fk',
+      columns: [t.roomId, t.sessionId],
+      foreignColumns: [sessions.roomId, sessions.id],
+    }),
     /** Composite-FK target — an object may only be accepted from its own room's proposal. */
     uniqueIndex('proposals_room_id_key').on(t.roomId, t.id),
     check('proposals_confidence_range', sql`${t.confidence} >= 0 AND ${t.confidence} <= 1`),
     check(
       'proposals_proposer_identified',
       sql`(${t.proposerKind} = 'model' AND ${t.proposerModel} IS NOT NULL)
-          OR (${t.proposerKind} = 'human' AND ${t.proposerUserId} IS NOT NULL)`,
+          OR (${t.proposerKind} = 'human' AND ${t.proposerUserId} IS NOT NULL)
+          OR (${t.proposerKind} = 'agent' AND ${t.proposerUserId} IS NOT NULL)`,
     ),
     /**
      * The same rule `core_events_actor_id_matches_kind` states, on the same
@@ -1221,6 +2128,18 @@ export const acceptedObjects = pgTable(
     objectiveId: uuid('objective_id'),
     /** The proposal this was accepted from, when it came through interpretation. */
     proposalId: uuid('proposal_id'),
+    /**
+     * Which session drafted this, when a session did (#116, from #114 T3's
+     * roll-up: a session → drafted-objects index). Nullable and still null in
+     * practice after #117: that ticket gave `proposer_kind` its agent value so a
+     * session may DRAFT a `~`, but the session id is not yet threaded from the
+     * command onto the `object_accepted` event, so the projection has nothing to
+     * file here. The column exists so the provenance edge is in the schema, and
+     * it is composite `(room_id, session_id)` so a fact can never point at a
+     * session from another room. It is provenance only — it carries no judgement
+     * and flipping it moves no `~` to a `✓`.
+     */
+    sessionId: uuid('session_id'),
     /** Bumped by every correction; cheap optimistic-concurrency token. */
     revision: integer('revision').notNull().default(0),
     /** Set by a `retract` correction — the row is never deleted. */
@@ -1288,6 +2207,13 @@ export const acceptedObjects = pgTable(
       name: 'accepted_objects_proposal_same_room_fk',
       columns: [t.roomId, t.proposalId],
       foreignColumns: [proposals.roomId, proposals.id],
+    }),
+    /** Composite, like every other reference out of this row: a drafting session
+     * belongs to the same room as the object it drafted. */
+    foreignKey({
+      name: 'accepted_objects_session_same_room_fk',
+      columns: [t.roomId, t.sessionId],
+      foreignColumns: [sessions.roomId, sessions.id],
     }),
   ],
 );
@@ -1482,6 +2408,16 @@ export const attentionItems = pgTable(
     subjectMessageId: uuid('subject_message_id').generatedAlwaysAs(
       sql`CASE WHEN "subject_kind" = 'message' THEN "subject_id" END`,
     ),
+    /**
+     * Non-null exactly when `subject_kind = 'session'` (#127). The fourth
+     * subject edge, added with the same three parts the other three have — a
+     * generated column, a composite same-room FK, and a name in the allowlist —
+     * so a subscription-expiry escalation names the SESSION that is still
+     * waiting rather than pointing at some message standing in for it.
+     */
+    subjectSessionId: uuid('subject_session_id').generatedAlwaysAs(
+      sql`CASE WHEN "subject_kind" = 'session' THEN "subject_id" END`,
+    ),
     class: attentionClass('class').notNull(),
     /**
      * Why this person specifically — @atrium/core's `RationaleReason`, structured
@@ -1522,7 +2458,7 @@ export const attentionItems = pgTable(
     check('attention_items_reason_has_kind', sql`length(coalesce(${t.reason}->>'kind', '')) > 0`),
     check(
       'attention_items_subject_kind_allowlist',
-      sql`${t.subjectKind} IN ('object', 'proposal', 'message')`,
+      sql`${t.subjectKind} IN ('object', 'proposal', 'message', 'session')`,
     ),
     /**
      * "Needs you" must never point at something from a room you cannot see —
@@ -1542,6 +2478,12 @@ export const attentionItems = pgTable(
       name: 'attention_items_message_same_room_fk',
       columns: [t.roomId, t.subjectMessageId],
       foreignColumns: [messages.roomId, messages.id],
+    }).onDelete('cascade'),
+    /** The fourth subject edge (#127) — same shape, same guarantee. */
+    foreignKey({
+      name: 'attention_items_session_same_room_fk',
+      columns: [t.roomId, t.subjectSessionId],
+      foreignColumns: [sessions.roomId, sessions.id],
     }).onDelete('cascade'),
   ],
 );
@@ -1602,6 +2544,12 @@ export type AttentionItemRow = typeof attentionItems.$inferSelect;
 export type NewAttentionItemRow = typeof attentionItems.$inferInsert;
 export type CorrectionRow = typeof corrections.$inferSelect;
 export type NewCorrectionRow = typeof corrections.$inferInsert;
+export type AgentRow = typeof agents.$inferSelect;
+export type NewAgentRow = typeof agents.$inferInsert;
+export type PlanRow = typeof plans.$inferSelect;
+export type NewPlanRow = typeof plans.$inferInsert;
+export type SessionRow = typeof sessions.$inferSelect;
+export type NewSessionRow = typeof sessions.$inferInsert;
 
 /**
  * Compile-time proof that the Postgres enums and the @atrium/core zod enums

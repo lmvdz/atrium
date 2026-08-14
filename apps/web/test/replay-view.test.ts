@@ -71,6 +71,7 @@ describe('contextual direct-reference placement', () => {
         payload: { title: 'Ship it', status: 'open' },
         objectiveId: null,
         proposalId: null,
+        sessionId: null,
         revision: 0,
         retractedAt: null,
         supersededById: null,
@@ -87,6 +88,7 @@ describe('contextual direct-reference placement', () => {
         payload: { statement: 'Use the durable edge.', decidedBy: 'alice', status: 'active' },
         objectiveId: 'objective',
         proposalId: null,
+        sessionId: null,
         revision: 0,
         retractedAt: null,
         supersededById: null,
@@ -266,6 +268,7 @@ function foldObjectRow(
     payload: record.object.payload,
     objectiveId: record.object.objectiveId ?? null,
     proposalId: record.object.provenance.proposalId,
+    sessionId: null,
     revision: record.revision,
     retractedAt: record.retractedAt === null ? null : new Date(record.retractedAt),
     supersededById: record.supersededById,
@@ -639,6 +642,7 @@ describe('persisted replay view', () => {
       payload: { statement: 'Regenerate in the background.', decidedBy: 'alice', status: 'active' },
       objectiveId: null,
       proposalId: null,
+      sessionId: null,
       revision: 0,
       retractedAt: null,
       supersededById: null,
@@ -689,6 +693,7 @@ describe('persisted replay view', () => {
       proposerUserId: null,
       stagedByKind: 'model',
       stagedById: 'replay/precomputed-v1',
+      sessionId: null,
       quote,
       status: 'proposed',
       decidedBy: null,
@@ -760,6 +765,7 @@ describe('persisted replay view', () => {
         payload: { question: 'Should regeneration happen in the background?', status: 'answered' },
         objectiveId: null,
         proposalId: null,
+        sessionId: null,
         revision: 0,
         retractedAt: null,
         supersededById: null,
@@ -783,6 +789,7 @@ describe('persisted replay view', () => {
         },
         objectiveId: null,
         proposalId: null,
+        sessionId: null,
         revision: 0,
         retractedAt: null,
         supersededById: null,
@@ -968,6 +975,7 @@ describe('persisted replay view', () => {
         payload: { statement: 'Use the old path.', decidedBy: 'alice', status: 'superseded' },
         objectiveId: null,
         proposalId: null,
+        sessionId: null,
         revision: 1,
         retractedAt: null,
         supersededById: 'decision',
@@ -984,6 +992,7 @@ describe('persisted replay view', () => {
         payload: { statement: 'Use the current path.', decidedBy: 'alice', status: 'active' },
         objectiveId: null,
         proposalId: null,
+        sessionId: null,
         revision: 0,
         retractedAt: null,
         supersededById: null,
@@ -1004,6 +1013,7 @@ describe('persisted replay view', () => {
         },
         objectiveId: null,
         proposalId: null,
+        sessionId: null,
         revision: 0,
         retractedAt: null,
         supersededById: null,
@@ -1111,6 +1121,7 @@ describe('persisted replay view', () => {
       proposerUserId: null,
       stagedByKind: 'model',
       stagedById: 'test',
+      sessionId: null,
       quote: 'Regenerate in the background.',
       status: 'accepted',
       decidedBy: 'alice',
@@ -1125,6 +1136,7 @@ describe('persisted replay view', () => {
       payload: { statement: 'Regenerate in the background.', decidedBy: 'alice', status: 'active' },
       objectiveId: null,
       proposalId: 'decision-proposal',
+      sessionId: null,
       revision: 0,
       retractedAt: null,
       supersededById: null,
@@ -1137,11 +1149,13 @@ describe('persisted replay view', () => {
     const proposalSources = snapshot.proposalSources as unknown as Array<{
       roomId: string;
       proposalId: string;
+      sessionId: null;
       messageId: string;
     }>;
     proposalSources.push({
       roomId: 'room',
       proposalId: 'decision-proposal',
+      sessionId: null,
       messageId: 'm2',
     });
     snapshot.attention.push({
@@ -1443,6 +1457,239 @@ describe('live room view', () => {
     expect(view.entries.some((entry) => entry.type === 'since-you-left')).toBe(false);
     expect(view.rooms[0]?.unseen).toBe(0);
   });
+
+  /**
+   * #136. Mutation: render `live.pending` as given, trusting the socket's
+   * `reconcilePending` to have emptied it. It has not, and cannot be relied on
+   * to have: the durable row reaches `data` through `router.refresh()` and the
+   * echo leaves `live.pending` through the socket event, and this is the exact
+   * interleaving where the refresh won — the state a socket drop across the
+   * commit holds open for a whole reconnect. The room then shows the same
+   * sentence twice, once committed and once as `pending:…`.
+   */
+  it('claims the pending echo with its own committed row in the same render', () => {
+    const snapshot = data();
+    const live: RoomView = {
+      roomId: 'room',
+      lastSeq: 1,
+      head: 2,
+      seenSeq: 1,
+      events: [],
+      // `m2` is already in `snapshot.messages`, carrying this exact
+      // `clientMessageId` — its socket event has not been applied yet.
+      pending: [
+        {
+          clientMessageId: 'client-answer-a',
+          commandName: 'send_message',
+          replyToId: 'm1',
+          body: 'Yes, while the previous page remains available.',
+          at: '2026-08-02T12:01:00.000Z',
+          status: 'failed',
+          error: 'the connection dropped before the server answered',
+          retryable: true,
+          attachments: [],
+          references: [],
+        },
+      ],
+      presence: {},
+      typing: [],
+      subscribed: true,
+    };
+    const view = liveRoomView(snapshot, 'alice', live);
+
+    const sameBody = view.records.filter(
+      (record) => record.text === 'Yes, while the previous page remains available.',
+    );
+    expect(sameBody).toHaveLength(1);
+    expect(sameBody[0]?.id).toBe('m2');
+    expect(view.records.some((record) => record.id.startsWith('pending:'))).toBe(false);
+    expect(view.entries.some((entry) => entry.id.startsWith('pending:'))).toBe(false);
+    // The retry affordance goes with it: the send did land, so offering to
+    // send it again is offering to duplicate a message that already exists.
+    expect(
+      view.entries.some(
+        (entry) => entry.type === 'message' && entry.tag?.label === 'retry exact send',
+      ),
+    ).toBe(false);
+  });
+
+  /**
+   * The other half of the same rule: an echo the projection does NOT hold is
+   * still the only evidence the person's words exist, and claiming it on a
+   * loose match would delete them from their own screen mid-send.
+   */
+  it('keeps a pending echo whose durable row has not landed', () => {
+    const snapshot = data();
+    const live: RoomView = {
+      roomId: 'room',
+      lastSeq: 2,
+      head: 2,
+      seenSeq: 2,
+      events: [],
+      pending: [
+        {
+          clientMessageId: 'client-answer-b',
+          commandName: 'send_message',
+          replyToId: null,
+          body: 'Still in flight.',
+          at: '2026-08-02T12:02:00.000Z',
+          status: 'pending',
+          attachments: [],
+          references: [],
+        },
+      ],
+      presence: {},
+      typing: [],
+      subscribed: true,
+    };
+    const view = liveRoomView(snapshot, 'alice', live);
+    expect(view.records.map((record) => record.id)).toContain('pending:client-answer-b');
+    expect(view.entries.at(-1)).toMatchObject({ id: 'pending:client-answer-b' });
+  });
+
+  /**
+   * The key is client-chosen, so a collision with somebody else's row must not
+   * claim this viewer's echo — the same guard `reconcilePending` states.
+   */
+  it('does not claim a pending echo against another author’s row', () => {
+    const snapshot: ReplayData = {
+      ...data(),
+      participants: [
+        { id: 'alice', name: 'alice', avatarUrl: null, principalKind: 'human' },
+        { id: 'bob', name: 'bob', avatarUrl: null, principalKind: 'human' },
+      ],
+      messages: data().messages.map((message) =>
+        message.id === 'm2' ? { ...message, authorId: 'bob', author: 'bob' } : message,
+      ),
+    };
+    const live: RoomView = {
+      roomId: 'room',
+      lastSeq: 1,
+      head: 2,
+      seenSeq: 1,
+      events: [],
+      pending: [
+        {
+          clientMessageId: 'client-answer-a',
+          commandName: 'send_message',
+          replyToId: null,
+          body: 'Alice’s own words, colliding on the key.',
+          at: '2026-08-02T12:01:00.000Z',
+          status: 'pending',
+          attachments: [],
+          references: [],
+        },
+      ],
+      presence: {},
+      typing: [],
+      subscribed: true,
+    };
+    const view = liveRoomView(snapshot, 'alice', live);
+    expect(view.records.map((record) => record.id)).toContain('pending:client-answer-a');
+  });
+
+  /**
+   * #136 r3. The key is not just client-chosen, it is client-INSTANCE-chosen:
+   * `userId:timestamp:counter`, so two tabs of one account that send in the same
+   * millisecond mint the same `clientMessageId` with different words. The server
+   * refuses the second — a receipt found under the same key with a different
+   * payload fingerprint is a `conflict`, not a replay (`ledger.ts`) — and the
+   * refused echo stays in `live.pending` as a `failed` row so it can be seen and
+   * retried.
+   *
+   * Mutation: claim on (author, key) alone, ignoring the payload. The refused
+   * row is then hidden before its nack arrives and stays hidden forever after,
+   * and the person's typed sentence disappears from their own screen with no
+   * trace — silent loss where the failure mode this feature guards against is a
+   * visible, self-healing duplicate.
+   */
+  it('keeps a pending echo whose key collides with a committed row of different words', () => {
+    const snapshot = data();
+    const live: RoomView = {
+      roomId: 'room',
+      lastSeq: 1,
+      head: 2,
+      seenSeq: 1,
+      events: [],
+      // Same author, same key as the committed `m2` — a second tab, same
+      // millisecond — but the person typed something else entirely.
+      pending: [
+        {
+          clientMessageId: 'client-answer-a',
+          commandName: 'send_message',
+          replyToId: 'm1',
+          body: 'No, regeneration should block the request.',
+          at: '2026-08-02T12:01:00.000Z',
+          status: 'failed',
+          error: 'that retry key already names a different command payload',
+          retryable: false,
+          attachments: [],
+          references: [],
+        },
+      ],
+      presence: {},
+      typing: [],
+      subscribed: true,
+    };
+    const view = liveRoomView(snapshot, 'alice', live);
+
+    // The committed row renders as itself, and the refused echo survives beside
+    // it — these are two different messages that happen to share a key.
+    expect(view.records.map((record) => record.id)).toContain('m2');
+    expect(view.records.map((record) => record.id)).toContain('pending:client-answer-a');
+    expect(view.records.find((record) => record.id === 'pending:client-answer-a')?.text).toBe(
+      'No, regeneration should block the request.',
+    );
+    // And the nack is still handleable exactly as it was before the claim
+    // existed: the failed echo is on the timeline, not swallowed by it.
+    expect(view.entries.some((entry) => entry.id === 'pending:client-answer-a')).toBe(true);
+  });
+
+  /**
+   * The other side of the payload term: agreement is what the server calls a
+   * replay, so agreement is what the claim still fires on. Byte-exact, because
+   * the server hashes `body` verbatim — a whitespace-only difference is a
+   * `conflict` to it, so it must not be a match here.
+   */
+  it('claims the echo on an exact payload match and not on a near one', () => {
+    const snapshot = data();
+    const echo = (body: string): RoomView => ({
+      roomId: 'room',
+      lastSeq: 1,
+      head: 2,
+      seenSeq: 1,
+      events: [],
+      pending: [
+        {
+          clientMessageId: 'client-answer-a',
+          commandName: 'send_message',
+          replyToId: 'm1',
+          body,
+          at: '2026-08-02T12:01:00.000Z',
+          status: 'pending',
+          attachments: [],
+          references: [],
+        },
+      ],
+      presence: {},
+      typing: [],
+      subscribed: true,
+    });
+
+    const exact = liveRoomView(
+      snapshot,
+      'alice',
+      echo('Yes, while the previous page remains available.'),
+    );
+    expect(exact.records.some((record) => record.id.startsWith('pending:'))).toBe(false);
+
+    const whitespace = liveRoomView(
+      snapshot,
+      'alice',
+      echo('Yes, while the previous page remains available. '),
+    );
+    expect(whitespace.records.map((record) => record.id)).toContain('pending:client-answer-a');
+  });
 });
 
 /* ───────────────────────────────────────────────────────────────────────────
@@ -1533,6 +1780,7 @@ describe('the receipt exposes certify + remove for a `~` reading', () => {
       payload: { question: QUESTION_TEXT, status: 'open' },
       objectiveId: null,
       proposalId: 'prop-q-1',
+      sessionId: null,
       revision: 0,
       retractedAt: null,
       supersededById: null,
@@ -1568,6 +1816,7 @@ describe('the receipt exposes certify + remove for a `~` reading', () => {
       payload: { statement: CLAIM_TEXT, claimant: 'alice', verification: 'verified' },
       objectiveId: null,
       proposalId: null,
+      sessionId: null,
       revision: 0,
       retractedAt: null,
       supersededById: null,
@@ -1603,6 +1852,7 @@ describe('the receipt exposes certify + remove for a `~` reading', () => {
       payload: { statement: CLAIM_TEXT, claimant: 'alice', verification: 'unverified' },
       objectiveId: null,
       proposalId: null,
+      sessionId: null,
       revision: 0,
       retractedAt: null,
       supersededById: null,
@@ -1636,6 +1886,7 @@ describe('the receipt exposes certify + remove for a `~` reading', () => {
       payload: { question: QUESTION_TEXT, status: 'answered' },
       objectiveId: null,
       proposalId: null,
+      sessionId: null,
       revision: 0,
       retractedAt: null,
       supersededById: null,
@@ -1654,5 +1905,108 @@ describe('the receipt exposes certify + remove for a `~` reading', () => {
     });
     expect(receipt.certifiable).toBe(false);
     expect(receipt.removable).toBe(false);
+  });
+});
+
+/**
+ * THE FOURTH ATTENTION SUBJECT, RENDERED HONESTLY (#127 fix round 2, finding D).
+ *
+ * A subscription that expires unmatched escalates to the agent's owner as an
+ * attention item whose subject is a SESSION. Round 1 widened the vocabulary and
+ * left the renderer alone, so the item arrived titled "an item whose semantic
+ * record is unavailable" — true of the semantic tables and false about the room,
+ * which holds a complete record of that process — and, because the escalation is
+ * classed `blocking_question`, it offered `answer` as its primary action for a
+ * question nobody asked.
+ */
+describe('an attention item about a session names the session', () => {
+  const sessionAttention = (subjectId: string) =>
+    ({
+      id: 'a-session',
+      roomId: 'room',
+      userId: 'alice',
+      subjectKind: 'session' as const,
+      subjectId,
+      subjectObjectId: null,
+      subjectProposalId: null,
+      subjectMessageId: null,
+      subjectSessionId: subjectId,
+      class: 'blocking_question' as const,
+      reason: {
+        kind: 'subscription_expired' as const,
+        source: 'channel',
+        matcher: 'the migration lands',
+        expiresAt: at.toISOString(),
+      },
+      status: 'pending' as const,
+      createdAt: at,
+      resolvedAt: null,
+    }) as unknown as ReplayData['attention'][number];
+
+  const withSession = (): ReplayData => ({
+    ...data(),
+    attention: [sessionAttention('s1')],
+    sessions: [
+      {
+        id: 's1',
+        planId: 'p1',
+        planTitle: 'ship the migration',
+        harness: 'omp',
+        model: 'haiku',
+        status: 'open',
+      },
+    ] as unknown as ReplayData['sessions'],
+  });
+
+  /**
+   * Mutation: drop the `session` arm from the title, and the row falls back to
+   * "an item whose semantic record is unavailable" — a person is told the room
+   * has lost the record of a process the room can describe completely.
+   */
+  it('titles the row from the session, not from the missing-record fallback', () => {
+    const [item] = replayView(withSession(), 'alice').attention;
+    if (!item) throw new Error('the session attention item did not reach the view');
+    expect(item.title).toContain('omp/haiku');
+    expect(item.title).toContain('ship the migration');
+    expect(item.title).not.toContain('semantic record is unavailable');
+  });
+
+  /**
+   * Mutation: remove the `subscription_expired` arm from `actionsFor` and the
+   * `blocking_question` arm below it offers `answer` — a primary button inviting
+   * a person to answer a question that was never asked. The two verbs the ledger
+   * actually has for a stalled process are a continuation (which spends a draw)
+   * and an exit.
+   */
+  it('offers resume-or-close, and never offers to answer', () => {
+    const [item] = replayView(withSession(), 'alice').attention;
+    if (!item) throw new Error('the session attention item did not reach the view');
+    const ids = item.actions.map((action) => action.id);
+    expect(ids).not.toContain('answer');
+    expect(ids).toEqual(['resume', 'close']);
+    // The continuation says what it costs. A wake that hid its draw would be the
+    // same dishonesty the projection guards refuse, one layer up.
+    expect(item.actions[0]?.label).toContain('draw');
+  });
+
+  /**
+   * Mutation: invent a title when the session row is absent. The honest answer to
+   * "what process is this?" with no row to read is to say the record is
+   * unavailable — not to render a plausible name from the id.
+   */
+  it('falls back to the unavailable-record sentence when the session is not loaded', () => {
+    const [item] = replayView({ ...withSession(), sessions: [] }, 'alice').attention;
+    if (!item) throw new Error('the session attention item did not reach the view');
+    expect(item.title).toBe('an item whose semantic record is unavailable');
+  });
+
+  /**
+   * The escalation cites no message, because none exists: nobody said anything.
+   * Mutation: synthesize a citation and the row claims a provenance the ledger
+   * cannot support.
+   */
+  it('renders without a citation, because a wait is not something somebody said', () => {
+    const [item] = replayView(withSession(), 'alice').attention;
+    expect(item?.source).toBeNull();
   });
 });
