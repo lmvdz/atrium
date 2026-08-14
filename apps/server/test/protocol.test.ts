@@ -153,6 +153,100 @@ describe('the ledger event union', () => {
     expect(forged.error?.issues.some((issue) => issue.path[0] === 'actor')).toBe(true);
   });
 
+  /**
+   * THE SIGNAL/INTERRUPT KINDS ARE LEDGER-ONLY TOO (#127, #123 resolution 1).
+   *
+   * The same claim the lifecycle test above makes, made again for the two new
+   * kinds because it is the claim the whole decision rests on: a steer is
+   * coordination, not the room's understanding, so the reducer must never fold
+   * one. Both parse as a `RoomEvent`, both are `isCoreEvent === false`, neither is
+   * in `coreEventTypes`, and the covenant still folds exactly six.
+   *
+   * RED-ON-REVERT: add either type to `coreEventTypeSet` / `coreEventTypes` and
+   * the `isCoreEvent` and `includes` assertions go red, and so does the count.
+   */
+  it('treats the signal/interrupt kinds as ledger-only, out of the covenant fold', () => {
+    const samples: Array<[string, Record<string, unknown>]> = [
+      ['session_signaled', { sessionId: 's1', signalId: 'sig1', kind: 'steer' }],
+      [
+        'session_subscribed',
+        {
+          sessionId: 's1',
+          subscriptionId: 'sub1',
+          source: 'channel',
+          matcher: 'the migration lands',
+          expiresAt: at,
+        },
+      ],
+    ];
+    for (const [type, extra] of samples) {
+      const event = RoomEvent.parse({ id: `e-${type}`, at, type, roomId: 'r1', ...extra });
+      expect(isCoreEvent(event), type).toBe(false);
+      expect(declaredRoomId(event), type).toBe('r1');
+      expect((coreEventTypes as readonly string[]).includes(type), type).toBe(false);
+    }
+    expect(coreEventTypes).toHaveLength(6);
+  });
+
+  /**
+   * A SUBSCRIPTION HAS NO SPELLING WITHOUT A HORIZON (#123 resolution 6).
+   *
+   * `expiresAt` is mandatory in the event, not merely validated in the command —
+   * so the wedge shape (a wait that holds a session open forever and blocks its
+   * plan's settle with nothing owed to anybody) cannot be written down at all,
+   * including by an in-process caller that never goes through `Command.parse`.
+   *
+   * RED-ON-REVERT: give `expiresAt` a `.nullable().default(null)` or an
+   * `.optional()` and this parse succeeds — the test goes red.
+   */
+  it('refuses a subscription with no expiry — the horizon is mandatory', () => {
+    const horizonless = RoomEvent.safeParse({
+      id: 'e1',
+      at,
+      type: 'session_subscribed',
+      roomId: 'r1',
+      sessionId: 's1',
+      subscriptionId: 'sub1',
+      source: 'channel',
+      matcher: 'anything',
+    });
+    expect(horizonless.success).toBe(false);
+    expect(horizonless.error?.issues.some((issue) => issue.path[0] === 'expiresAt')).toBe(true);
+  });
+
+  /**
+   * REPLAY ≡ LIVE ACROSS THE WIDENED `signal_raised` (#127).
+   *
+   * #127 widened `SignalRaised.subjectKind` from three subjects to four so a
+   * subscription-expiry escalation can name the SESSION it is about. A widening
+   * must not change how an OLDER row folds: every `signal_raised` already in a
+   * ledger names one of the original three, and a replay parses those rows with
+   * today's schema. This pins that all three still parse, and that the new
+   * subject parses too — so the same ledger yields the same events before and
+   * after the change.
+   *
+   * RED-ON-REVERT: narrow the enum back (dropping `session`) and the fourth case
+   * fails; replace it rather than widening it (e.g. `z.enum(['session'])`) and the
+   * first three fail — either direction is caught.
+   */
+  it('parses every signal_raised subject, old and new, so a replay is unchanged', () => {
+    for (const subjectKind of ['object', 'proposal', 'message', 'session'] as const) {
+      const raised = RoomEvent.parse({
+        id: `e-${subjectKind}`,
+        at,
+        type: 'signal_raised',
+        roomId: 'r1',
+        targetUserId: 'u1',
+        subjectKind,
+        subjectId: 'x1',
+        class: 'blocking_question',
+        reason: { kind: 'question_names_you', question: 'which cutover?' },
+      });
+      expect(raised.type === 'signal_raised' && raised.subjectKind, subjectKind).toBe(subjectKind);
+      expect(isCoreEvent(raised), subjectKind).toBe(false);
+    }
+  });
+
   it('refuses presence — it is not a kind of event at all (#14)', () => {
     expect(
       RoomEvent.safeParse({ id: 'e1', at, type: 'presence_changed', roomId: 'r1' }).success,
@@ -224,6 +318,13 @@ describe('ClientFrame', () => {
       'raise_signal',
       // The budget/rlimit spend-authorization (#118): human-only slice set/raise.
       'set_plan_rlimit',
+      // The signal/interrupt boundary (#127). `resume_session` is its OWN verb
+      // rather than a third `kind` on `signal_session`, because a resume SPENDS a
+      // plan's slice and a steer does not — a verb whose authorization you cannot
+      // read off its name is a verb nobody checks correctly.
+      'signal_session',
+      'resume_session',
+      'subscribe_session',
     ];
     const declared = Command.options.map((option) => option.shape.name.value);
     expect([...declared].sort()).toEqual([...names].sort());

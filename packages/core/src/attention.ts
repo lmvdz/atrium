@@ -48,8 +48,27 @@ export type AttentionStatus = z.infer<typeof AttentionStatus>;
  * `accepted_objects`, so persisting a proposal-subject item needs that column to
  * become polymorphic. Core is the layer that discovered it; the migration is not
  * this ticket's.)
+ *
+ * ## `session` — the fourth subject (#127, from #123 resolution point 6)
+ *
+ * A `session_subscribed` carries a mandatory `expiresAt`, and an unmatched
+ * subscription that reaches it escalates to the agent's OWNER as `signal_raised`
+ * — "the wait becomes owed attention, not a forever-open session silently
+ * blocking #119's plan-settle". That escalation is *about a session*, and the
+ * three subjects above cannot name one: an owner opening the item has to land on
+ * the process that is still waiting, not on some message standing in for it. A
+ * subject vocabulary that cannot name the thing an item is about forces the
+ * raiser to point at something else, and an attention item pointing at the wrong
+ * subject is worse than a wider enum.
+ *
+ * It is a WIDENING, so every payload that parsed before still parses (pinned in
+ * `apps/server/test/protocol.test.ts`), and it stays fail-closed in the store:
+ * `attention_items_subject_kind_allowlist` names the four explicitly, and a
+ * `session` subject carries its own generated column and composite
+ * `(room_id, session_id)` FK, exactly as the other three do — so an item can
+ * never point at a session from a room the viewer cannot see.
  */
-export const AttentionSubjectKind = z.enum(['object', 'proposal', 'message']);
+export const AttentionSubjectKind = z.enum(['object', 'proposal', 'message', 'session']);
 export type AttentionSubjectKind = z.infer<typeof AttentionSubjectKind>;
 
 /* ─────────────────────────────────────────────────────────────────────────
@@ -130,6 +149,28 @@ export const RationaleReason = z.discriminatedUnion('kind', [
   z.object({ kind: z.literal('question_names_you'), question: z.string().min(1) }),
   z.object({ kind: z.literal('mention'), request: z.string().min(1) }),
   /**
+   * **#127.** An agent session registered a durable WAIT (`session_subscribed`)
+   * and its mandatory `expiresAt` passed with nothing matching it. The wait then
+   * becomes owed ATTENTION, escalated to the agent's OWNER — a forever-open
+   * session that silently blocks its plan from settling (#119) is the shape this
+   * variant exists to make impossible.
+   *
+   * It is its own variant rather than a reuse of `question_names_you` because
+   * that sentence — "this open question names you" — would be false: nobody
+   * asked the owner anything, a machine's wait ran out. A rationale that
+   * misrepresents why this person specifically is exactly what this union exists
+   * to prevent.
+   */
+  z.object({
+    kind: z.literal('subscription_expired'),
+    /** The wait's opaque source, as the session declared it. */
+    source: z.string().min(1),
+    /** What would have satisfied it. */
+    matcher: z.string().min(1),
+    /** The horizon that passed. */
+    expiresAt: Timestamp,
+  }),
+  /**
    * **r8.** A model reading that the engine staged for a person rather than
    * accepting — today that is `type_not_certified`, whose refusal text promises
    * this panel by name. It is not `decision_pending`: nobody is being asked to
@@ -199,6 +240,8 @@ export function rationaleFor(userId: Id, reason: RationaleReason): Rationale {
       return `${you} — this open question names you: "${clip(reason.question)}".` as Rationale;
     case 'mention':
       return `${you} — you were named in a message that asks you something: "${clip(reason.request)}".` as Rationale;
+    case 'subscription_expired':
+      return `${you} — you own the agent whose session registered a wait on "${clip(reason.source)}" for "${clip(reason.matcher)}", and it ran out at ${reason.expiresAt} with nothing matching it. The session is still open and waiting on nothing; it is yours to resume or to close.` as Rationale;
     case 'reading_pending':
       return `${you} — a machine read this as a ${reason.proposedType} and nothing in the words settles that it was one, so it is staged rather than accepted and any member of the room can file it or decline it: "${clip(reason.statement)}".` as Rationale;
     case 'receipt_review':
@@ -383,6 +426,16 @@ export type AttentionProducer =
    */
   | 'mention_signal'
   /**
+   * `subscription_expired` (#127). A caller signal like `mention_signal`, and
+   * **no source declares it** either: the escalation is raised by the server's
+   * expiry sweep from a durable `session_subscriptions` row, not by any
+   * examination this module reconciles over. Its own key rather than a reuse of
+   * `mention_signal`, so a future mention reconciliation cannot resolve a stalled
+   * session's item by absence — the two are unrelated facts that happen to share
+   * "nothing declares me" today.
+   */
+  | 'subscription_signal'
+  /**
    * A reason kind this build does not know — a store written by another version
    * of this package. No source declares it, so no examination ever matches it
    * and the item stays where it is. See `producerOf`.
@@ -408,6 +461,7 @@ const PRODUCER_OF: Readonly<Record<RationaleReason['kind'], AttentionProducer>> 
   question_blocks_objective: 'blocking_relation',
   question_names_you: 'named_question',
   mention: 'mention_signal',
+  subscription_expired: 'subscription_signal',
 });
 
 /**

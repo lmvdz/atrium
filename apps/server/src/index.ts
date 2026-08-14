@@ -19,10 +19,11 @@ import {
 import { reconcileWedgedSessions } from './execution/reconcile.js';
 import { createAcceptanceProvider } from './jobs/acceptance-provider.js';
 import { createGatewayProvider } from './jobs/provider.js';
-import { createLedger } from './ledger.js';
+import { createLedger, type Tx } from './ledger.js';
 import { createLogger } from './logger.js';
 import { startQueue } from './queue.js';
 import { createMembershipAuthorizer } from './session.js';
+import { sweepExpiredSubscriptions } from './subscriptions.js';
 import { createSessionResolver, createUpgradeAuthenticator } from './ws-auth.js';
 import { createRealtimeServer } from './ws-server.js';
 
@@ -205,6 +206,17 @@ async function main(): Promise<void> {
   // dead owner's session from this process's live one.
   const executionInstanceId = bus.instanceId ?? randomUUID();
 
+  // The projection side effects that must commit with an append. Named once and
+  // shared, so the command service and the subscription-expiry sweep (#127) run
+  // the SAME hooks — a second literal here would be a second answer to "what else
+  // commits with a ledger row", free to drift from the first.
+  const projectionHooks = routing
+    ? {
+        onMessagePosted: ({ tx, roomId }: { tx: Tx; roomId: string }) =>
+          queue.enqueueInterpretation(tx, roomId),
+      }
+    : {};
+
   const baseCommands = createCommandService({
     db: database.db,
     ledger,
@@ -216,11 +228,7 @@ async function main(): Promise<void> {
     // capability token) in the SAME transaction as the draw (#120 round-6 F1).
     // Absent, every session is `external` (external-settle mode).
     executionInstanceId: executionRuntime ? executionInstanceId : undefined,
-    projectionHooks: routing
-      ? {
-          onMessagePosted: ({ tx, roomId }) => queue.enqueueInterpretation(tx, roomId),
-        }
-      : {},
+    projectionHooks,
   });
 
   const executionOwnership = executionRuntime
@@ -330,6 +338,26 @@ async function main(): Promise<void> {
             found: swept.found,
             failed: swept.failed,
             unreconciled: swept.unreconciled,
+          });
+        }
+        // THE SUBSCRIPTION EXPIRY SWEEP (#127). Rides the same beat as the
+        // execution sweep and for the same reason: both turn a silently wedged
+        // process into something a person can see. A wait past its mandatory
+        // horizon is marked `expired` and escalated to the agent's OWNER, so an
+        // unmatched subscribe cannot hold a session open forever and block its
+        // plan's settle (#119) with nothing owed to anybody. Runs on EVERY boot,
+        // execution enabled or not: a wait is a ledger fact, not a provider one.
+        const waits = await sweepExpiredSubscriptions({
+          db: database.db,
+          ledger,
+          logger,
+          projectionHooks,
+        });
+        if (waits.escalated > 0 || waits.skipped > 0) {
+          logger.warn('periodic sweep escalated expired session subscriptions', {
+            found: waits.found,
+            escalated: waits.escalated,
+            skipped: waits.skipped,
           });
         }
       } catch (error) {

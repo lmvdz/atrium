@@ -302,10 +302,15 @@ export type ReplayData = Omit<
   readonly referenceAttachments?: LoadedReplayData['referenceAttachments'];
   /** Generated FK columns are database enforcement plumbing, not view input. */
   readonly attention: Array<
-    Omit<LoadedReplayAttention, 'subjectObjectId' | 'subjectProposalId' | 'subjectMessageId'> & {
+    Omit<
+      LoadedReplayAttention,
+      'subjectObjectId' | 'subjectProposalId' | 'subjectMessageId' | 'subjectSessionId'
+    > & {
       readonly subjectObjectId?: string | null;
       readonly subjectProposalId?: string | null;
       readonly subjectMessageId?: string | null;
+      /** The fourth subject edge (#127) — a subscription-expiry escalation. */
+      readonly subjectSessionId?: string | null;
     }
   >;
   /** Optional only so hand-built unit fixtures can describe pre-ledger imports. */

@@ -448,8 +448,8 @@
       "id": "subject_kind_default_restored",
       "why": "An attention item that silently defaults to 'object' points #22's foreign key at a proposal id.",
       "file": "src/attention.ts",
-      "find": "export const AttentionSubjectKind = z.enum(['object', 'proposal', 'message']);",
-      "replace": "export const AttentionSubjectKind = z.enum(['object', 'proposal', 'message']).default('object');",
+      "find": "export const AttentionSubjectKind = z.enum(['object', 'proposal', 'message', 'session']);",
+      "replace": "export const AttentionSubjectKind = z.enum(['object', 'proposal', 'message', 'session']).default('object');",
       "catches": ["has no default for subjectKind — the wrong value there is unfalsifiable"]
     },
     {

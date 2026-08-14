@@ -20,16 +20,20 @@ import {
   parseSemanticCommand,
   RationaleReason,
   type Relation,
+  Timestamp,
 } from '@atrium/core';
 import type { Database } from '@atrium/db';
 import {
   acceptedObjects,
+  agents,
   coreEvents,
   messages,
   objectSources,
   plans,
   proposalSources,
   proposals,
+  sessionSignals,
+  sessionSubscriptions,
   sessions,
   users,
 } from '@atrium/db/schema';
@@ -424,6 +428,67 @@ export const Command = z.discriminatedUnion('name', [
     /** The new ceiling on authorized draws (spawns/continues). Non-negative. */
     slice: z.number().int().nonnegative(),
   }),
+
+  // ── the signal/interrupt boundary (#127, from #123's resolution) ───────────
+  //
+  // Three verbs producing the two new ledger-only events. All three target OPEN
+  // sessions only — as NEW enforcement, at the command AND in the projection,
+  // because the 0025 trigger guards the `sessions` ROW and structurally cannot
+  // nack a later ledger append (#123 resolution 3).
+  //
+  // `signal_session` carries `steer` and `interrupt` and nothing else: `resume`
+  // is a DRAW and has its own verb, because a verb that sometimes spends a plan's
+  // slice and sometimes does not is a verb whose authorization nobody can read
+  // off its name.
+  z.object({
+    name: z.literal('signal_session'),
+    roomId: Id,
+    sessionId: Id,
+    /**
+     * `steer` — guidance, appendable by ANY authenticated room member: the append
+     * is public, receipted, and powerless over covenant and purse.
+     * `interrupt` — a request to stop, and the session's plan's agent principal or
+     * that agent's OWNER only. Checked by in-command lookup (`plans.agent_user_id`
+     * → `agents.owner_user_id`), because the role `Authorizer.authorize` returns is
+     * discarded at `session.ts` and a check nobody reads is decoration.
+     */
+    kind: z.enum(['steer', 'interrupt']),
+    /** The steer's words, or the interrupt's reason. */
+    body: z.string().max(4000).nullable().default(null),
+    /** The same-room message this signal was mediated from (#123 resolution 4). */
+    causeMessageId: Id.nullable().default(null),
+    /** An earlier `session_signaled` in this room that this one revises. */
+    supersedesEventId: Id.nullable().default(null),
+  }),
+  // THE CONTINUATION COMMAND (#123 resolution 2). A resume is a DRAW: it takes the
+  // append lock and passes the #118 boundary EXACTLY as `open_session` does, and an
+  // over-slice resume appends a `draw_refused` receipt instead of a signal. There is
+  // no free wake path — that was the campaign-stopping finding the resolution folded.
+  z.object({
+    name: z.literal('resume_session'),
+    roomId: Id,
+    sessionId: Id,
+    body: z.string().max(4000).nullable().default(null),
+    causeMessageId: Id.nullable().default(null),
+    supersedesEventId: Id.nullable().default(null),
+    /** The `waiting` subscription this continuation pays out, if any. */
+    subscriptionId: Id.nullable().default(null),
+  }),
+  z.object({
+    name: z.literal('subscribe_session'),
+    roomId: Id,
+    sessionId: Id,
+    /** Where the awaited thing comes from — opaque to Atrium. */
+    source: z.string().min(1).max(200),
+    /** What would satisfy the wait — opaque; #124's daemon interprets it. */
+    matcher: z.string().min(1).max(2000),
+    /**
+     * MANDATORY, and must be in the FUTURE. A wait with no horizon holds a session
+     * open forever and blocks #119's plan-settle with nothing owed to anybody; one
+     * whose horizon has already passed is a wedge born dead. Both are refused.
+     */
+    expiresAt: Timestamp,
+  }),
 ]);
 export type Command = z.infer<typeof Command>;
 
@@ -565,6 +630,15 @@ export function certificationClassOf(name: CommandName): CertificationClass {
     case 'open_session':
     case 'settle_session':
     case 'raise_signal':
+    // The signal/interrupt verbs (#127). Participation, not certification, for
+    // the same reason the lifecycle verbs are: none of them mints or moves a `✓`,
+    // and their projections cannot reach an `accepted_objects` judgement column.
+    // `resume_session` SPENDS against a slice but does not SET one — exactly like
+    // `open_session`, which is `open` for that reason — so it is `open` here and
+    // bounded by #118's draw check under the append lock, not by this class.
+    case 'signal_session':
+    case 'resume_session':
+    case 'subscribe_session':
       return 'open';
     // The spend-authorization (#118). NOT `open`: setting or raising a plan's
     // rlimit slice is `human = init`'s act, refused to a machine before the
@@ -620,6 +694,75 @@ export function sessionSettleRefusal(sessionId: string): string {
  */
 export function providerSettleCapabilityRefusal(sessionId: string): string {
   return `"settle_session" of session "${sessionId}" is owned by its execution provider — its terminal (settled or failed) comes from the provider's verified report, carried on a capability minted for the session that a room member does not hold. Nothing was appended. A wedged provider session is driven to a receipt by reconciliation, not settled from the outside`;
+}
+
+/* ── the signal/interrupt refusals (#127) ────────────────────────────────────
+ *
+ * One message per CLAUSE, deliberately. #122's standing lesson: a shared refusal
+ * string makes every red-on-revert test assert the DISJUNCTION — "something
+ * refused this" — instead of the clause it was written for, and a guard can then
+ * be deleted while its own test stays green because a neighbouring guard catches
+ * the same input. Each of these names exactly one rule, and exactly one test
+ * asserts each.
+ * ─────────────────────────────────────────────────────────────────────────── */
+
+/**
+ * A signal aimed at a session that is not OPEN (#123 resolution 3). NEW
+ * enforcement: the 0025 trigger freezes a terminal `sessions` row and cannot
+ * refuse a later ledger append, so "signals target open sessions only" is a
+ * command precondition and a projection nack, under the one append lock.
+ *
+ * The race model is in the message because it is the part people get wrong:
+ * whichever of interrupt and settle commits first under the lock wins. An
+ * interrupt that landed first never blocks the exit — an interrupt REQUESTS, an
+ * exit CONCLUDES.
+ */
+export function signalTargetRefusal(verb: string, sessionId: string, status: string): string {
+  return `"${verb}" targets session "${sessionId}", which is ${status}, not open — a signal is control sent DOWN into a running process, and a process that has published its exit receipt is not running. Nothing was appended. An interrupt requests; an exit concludes, and this one already did`;
+}
+
+/** A signal naming a session that is not in this room at all. */
+export function signalMissingSessionRefusal(
+  verb: string,
+  sessionId: string,
+  roomId: string,
+): string {
+  return `"${verb}" names session "${sessionId}", which does not exist in room "${roomId}" — a refused draw opens no session and is not a signal target. Nothing was appended`;
+}
+
+/**
+ * A member trying to interrupt or continue somebody else's agent (#123
+ * resolution 5, codex r1.4). The check is a LOOKUP — `plans.agent_user_id` →
+ * `agents.owner_user_id` — because `execute` discards the role
+ * `Authorizer.authorize` returns, and an authorization whose answer nobody reads
+ * is decoration. Trigger-backstopped in drizzle/0045 for `interrupt`, so a direct
+ * writer cannot bypass it either.
+ *
+ * `steer` is deliberately NOT here: any authenticated room member may steer,
+ * because the append is public, receipted, and powerless over covenant and purse.
+ */
+export function sessionControlAuthorizationRefusal(verb: string, sessionId: string): string {
+  return `"${verb}" is control over session "${sessionId}"'s running process, and only that session's agent principal or the human who owns that agent may send it — a room member may STEER a session (that append is public, receipted, and powerless over covenant and purse) and may not stop or continue somebody else's process. Nothing was appended`;
+}
+
+/** A provenance edge pointing outside the room (#123 resolution 4). */
+export function causeMessageRefusal(causeMessageId: string, roomId: string): string {
+  return `causeMessageId "${causeMessageId}" names no message in room "${roomId}" — a signal's provenance edge is same-room by construction (the projection lands it on a composite (room_id, message_id) foreign key), so a cause from another room is not a cause this room can show. Nothing was appended`;
+}
+
+/** A forward-only revision naming something that is not an earlier signal here. */
+export function supersedesRefusal(supersedesEventId: string, sessionId: string): string {
+  return `supersedesEventId "${supersedesEventId}" is not an earlier session_signaled for session "${sessionId}" in this room — a revision is forward-only and NAMES the append it replaces, because the ledger is append-only and the tail-discard is the harness's act. Nothing was appended`;
+}
+
+/** A resume claiming a wait that is not live, not here, or not this session's. */
+export function subscriptionMatchRefusal(subscriptionId: string, sessionId: string): string {
+  return `subscriptionId "${subscriptionId}" is not a waiting subscription of session "${sessionId}" in this room — a continuation pays out a wait that is still waiting; one already matched, expired or disposed has had its disposition. Nothing was appended`;
+}
+
+/** A wait whose horizon has already passed (#123 resolution 6). */
+export function subscriptionHorizonRefusal(expiresAt: string, now: string): string {
+  return `expiresAt "${expiresAt}" is not in the future (it is now ${now}) — a subscription's expiry is mandatory because an unmatched wait must become owed ATTENTION rather than a forever-open session silently blocking its plan's settle, and a wait born past its horizon owes it immediately. Nothing was appended`;
 }
 
 /**
@@ -1066,6 +1209,158 @@ export function createCommandService({
       event: appended.event,
       issues,
     };
+  }
+
+  /* ── the signal/interrupt guards, all under the ONE append lock (#127) ─────
+   *
+   * Every one of these is called from a command's `guard`, which `appendAndProject`
+   * (and `ledger.append`) runs INSIDE the append transaction, after the global
+   * advisory lock is held. That placement is the whole of the race model in #123
+   * resolution 3: whichever of an interrupt and a settle reaches the lock first
+   * wins the ledger, and the loser is refused against the state the winner left.
+   * A check run before the lock would be a check against a state that can move.
+   * ─────────────────────────────────────────────────────────────────────────── */
+
+  interface SignalTarget {
+    status: 'open' | 'settled' | 'failed';
+    planId: string;
+    harness: string;
+    model: string;
+    /** The agent principal whose plan this session hangs under. */
+    agentUserId: string;
+    /** That agent's OWNER — the human accountable for it (`agents.owner_user_id`). */
+    ownerUserId: string;
+    /** The plan's human-set ceiling. NULL is UNFUNDED: fail closed, a ceiling of 0. */
+    slice: number | null;
+    authorizedDraws: number;
+  }
+
+  /**
+   * The session a signal names, with the lineage the authorization needs, read
+   * `FOR SHARE` so it cannot exit underneath the check. `null` when no such
+   * session lives in this room.
+   */
+  async function readSignalTarget(
+    tx: Tx,
+    roomId: string,
+    sessionId: string,
+  ): Promise<SignalTarget | null> {
+    const [row] = await tx
+      .select({
+        status: sessions.status,
+        planId: sessions.planId,
+        harness: sessions.harness,
+        model: sessions.model,
+        agentUserId: plans.agentUserId,
+        ownerUserId: agents.ownerUserId,
+        slice: plans.rlimitSlice,
+        authorizedDraws: plans.authorizedDraws,
+      })
+      .from(sessions)
+      .innerJoin(plans, and(eq(plans.id, sessions.planId), eq(plans.roomId, sessions.roomId)))
+      .innerJoin(agents, eq(agents.userId, plans.agentUserId))
+      .where(and(eq(sessions.id, sessionId), eq(sessions.roomId, roomId)))
+      .for('share', { of: sessions });
+    return row ?? null;
+  }
+
+  /**
+   * Signals target OPEN sessions only. Refused at the COMMAND — the projection
+   * refuses again from its own read, and the two are not redundant: this one
+   * gives the room a sentence naming the rule, and that one is what binds a
+   * writer that reaches the projection by another path.
+   */
+  function requireOpenTarget(
+    target: SignalTarget | null,
+    verb: string,
+    sessionId: string,
+    roomId: string,
+  ): asserts target is SignalTarget {
+    if (!target) {
+      throw new CommandError('invalid', signalMissingSessionRefusal(verb, sessionId, roomId));
+    }
+    if (target.status !== 'open') {
+      throw new CommandError('invalid', signalTargetRefusal(verb, sessionId, target.status));
+    }
+  }
+
+  /**
+   * Interrupt/continue authorization, BY LOOKUP (#123 resolution 5). The session's
+   * plan names an agent; that agent names an owner. Either principal may stop or
+   * continue the process. Nobody else may, however good their room membership is.
+   */
+  function requireSessionControl(
+    target: SignalTarget,
+    session: Session,
+    verb: string,
+    sessionId: string,
+  ): void {
+    if (session.userId !== target.agentUserId && session.userId !== target.ownerUserId) {
+      throw new CommandError('invalid', sessionControlAuthorizationRefusal(verb, sessionId));
+    }
+  }
+
+  /** The provenance edge is same-room or it is not an edge (#123 resolution 4). */
+  async function requireSameRoomCause(
+    tx: Tx,
+    roomId: string,
+    causeMessageId: string | null,
+  ): Promise<void> {
+    if (causeMessageId === null) return;
+    const [row] = await tx
+      .select({ id: messages.id })
+      .from(messages)
+      .where(and(eq(messages.id, causeMessageId), eq(messages.roomId, roomId)))
+      .limit(1);
+    if (!row) throw new CommandError('invalid', causeMessageRefusal(causeMessageId, roomId));
+  }
+
+  /** A revision names an EARLIER signal of this same session, in this room. */
+  async function requireSupersededSignal(
+    tx: Tx,
+    roomId: string,
+    sessionId: string,
+    supersedesEventId: string | null,
+  ): Promise<void> {
+    if (supersedesEventId === null) return;
+    const [row] = await tx
+      .select({ id: sessionSignals.id })
+      .from(sessionSignals)
+      .where(
+        and(
+          eq(sessionSignals.signaledByEventId, supersedesEventId),
+          eq(sessionSignals.roomId, roomId),
+          eq(sessionSignals.sessionId, sessionId),
+        ),
+      )
+      .limit(1);
+    if (!row) throw new CommandError('invalid', supersedesRefusal(supersedesEventId, sessionId));
+  }
+
+  /** A continuation pays out a wait that is still waiting, and is this session's. */
+  async function requireWaitingSubscription(
+    tx: Tx,
+    roomId: string,
+    sessionId: string,
+    subscriptionId: string | null,
+  ): Promise<void> {
+    if (subscriptionId === null) return;
+    const [row] = await tx
+      .select({ id: sessionSubscriptions.id })
+      .from(sessionSubscriptions)
+      .where(
+        and(
+          eq(sessionSubscriptions.id, subscriptionId),
+          eq(sessionSubscriptions.roomId, roomId),
+          eq(sessionSubscriptions.sessionId, sessionId),
+          eq(sessionSubscriptions.status, 'waiting'),
+        ),
+      )
+      .for('update')
+      .limit(1);
+    if (!row) {
+      throw new CommandError('invalid', subscriptionMatchRefusal(subscriptionId, sessionId));
+    }
   }
 
   async function execute(session: Session, command: Command): Promise<CommandResult> {
@@ -2070,6 +2365,188 @@ export function createCommandService({
           planId: command.planId,
           slice: command.slice,
         }));
+
+      /* ── the signal/interrupt boundary (#127, from #123's resolution) ───────
+       *
+       * PINNED WRITE-SET, restated where the verbs live: these three write
+       * `session_signals` / `session_subscriptions` and — for a GRANTED resume
+       * only — `plans.authorized_draws` and the matched subscription's row. They
+       * write NOTHING on `accepted_objects` and NOTHING on `plans.rlimit_slice`.
+       * A steer is coordination, not the room's understanding, and coordination
+       * has no route to a `✓`.
+       * ───────────────────────────────────────────────────────────────────── */
+
+      // `steer` and `interrupt`. Same append, two authorizations: a steer is any
+      // member's, an interrupt is the agent's or its owner's, by lookup.
+      case 'signal_session': {
+        const roomId = command.roomId;
+        const signalId = randomUUID();
+        return appendAndProject(
+          session,
+          roomId,
+          ({ id, at }) => ({
+            id,
+            at,
+            type: 'session_signaled',
+            roomId,
+            sessionId: command.sessionId,
+            signalId,
+            kind: command.kind,
+            body: command.body,
+            causeMessageId: command.causeMessageId,
+            supersedesEventId: command.supersedesEventId,
+            // A steer does not pay out a wait — held to that by
+            // `session_signals_subscription_is_a_resume` in the schema too.
+            subscriptionId: null,
+          }),
+          async (tx) => {
+            const target = await readSignalTarget(tx, roomId, command.sessionId);
+            requireOpenTarget(target, command.name, command.sessionId, roomId);
+            if (command.kind === 'interrupt') {
+              requireSessionControl(target, session, command.name, command.sessionId);
+            }
+            await requireSameRoomCause(tx, roomId, command.causeMessageId);
+            await requireSupersededSignal(tx, roomId, command.sessionId, command.supersedesEventId);
+          },
+        );
+      }
+
+      // THE CONTINUATION DRAW (#123 resolution 2). Structurally the twin of
+      // `open_session`: the boundary check runs in `authorize`, under the append
+      // lock, reading the plan's committed `authorized_draws` against the
+      // human-set `rlimit_slice`, and the DECISION picks which event this append
+      // is — a `session_signaled {kind:'resume'}` that grants the continuation,
+      // or a `draw_refused` receipt when the slice is spent. #115 decision 2
+      // defined the slice as authorized "spawns/continues"; #118 built only the
+      // spawn half, and a free 'resume' kind would have restarted paid work
+      // outside the boundary entirely. `reason` stays the existing `'budget'` —
+      // an over-slice continuation is refused for the same reason an over-slice
+      // spawn is, and a second label for one reason would only make the receipt
+      // harder to reconcile.
+      case 'resume_session': {
+        const roomId = command.roomId;
+        const signalId = randomUUID();
+        let refusal: {
+          planId: string;
+          slice: number;
+          authorizedDraws: number;
+          harness: string;
+          model: string;
+        } | null = null;
+        const appended = await ledger.append({
+          roomId,
+          actor: actorOf(session),
+          authorize: async (tx) => {
+            await requireMembership(session, roomId, tx);
+            const target = await readSignalTarget(tx, roomId, command.sessionId);
+            requireOpenTarget(target, command.name, command.sessionId, roomId);
+            requireSessionControl(target, session, command.name, command.sessionId);
+            await requireSameRoomCause(tx, roomId, command.causeMessageId);
+            await requireSupersededSignal(tx, roomId, command.sessionId, command.supersedesEventId);
+            await requireWaitingSubscription(tx, roomId, command.sessionId, command.subscriptionId);
+            // The same one line #118's spawn gate runs, against the same committed
+            // count: an UNFUNDED plan (NULL slice) reads as a ceiling of ZERO and
+            // refuses every continuation, exactly as it refuses every spawn.
+            const slice = target.slice ?? 0;
+            if (target.authorizedDraws + 1 > slice) {
+              refusal = {
+                planId: target.planId,
+                slice,
+                authorizedDraws: target.authorizedDraws,
+                harness: target.harness,
+                model: target.model,
+              };
+            }
+          },
+          build: ({ id, at }): RoomEvent =>
+            refusal
+              ? {
+                  id,
+                  at,
+                  type: 'draw_refused',
+                  roomId,
+                  planId: refusal.planId,
+                  reason: 'budget',
+                  slice: refusal.slice,
+                  authorizedDraws: refusal.authorizedDraws,
+                  harness: refusal.harness,
+                  model: refusal.model,
+                }
+              : {
+                  id,
+                  at,
+                  type: 'session_signaled',
+                  roomId,
+                  sessionId: command.sessionId,
+                  signalId,
+                  kind: 'resume',
+                  body: command.body,
+                  causeMessageId: command.causeMessageId,
+                  supersedesEventId: command.supersedesEventId,
+                  subscriptionId: command.subscriptionId,
+                },
+          project: (context) => projectRoomEvent(context, projectionHooks),
+        });
+        return {
+          kind: 'appended',
+          roomId: appended.roomId,
+          seq: appended.seq,
+          roomSeq: appended.roomSeq,
+          actor: appended.actor,
+          event: appended.event,
+          issues:
+            appended.outcome?.outcome === 'applied_with_issue'
+              ? appended.outcome.issues.map((issue) => issue.reason)
+              : [],
+          // The same synchronous signal `open_session` carries (#118 HIGH-3), for
+          // the same reason: both outcomes APPEND and both ack with empty issues,
+          // so the append shape alone cannot tell a granted continuation from a
+          // refused one, and a caller must never resume-and-proceed on a refusal.
+          // Derived from the event actually built, never from the closure variable.
+          draw:
+            appended.event.type === 'draw_refused'
+              ? {
+                  outcome: 'refused',
+                  reason: 'budget',
+                  slice: appended.event.slice,
+                  authorizedDraws: appended.event.authorizedDraws,
+                }
+              : { outcome: 'granted', sessionId: command.sessionId },
+        };
+      }
+
+      // A durable WAIT with a mandatory, FUTURE horizon (#123 resolution 6).
+      case 'subscribe_session': {
+        const roomId = command.roomId;
+        const subscriptionId = randomUUID();
+        return appendAndProject(
+          session,
+          roomId,
+          ({ id, at }) => ({
+            id,
+            at,
+            type: 'session_subscribed',
+            roomId,
+            sessionId: command.sessionId,
+            subscriptionId,
+            source: command.source,
+            matcher: command.matcher,
+            expiresAt: command.expiresAt,
+          }),
+          async (tx) => {
+            const target = await readSignalTarget(tx, roomId, command.sessionId);
+            requireOpenTarget(target, command.name, command.sessionId, roomId);
+            // Registering a wait on a process is control over it, the same as
+            // continuing one: it is what decides how long the process stays open,
+            // and therefore how long its plan cannot settle (#119).
+            requireSessionControl(target, session, command.name, command.sessionId);
+            const now = new Date().toISOString();
+            if (Date.parse(command.expiresAt) <= Date.parse(now)) {
+              throw new CommandError('invalid', subscriptionHorizonRefusal(command.expiresAt, now));
+            }
+          },
+        );
+      }
 
       // ── ephemeral: broadcast, never appended (#14) ─────────────────────────
       case 'set_presence':

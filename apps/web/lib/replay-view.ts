@@ -1,3 +1,4 @@
+import type { AttentionSubjectKind } from '@atrium/core';
 import {
   ClaimPayload,
   CommitmentPayload,
@@ -331,7 +332,12 @@ export function replayView(data: ReplayData, viewerId?: string) {
           ...messageEntries,
         ];
 
-  const sourceFor = (subjectKind: 'object' | 'proposal' | 'message', subjectId: string) => {
+  // `session` is the fourth attention subject (#127) and has no message source:
+  // a subscription-expiry escalation is about a process, not about something
+  // somebody said. It falls through to `undefined` here and renders without a
+  // citation, which is the honest answer rather than an invented one.
+  const sourceFor = (subjectKind: AttentionSubjectKind, subjectId: string) => {
+    if (subjectKind === 'session') return null;
     const sourceId =
       subjectKind === 'message'
         ? subjectId
@@ -1085,6 +1091,8 @@ function reasonFor(reason: ReplayData['attention'][number]['reason'], viewer: st
       return `${viewer} is named on this open question`;
     case 'mention':
       return `${viewer} has a direct request routed here for action`;
+    case 'subscription_expired':
+      return `${viewer} owns the agent whose session waited on nothing until its horizon passed`;
     case 'reading_pending':
       return `this was staged as ${reason.proposedType}; a person must file or decline it`;
     case 'receipt_review':

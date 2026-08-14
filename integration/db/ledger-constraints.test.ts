@@ -296,6 +296,32 @@ function kindRow(
         model: 'haiku',
       };
       break;
+    // The signal/interrupt kinds (#127), both declaring a top-level `roomId` like
+    // the eight above — the CHECK treats them the same way.
+    case 'session_signaled':
+      payload = {
+        ...base,
+        roomId,
+        sessionId: randomUUID(),
+        signalId: randomUUID(),
+        kind: 'steer',
+        body: 'try the other order',
+        causeMessageId: null,
+        supersedesEventId: null,
+        subscriptionId: null,
+      };
+      break;
+    case 'session_subscribed':
+      payload = {
+        ...base,
+        roomId,
+        sessionId: randomUUID(),
+        subscriptionId: randomUUID(),
+        source: 'channel',
+        matcher: 'the migration lands',
+        expiresAt: at,
+      };
+      break;
     case 'proposal_rejected':
       payload = { ...base, proposalId, reason: null };
       break;
@@ -2705,6 +2731,11 @@ describe('core_events — the room key is the one this kind declares, and no oth
     // The two budget/rlimit enforcement kinds (#118), also top-level `roomId`.
     plan_rlimit_set: 'roomId',
     draw_refused: 'roomId',
+    // The two signal/interrupt kinds (#127), also top-level `roomId`. Control
+    // DOWN into a running session, and a durable wait — ledger-only like every
+    // kind above them, and subject to exactly the same room-key discipline.
+    session_signaled: 'roomId',
+    session_subscribed: 'roomId',
   };
 
   /** Write a room key into a payload at one of the four spellings. */
@@ -2760,11 +2791,11 @@ describe('core_events — the room key is the one this kind declares, and no oth
         }
       }
     }
-    // Non-vacuous, and the count is the product: 13 room-declaring kinds × 3
+    // Non-vacuous, and the count is the product: 15 room-declaring kinds × 3
     // foreign keys × 2 values. A loop that silently stopped iterating would
-    // otherwise pass. (Five original kinds, the six #116 lifecycle kinds, plus
-    // the two #118 budget/rlimit kinds.)
-    expect(refused).toBe(78);
+    // otherwise pass. (Five original kinds, the six #116 lifecycle kinds, the
+    // two #118 budget/rlimit kinds, plus the two #127 signal/interrupt kinds.)
+    expect(refused).toBe(90);
   });
 
   it('refuses a room key on the three kinds that declare none', async () => {
@@ -2809,7 +2840,7 @@ describe('core_events — the room key is the one this kind declares, and no oth
       await expect(append(row)).resolves.toBeDefined();
       landed += 1;
     }
-    expect(landed).toBe(16);
+    expect(landed).toBe(18);
   });
 
   /**
@@ -2880,8 +2911,8 @@ describe('core_events — the room key is the one this kind declares, and no oth
         landed += 1;
       }
     }
-    // 13 room-declaring kinds × 3 foreign keys + 3 room-less kinds × 4 keys.
-    expect(landed).toBe(51);
+    // 15 room-declaring kinds × 3 foreign keys + 3 room-less kinds × 4 keys.
+    expect(landed).toBe(57);
     const filed = await handle.db
       .select({ roomId: coreEvents.roomId })
       .from(coreEvents)
@@ -3455,6 +3486,12 @@ describe('foreign keys — the audit is the catalog, not a paragraph', () => {
       // room but nulls the back-reference — a display pointer, not authority.
       'rooms_agent_user_id_fk',
       'rooms_created_by_users_id_fk',
+      /* #127's. WHO SIGNALED a session. Nulls on the identity's deletion for this
+         list's own reason: the signal happened and its ledger row records the
+         trusted actor, so this column is the read model's display pointer and not
+         the authority. The interrupt-authorization trigger reads it at WRITE time,
+         which is when the question is asked. */
+      'session_signals_raised_by_user_id_users_id_fk',
       /* #121's. WHO CERTIFIED a session, and who ARMED that certification.
          Both null on the identity's deletion for this list's own reason: the
          session's receipt outlives the person, and neither column is authority —
@@ -3487,6 +3524,10 @@ describe('foreign keys — the audit is the catalog, not a paragraph', () => {
       'attention_items_object_same_room_fk',
       'attention_items_proposal_same_room_fk',
       'attention_items_room_id_rooms_id_fk',
+      // #127's fourth attention subject: an expired wait escalates about a
+      // SESSION, and the item is meaningless once that session is gone — the same
+      // rule the three subject edges above it already follow.
+      'attention_items_session_same_room_fk',
       'attention_items_user_id_users_id_fk',
       // #26's four, and they are cascades for the reason the ones above are:
       // each row is meaningless without its parent. A deleted user has no
@@ -3527,6 +3568,17 @@ describe('foreign keys — the audit is the catalog, not a paragraph', () => {
       'rooms_workspace_id_workspaces_id_fk',
       // #116's sessions: the composite parent edge and the room edge both cascade
       // — a session is meaningless without the plan and room it runs under.
+      // #127's signal/interrupt projections. Every edge cascades for this list's
+      // own reason: a signal, a wait, the message a signal cites and the wait a
+      // resume paid out are all meaningless once the room or the session they
+      // belong to is gone. `session_signals_*` sorts before `sessions_*` ('_' <
+      // 's'), which is why they land here rather than beside the session edges.
+      'session_signals_cause_same_room_fk',
+      'session_signals_room_id_rooms_id_fk',
+      'session_signals_session_same_room_fk',
+      'session_signals_subscription_same_room_fk',
+      'session_subscriptions_room_id_rooms_id_fk',
+      'session_subscriptions_session_same_room_fk',
       'sessions_plan_same_room_fk',
       'sessions_room_id_fk',
       'workspace_invitations_inviter_id_users_id_fk',

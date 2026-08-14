@@ -270,6 +270,13 @@ describe('the durable ledger (issue #22)', () => {
       // would move it out of this list, and this pins that it did not.
       'plan_rlimit_set',
       'draw_refused',
+      // The signal/interrupt kinds (#127): control DOWN into a running session,
+      // and a durable wait. Ledger-only for the same reason as everything above
+      // them — a steer is coordination, not the room's understanding, and the
+      // covenant reducer folds neither. Adding either to `coreEventTypeSet` would
+      // move it out of this list, and this pins that it did not.
+      'session_signaled',
+      'session_subscribed',
     ]);
   });
 

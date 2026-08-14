@@ -1,6 +1,7 @@
 import type { Actor, CoreEvent, CoreEventType, TrustedContext } from '@atrium/core';
 import {
   AttentionClass,
+  AttentionSubjectKind,
   ProposalRecorded as CoreProposalRecorded,
   Id,
   ObjectAccepted,
@@ -265,7 +266,15 @@ export const SignalRaised = z.object({
   /** The participant this escalates to — a `users` id (`attention_items.user_id`). */
   targetUserId: Id,
   /** Which table `subjectId` names — the existing attention subject vocabulary. */
-  subjectKind: z.enum(['object', 'proposal', 'message']),
+  /**
+   * Which table `subjectId` names. WIDENED to four in #127: a subscription that
+   * expires unmatched escalates to the agent's owner, and that item is about the
+   * SESSION still waiting — the three older subjects cannot name one, and an
+   * attention item pointing at a stand-in subject is worse than a wider enum.
+   * Purely additive, so every payload that parsed before still parses (pinned in
+   * `test/protocol.test.ts`).
+   */
+  subjectKind: AttentionSubjectKind,
   subjectId: Id,
   class: AttentionClass,
   reason: RationaleReason,
@@ -325,6 +334,98 @@ export const DrawRefused = z.object({
 });
 export type DrawRefused = z.infer<typeof DrawRefused>;
 
+/* ── the signal/interrupt boundary (#127, from #123's resolution) ────────────
+ *
+ * Two more ledger-only kinds. They ride the spine for a `room_seq` and an append
+ * order and **neither ever joins `CoreEvent`** — the reducer does not fold them
+ * and must not grow a concept of them: a steer is coordination, not the room's
+ * understanding (#123 resolution 1). `isCoreEvent` is false for both because
+ * neither is in `coreEventTypes`, so a room's core-typed subsequence — and
+ * therefore its whole covenant state — is byte-for-byte identical whether a
+ * hundred signals are present or absent.
+ *
+ * ## THE PINNED WRITE-SET, for both (#123 resolution 1, grok r1.9)
+ *
+ * `projectSessionSignaled` writes `session_signals` (and, for a resume, the
+ * matched `session_subscriptions` row and the plan's committed draw count);
+ * `projectSessionSubscribed` writes `session_subscriptions`. NEITHER writes any
+ * column of `accepted_objects`, and neither writes `plans.rlimit_slice` — the
+ * human-set ceiling has exactly one writer and it is `projectPlanRlimitSet`.
+ * `plans.authorized_draws` is untouched by `steer` and `interrupt` and moves by
+ * exactly one for a GRANTED resume, because a resume is a draw (#115 decision 2)
+ * and the alternative is a free wake path around #118. `integration/server/
+ * signal-events.test.ts` folds a signal burst and asserts those tables byte-stable.
+ * ─────────────────────────────────────────────────────────────────────────── */
+
+/** What a signal into a running session IS. See `signalKind` in the schema. */
+export const SignalKind = z.enum(['steer', 'interrupt', 'resume']);
+export type SignalKind = z.infer<typeof SignalKind>;
+
+/**
+ * Control DOWN into a running session (#123 resolution 2/4).
+ *
+ * `steer` is guidance, `interrupt` is a request to stop, `resume` is a
+ * CONTINUATION DRAW that has passed #118's slice boundary under the append lock
+ * exactly as `open_session` does — an over-slice resume never appears as one of
+ * these at all; it appends a `draw_refused` instead. There is no free wake.
+ *
+ * The three provenance fields are explicit rather than a reused
+ * `MessageReference` (#123 resolution 4): that vocabulary has no `message` kind,
+ * so the shape the draft assumed was unrepresentable.
+ *
+ *  - `causeMessageId` — the same-room message a mediated signal came from,
+ *    composite-FK'd in the projection. Nullable: a signal typed straight at the
+ *    session cites nothing.
+ *  - `supersedesEventId` — forward-only revision of an earlier signal. The ledger
+ *    is append-only, so a revision NAMES its predecessor; discarding the
+ *    superseded tail is the harness's act, reported in the session receipt.
+ *  - `subscriptionId` — `resume` only (a DB check holds it to that), naming the
+ *    wait this continuation pays out.
+ */
+export const SessionSignaled = z.object({
+  ...eventBase,
+  type: z.literal('session_signaled'),
+  roomId: Id,
+  sessionId: Id,
+  /** The `session_signals` row this event mints — server-minted, like `messageId`. */
+  signalId: Id,
+  kind: SignalKind,
+  /** The steer's words or the interrupt's reason. */
+  body: z.string().max(4000).nullable().default(null),
+  causeMessageId: Id.nullable().default(null),
+  supersedesEventId: Id.nullable().default(null),
+  subscriptionId: Id.nullable().default(null),
+});
+export type SessionSignaled = z.infer<typeof SessionSignaled>;
+
+/**
+ * A durable WAIT registered against a running session (#123 resolution 6).
+ *
+ * `expiresAt` is MANDATORY — no `.nullable()`, no default — and that is the
+ * whole point of the event existing in this shape. An unmatched subscribe with
+ * no horizon holds a session open forever, blocks its plan from ever settling
+ * (#119), and owes nobody anything; the gauntlet found exactly that. So a
+ * subscription ends one of three ways: matched into a resume draw, expired into
+ * the agent owner's attention, or disposed by its own session's exit.
+ *
+ * `source` and `matcher` are opaque strings. What a wait MEANS is #124's
+ * daemon's business; that it exists, targets an open session, and ends is this
+ * ledger's.
+ */
+export const SessionSubscribed = z.object({
+  ...eventBase,
+  type: z.literal('session_subscribed'),
+  roomId: Id,
+  sessionId: Id,
+  /** The `session_subscriptions` row this event mints — server-minted. */
+  subscriptionId: Id,
+  source: z.string().min(1).max(200),
+  matcher: z.string().min(1).max(2000),
+  /** MANDATORY. A wait with no horizon is a wedge; this is the horizon. */
+  expiresAt: Timestamp,
+});
+export type SessionSubscribed = z.infer<typeof SessionSubscribed>;
+
 /** The payload union, before the no-actor guard. */
 const RoomEventVariants = z.discriminatedUnion('type', [
   ProposalRecorded,
@@ -343,6 +444,8 @@ const RoomEventVariants = z.discriminatedUnion('type', [
   SignalRaised,
   PlanRlimitSet,
   DrawRefused,
+  SessionSignaled,
+  SessionSubscribed,
 ]);
 
 /**
@@ -424,7 +527,9 @@ export type ServerEvent =
   | SessionFailed
   | SignalRaised
   | PlanRlimitSet
-  | DrawRefused;
+  | DrawRefused
+  | SessionSignaled
+  | SessionSubscribed;
 
 /** True when @atrium/core's `reduce` consumes this event. */
 export function isCoreEvent(event: RoomEvent): event is CoreEvent {
@@ -465,6 +570,8 @@ export function declaredRoomId(event: RoomEvent): string | null {
     case 'signal_raised':
     case 'plan_rlimit_set':
     case 'draw_refused':
+    case 'session_signaled':
+    case 'session_subscribed':
       return event.roomId;
     case 'proposal_rejected':
     case 'proposal_superseded':

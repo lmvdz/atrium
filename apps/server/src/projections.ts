@@ -17,6 +17,8 @@ import {
   plans,
   proposalSources,
   proposals,
+  sessionSignals,
+  sessionSubscriptions,
   sessions,
   attachments as storedAttachments,
 } from '@atrium/db/schema';
@@ -110,6 +112,10 @@ export async function projectRoomEvent(
       return projectPlanRlimitSet(context, event);
     case 'draw_refused':
       return projectDrawRefused(context, event);
+    case 'session_signaled':
+      return projectSessionSignaled(context, event);
+    case 'session_subscribed':
+      return projectSessionSubscribed(context, event);
     default: {
       const exhaustive: never = event;
       throw new Error(`no projection for event ${JSON.stringify(exhaustive)}`);
@@ -867,6 +873,29 @@ async function projectSessionExit(
       `no open session "${event.sessionId}" to ${status} in room "${roomId}" — it does not exist here or has already exited`,
     );
   }
+
+  // ── AN EXIT DISPOSES THE SESSION'S WAITS (#127; #123 resolution 6) ─────────
+  //
+  // A subscription outlives nothing: once the process it was registered against
+  // has published its exit receipt, there is nothing left to wake, and a
+  // `waiting` row pointing at a settled session is a wait whose only possible
+  // futures are a resume that will be refused and an expiry escalation about a
+  // session nobody can do anything with. So the exit disposes them, in the SAME
+  // transaction as the exit itself — there is no instant at which the session is
+  // terminal and its waits still say `waiting`.
+  //
+  // Scoped to `waiting`, so a wait already matched or already expired keeps the
+  // disposition it earned; this rewrites nothing that has one.
+  await tx
+    .update(sessionSubscriptions)
+    .set({ status: 'disposed', updatedAt: new Date(event.at) })
+    .where(
+      and(
+        eq(sessionSubscriptions.roomId, roomId),
+        eq(sessionSubscriptions.sessionId, event.sessionId),
+        eq(sessionSubscriptions.status, 'waiting'),
+      ),
+    );
 }
 
 async function projectSessionSettled(
@@ -967,4 +996,170 @@ async function projectDrawRefused(
   _event: EventOf<'draw_refused'>,
 ): Promise<void> {
   // Intentionally empty: the durable ledger row is the whole receipt.
+}
+
+/* ── the signal/interrupt projections (#127, from #123's resolution) ─────────
+ *
+ * ## THE PINNED WRITE-SET, and it is the point of this comment
+ *
+ * These two write `session_signals` and `session_subscriptions` — their OWN
+ * tables — and, for a granted `resume` only, the matched subscription's
+ * disposition and the plan's committed draw count. They contain NO statement
+ * against `accepted_objects`, so a steer can no more flip a `~` to a `✓` than a
+ * settle can (#114 T3), and they contain NO statement against
+ * `plans.rlimit_slice`, whose only writer is and stays `projectPlanRlimitSet`
+ * (the human-only `set_plan_rlimit`). `plans.authorized_draws` is untouched by
+ * `steer` and `interrupt`; a GRANTED `resume` moves it by exactly one, because a
+ * resume IS a draw (#115 decision 2) and the alternative is a free wake path
+ * around #118's boundary. `integration/server/signal-events.test.ts` folds a
+ * burst of steers and interrupts and asserts all three byte-stable.
+ *
+ * ## Why the open-session check is HERE as well as in the command
+ *
+ * The 0025 trigger freezes a terminal `sessions` row; it structurally cannot
+ * refuse a later LEDGER APPEND that merely names one. And the command's own
+ * check binds the command path only. So the rule is enforced twice, in the two
+ * places that bind different writers, exactly as `projectSessionOpened` re-reads
+ * its parent plan's status after `open_session` already looked at it.
+ * ─────────────────────────────────────────────────────────────────────────── */
+
+/**
+ * A signal appended into a running session.
+ *
+ * Writes ONE `session_signals` row and, for a `resume`, marks the wait it paid
+ * out and increments the plan's committed draw count. Nothing else, anywhere.
+ */
+async function projectSessionSignaled(
+  { tx, roomId, actor, event: { id } }: ProjectionContext<RoomEvent>,
+  event: EventOf<'session_signaled'>,
+): Promise<void> {
+  // Signals target OPEN sessions only, read under the append lock so the session
+  // cannot exit underneath the check. A zero-row / non-open result throws, which
+  // aborts the append: a `session_signaled` against a terminal session leaves NO
+  // ledger row and the caller gets a `nack`. This is the projection half of #123
+  // resolution 3 — the command asked the same question one step earlier, and both
+  // are needed because they bind different writers.
+  const [target] = await tx
+    .select({ status: sessions.status, planId: sessions.planId })
+    .from(sessions)
+    .where(and(eq(sessions.id, event.sessionId), eq(sessions.roomId, roomId)))
+    .for('share');
+  if (!target) {
+    throw new CommandError(
+      'invalid',
+      `no session "${event.sessionId}" in room "${roomId}" to signal — refused at the PROJECTION; a signal names a process this room is running`,
+    );
+  }
+  if (target.status !== 'open') {
+    throw new CommandError(
+      'invalid',
+      // Deliberately NOT the command's sentence. The two guards are different
+      // clauses binding different writers, and a shared string would make each
+      // one's red-on-revert test assert the DISJUNCTION — delete the command
+      // check and its own test stays green because this one catches the same
+      // input (#122's standing lesson, and it caught exactly that here).
+      `session "${event.sessionId}" is ${target.status}, not open — refused at the PROJECTION, which is the guard that binds a writer reaching this table without passing the command`,
+    );
+  }
+
+  await tx.insert(sessionSignals).values({
+    id: event.signalId,
+    roomId,
+    sessionId: event.sessionId,
+    kind: event.kind,
+    body: event.body,
+    causeMessageId: event.causeMessageId,
+    supersedesEventId: event.supersedesEventId,
+    subscriptionId: event.subscriptionId,
+    // The TRUSTED actor off the ledger row, never the payload (#21's contract).
+    // The interrupt-authorization trigger in drizzle/0045 reads this column, so a
+    // direct writer cannot dodge the command's lookup by writing a different one.
+    raisedByUserId: actorUserId(actor),
+    signaledByEventId: id,
+    createdAt: new Date(event.at),
+  });
+
+  if (event.kind !== 'resume') return;
+
+  // ── A RESUME IS A DRAW, AND THIS IS WHERE IT IS SPENT (#115 decision 2) ────
+  //
+  // The boundary check ran in `commands.ts` under this same append lock, against
+  // this same committed count, and decided that this event is a grant rather than
+  // a `draw_refused`. So the grant is recorded here in the same transaction, one
+  // increment, exactly as `projectSessionOpened` records a spawn's. Without it the
+  // slice would bound spawns only and every continuation would be free — the
+  // campaign-stopping shape #123's gauntlet named.
+  await tx
+    .update(plans)
+    .set({ authorizedDraws: sql`${plans.authorizedDraws} + 1`, updatedAt: new Date(event.at) })
+    .where(and(eq(plans.id, target.planId), eq(plans.roomId, roomId)));
+
+  if (event.subscriptionId === null) return;
+  // The wait paid out. Scoped to `waiting` and to this session, `.returning()`ing
+  // what it touched: a zero-row result throws and aborts the append, so a resume
+  // naming an already-matched, expired, disposed or foreign wait leaves no row.
+  const matched = await tx
+    .update(sessionSubscriptions)
+    .set({ status: 'matched', matchedByEventId: id, updatedAt: new Date(event.at) })
+    .where(
+      and(
+        eq(sessionSubscriptions.id, event.subscriptionId),
+        eq(sessionSubscriptions.roomId, roomId),
+        eq(sessionSubscriptions.sessionId, event.sessionId),
+        eq(sessionSubscriptions.status, 'waiting'),
+      ),
+    )
+    .returning({ id: sessionSubscriptions.id });
+  if (matched.length === 0) {
+    throw new CommandError(
+      'invalid',
+      `subscription "${event.subscriptionId}" is not a waiting subscription of session "${event.sessionId}" in room "${roomId}" — a continuation pays out a wait that is still waiting`,
+    );
+  }
+}
+
+/**
+ * A durable wait registered against a running session.
+ *
+ * Writes ONE `session_subscriptions` row. `expires_at` is NOT NULL in the table
+ * and mandatory in the event, so there is no spelling of a wait without a
+ * horizon — which is what stops an unmatched subscribe from holding a session
+ * open forever and blocking #119's plan-settle with nothing owed to anybody.
+ */
+async function projectSessionSubscribed(
+  { tx, roomId, event: { id } }: ProjectionContext<RoomEvent>,
+  event: EventOf<'session_subscribed'>,
+): Promise<void> {
+  // Subscriptions target open sessions only, for the same reason and by the same
+  // read as `projectSessionSignaled` above: a wait registered against a process
+  // that has already exited can never be matched and can only ever escalate.
+  const [target] = await tx
+    .select({ status: sessions.status })
+    .from(sessions)
+    .where(and(eq(sessions.id, event.sessionId), eq(sessions.roomId, roomId)))
+    .for('share');
+  if (!target) {
+    throw new CommandError(
+      'invalid',
+      `no session "${event.sessionId}" in room "${roomId}" to subscribe — a wait names a process this room is running`,
+    );
+  }
+  if (target.status !== 'open') {
+    throw new CommandError(
+      'invalid',
+      `session "${event.sessionId}" is ${target.status}, not open — a wait registered against a process that has already exited can never be matched, only escalated`,
+    );
+  }
+  await tx.insert(sessionSubscriptions).values({
+    id: event.subscriptionId,
+    roomId,
+    sessionId: event.sessionId,
+    source: event.source,
+    matcher: event.matcher,
+    expiresAt: new Date(event.expiresAt),
+    status: 'waiting',
+    subscribedByEventId: id,
+    createdAt: new Date(event.at),
+    updatedAt: new Date(event.at),
+  });
 }

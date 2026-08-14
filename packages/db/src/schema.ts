@@ -129,6 +129,39 @@ export const planStatus = pgEnum('plan_status', ['open', 'settled']);
 export const sessionStatus = pgEnum('session_status', ['open', 'settled', 'failed']);
 
 /**
+ * The three things a signal into a running session can BE (#127, from #123
+ * resolution 2). Deliberately three labels and not a free string: `steer` is
+ * guidance any room member may append, `interrupt` is a request to stop that
+ * only the session's agent principal or that agent's owner may make, and
+ * `resume` is a CONTINUATION DRAW — it passes #118's slice boundary exactly as a
+ * spawn does, so there is no free wake path.
+ *
+ * Mastra's `debounce`/`batch` are deliberately NOT here: they are delivery
+ * optimizations, and the ledger records acts (#123 resolution 2).
+ */
+export const signalKind = pgEnum('signal_kind', ['steer', 'interrupt', 'resume']);
+
+/**
+ * A durable wait's disposition (#127, from #123 resolution 6). A subscription is
+ * never allowed to sit open forever — that is exactly the shape that blocks
+ * #119's plan-settle with nothing to look at:
+ *
+ *  - `waiting` — live, and before its `expires_at`.
+ *  - `matched` — a `session_signaled {kind:'resume'}` named it; the wait paid out
+ *    as a continuation draw.
+ *  - `expired` — its `expires_at` passed unmatched. The sweep escalates it to the
+ *    agent's owner as `signal_raised`: the wait becomes owed ATTENTION.
+ *  - `disposed` — its session took its exit first, so there is nothing left to
+ *    wake. Session exit disposes its subscriptions (`projectSessionExit`).
+ */
+export const subscriptionStatus = pgEnum('subscription_status', [
+  'waiting',
+  'matched',
+  'expired',
+  'disposed',
+]);
+
+/**
  * Closed alphabet for durable authored references.
  *
  * `agent` (drizzle/0019) joins `human` as the second **participant** kind a
@@ -159,7 +192,13 @@ export const messageReferenceKind = pgEnum('message_reference_kind', [
  */
 /** Checked-text vocabulary; exported for core/schema parity without a phantom DB enum. */
 export const attentionSubjectKind = {
-  enumValues: ['object', 'proposal', 'message'] as const,
+  // `session` joins the three in #127: a subscription that expires unmatched
+  // escalates to the agent's owner, and that item is about the SESSION still
+  // waiting. Held in parity with @atrium/core's own enum by
+  // `_AttentionSubjectKindParity` at the foot of this file, and fail-closed in
+  // the store by `attention_items_subject_kind_allowlist` plus the fourth
+  // generated column and its composite same-room FK.
+  enumValues: ['object', 'proposal', 'message', 'session'] as const,
 };
 
 /**
@@ -240,6 +279,17 @@ export const eventType = pgEnum('event_type', [
   // neither, and `plans`/`sessions` are still their only projections.
   'plan_rlimit_set',
   'draw_refused',
+  // ── the signal/interrupt boundary (#127, from #123's resolution) ──────────
+  //
+  // Two more ledger-only kinds, KEPT OUT of `coreEventTypes` exactly as the
+  // eight above are. `session_signaled` is control DOWN into a running session
+  // (`steer | interrupt | resume`); `session_subscribed` is a durable WAIT with
+  // a mandatory expiry. Neither is ever folded: a steer is coordination, not the
+  // room's understanding (#123 resolution 1). The third signal word,
+  // `signal_raised`, is escalation UP and is unchanged — three meanings, three
+  // names, no overloading (#123 resolution 7).
+  'session_signaled',
+  'session_subscribed',
 ]);
 
 /**
@@ -912,6 +962,8 @@ export const coreEvents = pgTable(
         WHEN 'signal_raised' THEN ARRAY['roomId']
         WHEN 'plan_rlimit_set' THEN ARRAY['roomId']
         WHEN 'draw_refused' THEN ARRAY['roomId']
+        WHEN 'session_signaled' THEN ARRAY['roomId']
+        WHEN 'session_subscribed' THEN ARRAY['roomId']
         WHEN 'proposal_rejected' THEN ARRAY[]::text[]
         WHEN 'proposal_superseded' THEN ARRAY[]::text[]
         WHEN 'object_corrected' THEN ARRAY[]::text[]
@@ -929,6 +981,8 @@ export const coreEvents = pgTable(
         WHEN 'signal_raised' THEN ${t.payload}->>'roomId'
         WHEN 'plan_rlimit_set' THEN ${t.payload}->>'roomId'
         WHEN 'draw_refused' THEN ${t.payload}->>'roomId'
+        WHEN 'session_signaled' THEN ${t.payload}->>'roomId'
+        WHEN 'session_subscribed' THEN ${t.payload}->>'roomId'
         ELSE ${t.roomId}::text
       END, false)`,
     ),
@@ -1322,10 +1376,23 @@ export const plans = pgTable(
     /**
      * The committed authorized-draw accounting: how many draws Atrium has granted
      * under this plan. Incremented by exactly one inside the same append
-     * transaction as each `session_opened` it grants (`projectSessionOpened`),
-     * under the global ledger lock, so it equals `count(sessions)` for the plan by
-     * construction and cannot be forged. This is the number the spawn gate reads
-     * and compares to `rlimit_slice` — never the adapter-reported `spent_micros`.
+     * transaction as each draw it grants, under the global ledger lock, so it
+     * cannot be forged. This is the number the draw gate reads and compares to
+     * `rlimit_slice` — never the adapter-reported `spent_micros`.
+     *
+     * ## A draw is a SPAWN **or** a CONTINUE (#127, from #115 decision 2)
+     *
+     * #115 defined the slice as authorized "spawns/continues", and #118 built only
+     * the spawn half — so this column's original sentence said it "equals
+     * `count(sessions)` for the plan by construction". That identity was an
+     * artifact of the missing half, not the invariant: #123's resolution point 2
+     * makes RESUME a draw, and `projectSessionSignaled` increments this column by
+     * one for a granted `session_signaled {kind:'resume'}` exactly as
+     * `projectSessionOpened` does for a `session_opened`. So the identity is now
+     * `count(sessions) + count(granted resumes)`, and a resume that would exceed
+     * the slice takes the same durable `draw_refused` receipt a spawn does. The
+     * enforced quantity is unchanged: draws Atrium itself granted. `steer` and
+     * `interrupt` are NOT draws and never touch this column.
      */
     authorizedDraws: bigint('authorized_draws', { mode: 'number' }).notNull().default(0),
     /** The `core_events.id` of the `plan_opened` that projected this. */
@@ -1579,6 +1646,159 @@ export const sessions = pgTable(
       columns: [t.roomId, t.planId],
       foreignColumns: [plans.roomId, plans.id],
     }).onDelete('cascade'),
+  ],
+);
+
+/* ── the signal/interrupt boundary (#127, from #123's resolution) ────────────
+ *
+ * Two projections of two ledger-only events, and they are the ONLY tables those
+ * events write. The pinned write-set: `session_signals` and
+ * `session_subscriptions` and nothing else — no `accepted_objects` column, no
+ * `plans.rlimit_slice`, and (for `steer`/`interrupt`) no `plans.authorized_draws`.
+ * A steer is coordination, not the room's understanding, and coordination has no
+ * route to a `✓`. The single deliberate exception is a granted `resume`, which IS
+ * a draw and moves `authorized_draws` by exactly one under #118's boundary —
+ * #115 decision 2's "spawns/continues", finally built.
+ * ─────────────────────────────────────────────────────────────────────────── */
+
+/**
+ * A durable WAIT registered by a running session (#127; #123 resolution 6).
+ *
+ * `expires_at` is NOT NULL and that is the whole design. An unmatched subscribe
+ * used to be a way to hold a session open forever with nothing owed to anybody:
+ * the plan could never settle (#119), and no human ever learned why. So a
+ * subscription has exactly three ways to end — matched into a resume draw,
+ * expired into the owner's attention, or disposed by its session's own exit —
+ * and `status` records which. `matcher` and `source` are opaque here on purpose:
+ * what a wait means is the daemon's business (#124), and the ledger's business is
+ * that the wait exists, targets an OPEN session, and ends.
+ */
+export const sessionSubscriptions = pgTable(
+  'session_subscriptions',
+  {
+    id: uuid('id').primaryKey().defaultRandom(),
+    roomId: uuid('room_id')
+      .notNull()
+      .references(() => rooms.id, { onDelete: 'cascade' }),
+    /** The session that is waiting. Same room, by the composite FK below. */
+    sessionId: uuid('session_id').notNull(),
+    /** Where the awaited thing comes from — opaque to Atrium, the daemon's word. */
+    source: text('source').notNull(),
+    /** What would satisfy the wait — opaque; #124 interprets it, this table stores it. */
+    matcher: text('matcher').notNull(),
+    /** MANDATORY. A wait with no horizon is a wedge; this is the horizon. */
+    expiresAt: timestamp('expires_at', { withTimezone: true }).notNull(),
+    status: subscriptionStatus('status').notNull().default('waiting'),
+    /** The `core_events.id` of the `session_signaled {resume}` that matched it. */
+    matchedByEventId: text('matched_by_event_id'),
+    /** When the expiry sweep escalated it to the agent's owner. NULL until then. */
+    escalatedAt: timestamp('escalated_at', { withTimezone: true }),
+    /** The `core_events.id` of the `session_subscribed` that projected this. */
+    subscribedByEventId: text('subscribed_by_event_id'),
+    createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
+    updatedAt: timestamp('updated_at', { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [
+    index('session_subscriptions_session_idx').on(t.roomId, t.sessionId, t.status),
+    /** The expiry sweep's index: waiting subscriptions, oldest horizon first. */
+    index('session_subscriptions_expiry_idx').on(t.expiresAt).where(sql`${t.status} = 'waiting'`),
+    /** The composite-FK target a resume's `subscription_id` lands on. */
+    uniqueIndex('session_subscriptions_room_id_key').on(t.roomId, t.id),
+    /** One row per ledger event — a re-projection cannot mint a second wait. */
+    uniqueIndex('session_subscriptions_event_key').on(t.subscribedByEventId),
+    /** One room, one session — a wait can never name a session it cannot see. */
+    foreignKey({
+      name: 'session_subscriptions_session_same_room_fk',
+      columns: [t.roomId, t.sessionId],
+      foreignColumns: [sessions.roomId, sessions.id],
+    }).onDelete('cascade'),
+  ],
+);
+
+/**
+ * A signal appended into a running session (#127; #123 resolution 2/4).
+ *
+ * Ledger-only and non-epistemic: this table is the whole projection. It writes no
+ * judgement column, so `steer`ing a session can no more flip a `~` to a `✓` than
+ * settling one can (#114 T3).
+ *
+ * ## The provenance fields are explicit, and are NOT `MessageReference`
+ *
+ * #123's draft reached for `MessageReference` and the gauntlet found it
+ * unrepresentable — that vocabulary has no `message` kind (`room-events.ts`), and
+ * `routedFrom` existed nowhere at all. So the edges are named outright:
+ *
+ *  - `cause_message_id` — the room message a mediated steer came from. Nullable
+ *    (a steer typed straight at the session cites nothing), and composite-FK'd on
+ *    `(room_id, message_id)` so a cause from ANOTHER room is impossible in every
+ *    write path, not merely refused by the command.
+ *  - `supersedes_event_id` — forward-only revision of an earlier steer. The
+ *    ledger is append-only, so a revision is a new row that NAMES the one it
+ *    replaces; discarding the superseded tail is the harness's act, reported in
+ *    the session receipt, never a rewrite of history here.
+ *  - `subscription_id` — `resume` only, held to that by
+ *    `session_signals_subscription_is_a_resume`. A steer does not pay out a wait.
+ */
+export const sessionSignals = pgTable(
+  'session_signals',
+  {
+    id: uuid('id').primaryKey().defaultRandom(),
+    roomId: uuid('room_id')
+      .notNull()
+      .references(() => rooms.id, { onDelete: 'cascade' }),
+    /** The session being signaled. Open at append time — see the 0045 trigger. */
+    sessionId: uuid('session_id').notNull(),
+    kind: signalKind('kind').notNull(),
+    /** The steer's words, or the interrupt's reason. Nullable. */
+    body: text('body'),
+    /** The room message this signal was mediated from. Same room, by FK. */
+    causeMessageId: uuid('cause_message_id'),
+    /** The `core_events.id` of an earlier signal this one revises. */
+    supersedesEventId: text('supersedes_event_id'),
+    /** `resume` only: the wait this continuation pays out. */
+    subscriptionId: uuid('subscription_id'),
+    /**
+     * WHO signaled — the trusted actor off the ledger row, never the payload.
+     * The interrupt-authorization trigger reads this column, so it is the same
+     * value the command checked, and a direct writer cannot dodge the check by
+     * writing a different one.
+     */
+    raisedByUserId: uuid('raised_by_user_id').references(() => users.id, { onDelete: 'set null' }),
+    /** The `core_events.id` of the `session_signaled` that projected this. */
+    signaledByEventId: text('signaled_by_event_id'),
+    createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [
+    index('session_signals_session_idx').on(t.roomId, t.sessionId, t.createdAt),
+    /** One row per ledger event — a re-projection cannot mint a second signal. */
+    uniqueIndex('session_signals_event_key').on(t.signaledByEventId),
+    /** A signal can never name a session from another room. */
+    foreignKey({
+      name: 'session_signals_session_same_room_fk',
+      columns: [t.roomId, t.sessionId],
+      foreignColumns: [sessions.roomId, sessions.id],
+    }).onDelete('cascade'),
+    /**
+     * THE SAME-ROOM PROVENANCE EDGE (#123 resolution 4). A cross-room
+     * `causeMessageId` is refused by the DDL, so the command's own check is the
+     * clean error message and this is the authority.
+     */
+    foreignKey({
+      name: 'session_signals_cause_same_room_fk',
+      columns: [t.roomId, t.causeMessageId],
+      foreignColumns: [messages.roomId, messages.id],
+    }).onDelete('cascade'),
+    /** A resume names a wait in its own room, or none. */
+    foreignKey({
+      name: 'session_signals_subscription_same_room_fk',
+      columns: [t.roomId, t.subscriptionId],
+      foreignColumns: [sessionSubscriptions.roomId, sessionSubscriptions.id],
+    }).onDelete('cascade'),
+    /** Only a resume pays out a wait — a steer carrying one is a category error. */
+    check(
+      'session_signals_subscription_is_a_resume',
+      sql`${t.subscriptionId} IS NULL OR ${t.kind} = 'resume'`,
+    ),
   ],
 );
 
@@ -2031,6 +2251,16 @@ export const attentionItems = pgTable(
     subjectMessageId: uuid('subject_message_id').generatedAlwaysAs(
       sql`CASE WHEN "subject_kind" = 'message' THEN "subject_id" END`,
     ),
+    /**
+     * Non-null exactly when `subject_kind = 'session'` (#127). The fourth
+     * subject edge, added with the same three parts the other three have — a
+     * generated column, a composite same-room FK, and a name in the allowlist —
+     * so a subscription-expiry escalation names the SESSION that is still
+     * waiting rather than pointing at some message standing in for it.
+     */
+    subjectSessionId: uuid('subject_session_id').generatedAlwaysAs(
+      sql`CASE WHEN "subject_kind" = 'session' THEN "subject_id" END`,
+    ),
     class: attentionClass('class').notNull(),
     /**
      * Why this person specifically — @atrium/core's `RationaleReason`, structured
@@ -2071,7 +2301,7 @@ export const attentionItems = pgTable(
     check('attention_items_reason_has_kind', sql`length(coalesce(${t.reason}->>'kind', '')) > 0`),
     check(
       'attention_items_subject_kind_allowlist',
-      sql`${t.subjectKind} IN ('object', 'proposal', 'message')`,
+      sql`${t.subjectKind} IN ('object', 'proposal', 'message', 'session')`,
     ),
     /**
      * "Needs you" must never point at something from a room you cannot see —
@@ -2091,6 +2321,12 @@ export const attentionItems = pgTable(
       name: 'attention_items_message_same_room_fk',
       columns: [t.roomId, t.subjectMessageId],
       foreignColumns: [messages.roomId, messages.id],
+    }).onDelete('cascade'),
+    /** The fourth subject edge (#127) — same shape, same guarantee. */
+    foreignKey({
+      name: 'attention_items_session_same_room_fk',
+      columns: [t.roomId, t.subjectSessionId],
+      foreignColumns: [sessions.roomId, sessions.id],
     }).onDelete('cascade'),
   ],
 );
