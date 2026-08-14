@@ -336,20 +336,14 @@ describe('the durable ledger (issue #22)', () => {
     // carries `session_id` on both sides. RED-ON-REVERT: shrink the FK back to
     // (room_id, supersedes_event_id) → (room_id, id) and this fails.
     const fks = getTableConfig(sessionSignals).foreignKeys.map((fk) => fk.reference());
-    const supersedes = fks.find((fk) =>
-      fk.columns.some((c) => c.name === 'supersedes_event_id'),
-    );
+    const supersedes = fks.find((fk) => fk.columns.some((c) => c.name === 'supersedes_event_id'));
     expect(supersedes, 'a supersedes FK must exist').toBeTruthy();
     expect(supersedes?.columns.map((c) => c.name)).toEqual([
       'room_id',
       'session_id',
       'supersedes_event_id',
     ]);
-    expect(supersedes?.foreignColumns.map((c) => c.name)).toEqual([
-      'room_id',
-      'session_id',
-      'id',
-    ]);
+    expect(supersedes?.foreignColumns.map((c) => c.name)).toEqual(['room_id', 'session_id', 'id']);
     // And the migration deploys the same session-bound shape.
     expect(migrationSql()).toContain('session_signals_supersedes_same_session_fk');
   });
