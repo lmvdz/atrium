@@ -127,6 +127,36 @@ export const covenant = {
   fund: (_planId: string, _slice: number): CovenantOutcome => inert('set_plan_rlimit'),
   /** Steer an open session — public, receipted, powerless over covenant and purse. */
   steer: (_sessionId: string, _body: string): CovenantOutcome => inert('signal_session{steer}'),
+  /**
+   * Mediate an anchored artifact COMMENT into a session steer (#158/#152). This
+   * is the comment-to-steer client shape, and it is TWO gated calls in order —
+   * NEVER a local mutation and NEVER a faked delivery:
+   *
+   *   1. `clientRef.sendMessage(roomId, body, { references: [<quotation anchor>] })`
+   *      — post the comment as a REAL room message carrying the quotation anchor
+   *      (`send_message`; realtime.ts). This is the "durable room message" half.
+   *   2. `clientRef.signalSession(roomId, sessionId, 'steer', { body,
+   *      causeMessageId: <the message's durable id> })` — classify it into the
+   *      gated `signal_session{steer}` door (realtime.ts; commands.ts), which
+   *      `signalSession` ALREADY accepts a `causeMessageId` for. The server links
+   *      it same-room via `requireSameRoomCause`; a steer is powerless over
+   *      covenant and purse, so it never touches a spend/certify gate. This is
+   *      the "mediatedFromMessageId" edge the ticket names.
+   *
+   * Two REAL go-live gaps (#168), named here so app-integration cannot forget
+   * them: (a) `MessageReference.kind` (room-events.ts) has no `message`/
+   * `quotation` variant, so a durable message→message quotation anchor is not
+   * yet representable on the wire; (b) `sendMessage` does not forward
+   * `causeMessageId`. Until both close AND a live client/room/session bind, this
+   * door is honestly INERT: it performs no durable mutation, returns
+   * `reached: false`, and NEVER emits a `session_signaled{steer}`. The interrupt
+   * path is deliberately NOT reachable from a comment (scope boundary: no ungated
+   * interrupt) — a comment mediates only to the member-gated steer.
+   */
+  mediateSteer: (
+    _sessionId: string,
+    _comment: { readonly anchor: string; readonly quote: string; readonly body: string },
+  ): CovenantOutcome => inert('signal_session{steer}'),
   /** Interrupt (stop) an open session — the agent principal or its owner only. */
   interrupt: (_sessionId: string, _body: string): CovenantOutcome =>
     inert('signal_session{interrupt}'),

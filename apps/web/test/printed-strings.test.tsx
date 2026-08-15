@@ -392,6 +392,9 @@ describe('every caller-supplied string the page prints goes through a door', () 
    * call site is a diff, and a host that stops existing is a diff too.
    * ------------------------------------------------------------------------- */
   const OFFERED_HOSTS: readonly string[] = [
+    // #158: the artifact-switcher buttons' own title/aria-label copy.
+    'app/prototype/ArtifactPane.tsx <button>',
+    'app/prototype/ArtifactPane.tsx <button>',
     'src/components/attention/AttentionCard.tsx <button>',
     'src/components/attention/AttentionCard.tsx <button>',
     'src/components/attention/AttentionCompact.tsx <button>',

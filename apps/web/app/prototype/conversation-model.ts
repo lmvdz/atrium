@@ -53,11 +53,12 @@ import type {
   MessageRecord,
   ParticipantKind,
   ParticipantSummary,
+  Quotation,
   SystemEntry,
 } from '@/src/components/model';
-import { bodyText, messageEntry, systemStatement } from '@/src/components/model';
+import { bodyText, messageEntry, quotationFrom, systemStatement } from '@/src/components/model';
 import { conversationFor, participantsFor, sessionFor } from './seams';
-import type { ChatKind, ChatMsg, Selection, TurnData } from './types';
+import type { Artifact, ChatKind, ChatMsg, Selection, TurnData } from './types';
 
 /** The person reading the surface — the viewer `messageEntry` derives `fromViewer` from. */
 export const VIEWER = 'you';
@@ -105,6 +106,42 @@ const SYSTEM_SETTLED: EpistemicState = {
  */
 export function systemSettlementState(certified: boolean): EpistemicState {
   return certified ? SYSTEM_CERTIFIED : SYSTEM_SETTLED;
+}
+
+/* ── the doc/plan artifact, as an attributed record (#158) ──────────────────
+   A doc/plan artifact is the agent's drafted markdown. It renders through the
+   SHIPPED `RichMessageBody` grammar — the same grammar the conversation feed
+   uses — which resolves its text from the attribution register (`useAttribution`)
+   and NEVER raw-prints a caller string. So the artifact becomes a real
+   `MessageRecord` the body cites, and the pane wraps it in an
+   `<AttributionLedger>`. The record is honestly classified: `authorKind: 'agent'`
+   (a machine draft is the agent's own words, records.ts), `origin: 'seeded'` (a
+   draft already present when the pane opened). The `~`/`✓` mark stays DERIVED
+   from `certified` elsewhere — this helper is only the body render.
+
+   SEAM(#155): the room + actor bind to the session's real room and author at
+   app-integration. Here the room is the artifact's own scope and the actor is
+   the artifact's name — neither is ever PAINTED (RichMessageBody renders only
+   the body, never a name or a time), so nothing false reaches a reader; the
+   record exists so the register can resolve the body the way the feed does. */
+export const ARTIFACT_DOC_ROOM = 'artifact';
+
+export function artifactDocModel(
+  artifact: Artifact,
+): { readonly record: MessageRecord; readonly citation: Quotation } | null {
+  const md = artifact.md ?? '';
+  if (md.trim().length === 0) return null;
+  const record: MessageRecord = {
+    id: `artifact:${artifact.id}`,
+    at: '',
+    actor: artifact.title,
+    text: md,
+    origin: 'seeded',
+    authorKind: 'agent',
+    room: ARTIFACT_DOC_ROOM,
+  };
+  const citation = quotationFrom(record);
+  return citation === null ? null : { record, citation };
 }
 
 /* ── the lossless inline tokenizer ─────────────────────────────────────────

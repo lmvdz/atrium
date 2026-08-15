@@ -31,7 +31,7 @@ import { covenant } from './covenant';
 import { IconPanel } from './icons';
 import { NavTree } from './NavTree';
 import styles from './prototype.module.css';
-import { sessionArtifacts, treeData, usePRStream } from './seams';
+import { sessionArtifacts, sessionFor, treeData, usePRStream } from './seams';
 import type { Comment, CommentDraft, Selection } from './types';
 import { UserBar } from './UserBar';
 
@@ -195,6 +195,28 @@ export function MoldingSurface() {
     // echo) — a comment is the operator speaking, not a covenant act.
     setEchoes((e) => [...e, { delivery: 'said', text: `💬 ${anchor} · “${q}” — ${text}` }]);
     setDraftComment(null); // the live draft becomes a permanent line
+
+    /* COMMENT-TO-STEER (#158/#152). An anchored comment is, in the client shape,
+       a real room message carrying a quotation anchor; when it TARGETS A RUNNING
+       SESSION's goal it additionally classifies into `signal_session{steer}` via
+       that message's durable id (`causeMessageId` / the "mediatedFromMessageId"
+       edge) — `covenant.mediateSteer` names both gated calls. On int/phase5 there
+       is no live room/session, so the mediation is honestly INERT: it returns
+       `reached:false` and NO `session_signaled{steer}` leaves the client. The
+       operator is told — verbatim — that nothing was delivered, never a faked
+       steer. Flip the input (select a settled session) and the steer
+       classification does not fire at all — only a running target steers. */
+    const target = sessionFor(selected).session;
+    if (target.status === 'running') {
+      const outcome = covenant.mediateSteer(target.id, { anchor, quote, body: text });
+      setEchoes((e) => [
+        ...e,
+        {
+          delivery: 'refused',
+          text: `steer not delivered — ${outcome.inert} · door: ${outcome.door}`,
+        },
+      ]);
+    }
   };
 
   return (

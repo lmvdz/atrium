@@ -20,6 +20,7 @@
  *     is why the design feed shell (scroll container, minimap, composer) stays. */
 
 import { useEffect, useMemo, useRef, useState } from 'react';
+import { fileText } from '@/src/components/model';
 import { AttributionLedger } from '@/src/components/model/ledger';
 import { MessageBody } from '@/src/components/primitives/MessageBody';
 import { SystemRow } from '@/src/components/timeline/SystemRow';
@@ -30,6 +31,7 @@ import {
   conversationModel,
   type Echo,
   echoItem,
+  messageBody,
 } from './conversation-model';
 import { IconChevron, IconDot } from './icons';
 import { MessageText } from './MessageText';
@@ -589,7 +591,14 @@ function Composer({
 /* the comment being written in the artifact pane, mirrored into the chat live —
    as you type over there, it materialises here as a draft line. */
 function DraftComment({ draft }: { draft: CommentDraft }) {
-  const quote = draft.quote.length > 52 ? `${draft.quote.slice(0, 52)}…` : draft.quote;
+  /* The quote is VERBATIM doc content (a slice of the artifact) → the `fileText`
+     content door; the draft text is the viewer's OWN words → the shipped
+     `MessageBody`. Same discipline the artifact pane's comment list uses (#158),
+     so the live mirror never raw-prints a caller string. */
+  const quote = fileText(
+    draft.quote.length > 52 ? `${draft.quote.slice(0, 52)}…` : draft.quote,
+    'DraftComment quote',
+  );
   return (
     <div className={`${styles.chatRow} ${styles.draftRow}`} data-kind="human">
       <Avatar who="you" kind="human" />
@@ -601,7 +610,9 @@ function DraftComment({ draft }: { draft: CommentDraft }) {
         <div className={styles.draftBody}>
           <span className={styles.draftQuote}>“{quote}”</span>
           {draft.text ? (
-            <span className={styles.draftText}>{draft.text}</span>
+            <span className={styles.draftText}>
+              <MessageBody body={messageBody(draft.text)} />
+            </span>
           ) : (
             <span className={styles.draftPlaceholder}>start typing your comment…</span>
           )}
