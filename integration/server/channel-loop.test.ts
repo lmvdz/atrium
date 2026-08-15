@@ -30,7 +30,9 @@ import {
  *      `session_opened`, `message_posted`), same-room enforced at THREE layers
  *      that bind three different writers.
  *   2. At most one FUNDED arm per cause message, across both draw-taking
- *      appends — and `plan_opened` exempt, because a plan never draws.
+ *      appends — and `plan_opened` exempt from THAT claim, because a plan never
+ *      draws. It carries its own board-level claim instead (#148 FIX 1: at most
+ *      one plan per routed cause), a different mechanism, not an arm.
  *   3. The nack list, verified with the LOOP PRINCIPAL (an agent) as the actor.
  *   4. The doctrine brief is documentation; nothing here or anywhere claims it
  *      as enforcement. `docs/agent-loop-doctrine.md`.
@@ -618,31 +620,65 @@ describe('one channel message funds at most one arm', () => {
   });
 
   /**
-   * A PLAN NEVER DRAWS, so it is EXEMPT — and the exemption is checked by
-   * MUTATION, not by a comment. Two boards from one message both land, and
-   * neither claims an arm, so a later SESSION from that same message still
-   * draws successfully. If `projectPlanOpened` ever grew a `claimFundedArm`
-   * call, the second plan would nack and the spawn would too.
+   * A PLAN NEVER DRAWS, so it takes NO funded-arm claim — the SPEND exemption
+   * (#124 resolution 2), checked by MUTATION: a routed plan claims zero arms, and
+   * a later SESSION from that same message still draws. That exemption stands.
    *
-   * RED-ON-REVERT: add a `claimFundedArm(..., 'spawn', ...)` to
-   * `projectPlanOpened` (or a `requireUnfundedCause` to `open_plan`) and every
-   * assertion after the first plan goes red.
+   * But a routed plan now carries a BOARD-level idempotency of its OWN (#148
+   * FIX 1, `plans_room_cause_routed_key`): at most one plan per (room, non-null
+   * cause). The channel daemon opens a plan by sending `open_plan` then journaling
+   * the request, and a crash between them re-sends `open_plan`; without this claim
+   * that re-send opens a permanently-orphaned second board (it never draws — the
+   * cause has advanced — and never settles). The earlier "two free boards" was
+   * spend-scoped and true for spend; the orphan board is what the durable daemon
+   * surfaced. A HAND-opened plan (null cause) stays free — the index is partial.
+   *
+   * RED-ON-REVERT (spend exemption): add a `claimFundedArm(..., 'spawn', ...)` to
+   * `projectPlanOpened` and `armRows` goes non-empty / the spawn nacks.
+   * RED-ON-REVERT (board idempotency): drop `requirePlanCauseUnclaimed` from
+   * `open_plan` and the second routed plan acks (two boards from one message).
    */
-  it('exempts plan_opened — two free boards from one message, and the session still draws', async () => {
+  it('opens at most one plan per routed cause, claims no arm, and the session still draws', async () => {
     const alice = await connect(ownerId, 'human');
     const hexi = await connect(agentId, 'agent');
-    const cause = await postMessage(alice, room.roomId, 'two boards, one ask');
+    const cause = await postMessage(alice, room.roomId, 'one ask, one board');
 
+    // A routed plan opens and claims NO arm — a plan is not a draw.
     const planA = await fundedPlan(5, cause);
-    const planB = await fundedPlan(5, cause);
-    expect(planA).not.toBe(planB);
-    expect(await eventCount('plan_opened')).toBe(2);
+    expect(await eventCount('plan_opened')).toBe(1);
     expect(await armRows()).toHaveLength(0);
 
-    // The purse-touching arm from the SAME message still works, exactly once.
+    // A SECOND routed plan from the SAME cause is REFUSED — the board's own
+    // idempotency, distinct from the funded-arm claim (this took no arm).
+    const second = await hexi.command({
+      name: 'open_plan',
+      roomId: room.roomId,
+      agentUserId: agentId,
+      title: 'a second board from one ask',
+      budgetLimitMicros: null,
+      causeMessageId: cause,
+    });
+    expect(second.type).toBe('nack');
+    if (second.type === 'nack') expect(second.message).toContain('has already opened a plan');
+    expect(await eventCount('plan_opened')).toBe(1); // no second board appended
+
+    // The purse-touching arm from that SAME message still draws, exactly once —
+    // the plan took no arm, so the session is free to.
     expect((await spawn(hexi, planA, cause)).type).toBe('ack');
     expect(await armRows()).toHaveLength(1);
-    expect((await spawn(hexi, planB, cause)).type).toBe('nack');
+
+    // A HAND-opened plan cites nothing and stays FREE: two null-cause boards land.
+    const free = (title: string) =>
+      hexi.command({
+        name: 'open_plan',
+        roomId: room.roomId,
+        agentUserId: agentId,
+        title,
+        budgetLimitMicros: null,
+        causeMessageId: null,
+      });
+    expect((await free('free board a')).type).toBe('ack');
+    expect((await free('free board b')).type).toBe('ack');
   });
 
   /**

@@ -1432,11 +1432,22 @@ export const plans = pgTable(
      * outright.
      *
      * A PLAN NEVER DRAWS (#124 resolution 2, grok r3): only session spawns and
-     * continues pass #118's slice boundary, so this column carries provenance and
-     * is deliberately EXEMPT from the funded-arm uniqueness in `funded_arms`. Two
-     * plans opened from one message are two free boards, which costs nothing and
-     * hides nothing; two FUNDED sessions from one message is a daemon retry that
-     * spent the slice twice, and that is what the uniqueness refuses.
+     * continues pass #118's slice boundary, so this column takes NO `funded_arms`
+     * claim — a plan is not a draw and must not consume a draw claim. That
+     * SPEND exemption stands.
+     *
+     * It does, however, carry a distinct BOARD-level idempotency of its own
+     * (#148 FIX 1, `plans_room_cause_routed_key` below): at most one plan per
+     * `(room, cause)` when the cause is non-null. The daemon opens a plan by
+     * sending `open_plan` and only THEN journaling the request; a crash in that
+     * window replays the goal and re-sends `open_plan`, and without a server claim
+     * that second send opens a permanently-orphaned empty board (it never draws —
+     * the cause has already advanced — and never settles). The funded-arm claim
+     * covers the SESSION double-fund but says nothing about the free board, so a
+     * durable daemon needs this. The earlier "two free boards cost nothing"
+     * reasoning was spend-scoped and true for spend; the orphan board is a
+     * durability wart the routing daemon surfaced. A HAND-opened plan cites no
+     * cause (null) and stays free — the partial index only binds routed plans.
      */
     causeMessageId: uuid('cause_message_id'),
     /** The `core_events.id` of the `plan_opened` that projected this. */
@@ -1457,6 +1468,19 @@ export const plans = pgTable(
       columns: [t.roomId, t.causeMessageId],
       foreignColumns: [messages.roomId, messages.id],
     }),
+    /**
+     * AT MOST ONE PLAN PER ROUTED CAUSE (#148 FIX 1) — the board-level analogue of
+     * `funded_arms`. PARTIAL, on `cause_message_id IS NOT NULL`: a hand-opened
+     * plan cites nothing and stays free, so this binds only the daemon's routed
+     * `open_plan`s, where `cause_message_id` is set. It is the durable authority
+     * behind `requirePlanCauseUnclaimed` in `commands.ts`: a crash-replay re-send
+     * of `open_plan` for a cause that already opened a board is refused, so the
+     * daemon opens exactly one board per goal across any crash seam. Distinct from
+     * `funded_arms`: a plan takes no draw claim; this is a plan claim.
+     */
+    uniqueIndex('plans_room_cause_routed_key')
+      .on(t.roomId, t.causeMessageId)
+      .where(sql`${t.causeMessageId} IS NOT NULL`),
     /** A slice is a count of draws — never negative. NULL (unfunded) is allowed. */
     check('plans_rlimit_slice_nonnegative', sql`${t.rlimitSlice} IS NULL OR ${t.rlimitSlice} >= 0`),
     /** Draws granted only ever counts up from zero. */

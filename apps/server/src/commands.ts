@@ -811,6 +811,23 @@ export function fundedArmRefusal(causeMessageId: string, roomId: string): string
   return `cause message "${causeMessageId}" has already funded a draw in room "${roomId}" — one channel message funds at most ONE arm (a spawn or a continue), so a second draw from it is a daemon retry of work the slice already paid for. Nothing was appended. If the first arm was wrong, settle or fail it and route the new work from a new message`;
 }
 
+/**
+ * A SECOND PLAN FROM ONE ROUTED CAUSE (#148 FIX 1).
+ *
+ * The board-level analogue of `fundedArmRefusal`, and deliberately its own
+ * sentence. A plan takes no `funded_arms` claim (a plan is not a draw), so the
+ * funded-arm refusal cannot cover it — yet the routing daemon opens a plan by
+ * sending `open_plan` and only THEN journaling the request, and a crash in that
+ * window replays the goal and re-sends `open_plan`. Without this refusal the
+ * re-send opens a permanently-orphaned empty board (it never draws, because the
+ * cause has already advanced past the draw, and never settles). So `open_plan`
+ * gets a per-cause claim of its OWN: at most one plan per (room, non-null cause).
+ * A hand-opened plan cites nothing and is never refused here.
+ */
+export function planCauseRefusal(causeMessageId: string, roomId: string): string {
+  return `cause message "${causeMessageId}" has already opened a plan in room "${roomId}" — one routed channel message opens at most ONE board, so a second open_plan from it is a daemon retry of a plan already opened. Nothing was appended. A plan takes no funded-arm claim (a plan is not a draw); this is the board's own idempotency, and its authority is plans_room_cause_routed_key`;
+}
+
 /** A forward-only revision naming something that is not an earlier signal here. */
 export function supersedesRefusal(supersedesEventId: string, sessionId: string): string {
   return `supersedesEventId "${supersedesEventId}" is not an earlier session_signaled for session "${sessionId}" in this room — a revision is forward-only and NAMES the append it replaces, because the ledger is append-only and the tail-discard is the harness's act. Nothing was appended`;
@@ -1385,6 +1402,32 @@ export function createCommandService({
       .where(and(eq(fundedArms.roomId, roomId), eq(fundedArms.causeMessageId, causeMessageId)))
       .for('share');
     if (claimed) throw new CommandError('invalid', fundedArmRefusal(causeMessageId, roomId));
+  }
+
+  /**
+   * AT MOST ONE PLAN PER ROUTED CAUSE MESSAGE (#148 FIX 1) — the command layer's
+   * half, mirroring `requireUnfundedCause` for draws.
+   *
+   * Read under the append lock (`.for('share')`), so no second `open_plan` can
+   * claim the same cause between this read and the projection's INSERT: appends
+   * in a room serialize on the one global advisory lock, so the crash-replay
+   * re-send that this closes runs strictly after the first plan committed and
+   * sees it here. The authority is the partial `plans_room_cause_routed_key`
+   * (drizzle/0048), which binds a writer that never passed this command; this is
+   * the legible refusal. A null cause claims nothing — a hand-opened plan is free.
+   */
+  async function requirePlanCauseUnclaimed(
+    tx: Tx,
+    roomId: string,
+    causeMessageId: string | null,
+  ): Promise<void> {
+    if (causeMessageId === null) return;
+    const [claimed] = await tx
+      .select({ id: plans.id })
+      .from(plans)
+      .where(and(eq(plans.roomId, roomId), eq(plans.causeMessageId, causeMessageId)))
+      .for('share');
+    if (claimed) throw new CommandError('invalid', planCauseRefusal(causeMessageId, roomId));
   }
 
   /** The provenance edge is same-room or it is not an edge (#123 resolution 4). */
@@ -2059,10 +2102,11 @@ export function createCommandService({
       // `messageId` — and read back off the appended event; the settle/raise
       // verbs name an existing entity the caller already holds.
       // A PLAN NEVER DRAWS (#124 resolution 2). So `open_plan` gets the routing
-      // receipt and its same-room check, and does NOT get the funded-arm claim:
-      // two boards opened from one message are two free boards, and refusing
-      // them would be enforcement invented past the resolution. The purse is the
-      // thing being protected, and a plan does not touch it.
+      // receipt and its same-room check, and takes NO funded-arm claim — the
+      // purse is untouched by a plan. It DOES take its own board-level claim
+      // (#148 FIX 1): at most one plan per routed (non-null) cause, so a daemon's
+      // crash-replay re-send of `open_plan` cannot leave a permanently-orphaned
+      // empty board. Both checks run under the append lock, like the draw's.
       case 'open_plan':
         return appendAndProject(
           session,
@@ -2080,6 +2124,7 @@ export function createCommandService({
           }),
           async (tx) => {
             await requireSameRoomCause(tx, command.roomId, command.causeMessageId);
+            await requirePlanCauseUnclaimed(tx, command.roomId, command.causeMessageId);
           },
         );
 

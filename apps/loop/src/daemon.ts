@@ -30,9 +30,16 @@ import {
  *    crash-replay not double-fund.
  *  - ANSWERS: the daemon supplies a deterministic `clientMessageId` derived from
  *    the cause, so the server's existing send_message dedupe holds on replay.
- *  - STEERS / open_plan: at-least-once via the journal — a journaled cause is not
- *    re-routed. A journal loss can double a steer or a plan, which the doctrine
- *    already declares unpreventable (stated, not hidden).
+ *  - PLANS (open_plan): the SERVER's per-cause plan claim is the backstop (#148
+ *    FIX 1), mirroring the funded-arm claim for draws. A crash after the plan's
+ *    ack but before the journal write replays the goal and re-sends `open_plan`;
+ *    the server refuses it (a plan for this cause already exists), and that
+ *    refusal — not the journal — is the idempotency, so exactly one board is
+ *    opened per cause across any crash seam. A plan still takes NO `funded_arms`
+ *    claim: a plan is not a draw, and this claim is a distinct board-level one.
+ *  - STEERS: at-least-once via the journal — a journaled cause is not re-routed.
+ *    A journal loss can double a steer, which the doctrine declares unpreventable
+ *    (stated, not hidden).
  *
  * ## The covenant (#122, #148)
  *
@@ -50,6 +57,13 @@ export interface LoopHooks {
    * simulate a crash between the server append and the journal write.
    */
   beforeDrawJournal?: (info: { cause: string; planId: string }) => Promise<void> | void;
+  /**
+   * FAULT-INJECTION SEAM (tests only). Invoked after an `open_plan` ack returns
+   * and BEFORE `plan_requested` is journaled — the window whose crash opens a
+   * SECOND plan on replay unless the SERVER's per-cause plan claim refuses it
+   * (#148 FIX 1). A test throws here to simulate that crash.
+   */
+  beforePlanJournal?: (info: { cause: string }) => Promise<void> | void;
 }
 
 export interface LoopDaemonOptions {
@@ -62,6 +76,10 @@ export interface LoopDaemonOptions {
    *  shim's reserved directives. */
   harness?: string;
   model?: string;
+  /** Compact the outcome journal after this many appended records (#148 FIX 3).
+   *  Defaults to the journal's own bound; tests set it small to witness a real
+   *  compaction. */
+  compactEvery?: number;
   log?: (level: 'info' | 'warn' | 'error', message: string, fields?: unknown) => void;
   hooks?: LoopHooks;
 }
@@ -72,6 +90,17 @@ export interface LoopDaemonOptions {
  *  carries this fragment. */
 export function isFundedArmRefusal(nack: { code: string; message: string }): boolean {
   return nack.code === 'invalid' && nack.message.includes('has already funded a draw');
+}
+
+/** The per-cause PLAN claim refusal (#148 FIX 1) — the plan-opening analogue of
+ *  `isFundedArmRefusal`. A pre-crash `open_plan` this loop had not yet journaled
+ *  already opened the board; the server refuses the replay re-send, and that
+ *  refusal is not an error — it means the plan EXISTS, so the daemon records the
+ *  request and lets the plan's own event drive the draw, exactly as a fresh ack
+ *  would. Keyed on a stable fragment of `planCauseRefusal`, PINNED by the
+ *  integration test. */
+export function isPlanClaimedRefusal(nack: { code: string; message: string }): boolean {
+  return nack.code === 'invalid' && nack.message.includes('has already opened a plan');
 }
 
 const ANSWER_BODY =
@@ -107,7 +136,11 @@ export class LoopDaemon {
   /** Open the journal, connect, subscribe, and replay from the cursor. Resolves
    *  once live consumption is running; the loop then runs until `stop()`. */
   async start(): Promise<void> {
-    this.journal = await OutcomeJournal.open(this.options.journalPath);
+    this.journal = await OutcomeJournal.open(this.options.journalPath, this.options.roomId, {
+      ...(this.options.compactEvery !== undefined
+        ? { compactEvery: this.options.compactEvery }
+        : {}),
+    });
     await this.client.connect();
     this.client.setEventHandler((entry) => this.safeHandle(entry), this.journal.cursor);
     await this.client.subscribe(this.options.roomId);
@@ -197,10 +230,23 @@ export class LoopDaemon {
       causeMessageId: cause,
     });
     if (ack.type === 'nack') {
+      if (isPlanClaimedRefusal(ack)) {
+        // A plan for this cause ALREADY EXISTS — a pre-crash `open_plan` this loop
+        // acked but had not yet journaled (#148 FIX 1). The refusal IS the
+        // idempotency: record the REQUEST so the existing plan's own event drives
+        // the draw, exactly as a fresh ack would. Without this the replay would
+        // journal `ignored` and the already-opened plan would never draw a session.
+        this.log('info', 'open_plan refused — plan already opened for cause, resuming', { cause });
+        return this.journal.record({ roomSeq, outcome: { kind: 'plan_requested', cause } });
+      }
       this.log('warn', 'open_plan refused', { cause, message: ack.message });
-      // Record the cause so it is not re-routed; the loop cannot open this plan.
+      // A genuine refusal (cross-room cause, non-membership): record the cause so
+      // it is not re-routed; the loop cannot open this plan.
       return this.journal.record({ roomSeq, outcome: { kind: 'ignored', cause } });
     }
+    // The FAULT SEAM sits here: after the server has opened the plan, before the
+    // journal records the request — the window the per-cause plan claim must cover.
+    await this.options.hooks?.beforePlanJournal?.({ cause });
     // The plan's id is minted server-side and rides the plan_opened event, not the
     // ack. Record the REQUEST now (so a replay does not re-open the plan) and take
     // the draw when that event arrives.

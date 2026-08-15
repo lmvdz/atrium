@@ -717,10 +717,12 @@ async function projectPlanOpened(
     title: event.title,
     status: 'open',
     budgetLimitMicros: event.budgetLimitMicros,
-    // Provenance only — a plan never draws, so NO `funded_arms` claim (#124
-    // resolution 2). The absence of a claim here is deliberate and load-bearing:
-    // adding one would refuse a second free board from one message, which is
-    // enforcement nobody decided and which the purse does not need.
+    // Provenance, and the key for the board-level plan claim (#148 FIX 1). A plan
+    // never draws, so it takes NO `funded_arms` claim (#124 resolution 2) — that
+    // spend exemption stands. But a non-null cause DOES land on the partial
+    // `plans_room_cause_routed_key`, so this INSERT is itself the claim: a second
+    // routed plan from the same cause collides here and its append aborts, which
+    // is what stops a daemon crash-replay from opening an orphaned second board.
     causeMessageId: event.causeMessageId,
     openedByEventId: id,
     createdAt: new Date(event.at),

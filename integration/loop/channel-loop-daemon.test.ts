@@ -21,7 +21,11 @@ import {
 } from '@atrium/db/schema';
 import { and, desc, eq } from 'drizzle-orm';
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it } from 'vitest';
-import { isFundedArmRefusal, LoopDaemon } from '../../apps/loop/src/daemon.js';
+import {
+  isFundedArmRefusal,
+  isPlanClaimedRefusal,
+  LoopDaemon,
+} from '../../apps/loop/src/daemon.js';
 import { type LoopCommand, parseServerFrame } from '../../apps/loop/src/protocol.js';
 import {
   Command,
@@ -258,6 +262,14 @@ async function planForCause(
   return row;
 }
 
+async function countPlansForCause(roomId: string, cause: string): Promise<number> {
+  const rows = await handle.db
+    .select({ id: plans.id })
+    .from(plans)
+    .where(and(eq(plans.roomId, roomId), eq(plans.causeMessageId, cause)));
+  return rows.length;
+}
+
 async function fund(p: Provisioned, planId: string, slice = 5): Promise<void> {
   const result = await execute(human(p.humanId), {
     name: 'set_plan_rlimit',
@@ -301,7 +313,10 @@ function makeDaemon(
   p: Provisioned,
   server: RunningServer,
   journalPath: string,
-  hooks?: { beforeDrawJournal?: (info: { cause: string; planId: string }) => void | Promise<void> },
+  hooks?: {
+    beforeDrawJournal?: (info: { cause: string; planId: string }) => void | Promise<void>;
+    beforePlanJournal?: (info: { cause: string }) => void | Promise<void>;
+  },
 ): LoopDaemon {
   const daemon = new LoopDaemon({
     url: server.url,
@@ -448,7 +463,7 @@ describe('2. crash-replay — the funded-arm claim refuses the re-route, so no d
     const journalText = await readFile(journalPath, 'utf8');
     const fundedTerminal = journalText
       .split('\n')
-      .filter((line) => line.trim() !== '')
+      .filter((line) => line.trim() !== '' && !line.includes('"v":1'))
       .map((line) => JSON.parse(line) as { outcome: { kind: string; cause?: string } })
       .find((record) => record.outcome.kind === 'funded_terminal');
     expect(fundedTerminal?.outcome.cause).toBe(cause);
@@ -666,6 +681,203 @@ describe('5. contract-drift pin — the re-declared wire types agree with the se
       // The exact bytes the server sent for this ack — re-parsed by the daemon's schema.
       const frame = parseServerFrame(JSON.stringify(ack));
       expect(frame.type).toBe('ack');
+    } finally {
+      await agentClient.close();
+    }
+  });
+});
+
+describe('6. FIX 1 — a crash after open_plan ack, before its journal, opens exactly one plan', () => {
+  it('the server plan-claim refuses the replay re-send; one board, one session, one settle', async () => {
+    const p = await provision();
+    const journalPath = join(scratchDir, 'plan-crash.journal');
+
+    // Daemon 1 crashes the instant `open_plan` is acked, before it journals the
+    // request — the exact window that, unclaimed, opens a SECOND orphan board.
+    let crashed = false;
+    const daemon1 = makeDaemon(p, server, journalPath, {
+      beforePlanJournal: () => {
+        crashed = true;
+        throw new Error('injected crash: open_plan acked, request not yet journaled');
+      },
+    });
+    await daemon1.start();
+    const cause = await postGoal(p, 'build #148 (crash before plan journal)', 'goal-plan-crash');
+
+    // The server opened the plan before the crash; the daemon then halted.
+    await until(
+      async () => (await planForCause(p.roomId, cause)) !== undefined,
+      15_000,
+      'plan opened server-side',
+    );
+    await until(() => crashed, 15_000, 'crash injected');
+    await daemon1.stop();
+    expect(await countPlansForCause(p.roomId, cause)).toBe(1);
+    const plan = await planForCause(p.roomId, cause);
+    if (!plan) throw new Error('no plan');
+
+    // Daemon 2 replays the SAME journal. Its re-sent `open_plan` hits the per-cause
+    // plan claim and is REFUSED — the refusal IS the idempotency — and it resumes
+    // toward the draw against the SAME plan rather than opening a second board.
+    const daemon2 = makeDaemon(p, server, journalPath);
+    await daemon2.start();
+    await fund(p, plan.id, 5);
+
+    await until(
+      async () => (await settledArtifact(p.roomId)) !== null,
+      30_000,
+      'the recovered session settles',
+    );
+    // Give any (wrongful) second plan ample time to have appeared.
+    await new Promise((r) => setTimeout(r, 500));
+    // EXACTLY ONE plan for the cause (revert of FIX 1 → two: the orphan board).
+    expect(await countPlansForCause(p.roomId, cause)).toBe(1);
+
+    // POSITIVE witness the re-send happened and was refused (not merely skipped):
+    // the recovered journal carries a plan_requested for the cause, written by the
+    // plan-claim refusal path, and the single plan reaches settled.
+    const journalText = await readFile(journalPath, 'utf8');
+    const planRequested = journalText
+      .split('\n')
+      .filter((line) => line.trim() !== '' && !line.includes('"v":1'))
+      .map((line) => JSON.parse(line) as { outcome: { kind: string; cause?: string } })
+      .find((record) => record.outcome.kind === 'plan_requested' && record.outcome.cause === cause);
+    expect(planRequested).toBeDefined();
+    await until(
+      async () => (await planForCause(p.roomId, cause))?.status === 'settled',
+      15_000,
+      'plan settled after recovery',
+    );
+  });
+
+  it('the plan-claim refusal really is a nack the daemon recognizes (message pin)', async () => {
+    // Pins the daemon's coupling to the server's refusal wording. If the server
+    // rewords planCauseRefusal, isPlanClaimedRefusal must be updated with it.
+    const p = await provision();
+    const cause = await postGoal(p, 'seed a routed plan #148', 'goal-plan-pin');
+    const first = await execute(human(p.humanId), {
+      name: 'open_plan',
+      roomId: p.roomId,
+      agentUserId: p.agentId,
+      title: 'pin plan',
+      causeMessageId: cause,
+    } as CommandInput);
+    if (first.kind !== 'appended') throw new Error('first open_plan failed');
+
+    const agentClient = await TestClient.connect(server.url, p.agentId, {
+      headers: { cookie: p.cookie },
+    });
+    try {
+      await agentClient.subscribe(p.roomId);
+      const second = await agentClient.command({
+        name: 'open_plan',
+        roomId: p.roomId,
+        agentUserId: p.agentId,
+        title: 'second board from one cause',
+        causeMessageId: cause,
+      } as CommandInput);
+      expect(second.type).toBe('nack');
+      if (second.type !== 'nack') throw new Error('expected nack');
+      expect(isPlanClaimedRefusal(second)).toBe(true);
+      expect(second.message).toContain('has already opened a plan');
+      // And no second board was appended.
+      expect(await countPlansForCause(p.roomId, cause)).toBe(1);
+    } finally {
+      await agentClient.close();
+    }
+  });
+
+  it('a hand-opened plan cites no cause and stays FREE — two null-cause boards coexist', async () => {
+    // The partial index binds only routed (non-null) causes; the "many free
+    // boards" case the resolution named is untouched.
+    const p = await provision();
+    for (const title of ['board one', 'board two']) {
+      const r = await execute(human(p.humanId), {
+        name: 'open_plan',
+        roomId: p.roomId,
+        agentUserId: p.agentId,
+        title,
+      } as CommandInput);
+      expect(r.kind).toBe('appended');
+    }
+    const rows = await handle.db
+      .select({ id: plans.id })
+      .from(plans)
+      .where(eq(plans.roomId, p.roomId));
+    expect(rows.length).toBe(2);
+  });
+});
+
+describe('7. FIX 4 — the server refuses raw forged frames from the agent cookie, against REAL targets', () => {
+  it('set_plan_rlimit on a real plan, settle_session on a real session, and certify — each nacked', async () => {
+    const p = await provision();
+    const daemon = makeDaemon(p, server, join(scratchDir, 'forge.journal'));
+    await daemon.start();
+
+    const cause = await postGoal(p, 'build #148 (forged-frame witness)', 'goal-forge');
+    await until(
+      async () => (await planForCause(p.roomId, cause)) !== undefined,
+      15_000,
+      'plan opened',
+    );
+    const plan = await planForCause(p.roomId, cause);
+    if (!plan) throw new Error('no plan');
+    await fund(p, plan.id, 5);
+
+    // Wait until a REAL session exists — one the daemon opened via a real draw.
+    await until(
+      async () => (await fundedArmRows(p.roomId)).length === 1,
+      30_000,
+      'a real session was drawn',
+    );
+    const realSessionId = (await fundedArmRows(p.roomId))[0]?.sessionId;
+    if (!realSessionId) throw new Error('no real session');
+
+    // The daemon's OWN agent cookie, driving RAW frames the LoopCommand type can
+    // never express, against the real plan and the real session it just opened.
+    const agentClient = await TestClient.connect(server.url, p.agentId, {
+      headers: { cookie: p.cookie },
+    });
+    try {
+      await agentClient.subscribe(p.roomId);
+
+      // set_plan_rlimit on the REAL plan — spend authorization is human-only, and
+      // the server refuses the agent regardless of the plan being real.
+      const rlimit = await agentClient.command({
+        name: 'set_plan_rlimit',
+        roomId: p.roomId,
+        planId: plan.id,
+        slice: 999,
+      } as CommandInput);
+      expect(rlimit.type).toBe('nack');
+      if (rlimit.type === 'nack') expect(rlimit.code).toBe('invalid');
+
+      // settle_session against the REAL session the daemon opened. The refusal is
+      // the SERVER's authority gate, not "no such session": the exit is owned by
+      // the execution provider on a capability the agent never holds. This is the
+      // strengthened witness — the weak one settled a nonexistent session.
+      const settle = await agentClient.command({
+        name: 'settle_session',
+        roomId: p.roomId,
+        sessionId: realSessionId,
+        outcome: 'settled',
+      } as CommandInput);
+      expect(settle.type).toBe('nack');
+
+      // accept_proposal / certify — refused to a machine principal by the server's
+      // fold, never reachable by the agent cookie.
+      const certify = await agentClient.command({
+        name: 'accept_proposal',
+        roomId: p.roomId,
+        proposalId: randomUUID(),
+      } as CommandInput);
+      expect(certify.type).toBe('nack');
+      if (certify.type === 'nack') expect(certify.code).toBe('invalid');
+
+      // The forgeries changed nothing: the plan's slice is still the human's 5,
+      // and no forged settle wrote the session's exit from the outside.
+      const after = await planForCause(p.roomId, cause);
+      expect(after?.slice).toBe(5);
     } finally {
       await agentClient.close();
     }
