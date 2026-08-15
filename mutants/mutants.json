@@ -179,9 +179,9 @@
       "id": "client_resumes_a_cursor_without_its_events",
       "suite": "unit",
       "kind": "file",
-      "why": "Round 2's `WatermarkStore` by construction: the cursor is durable and the events are not, so a reload is a room that believes it is up to date and holds nothing.",
+      "why": "Round 2's `WatermarkStore` by construction: the cursor is durable and the events are not, so a reload is a room that believes it is up to date and holds nothing. (#159 round-3 hoisted the resume filter into `resumedEvents` so the terminal-wall can also be seeded from it; the anchor follows the assignment.)",
       "file": "apps/web/src/lib/realtime.ts",
-      "find": "        events: held.events.filter((entry) => entry.issues.length === 0),",
+      "find": "        events: resumedEvents,",
       "replace": "        events: [],",
       "catches": ["resumes from a durable journal rather than replaying the room"]
     },

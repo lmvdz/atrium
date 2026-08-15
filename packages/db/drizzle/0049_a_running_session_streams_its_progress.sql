@@ -55,29 +55,66 @@ ALTER TYPE "public"."event_type" ADD VALUE IF NOT EXISTS 'session_phase_changed'
 -- added to BOTH arms (required-keys = ARRAY['roomId']; declared room = payload
 -- roomId), the whole allowlist otherwise byte-identical to 0045's.
 --
--- IDEMPOTENT + LOCK-PATTERNED (round-1 gauntlet, finding 6). Two changes over 0045's
--- plain `DROP` + validated `ADD`:
+-- ATOMIC, GUARDED SWAP (round-2 gauntlet, finding 6). Round 1 shipped this as three
+-- separate statements — `DROP … IF EXISTS`, then `ADD … NOT VALID`, then a guarded
+-- `VALIDATE` — and advertised that a manual/ops apply committing them SEPARATELY got
+-- the lock decoupling the batched migrator negates. That advertised mode is exactly
+-- what the round-2 gauntlet flagged as unsafe: with the DROP and the recreate in two
+-- separately-committing transactions, the room-match backstop is ABSENT in the window
+-- between them, a concurrent append with a mismatched `roomId` slips through, and
+-- because the recreate lands `NOT VALID` (it does not rescan existing rows) that bad
+-- row is then blessed and outlives the migration. The unconditional DROP/recreate was
+-- unsafe precisely in the mode the comment recommended.
 --
---   * IDEMPOTENT: `DROP … IF EXISTS` immediately before the `ADD` (so the pair is
---     re-runnable — a re-apply drops then re-adds), and the `VALIDATE` guarded on
---     `convalidated`, so a partial re-apply does not error.
---   * NOT VALID + VALIDATE: the correct lock-safer SHAPE for a live ledger — a plain
---     validated `ADD CONSTRAINT … CHECK` scans the whole table under ACCESS EXCLUSIVE,
---     whereas `NOT VALID` is metadata-only and `VALIDATE` scans under the weaker SHARE
---     UPDATE EXCLUSIVE. Existing rows already satisfy it (the sole change from 0045 is
---     the `session_phase_changed` arm, and no pre-existing row carries that brand-new
---     enum type), so validation cannot fail.
+-- The fix makes the swap ATOMIC IN EVERY APPLY MODE by putting the whole DROP + ADD +
+-- VALIDATE inside ONE `DO` block — a single statement, hence a single transaction, so
+-- no other session can ever observe a committed state with the constraint missing,
+-- whether run by drizzle's batched migrator or a manual per-statement ops apply. The
+-- unprotected window cannot open. And it is fully IDEMPOTENT/re-runnable:
 --
--- HONEST BOUND, measured (drizzle-orm 0.45.2 `pg-core/dialect.cjs` `migrate`): the
--- migrator wraps ALL pending migrations in ONE outer transaction, so the ACCESS
--- EXCLUSIVE this `DROP` takes is held until the whole batch commits and the `VALIDATE`
--- runs under it regardless of its own weaker lock request. The lock decoupling is
--- therefore realized only when these statements run in SEPARATE transactions — a
--- manual/ops apply, or a future migrator that commits per-file — which the idempotency
--- guards now make safe. Under the batched migrator the win here is idempotency; the
--- shape is correct and future-proof rather than currently lock-reducing.
-ALTER TABLE "core_events" DROP CONSTRAINT IF EXISTS "core_events_payload_room_matches";--> statement-breakpoint
-ALTER TABLE "core_events" ADD CONSTRAINT "core_events_payload_room_matches" CHECK (coalesce(array_remove(ARRAY[
+--   * If the canonical constraint already carries the upgraded definition (a completed
+--     prior apply), the swap is skipped entirely — no needless DROP, no needless
+--     ACCESS EXCLUSIVE — after ensuring it is validated (a prior run that added
+--     `NOT VALID` then stopped is finished, not re-dropped).
+--   * Otherwise (absent, or still the old 0045 definition) it drops the old and adds
+--     the new atomically, then validates.
+--
+-- HONEST LOCK BOUND: because the block is atomic, the DROP's ACCESS EXCLUSIVE is held
+-- until the block commits, so the `VALIDATE`'s scan runs under it — this migration does
+-- NOT decouple the validation lock, and does not claim to. That decoupling is
+-- unreachable without giving up the gap-free swap, and on a ledger the gap-free swap is
+-- the property that matters: the sole definitional change from 0045 is the additive
+-- `session_phase_changed` arm and no pre-existing row carries that brand-new enum type,
+-- so the scan is instant here regardless. The `NOT VALID` + `VALIDATE` shape is kept as
+-- the correct future-proof form (a later per-file migrator, or a manual replay of the
+-- inner statements outside a wrapping txn, stays safe), not as a live lock win.
+DO $mig$
+DECLARE
+  canonical_def text;
+BEGIN
+  SELECT pg_get_constraintdef(oid) INTO canonical_def
+  FROM pg_constraint
+  WHERE conname = 'core_events_payload_room_matches'
+    AND conrelid = 'core_events'::regclass;
+
+  IF canonical_def IS NOT NULL AND position('session_phase_changed' in canonical_def) > 0 THEN
+    -- Already upgraded. Finish a partial prior run by validating if needed, then stop —
+    -- do NOT drop/recreate (that would reopen a window and take a needless lock).
+    IF NOT EXISTS (
+      SELECT 1 FROM pg_constraint
+      WHERE conname = 'core_events_payload_room_matches'
+        AND conrelid = 'core_events'::regclass
+        AND convalidated
+    ) THEN
+      ALTER TABLE "core_events" VALIDATE CONSTRAINT "core_events_payload_room_matches";
+    END IF;
+    RETURN;
+  END IF;
+
+  -- Not yet upgraded (absent, or still 0045's definition). Swap atomically: the DROP
+  -- and the recreate commit together, so the backstop is never observably absent.
+  ALTER TABLE "core_events" DROP CONSTRAINT IF EXISTS "core_events_payload_room_matches";
+  ALTER TABLE "core_events" ADD CONSTRAINT "core_events_payload_room_matches" CHECK (coalesce(array_remove(ARRAY[
         CASE WHEN "core_events"."payload"->'proposal'->>'roomId' IS NOT NULL THEN 'proposal.roomId' END,
         CASE WHEN "core_events"."payload"->'object'->>'roomId' IS NOT NULL THEN 'object.roomId' END,
         CASE WHEN "core_events"."payload"->'relation'->>'roomId' IS NOT NULL THEN 'relation.roomId' END,
@@ -120,22 +157,9 @@ ALTER TABLE "core_events" ADD CONSTRAINT "core_events_payload_room_matches" CHEC
         WHEN 'session_subscribed' THEN "core_events"."payload"->>'roomId'
         WHEN 'session_phase_changed' THEN "core_events"."payload"->>'roomId'
         ELSE "core_events"."room_id"::text
-      END, false)) NOT VALID;--> statement-breakpoint
-
--- Validate under SHARE UPDATE EXCLUSIVE, not the ACCESS EXCLUSIVE a validated ADD
--- would have taken. Guarded on `convalidated` so a re-run is a no-op rather than a
--- redundant scan.
-DO $$
-BEGIN
-  IF NOT EXISTS (
-    SELECT 1 FROM pg_constraint
-    WHERE conname = 'core_events_payload_room_matches'
-      AND conrelid = 'core_events'::regclass
-      AND convalidated
-  ) THEN
-    ALTER TABLE "core_events" VALIDATE CONSTRAINT "core_events_payload_room_matches";
-  END IF;
-END $$;--> statement-breakpoint
+      END, false)) NOT VALID;
+  ALTER TABLE "core_events" VALIDATE CONSTRAINT "core_events_payload_room_matches";
+END $mig$;--> statement-breakpoint
 
 -- ═════════════════════════════════════════════════════════════════════════════
 -- TERMINAL-NULL PROGRESS IS A TABLE FACT (round-1 gauntlet, finding 5).

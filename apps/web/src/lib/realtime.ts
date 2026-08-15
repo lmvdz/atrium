@@ -915,6 +915,30 @@ export interface RoomView {
    * live `view()` constructor always initialises it to `{}`.
    */
   progress?: Record<string, ProgressFrame>;
+  /**
+   * SESSIONS THAT HAVE REACHED A DURABLE TERMINAL (#159 round-3, finding 4). Once a
+   * `session_settled`/`session_failed` for a session lands in the log, its live `~`
+   * stream is OVER — the durable receipt replaced it wholesale (#152 convergence) —
+   * and NO later progress frame may ever preview it again. A reordered, delayed, or
+   * FORGED frame (a `progressSeq:0` included, arriving over the unauthenticated
+   * ephemeral bus after the receipt) is refused against this set, so a stale preview
+   * cannot be resurrected under the receipt. Derived from applied durable events, so
+   * it survives a reconnect: the catch-up that re-applies the settle re-adds it, and
+   * it is NOT cleared on a socket drop (unlike the presence-class `progress` itself).
+   */
+  settledSessions?: Set<string>;
+  /**
+   * THE PER-SESSION `progressSeq` HIGH-WATER MARK (#159 round-3, finding 4). The
+   * highest seq this client has ever applied OR recovered from the durable snapshot
+   * for a session — and it SURVIVES the settle-clear and the socket-drop clear of
+   * `progress`. Live-apply is floored by it: a frame at or below the floor is a
+   * duplicate/reorder/forgery and is dropped, even after the preview it advanced was
+   * cleared. Without a surviving floor, clearing `progress` dropped the only monotonic
+   * anchor, so a later `progressSeq:0` frame read as "the first frame" and re-previewed.
+   * A late joiner floors this from the authenticated `sessions.progress` snapshot via
+   * `recoverProgress`, so a frame older than the snapshot is dropped rather than shown.
+   */
+  progressFloor?: Record<string, number>;
 }
 
 /** A live progress frame as the client last saw it (#159). Preview, never history. */
@@ -1045,6 +1069,23 @@ export interface RealtimeClient {
   advanceSeen: (roomId: string, roomSeq?: number) => void;
   setPresence: (roomId: string, state: 'online' | 'away' | 'offline') => void;
   setTyping: (roomId: string, typing: boolean) => void;
+  /**
+   * FLOOR THE LIVE PROGRESS CHANNEL BY THE DURABLE SNAPSHOT (#159 round-3, finding 3).
+   *
+   * The ephemeral progress frames a client missed while disconnected are gone — the
+   * bus does not replay them. On a (re)subscribe the authenticated route reloads the
+   * durable `sessions.progress` snapshot; this hands its per-session `progressSeq`
+   * back to the live channel so that a subsequently-arriving frame OLDER than the
+   * snapshot is dropped rather than shown as if it were fresh. Idempotent and
+   * monotonic: it only ever RAISES a session's floor, never lowers it, so replaying
+   * an older snapshot cannot re-open a frame the client already moved past. The
+   * renderer that reads the snapshot and calls this binds after #161 — see the SEAM
+   * marker in `handleFrame`; the mechanism is landed and tested here.
+   */
+  recoverProgress: (
+    roomId: string,
+    snapshots: ReadonlyArray<{ sessionId: string; progressSeq: number }>,
+  ) => void;
   /** Subscribe to any change. Returns an unsubscribe function. */
   onChange: (
     listener: (roomId: string, view: RoomView, reason: 'state' | 'projection') => void,
@@ -1092,22 +1133,41 @@ export function createRealtimeClient(options: RealtimeClientOptions): RealtimeCl
       // journal that persists is required to write them in one operation, and
       // one that finds them inconsistent reports no history at all.
       const held = journal.load(roomId);
+      // The same filter `applyEntry` applies live, applied to what was resumed: the
+      // journal holds every row it walked past — that is what makes its cursor
+      // meaningful — and the room holds only the rows that took effect. A record
+      // written by an older build has no `issues` on any entry and so resumes exactly
+      // as it always did.
+      const resumedEvents = held.events.filter((entry) => entry.issues.length === 0);
+      // Seed the terminal set from the RESUMED events (#159 round-3, finding 4). A full
+      // page reload rebuilds `room.events` straight from the journal without replaying
+      // them through `applyEntry`, so the terminal wall would otherwise be empty after
+      // a reload and a forged post-receipt frame could re-preview a session whose
+      // settle is sitting right there in the resumed history. Deriving the set from the
+      // journal keeps the wall standing across a reload, not only across a reconnect.
+      const settledSessions = new Set<string>();
+      for (const entry of resumedEvents) {
+        const ev = entry.event as { type: string; sessionId?: unknown };
+        if (
+          (ev.type === 'session_settled' || ev.type === 'session_failed') &&
+          typeof ev.sessionId === 'string'
+        ) {
+          settledSessions.add(ev.sessionId);
+        }
+      }
       existing = {
         roomId,
         lastSeq: held.lastSeq,
         head: held.lastSeq,
         seenSeq: 0,
-        // The same filter `applyEntry` applies live, applied to what was
-        // resumed: the journal holds every row it walked past — that is what
-        // makes its cursor meaningful — and the room holds only the rows that
-        // took effect. A record written by an older build has no `issues` on any
-        // entry and so resumes exactly as it always did.
-        events: held.events.filter((entry) => entry.issues.length === 0),
+        events: resumedEvents,
         pending: [],
         presence: {},
         typing: [],
         subscribed: false,
         progress: {},
+        settledSessions,
+        progressFloor: {},
       };
       rooms.set(roomId, existing);
     }
@@ -1211,11 +1271,23 @@ export function createRealtimeClient(options: RealtimeClientOptions): RealtimeCl
       const settled = entry.event as { type: string; sessionId?: unknown };
       if (
         (settled.type === 'session_settled' || settled.type === 'session_failed') &&
-        typeof settled.sessionId === 'string' &&
-        room.progress?.[settled.sessionId] !== undefined
+        typeof settled.sessionId === 'string'
       ) {
-        const { [settled.sessionId]: _converged, ...rest } = room.progress;
-        room.progress = rest;
+        // Record the terminal FIRST (#159 round-3, finding 4). This is the wall the
+        // live-apply gate checks: once a session is terminal, no later frame —
+        // reordered, delayed, forged, or `progressSeq:0` — may preview it again, so a
+        // stale `~` can never be resurrected under the durable receipt. Kept across a
+        // socket drop (unlike `progress`), and re-derived on reconnect when the
+        // catch-up re-applies this settle.
+        if (!room.settledSessions) room.settledSessions = new Set();
+        room.settledSessions.add(settled.sessionId);
+        // And drop the preview it was showing. The floor (`progressFloor`) is left in
+        // place deliberately: it is a high-water mark, not a preview, and the terminal
+        // wall already refuses everything for this session regardless of seq.
+        if (room.progress?.[settled.sessionId] !== undefined) {
+          const { [settled.sessionId]: _converged, ...rest } = room.progress;
+          room.progress = rest;
+        }
       }
     }
     room.lastSeq = entry.roomSeq;
@@ -1321,6 +1393,17 @@ export function createRealtimeClient(options: RealtimeClientOptions): RealtimeCl
         room.head = frame.head;
         room.seenSeq = frame.seenSeq;
         changed(frame.roomId);
+        // RECOVER THE DURABLE PROGRESS SNAPSHOT ON EVERY (RE)SUBSCRIBE (#159 round-3,
+        // finding 3). The ephemeral `session_heartbeat`/`session_diff_delta` frames a
+        // client missed while disconnected are GONE — the bus does not replay them —
+        // so a reconnecting or late-joining client would show nothing, or worse, a
+        // frame older than the durable `sessions.progress` snapshot. `subscribed`
+        // fires on every reconnect (the socket re-subscribes on open), so prompting a
+        // projection re-read here is the recovery: the authenticated route reloads
+        // `sessions.progress`, and the consumer floors the live channel by its
+        // `progressSeq` via `recoverProgress`. A plain `changed(state)` above does not
+        // trigger the projection reread — that path is gated on `reason==='projection'`.
+        changed(frame.roomId, 'projection');
         // Always ask, even on a first join: `lastSeq` is 0 then, so this is
         // both "load the room" and "close the gap" with one code path.
         requestSince(frame.roomId);
@@ -1447,12 +1530,28 @@ export function createRealtimeClient(options: RealtimeClientOptions): RealtimeCl
         // #161 lands — the surface is being decomposed in that parallel lane, so the
         // renderer is intentionally NOT built here; this only lands the typed state).
         const room = view(frame.roomId);
+        // WALL 1 (#159 round-3, finding 4): a session that has reached a durable
+        // terminal is DONE streaming. Refuse regardless of seq — a `progressSeq:0`,
+        // a reorder, or a frame forged onto the unauthenticated ephemeral bus AFTER
+        // the receipt landed must NOT resurrect the `~` preview under it. This is the
+        // convergence guarantee the client owns; the bus authenticates nobody.
+        if (room.settledSessions?.has(frame.sessionId)) return;
+        // WALL 2 (#159 round-3, finding 4): floor by the surviving high-water mark.
+        // `progressFloor` outlives both the settle-clear and the socket-drop clear of
+        // `progress`, so a duplicate/reordered/forged frame at or below the last seq
+        // this client applied-or-recovered is dropped — including a `progressSeq:0`
+        // frame arriving after the preview it would have advanced was already cleared.
+        // (Before this, clearing `progress` dropped the only monotonic anchor and a
+        // later low/zero seq read as "the first frame" and re-previewed.)
+        const floor = room.progressFloor?.[frame.sessionId];
+        if (floor !== undefined && frame.progressSeq <= floor) return;
         const current = room.progress ?? {};
-        const prior = current[frame.sessionId];
-        if (!prior || frame.progressSeq > prior.progressSeq) {
-          room.progress = { ...current, [frame.sessionId]: frame };
-          changed(frame.roomId);
-        }
+        room.progress = { ...current, [frame.sessionId]: frame };
+        room.progressFloor = {
+          ...(room.progressFloor ?? {}),
+          [frame.sessionId]: frame.progressSeq,
+        };
+        changed(frame.roomId);
         return;
       }
       case 'seen': {
@@ -1760,6 +1859,34 @@ export function createRealtimeClient(options: RealtimeClientOptions): RealtimeCl
     },
     setTyping: (roomId, typing) => {
       command({ name: 'set_typing', roomId, typing });
+    },
+    recoverProgress: (roomId, snapshots) => {
+      if (snapshots.length === 0) return;
+      const room = view(roomId);
+      const floor = { ...(room.progressFloor ?? {}) };
+      let raised = false;
+      for (const { sessionId, progressSeq } of snapshots) {
+        const prior = floor[sessionId];
+        // Monotonic: only ever RAISE the floor. A stale snapshot re-read cannot pull a
+        // session back below a seq this client already applied live.
+        if (prior === undefined || progressSeq > prior) {
+          floor[sessionId] = progressSeq;
+          raised = true;
+        }
+        // If the live preview currently held for this session is OLDER than the durable
+        // snapshot, it is a frame the snapshot already superseded — drop it so the
+        // recovered snapshot (read by the consumer) is what shows, not a stale frame.
+        const held = room.progress?.[sessionId];
+        if (held !== undefined && held.progressSeq < progressSeq) {
+          const { [sessionId]: _superseded, ...rest } = room.progress ?? {};
+          room.progress = rest;
+          raised = true;
+        }
+      }
+      if (raised) {
+        room.progressFloor = floor;
+        changed(roomId);
+      }
     },
     onChange: (listener) => {
       changeListeners.add(listener);
