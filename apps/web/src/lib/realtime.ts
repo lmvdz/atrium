@@ -162,6 +162,39 @@ const Tombstone = z.object({
 /** One wire position: a readable event, or a tombstone for a row that is not (#46). */
 const WireEntry = z.union([Tombstone, Envelope]);
 
+/**
+ * A catch-up page entry this client could not parse at all — skipped, not fatal
+ * (#46 round 3).
+ *
+ * A page is an array, and round 2 parsed it with `z.array(WireEntry)`: one entry
+ * the client cannot read failed the WHOLE `catchup` frame at `ServerFrame.safeParse`,
+ * so the page was dropped and `handleFrame`'s stall counter never ran. The client
+ * re-requested the identical page on every `head` and hammered `since` forever, in
+ * silence — a single bad entry became an infinite loop. Parsing each entry with
+ * `.catch` turns an unreadable one into this sentinel instead: the good entries in
+ * the page still apply, and because a skipped entry carries no `roomSeq` to advance
+ * the cursor past, the page makes no progress across it — which `handleFrame` reads
+ * as a stall, so `maxStalledCatchups` fires and the loop is bounded rather than
+ * infinite. (A tombstone is the graceful case, for a row the SERVER could not read;
+ * this sentinel is the last-resort case, for a row THIS client cannot read — a
+ * forward-incompatible entry from a newer server, say.)
+ */
+const SKIPPED_CATCHUP_ENTRY = { skipped: true } as const;
+type SkippedCatchupEntry = typeof SKIPPED_CATCHUP_ENTRY;
+// A readable event or tombstone wins; anything this client cannot parse falls
+// through the trailing arm to the skip sentinel (order matters — the `any` arm is
+// last, so it only catches what `Tombstone`/`Envelope` refused).
+const CatchupEntry = z.union([
+  Tombstone,
+  Envelope,
+  z.any().transform((): SkippedCatchupEntry => SKIPPED_CATCHUP_ENTRY),
+]);
+
+/** Narrow a catch-up entry to the round-3 skip sentinel — an entry we could not read. */
+function isSkippedEntry(entry: RoomEntry | SkippedCatchupEntry): entry is SkippedCatchupEntry {
+  return 'skipped' in entry && entry.skipped === true;
+}
+
 /** A tombstone as this client holds it. */
 export type RoomTombstone = z.infer<typeof Tombstone>;
 
@@ -189,6 +222,14 @@ export const ServerFrame = z.discriminatedUnion('type', [
   }),
   z.object({ type: z.literal('unsubscribed'), roomId: z.string().min(1) }),
   z.object({ type: z.literal('event'), entry: Envelope }),
+  /**
+   * A malformed row on the LIVE path (#46 round 3), under its own discriminant so
+   * a live `event` frame stays a readable event. A subscriber live-at-head advances
+   * its cursor past the bad position the instant it is fanned out, instead of only
+   * recovering on the reconciler's next `head`→`since`. `applyEntry` renders it as
+   * nothing.
+   */
+  z.object({ type: z.literal('tombstone'), entry: Tombstone }),
   /**
    * "This room is at `head`" — unsolicited, from the server's reconciler.
    *
@@ -221,11 +262,17 @@ export const ServerFrame = z.discriminatedUnion('type', [
       to: z.number().int().min(0),
       head: z.number().int().min(0),
       more: z.boolean(),
-      entries: z.array(WireEntry),
+      // Per-entry tolerant (#46 round 3): one unreadable entry becomes a skip
+      // sentinel rather than sinking the whole page — see `CatchupEntry`.
+      entries: z.array(CatchupEntry),
     })
-    .refine((frame) => frame.entries.every((entry) => entry.roomId === frame.roomId), {
-      message: 'a catch-up page carries an entry for a different room',
-    }),
+    .refine(
+      (frame) =>
+        frame.entries.every((entry) => isSkippedEntry(entry) || entry.roomId === frame.roomId),
+      {
+        message: 'a catch-up page carries an entry for a different room',
+      },
+    ),
   z.object({
     type: z.literal('ack'),
     commandId: z.string(),
@@ -313,6 +360,18 @@ interface PendingMessageBase {
    * been unnecessary collapses into the message that already landed.
    */
   retryable?: boolean;
+  /**
+   * The ledger position the server's `ack` assigned this send, once it has one
+   * (#46 round 3).
+   *
+   * A confirming `event` retires a pending echo by `clientMessageId`, which the
+   * event carries. A #46 tombstone carries no `clientMessageId` — there is no
+   * readable payload to carry one — so a send whose durable row turns out to be
+   * malformed would never be retired and would sit `pending` forever. Recording the
+   * assigned `roomSeq` here lets a tombstone landing at that exact position resolve
+   * the echo by position instead. Absent until the ack arrives.
+   */
+  roomSeq?: number;
 }
 
 export type PendingMessage = PendingMessageBase &
@@ -1188,6 +1247,21 @@ export function createRealtimeClient(options: RealtimeClientOptions): RealtimeCl
     if (isTombstone(entry)) {
       room.lastSeq = entry.roomSeq;
       room.head = Math.max(room.head, entry.roomSeq);
+      // #46 round 3: if a message THIS client sent landed at this position and its
+      // durable row is the one that could not be read back, the tombstone is the
+      // only signal it will ever get — the confirming `event` that `reconcilePending`
+      // waits for is never coming. Retire the echo (matched by the `roomSeq` the ack
+      // recorded, since a tombstone carries no `clientMessageId`) as failed rather
+      // than leaving it spinning `pending` forever. Not retryable: the row is
+      // durably malformed and `clientMessageId` would dedup a resend onto it.
+      const stuck = room.pending.find(
+        (item) => item.roomSeq === entry.roomSeq && item.status === 'pending',
+      );
+      if (stuck) {
+        stuck.status = 'failed';
+        stuck.error = 'the message could not be read back from the ledger (malformed row)';
+        stuck.retryable = false;
+      }
       changed(entry.roomId);
       return;
     }
@@ -1332,6 +1406,12 @@ export function createRealtimeClient(options: RealtimeClientOptions): RealtimeCl
       case 'event':
         applyEntry(frame.entry);
         return;
+      case 'tombstone':
+        // #46 round 3: a malformed row on the live path. `applyEntry` advances the
+        // cursor past it and renders nothing — the same handling the catch-up page
+        // gives a tombstone, so live and catch-up agree.
+        applyEntry(frame.entry);
+        return;
       case 'head': {
         // The server's reconciler saying where the room actually is, with no
         // frame required to have arrived. Same arithmetic as everywhere else:
@@ -1355,7 +1435,25 @@ export function createRealtimeClient(options: RealtimeClientOptions): RealtimeCl
         // moved backwards would make the loop below ask for a gap that has
         // already been filled.
         room.head = Math.max(room.head, frame.head);
-        for (const entry of frame.entries) applyEntry(entry);
+        let skipped = 0;
+        for (const entry of frame.entries) {
+          // #46 round 3: an entry this client could not parse at all. Skipped —
+          // it carries no `roomSeq` to advance past — and reported, never applied.
+          // The hole it leaves is what the stall counter below turns into a bounded
+          // `maxStalledCatchups` failure instead of an infinite silent `since`.
+          if (isSkippedEntry(entry)) {
+            skipped += 1;
+            continue;
+          }
+          applyEntry(entry);
+        }
+        if (skipped > 0) {
+          fail(
+            `catch-up for room "${frame.roomId}" contained ${skipped} entr${
+              skipped === 1 ? 'y' : 'ies'
+            } this client could not read; they were skipped`,
+          );
+        }
 
         // The loop condition is this client's own arithmetic: am I at the head
         // I was told about? `more` is taken as a hint on top, not as the
@@ -1386,7 +1484,16 @@ export function createRealtimeClient(options: RealtimeClientOptions): RealtimeCl
         return;
       }
       case 'ack': {
+        const dispatched = inFlight.get(frame.commandId);
         inFlight.delete(frame.commandId);
+        // #46 round 3: remember the position the server assigned this send, so a
+        // tombstone that lands there (its durable row could not be read back) can
+        // retire the optimistic echo the confirming event never will.
+        if (dispatched && frame.roomSeq !== null) {
+          const room = view(dispatched.roomId);
+          const item = room.pending.find((p) => p.clientMessageId === dispatched.clientMessageId);
+          if (item) item.roomSeq = frame.roomSeq;
+        }
         if (frame.issues.length > 0) {
           fail(`the server accepted the command with issues: ${frame.issues.join('; ')}`);
         }

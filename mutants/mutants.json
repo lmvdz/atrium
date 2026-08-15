@@ -857,7 +857,7 @@
       "replace": "const parsed = { success: true as const, data: json as ServerFrame } as ReturnType<\n        typeof ServerFrame.safeParse\n      >;",
       "catches": [
         "does not move the cursor for an event whose envelope does not parse",
-        "refuses a catch-up page carrying one unreadable entry, and keeps the socket"
+        "skips one unreadable catch-up entry rather than sinking the page, and keeps the socket"
       ]
     },
     {
@@ -896,8 +896,8 @@
       "kind": "file",
       "why": "The client stops requiring a catch-up page entries to name the page room. handleFrame does its arithmetic against view(frame.roomId) while applyEntry files each entry under entry.roomId, so a page whose entries name another room moves one room journal on another room cursor. The same cross-check exists on the bus (EphemeralNote) and was missing on the socket — an asymmetry inside r7 own fix, found by a second lineage.",
       "file": "apps/web/src/lib/realtime.ts",
-      "find": "    .refine((frame) => frame.entries.every((entry) => entry.roomId === frame.roomId), {",
-      "replace": "    .refine(() => true, {",
+      "find": "        frame.entries.every((entry) => isSkippedEntry(entry) || entry.roomId === frame.roomId),",
+      "replace": "        frame.entries.every((entry) => isSkippedEntry(entry) || true),",
       "catches": ["refuses a catch-up page whose entries name a different room"]
     },
     {

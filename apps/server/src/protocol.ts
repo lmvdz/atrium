@@ -130,14 +130,27 @@ export interface WireTombstone {
  * One position as a `catchup` page carries it: a readable event, or a tombstone
  * for a row that is not (#46).
  *
- * Only the catch-up page carries the union. A live `event` frame stays a
- * `WireEvent` — a malformed row is skipped on the live fan-out, and the
- * subscriber closes the resulting gap the same way it closes any other: the
- * reconciler's `head` frame, or the next valid row, drives a `since`, and the
- * catch-up reply carries the tombstone that advances the cursor past the bad
- * position. Keeping the live frame narrow means every existing reader of
- * `event.entry.event` stays honest; the tombstone appears only where a cursor is
- * actually being walked forward over history.
+ * The catch-up page carries the union. On the LIVE path the two travel as separate
+ * frames — a readable row as `event` (a `WireEvent`), a malformed row as `tombstone`
+ * (a `WireTombstone`) — rather than one widened `event` frame. Round 2 skipped the
+ * marker on the live fan-out entirely, on the theory that the reconciler's
+ * `head`→`since` would close the gap; it does, but a whole reconcile interval late,
+ * and not at all if that one frame is lost. Round 3 carries it live so a subscriber
+ * advances the instant the row is folded. The distinct discriminant — rather than
+ * teaching every reader of `event.entry.event` to narrow on `malformed` — keeps a
+ * live `event` frame exactly what it always was.
+ *
+ * ## Rollout / old-client compatibility
+ *
+ * The live `tombstone` frame is new. A client from before round 3 has no `tombstone`
+ * case in its `ServerFrame` union, so it rejects the frame at parse and drops it —
+ * which corrupts nothing (a dropped frame advances no cursor) and recovers through
+ * the same `head`→`since` path round 2 relied on, where the catch-up page has
+ * carried the tombstone since round 2. So the change degrades safely: upgraded
+ * clients advance immediately, older ones fall back to the reconciler. No version
+ * handshake is negotiated on this socket, so a hard skew guard is not cheap here;
+ * the safe degradation above is the rollout contract. Deploy server and client
+ * together when you can, but a lagging client is not a correctness hazard.
  */
 export type WireEntry = WireEvent | WireTombstone;
 
@@ -147,6 +160,14 @@ export type ServerFrame =
   | { type: 'subscribed'; roomId: string; head: number; seenSeq: number }
   | { type: 'unsubscribed'; roomId: string }
   | { type: 'event'; entry: WireEvent }
+  /**
+   * A malformed row on the LIVE path (#46 round 3). Its own frame rather than a
+   * widened `event`, so a live `event` frame stays a readable event and the
+   * subscriber advances its cursor past the bad position immediately — instead of
+   * only recovering on the reconciler's next `head`→`since`. The client renders it
+   * as nothing; it exists to carry the cursor forward.
+   */
+  | { type: 'tombstone'; entry: WireTombstone }
   /**
    * "This room is at `head`." Unsolicited, from the reconciler.
    *

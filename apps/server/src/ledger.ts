@@ -623,6 +623,22 @@ export function actorToColumns(actor: Actor): { kind: Actor['kind']; id: string 
 /** One shared empty list, so a clean row costs no allocation on the fan-out path. */
 const EMPTY_ISSUES: readonly string[] = Object.freeze([]);
 
+/**
+ * The last instant a `Timestamp` can spell, in epoch ms (#46 round 3, Minor).
+ *
+ * `CANONICAL_TIMESTAMP` — and the `core_events_payload_at_is_canonical_utc` CHECK
+ * built from its source — matches a four-digit year, so `9999-12-31T23:59:59.999Z`
+ * is the newest `at` any row can legally hold, `Date#toISOString` rolls the next
+ * millisecond over to `+010000-01-01T…` (the expanded-year form the regex rejects).
+ * A malformed row can carry a canonical `occurred_at` right at this bound (its
+ * payload is unreadable, but the column is still CHECK-pinned to a canonical
+ * instant), which advances `lastAtMs` here — so the mint below is clamped to this
+ * value rather than allowed to produce a string the append guard would refuse as
+ * not-a-`RoomEvent`, which would be the server rejecting *its own* mint and turning
+ * the ledger globally read-only.
+ */
+const MAX_AT_MS = Date.parse('9999-12-31T23:59:59.999Z');
+
 export function createLedger({ db, logger, instanceId }: LedgerOptions): Ledger {
   let state: CoreState = emptyState();
   let lastSeq = 0;
@@ -794,6 +810,32 @@ export function createLedger({ db, logger, instanceId }: LedgerOptions): Ledger 
    */
   const reportedMalformed = new Set<number>();
 
+  /**
+   * Rows that parsed as a `RoomEvent` but the fold refused as `CoreEvent`-malformed,
+   * keyed by `seq` → the reason (#46 round 3).
+   *
+   * `catchUp` is the only place the two schemas are actually run against each other
+   * (the fold), so it is the only place a `RoomEvent`-that-is-not-a-`CoreEvent`
+   * could be discovered — `parseRow` cannot see it, because the row *did* parse as a
+   * `RoomEvent`. `catchUp` converts such a row to a marker and never folds it. The
+   * point of this map is that the cold-read doors (`since`, `catchUpPage`) and
+   * `replayCoreEvents`, which re-`parseRow` independently, consult it after
+   * `foldThrough` and apply the *same* conversion — so no door can render as a clean
+   * `event` a position another door tombstoned.
+   *
+   * **Currently a defense-in-depth invariant, not a live hazard.** The round-2
+   * gauntlet asserted the divergence was reachable because `ProposalRecorded` is
+   * `CoreProposalRecorded.extend({ sessionId })`; measured, it is not — zod strips
+   * the extra `sessionId` on `CoreEvent.safeParse` rather than refusing it, so a
+   * payload that parses as the `RoomEvent` variant also parses as the `CoreEvent`
+   * one, and the six `coreEventTypes` are otherwise @atrium/core's own schemas
+   * verbatim. This map therefore stays empty under the present schemas. It earns its
+   * place by making the doors provably consistent the day a future field makes the
+   * two schemas genuinely disagree (a required field, a refinement, a `.strict()`),
+   * instead of leaving that a latent cold-vs-live split to be rediscovered.
+   */
+  const coreMalformedReasonBySeq = new Map<number, string>();
+
   /** Log-and-count a malformed row, once per distinct `seq`. */
   function reportMalformed(entry: MalformedLedgerEntry): void {
     if (reportedMalformed.has(entry.seq)) return;
@@ -826,6 +868,32 @@ export function createLedger({ db, logger, instanceId }: LedgerOptions): Ledger 
   /** The one place a folded `LedgerEntry` acquires its verdict. */
   function withIssues(entry: FoldedLedgerEntry): FoldedLedgerEntry {
     return { ...entry, issues: issuesFor(entry.event.id) };
+  }
+
+  /**
+   * The conversion `catchUp` applies, applied at a read door (#46 round 3).
+   *
+   * A row already carried out as a `malformed` marker stays one. A folded row the
+   * fold refused as `CoreEvent`-malformed (recorded in `coreMalformedReasonBySeq`
+   * by `catchUp`, which every read door runs via `foldThrough` before mapping) is
+   * converted to the *same* marker a live subscriber saw, so a cold `since` /
+   * `catchUpPage` cannot render as a real event a position the live fan-out
+   * skipped. Everything else gets its verdict from `withIssues`. Call only after
+   * folding through the entry's `seq`.
+   */
+  function readDoorEntry(entry: LedgerEntry): LedgerEntry {
+    if (entry.kind === 'malformed') return entry;
+    const coreReason = coreMalformedReasonBySeq.get(entry.seq);
+    if (coreReason !== undefined) {
+      return {
+        kind: 'malformed',
+        seq: entry.seq,
+        roomSeq: entry.roomSeq,
+        roomId: entry.roomId,
+        reason: coreReason,
+      };
+    }
+    return withIssues(entry);
   }
 
   /**
@@ -1062,9 +1130,21 @@ export function createLedger({ db, logger, instanceId }: LedgerOptions): Ledger 
             // catch because the row *did* parse as a `RoomEvent`. It is still a
             // row no replay can fold, so it is reported and — MEDIUM 5 — the
             // matching entry is converted to a marker below rather than reaching
-            // `folded`/fan-out as a clean event. (In practice unreachable: the
-            // core kinds in `RoomEventVariants` are @atrium/core's own schemas, so
-            // a payload that parses as one parses as the other.)
+            // `folded`/fan-out as a clean event, and the seq is recorded so the
+            // cold-read doors (`since`/`catchUpPage`/`replayCoreEvents`) apply the
+            // identical conversion (round 3) — the doors are provably consistent, not
+            // consistent-by-inspection.
+            //
+            // Reachability, measured (round 3, correcting the r2 gauntlet): this
+            // branch is currently unreachable. The gauntlet argued `RoomEvent` can
+            // outrun `CoreEvent` because `ProposalRecorded` is
+            // `CoreProposalRecorded.extend({ sessionId })`, but zod STRIPS the extra
+            // `sessionId` on `CoreEvent.safeParse` rather than refusing it, so a
+            // payload that parses as the `RoomEvent` variant also parses as the
+            // `CoreEvent` one; the other five core kinds are @atrium/core's schemas
+            // verbatim. The conversion is kept — and now applied uniformly — as
+            // defense-in-depth for the day a field makes the two schemas actually
+            // disagree, not because a row can reach it today.
             const badId = (outcome.event as { id?: unknown }).id;
             if (typeof badId === 'string') coreMalformed.set(badId, outcome.detail);
             logger.warn(
@@ -1103,6 +1183,8 @@ export function createLedger({ db, logger, instanceId }: LedgerOptions): Ledger 
             roomId: entry.roomId,
             reason: `core: ${coreReason}`,
           };
+          // Recorded so the cold-read doors apply the same conversion (round 3).
+          coreMalformedReasonBySeq.set(entry.seq, marker.reason);
           reportMalformed(marker);
           folded.push(marker);
           continue;
@@ -1342,7 +1424,15 @@ export function createLedger({ db, logger, instanceId }: LedgerOptions): Ledger 
           const results: AppendResult[] = [];
 
           for (const build of request.builds) {
-            const atMs = Math.max(Date.now(), stagedAtMs + 1);
+            // Clamped to the last legal instant (#46 round 3): a malformed row at
+            // the max canonical `at` can push `stagedAtMs` to `MAX_AT_MS`, and an
+            // unclamped `+ 1` would mint `+010000-01-01T…`, which the append guard
+            // (`RoomEvent.safeParse`) refuses — the server rejecting its own mint
+            // and going globally read-only. Clamped, the mint stays a legal
+            // `Timestamp`; if it can no longer be strictly after the newest row the
+            // database's canonical-order gate refuses it as `out_of_order` with the
+            // ordinary retry message, not a guard throw.
+            const atMs = Math.min(MAX_AT_MS, Math.max(Date.now(), stagedAtMs + 1));
             const at = new Date(atMs).toISOString();
             const id = randomUUID();
             const built = build({ id, at });
@@ -1661,8 +1751,10 @@ export function createLedger({ db, logger, instanceId }: LedgerOptions): Ledger 
       await foldThrough(entries.at(-1)?.seq ?? 0);
       // #46: a malformed row is named in the answer (the marker rides through),
       // never thrown — `since(room, 0, 50)` resolves for a room with an
-      // unreadable row instead of rejecting every reconnect forever.
-      return entries.map((entry) => (entry.kind === 'malformed' ? entry : withIssues(entry)));
+      // unreadable row instead of rejecting every reconnect forever. Round 3:
+      // `readDoorEntry` also converts a row the fold refused as CoreEvent-malformed
+      // to the same marker the live path emitted, so cold and live agree.
+      return entries.map(readDoorEntry);
     },
     /**
      * The page and the head, read in **one transaction**.
@@ -1714,13 +1806,13 @@ export function createLedger({ db, logger, instanceId }: LedgerOptions): Ledger 
       await foldThrough(page.entries.at(-1)?.seq ?? 0);
       // #46: `to`/`head` are computed over *all* rows including malformed ones,
       // so a client's cursor advances past a bad row; the marker rides out in
-      // `entries` so the row is named rather than a silent hole. `withIssues`
-      // only touches folded entries.
+      // `entries` so the row is named rather than a silent hole. Round 3:
+      // `readDoorEntry` also converts a CoreEvent-malformed row to the marker the
+      // live path emitted, so the cold page and the live fan-out never disagree
+      // about whether a position is renderable.
       return {
         ...page,
-        entries: page.entries.map((entry) =>
-          entry.kind === 'malformed' ? entry : withIssues(entry),
-        ),
+        entries: page.entries.map(readDoorEntry),
       };
     },
     head: async (roomId) => {
@@ -1769,6 +1861,12 @@ export function createLedger({ db, logger, instanceId }: LedgerOptions): Ledger 
             reportMalformed(entry);
             continue;
           }
+          // #46 round 3: a row that parses as a `RoomEvent` but the fold refused as
+          // `CoreEvent`-malformed is excluded from replay too, so a replayed state
+          // is byte-for-byte the state `catchUp` folds (which converts it to a
+          // marker and never folds it). The set is populated by `catchUp`, which
+          // `hydrate` runs before any replay is asked for.
+          if (coreMalformedReasonBySeq.has(entry.seq)) continue;
           if (!isCoreEvent(entry.event)) continue;
           // The row's own snapshot, not a fresh read of `messages`. This is the
           // replay half of r3-delta blocking 2: the substrate a replay folds is

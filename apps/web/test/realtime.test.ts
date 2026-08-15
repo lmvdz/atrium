@@ -540,6 +540,112 @@ describe('a malformed position on the wire advances the cursor, renders nothing'
 });
 
 /**
+ * #46 round 3 — the tombstone now rides the LIVE `event` frame, not only catch-up.
+ *
+ * Round 2 filtered the marker off the live fan-out, so a client live-at-head in a
+ * quiet room only recovered when the reconciler's next `head` frame drove a
+ * `since` — one reconcile interval late, and not at all if that frame was lost.
+ * These assert a live-at-head client crosses a live tombstone immediately, with no
+ * `since` round-trip and no dependence on a `head` frame arriving.
+ */
+describe('a malformed position arrives live, not only in catch-up (#46 round 3)', () => {
+  it('advances a live-at-head client past a live tombstone and lands the next valid row', () => {
+    client.join(ROOM);
+    latest().deliver({ type: 'subscribed', roomId: ROOM, head: 1, seenSeq: 0 });
+    // Live-at-head: a first live event puts the client at the head with no gap.
+    latest().deliver({ type: 'event', entry: messageEvent(1, 'a') });
+    expect(client.lastSeq(ROOM)).toBe(1);
+
+    // A malformed row is appended while this client is subscribed and live-at-head.
+    // It rides the live path under its own `tombstone` discriminant.
+    const sinceBefore = latest().framesOfType('since').length;
+    latest().deliver({ type: 'tombstone', entry: tombstone(2) });
+
+    // Advanced the instant the row was fanned out — no `head` frame, no `since`.
+    expect(client.lastSeq(ROOM)).toBe(2);
+    expect(latest().framesOfType('since').length).toBe(sinceBefore);
+
+    // The next valid live row lands with no gap, precisely because the cursor
+    // crossed the tombstone rather than stalling one short behind it.
+    latest().deliver({ type: 'event', entry: messageEvent(3, 'c') });
+    expect(client.lastSeq(ROOM)).toBe(3);
+    expect(client.room(ROOM).events.map((e) => e.roomSeq)).toEqual([1, 3]);
+    // The tombstone itself rendered nothing and triggered no gap recovery.
+    expect(latest().framesOfType('since').length).toBe(sinceBefore);
+  });
+
+  it('renders nothing and confirms no pending echo for a live tombstone', () => {
+    client.join(ROOM);
+    latest().deliver({ type: 'subscribed', roomId: ROOM, head: 0, seenSeq: 0 });
+    latest().deliver({ type: 'tombstone', entry: tombstone(1) });
+    expect(client.lastSeq(ROOM)).toBe(1);
+    expect(client.room(ROOM).events).toEqual([]);
+    expect(client.room(ROOM).pending).toEqual([]);
+  });
+});
+
+/**
+ * #46 round 3 — one unreadable catch-up entry is skipped, not fatal to the page.
+ *
+ * Round 2 parsed the page with `z.array(WireEntry)`, so a single entry this client
+ * could not read failed the WHOLE `catchup` frame at `ServerFrame.safeParse`: the
+ * page was dropped, the stall counter never ran, and the client re-requested the
+ * same page on every `head` — an infinite silent `since`. The page is per-entry
+ * tolerant now: the good entries apply, the bad one is skipped and reported, and
+ * the hole it leaves is what makes `maxStalledCatchups` fire so the retry is
+ * bounded rather than forever.
+ */
+describe('one unreadable catch-up entry is skipped, not fatal to the page (#46 round 3)', () => {
+  // Neither a valid `Envelope` (no `at`/`type`, no `actor`) nor a `Tombstone` (no
+  // `malformed: true`) — the exact shape the union cannot classify.
+  const unreadable = { roomId: ROOM, roomSeq: 2, seq: 2, event: { id: 'e2' } };
+  function deliverRaw(frame: unknown): void {
+    latest().onmessage?.({ data: JSON.stringify(frame) });
+  }
+
+  it('applies the good entries and reports the bad one instead of dropping the whole page', () => {
+    client.join(ROOM);
+    latest().deliver({ type: 'subscribed', roomId: ROOM, head: 3, seenSeq: 0 });
+    deliverRaw({
+      type: 'catchup',
+      roomId: ROOM,
+      from: 0,
+      to: 3,
+      head: 3,
+      more: false,
+      entries: [messageEvent(1, 'a'), unreadable, messageEvent(3, 'c')],
+    });
+    // Round 2 dropped all three (whole-frame parse failure); now the good leading
+    // entry applied and the cursor advanced onto it.
+    expect(client.lastSeq(ROOM)).toBe(1);
+    expect(client.room(ROOM).events.map((e) => e.roomSeq)).toEqual([1]);
+    // The skip was surfaced, not swallowed.
+    expect(errors.some((message) => message.includes('could not read'))).toBe(true);
+  });
+
+  it('bounds the retry with maxStalledCatchups instead of hammering since forever', async () => {
+    const bounded = await clientWith({ maxStalledCatchups: 3 });
+    bounded.join(ROOM);
+    latest().deliver({ type: 'subscribed', roomId: ROOM, head: 3, seenSeq: 0 });
+    // The unreadable entry at seq 2 carries no room_seq to advance past, so the
+    // client can never cross it. Without the stall guard this is an infinite loop.
+    for (let round = 0; round < 20; round += 1) {
+      deliverRaw({
+        type: 'catchup',
+        roomId: ROOM,
+        from: 0,
+        to: 1,
+        head: 3,
+        more: true,
+        entries: [messageEvent(1, 'a'), unreadable],
+      });
+    }
+    expect(latest().framesOfType('since').length).toBeLessThanOrEqual(6);
+    expect(errors.some((message) => message.includes('stalled'))).toBe(true);
+  });
+});
+
+/**
  * Crash-safety of the cursor (#22 gauntlet r2 delta, major 1).
  *
  * The finding: the watermark advanced *after* the in-memory list was mutated, so
@@ -1357,7 +1463,12 @@ describe('a frame the client cannot read is refused, not written', () => {
     expect(errors.at(-1)).toContain('cannot read');
   });
 
-  it('refuses a catch-up page carrying one unreadable entry, and keeps the socket', () => {
+  it('skips one unreadable catch-up entry rather than sinking the page, and keeps the socket', () => {
+    // #46 round 3 changed this contract. Round 2 dropped the WHOLE page on any
+    // unreadable entry — which, for an entry that can never be crossed, was an
+    // infinite silent `since`. A page is per-entry tolerant now: the readable
+    // prefix applies, the bad entry is skipped and reported, and the hole it leaves
+    // is what the stall guard turns into a bounded failure (covered separately).
     raw({
       type: 'catchup',
       roomId: ROOM,
@@ -1367,21 +1478,21 @@ describe('a frame the client cannot read is refused, not written', () => {
       more: false,
       entries: [messageEvent(1, 'one'), { ...messageEvent(2, 'two'), roomSeq: -2 }],
     });
-    // The whole page, not the readable prefix: a page is one statement about a
-    // range, and applying half of it would move the cursor to a position the
-    // server never described.
-    expect(client.lastSeq(ROOM)).toBe(0);
-    expect(client.room(ROOM).events).toEqual([]);
+    // The good leading entry applied; the unreadable one (negative `roomSeq`, so
+    // neither a valid envelope nor a tombstone) was skipped, not applied.
+    expect(client.lastSeq(ROOM)).toBe(1);
+    expect(client.room(ROOM).events.map((e) => e.roomSeq)).toEqual([1]);
+    expect(errors.some((message) => message.includes('could not read'))).toBe(true);
 
-    // The socket is still live — one bad frame is not a reason to stop reading.
+    // The socket is still live — one bad entry is not a reason to stop reading.
     latest().deliver({
       type: 'catchup',
       roomId: ROOM,
-      from: 0,
+      from: 1,
       to: 2,
       head: 2,
       more: false,
-      entries: [messageEvent(1, 'one'), messageEvent(2, 'two')],
+      entries: [messageEvent(2, 'two')],
     });
     expect(client.lastSeq(ROOM)).toBe(2);
   });
@@ -1925,6 +2036,62 @@ describe('optimism is limited to your own message row', () => {
     // The collision is possible because the key is client-chosen; dropping the
     // row here would delete a message the person can still see they sent.
     expect(client.room(ROOM).pending).toHaveLength(1);
+  });
+
+  /**
+   * #46 round 3 — a message you sent whose durable row becomes malformed.
+   *
+   * The confirming `event` that `reconcilePending` waits on to retire the echo is
+   * never coming: the durable row could not be read back, so a tombstone lands at
+   * its position instead — and a tombstone carries no `clientMessageId` to match.
+   * Left as-is the echo spins `pending` forever. Matched by the `room_seq` the ack
+   * recorded, it is retired failed (not retryable — a resend would dedup onto the
+   * same malformed row).
+   */
+  it('retires a sent message whose durable row is malformed rather than leaving it pending', () => {
+    const clientMessageId = client.sendMessage(ROOM, 'this row will not read back');
+    const commandId = latest().sent.find((f) => f.type === 'command')?.commandId as string;
+    // Accepted and assigned room_seq 1 — the ack records the position.
+    latest().deliver({
+      type: 'ack',
+      commandId,
+      roomId: ROOM,
+      seq: 1,
+      roomSeq: 1,
+      eventId: 'e1',
+      issues: [],
+    });
+    expect(client.room(ROOM).pending[0]).toMatchObject({ clientMessageId, status: 'pending' });
+
+    // The durable row could not be read back: a tombstone lands at position 1.
+    latest().deliver({ type: 'tombstone', entry: tombstone(1) });
+
+    // The cursor crossed it, nothing rendered, and the echo is resolved failed.
+    expect(client.lastSeq(ROOM)).toBe(1);
+    expect(client.room(ROOM).events).toHaveLength(0);
+    const [pending] = client.room(ROOM).pending;
+    expect(pending).toMatchObject({ status: 'failed', retryable: false });
+    expect(pending?.error).toMatch(/malformed|could not be read/);
+  });
+
+  it('leaves a pending echo at another position untouched when a tombstone lands elsewhere', () => {
+    const keepId = client.sendMessage(ROOM, 'mine, at position 2');
+    const commandId = latest().sent.find((f) => f.type === 'command')?.commandId as string;
+    latest().deliver({
+      type: 'ack',
+      commandId,
+      roomId: ROOM,
+      seq: 2,
+      roomSeq: 2,
+      eventId: 'e2',
+      issues: [],
+    });
+    // A tombstone at position 1 — not this echo's assigned position (2).
+    latest().deliver({ type: 'tombstone', entry: tombstone(1) });
+    expect(client.room(ROOM).pending[0]).toMatchObject({
+      clientMessageId: keepId,
+      status: 'pending',
+    });
   });
 
   it('marks a rejected send failed and keeps the text', () => {

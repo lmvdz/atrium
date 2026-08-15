@@ -301,6 +301,91 @@ describe('#46 an append after a future-dated malformed row is not bricked', () =
 });
 
 /**
+ * #46 round 3 (Minor) — a malformed row at the MAXIMUM legal `at` does not brick
+ * the server's own mint.
+ *
+ * The mint watermark `lastAtMs` advances past every physical row, malformed
+ * included (BLOCKER 2). A malformed row can carry a canonical `occurred_at` right
+ * at the bound `Timestamp` admits — `9999-12-31T23:59:59.999Z` — so the next mint
+ * of `max(now, lastAtMs + 1)` would be `+010000-01-01T…`, an expanded-year form the
+ * `RoomEvent` append guard refuses: the server rejecting its OWN mint, on every
+ * append, globally (the watermark and the DB order gate are both process- and
+ * table-wide). The clamp keeps the mint a legal `Timestamp`; the DB's canonical
+ * gate then allows the append on the `id` tie-break at the same instant.
+ *
+ * The malformed row is planted with the minimal event id, so the freshly minted
+ * random id always sorts strictly after it on the `(at, id)` plateau and the gate
+ * accepts. Against the bug this test fails on the mint: a `nack` naming the
+ * `RoomEvent` guard, not an `ack`.
+ */
+describe('#46 a malformed row at the max legal timestamp does not brick the mint', () => {
+  const MAX_AT = '9999-12-31T23:59:59.999Z';
+  const MIN_ID = '00000000-0000-4000-8000-000000000000';
+
+  async function plantMalformedAtMax(): Promise<void> {
+    const payload = {
+      id: MIN_ID,
+      at: MAX_AT,
+      type: 'message_posted',
+      roomId: room.roomId,
+      messageId: randomUUID(),
+      body: '',
+      replyToId: null,
+      clientMessageId: null,
+      causeMessageId: null,
+      attachments: [],
+      references: [],
+    };
+    await handle.db.execute(
+      sql`ALTER TABLE "core_events" DISABLE TRIGGER "core_events_append_guard"`,
+    );
+    try {
+      await handle.db.insert(coreEvents).values({
+        roomId: room.roomId,
+        roomSeq: 1,
+        id: MIN_ID,
+        type: 'message_posted',
+        actorKind: 'human',
+        actorId: room.people.alice,
+        payload,
+        occurredAt: MAX_AT,
+      });
+    } finally {
+      await handle.db.execute(
+        sql`ALTER TABLE "core_events" ENABLE TRIGGER "core_events_append_guard"`,
+      );
+    }
+  }
+
+  it('mints a legal timestamp and the append is accepted rather than rejecting its own mint', async () => {
+    const alice = await connect(room.people.alice as string);
+    await post(alice, 'before the max-dated bad row');
+
+    // A malformed row at the very last instant a Timestamp can spell.
+    await plantMalformedAtMax();
+    // Fold it, advancing the global mint watermark to the maximum.
+    await server.ledger.sync();
+
+    // The append the bug bricks: unclamped, `lastAtMs + 1` mints `+010000-…`, which
+    // the server's own `RoomEvent` guard refuses. Clamped, the mint stays `MAX_AT`
+    // and wins the `(at, id)` tie-break over the minimal-id bad row.
+    const ack = await post(alice, 'after the max-dated bad row');
+    expect(ack.type).toBe('ack');
+
+    // It really landed, past the malformed row, with a legal `at`.
+    const fresh = createLedger({ db: handle.db, logger: createLogger('error') });
+    await expect(fresh.hydrate()).resolves.toBeUndefined();
+    expect(fresh.malformedCount()).toBe(1);
+    const page = await server.ledger.since(room.roomId, 0, 50);
+    const bodies = page
+      .filter((entry) => entry.kind === 'event')
+      .map((entry) => (entry.kind === 'event' ? entry.event : null))
+      .map((event) => (event && 'body' in event ? (event as { body: string }).body : null));
+    expect(bodies).toContain('after the max-dated bad row');
+  });
+});
+
+/**
  * grok's `trusted_messages` nuance, adjudicated end-to-end: a bad receipt window
  * on an event kind that never consults it does not discard the payload's fold.
  * The reducer reads the window for exactly one kind (`object_accepted`), so a
