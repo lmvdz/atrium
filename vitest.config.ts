@@ -32,6 +32,7 @@ export default defineConfig({
       'packages/ingest',
       'apps/server',
       'apps/web',
+      'apps/loop',
       'mutants',
     ],
   },

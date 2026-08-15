@@ -83,6 +83,7 @@
         "**/scripts/**",
         "design/*.mjs",
         "apps/server/src/**",
+        "apps/loop/src/**",
         "packages/core/mutants/**",
         "mutants/**"
       ],
@@ -90,6 +91,37 @@
         "rules": {
           "suspicious": {
             "noConsole": "off"
+          }
+        }
+      }
+    },
+    {
+      "includes": ["apps/loop/**"],
+      "linter": {
+        "rules": {
+          "style": {
+            "noRestrictedImports": {
+              "level": "error",
+              "options": {
+                "paths": {
+                  "@atrium/server": "apps/loop is a protocol-only client (#148) — it must not import apps/server internals. Talk to the server over the wire.",
+                  "@atrium/db": "apps/loop must not touch Atrium's schema (#148) — its durable state lives in its own journal file, outside the database.",
+                  "@atrium/auth": "apps/loop holds the agent cookie as an opaque string (#148) — it must not import @atrium/auth."
+                },
+                "patterns": [
+                  {
+                    "group": [
+                      "**/apps/server/**",
+                      "**/apps/web/**",
+                      "**/server/src/**",
+                      "**/server/dist/**",
+                      "**/web/src/**"
+                    ],
+                    "message": "apps/loop must not reach into another app's internals (#148 import ban) — it is a wire client, not a monorepo sibling with backstage access."
+                  }
+                ]
+              }
+            }
           }
         }
       }
