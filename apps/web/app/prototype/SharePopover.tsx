@@ -8,15 +8,18 @@
    prototype of the real share flow. */
 
 import { useState } from 'react';
+import { systemText } from '@/src/components/model/quotation';
+import type { ParticipantSummary } from '@/src/components/model/records';
+import { initials } from '@/src/components/model/text';
 import { IconClose } from './icons';
 import styles from './prototype.module.css';
-import { NO_AUTOFILL, type Participant } from './types';
+import { NO_AUTOFILL } from './types';
 
 export function SharePopover({
   people,
   onClose,
 }: {
-  people: readonly Participant[];
+  people: readonly ParticipantSummary[];
   onClose: () => void;
 }) {
   const [email, setEmail] = useState('');
@@ -64,21 +67,40 @@ export function SharePopover({
         </button>
       </form>
       <div className={styles.shareList}>
-        {people.map((p, i) => (
-          <div key={p.who} className={styles.shareRow}>
-            <span
-              className={`${styles.face} ${p.kind === 'human' ? styles.faceHuman : styles.faceAgent}`}
-              aria-hidden
-            >
-              {p.who.slice(0, 2)}
-            </span>
-            <span className={styles.shareName}>{p.who === 'you' ? 'you' : p.who}</span>
-            <span className={styles.grow} />
-            <span className={styles.shareRole}>
-              {i === 0 ? 'owner' : p.kind === 'agent' ? 'agent' : 'editor'}
-            </span>
-          </div>
-        ))}
+        {/* #156: the roster is real `ParticipantSummary` rows. The row's role is
+            read from the record — the viewer owns the thread, an agent is named
+            an agent, everyone else is an editor — never from list position. */}
+        {people.map((participant) => {
+          const name = systemText(participant.name, 'SharePopover name');
+          const role = participant.isViewer
+            ? 'owner'
+            : participant.kind === 'agent'
+              ? 'agent'
+              : participant.kind === 'unknown'
+                ? 'unknown'
+                : 'editor';
+          return (
+            <div key={participant.id} className={styles.shareRow}>
+              <span
+                className={`${styles.face} ${
+                  participant.kind === 'agent'
+                    ? styles.faceAgent
+                    : participant.kind === 'unknown'
+                      ? styles.facePending
+                      : styles.faceHuman
+                }`}
+                data-participant-kind={participant.kind}
+                data-presence={participant.presence}
+                aria-hidden
+              >
+                {initials(name)}
+              </span>
+              <span className={styles.shareName}>{name}</span>
+              <span className={styles.grow} />
+              <span className={styles.shareRole}>{role}</span>
+            </div>
+          );
+        })}
         {invited.map((e) => (
           <div key={e} className={styles.shareRow}>
             <span className={`${styles.face} ${styles.facePending}`} aria-hidden>

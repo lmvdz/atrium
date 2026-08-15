@@ -11,39 +11,66 @@
    wired by #157. */
 
 import { useState } from 'react';
+import { systemText } from '@/src/components/model/quotation';
+import type { ParticipantSummary } from '@/src/components/model/records';
+import { initials } from '@/src/components/model/text';
 import { IconBase, IconPlay } from './icons';
 import { ProviderMark } from './ProviderMark';
 import styles from './prototype.module.css';
 import { SharePopover } from './SharePopover';
-import { participantsFor, type StreamState, sessionFor, threadHeadFor } from './seams';
+import { participantsFor, type StreamState, statusStripFor, threadHeadFor } from './seams';
 import type { Selection } from './types';
+
+/* THE FACES ROW — a `ParticipantSummary` per member, kind-aware and presence-
+   carrying, following the shipped `frame/RoomHead`/`Rail` grammar: the monogram
+   is `initials()`, an agent's chip says so (`faceAgent`), and each face states
+   its kind and presence as data so a fixture change moves the rendered state.
+   Extracted so it can be rendered against a projected roster in a test. */
+export function Faces({ people }: { people: readonly ParticipantSummary[] }) {
+  return (
+    <div className={styles.chatFaces}>
+      {people.map((participant) => {
+        const name = systemText(participant.name, 'ChatTopBar face');
+        const isAgent = participant.kind === 'agent';
+        const isUnknown = participant.kind === 'unknown';
+        const kindClass = isAgent
+          ? styles.faceAgent
+          : isUnknown
+            ? styles.facePending
+            : styles.faceHuman;
+        const label = isAgent ? `${name} — agent` : isUnknown ? `${name} — unknown` : name;
+        return (
+          <span
+            key={participant.id}
+            className={`${styles.face} ${kindClass}`}
+            data-participant-kind={participant.kind}
+            data-presence={participant.presence}
+            title={label}
+            aria-label={label}
+          >
+            {initials(name)}
+          </span>
+        );
+      })}
+    </div>
+  );
+}
 
 /* CHAT TOP BAR — the thread's header: its title, the faces of everyone on it, and
    share. Contained to the chat column, sharing the chat's L/R gutters. */
 export function ChatTopBar({ selected }: { selected: Selection }) {
-  // SEAM(#156): bind head + participants to `frame/RoomHead` + `ParticipantSummary`.
+  // #156: head is a real `RoomHeadRecord`; participants are real `ParticipantSummary` rows.
   const head = threadHeadFor(selected);
   const people = participantsFor(selected);
   const [shareOpen, setShareOpen] = useState(false);
   return (
     <div className={styles.chatTop}>
       <div className={styles.chatTopId}>
-        <span className={styles.chatTopName}>{head.title}</span>
-        <span className={styles.chatTopSub}>{head.sub}</span>
+        <span className={styles.chatTopName}>{systemText(head.topic, 'ChatTopBar topic')}</span>
+        <span className={styles.chatTopSub}>#{systemText(head.name, 'ChatTopBar room')}</span>
       </div>
       <span className={styles.grow} />
-      <div className={styles.chatFaces}>
-        {people.map((p) => (
-          <span
-            key={p.who}
-            className={`${styles.face} ${p.kind === 'human' ? styles.faceHuman : styles.faceAgent}`}
-            title={p.who}
-            aria-label={p.who}
-          >
-            {p.who.slice(0, 2)}
-          </span>
-        ))}
-      </div>
+      <Faces people={people} />
       <div className={styles.shareWrap}>
         <button
           type="button"
@@ -68,13 +95,8 @@ export function ChatTopBar({ selected }: { selected: Selection }) {
 /* THREAD STATUS BAR — the bottom strip: branch · base · diff · model · host · run.
    Sits inside the thread, so it shares the chat's L/R gutters. */
 export function ThreadStatus({ selected, stream }: { selected: Selection; stream: StreamState }) {
-  // SEAM(#156): bind branch/base/diff/model/host to the real session projection.
-  const { agent, session } = sessionFor(selected);
-  const live = session.id === 's-live';
-  const added = live ? stream.added : Math.round(session.spendMicros / 90_000) + 3;
-  const removed = live ? stream.removed : (session.ageMin % 4) + 1;
-  const branch = session.branch.split('/').pop() ?? session.branch;
-  const running = session.status === 'running';
+  // #156: the branch/base/diff/model/host strip, assembled by a client projection.
+  const strip = statusStripFor(selected, stream);
   return (
     <footer className={styles.status}>
       <span className={styles.statItem}>
@@ -84,21 +106,21 @@ export function ThreadStatus({ selected, stream }: { selected: Selection; stream
           <circle cx="18" cy="6" r="2.4" stroke="currentColor" strokeWidth="1.8" />
           <path d="M6 8.4v7.2M18 8.4c0 4-4 4-8.6 4.2" stroke="currentColor" strokeWidth="1.8" />
         </svg>
-        <span className={styles.statBranch}>{branch}</span>
+        <span className={styles.statBranch}>{systemText(strip.branch, 'ThreadStatus branch')}</span>
       </span>
       <span className={styles.statSep} aria-label="based on">
         <IconBase size={13} />
       </span>
-      <span className={styles.statDim}>main</span>
+      <span className={styles.statDim}>{systemText(strip.base, 'ThreadStatus base')}</span>
       <span className={styles.statDiff}>
-        <span className={styles.statAdd}>+{added}</span>
-        <span className={styles.statDel}>−{removed}</span>
+        <span className={styles.statAdd}>+{strip.added}</span>
+        <span className={styles.statDel}>−{strip.removed}</span>
       </span>
-      {running ? <span className={`${styles.statDot} atr-pulse`} aria-hidden /> : null}
+      {strip.running ? <span className={`${styles.statDot} atr-pulse`} aria-hidden /> : null}
       <span className={styles.grow} />
       <span className={styles.statItem}>
-        <ProviderMark model={session.model} />
-        {session.model}
+        <ProviderMark model={strip.model} />
+        {systemText(strip.model, 'ThreadStatus model')}
       </span>
       <span className={styles.statSep}>·</span>
       <span className={styles.statItem}>
@@ -114,7 +136,7 @@ export function ThreadStatus({ selected, stream }: { selected: Selection; stream
           />
           <path d="M8 20h8" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" />
         </svg>
-        {agent.host}
+        {systemText(strip.host, 'ThreadStatus host')}
       </span>
       {/* SEAM(#157): the run ▶ affordance dispatches through a gated door (dispatch/run). */}
       <button className={styles.statRun} type="button" title="run" aria-label="run">

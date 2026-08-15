@@ -5,6 +5,7 @@
    projection over a `model` string, with no more-evolved shipped equivalent to
    defer to. It stays as the design shipped it. */
 
+import { systemText } from '@/src/components/model/quotation';
 import { IconAnthropic, IconDot, IconOpenAI, IconXai } from './icons';
 import styles from './prototype.module.css';
 
@@ -29,7 +30,11 @@ export function ProviderMark({ model, title }: { model: string; title?: string }
           ? styles.pXai
           : styles.pOther;
   return (
-    <span className={`${styles.pMark} ${cls}`} title={title ?? model} aria-label={p}>
+    <span
+      className={`${styles.pMark} ${cls}`}
+      title={systemText(title ?? model, 'ProviderMark')}
+      aria-label={p}
+    >
       {p === 'anthropic' ? (
         <IconAnthropic />
       ) : p === 'openai' ? (

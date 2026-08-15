@@ -18,6 +18,12 @@
  * with its real source; the component that consumes it never changes shape.
  * ═════════════════════════════════════════════════════════════════════════ */
 
+import type {
+  MemberChip,
+  ParticipantSummary,
+  Presence,
+  RoomHeadRecord,
+} from '@/src/components/model/records';
 import {
   type DiffLine,
   INVOICE_DIFF,
@@ -27,7 +33,7 @@ import {
   type StreamState,
   useMockPRStream,
 } from './mock';
-import type { Artifact, ChatMsg, Participant, Selection } from './types';
+import type { Artifact, ChatMsg, Selection } from './types';
 
 export type { StreamState } from './mock';
 
@@ -268,27 +274,129 @@ export function sessionFor(sel: Selection) {
     : { agent: MOCK_AGENTS[0]!, session: MOCK_AGENTS[0]!.plans[0]!.sessions[0]! };
 }
 
-/* SEAM(#156): bind to the real thread identity (title + room).
-   the thread's identity — its title and the room it lives in. */
-export function threadHeadFor(sel: Selection): { title: string; sub: string } {
+/* #156: BIND THE THREAD HEAD TO `RoomHeadRecord` (the shipped `frame/RoomHead`
+   shape), not an ad-hoc `{title, sub}`. The room is the record's `name`, the
+   plan is its `topic`, and the faces are `MemberChip`s carrying each member's
+   KIND — so the head can tell a person from an agent the way `RoomHead` does,
+   instead of stamping every face the same. */
+export function threadHeadFor(sel: Selection): RoomHeadRecord {
   const { agent, session } = sessionFor(sel);
   const plan =
     agent.plans.find((p) => p.sessions.some((s) => s.id === session.id)) ?? agent.plans[0];
-  return { title: plan?.title ?? session.branch, sub: `#${agent.room}` };
+  const members: readonly MemberChip[] = participantsFor(sel).map((participant) => ({
+    name: participant.name,
+    kind: participant.kind,
+  }));
+  return { name: agent.room, topic: plan?.title ?? session.branch, members };
 }
 
-/* SEAM(#156): bind to real room presence (`ParticipantSummary`/`Rail`).
-   who is on this thread — the human, the agents that have spoken, plus the live
-   collaborator. Derived from the conversation, so avatars match the room. */
-export function participantsFor(sel: Selection): Participant[] {
-  const seen = new Map<string, Participant['kind']>();
-  seen.set('you', 'human');
-  for (const m of conversationFor(sel)) {
-    if (m.kind === 'system' || !m.who) continue;
-    if (!seen.has(m.who)) seen.set(m.who, m.kind);
+/* The presence a session's lifecycle status implies for the agent holding it.
+   An agent running a session is HERE the same way a person is; a settled/open
+   one is idle; a failed one has stepped away. This is the seam where real
+   presence over `src/lib/realtime.ts` lands — until then it is derived from the
+   control-plane status the tree already carries, and it MOVES when that status
+   does (flip-the-input: change a session's status, the face's presence moves). */
+function agentPresence(agent: MockAgent): Presence {
+  const statuses = agent.plans.flatMap((plan) => plan.sessions.map((session) => session.status));
+  if (statuses.includes('running')) return 'here';
+  if (statuses.includes('open') || statuses.includes('settled')) return 'idle';
+  return 'away';
+}
+
+/** The live collaborator's presence — the one field a realtime channel drives.
+    A module constant standing in for that channel; flipping it moves the face. */
+export const COLLABORATOR_PRESENCE: Presence = 'here';
+
+/* #156: PROJECT REAL `ParticipantSummary` ROWS — the shipped roster/RoomHead
+   shape (`{id, kind, name, presence, note, isViewer}`), kind-aware and
+   presence-carrying — rather than the old `{who, kind}` string derivation.
+
+   Pure and injectable so the projection can be flipped in a test: hand it a
+   tree whose session status differs and the agent's presence moves with it. */
+export function projectParticipants(input: {
+  readonly agents: readonly MockAgent[];
+  /** who has spoken on this thread, in order — from the conversation seam */
+  readonly spokenNames: readonly string[];
+  readonly collaborator: { readonly name: string; readonly presence: Presence };
+}): readonly ParticipantSummary[] {
+  const out: ParticipantSummary[] = [
+    { id: 'you', kind: 'human', name: 'you', presence: 'here', note: null, isViewer: true },
+  ];
+  const seen = new Set<string>(['you']);
+  for (const name of input.spokenNames) {
+    if (seen.has(name)) continue;
+    seen.add(name);
+    const agent = input.agents.find((candidate) => candidate.name === name);
+    /* A speaker we can resolve to an agent IS an agent, with the presence its
+       sessions imply. One we cannot is `unknown` — the fail-closed kind, never
+       softened to a person — and presence `away`, since nothing here says it is
+       present. Both mirror `model/kind.ts`'s allowlist. */
+    out.push(
+      agent === undefined
+        ? { id: name, kind: 'unknown', name, presence: 'away', note: null, isViewer: false }
+        : {
+            id: agent.id,
+            kind: 'agent',
+            name: agent.name,
+            presence: agentPresence(agent),
+            note: null,
+            isViewer: false,
+          },
+    );
   }
-  seen.set('dane', 'human'); // the collaborator currently typing
-  return [...seen].map(([who, kind]) => ({ who, kind }));
+  if (!seen.has(input.collaborator.name)) {
+    out.push({
+      id: input.collaborator.name,
+      kind: 'human',
+      name: input.collaborator.name,
+      presence: input.collaborator.presence,
+      note: null,
+      isViewer: false,
+    });
+  }
+  return out;
+}
+
+/* SEAM(#156): who is on this thread, as real `ParticipantSummary` rows — the
+   viewer, the agents that have spoken (with live presence), and the live
+   collaborator. Derived from the conversation, so the roster matches the room. */
+export function participantsFor(sel: Selection): readonly ParticipantSummary[] {
+  const spokenNames = conversationFor(sel)
+    .filter((message) => message.kind !== 'system' && message.who !== undefined)
+    .map((message) => message.who as string);
+  return projectParticipants({
+    agents: MOCK_AGENTS,
+    spokenNames,
+    collaborator: { name: 'dane', presence: COLLABORATOR_PRESENCE },
+  });
+}
+
+/* #156: THE BRANCH/MODEL STATUS STRIP has no single shipped source, so it is a
+   small CLIENT PROJECTION over the tree + live-stream facts — branch and base,
+   the diff counts, the model and the host — assembled here rather than computed
+   inline in the footer. No server change: every field is already on the rows. */
+export interface StatusStrip {
+  readonly branch: string;
+  readonly base: string;
+  readonly model: string;
+  readonly host: string;
+  readonly added: number;
+  readonly removed: number;
+  readonly running: boolean;
+}
+
+export function statusStripFor(sel: Selection, stream: StreamState): StatusStrip {
+  const { agent, session } = sessionFor(sel);
+  const live = session.id === 's-live';
+  return {
+    branch: session.branch.split('/').pop() ?? session.branch,
+    base: 'main',
+    model: session.model,
+    host: agent.host,
+    added: live ? stream.added : Math.round(session.spendMicros / 90_000) + 3,
+    removed: live ? stream.removed : (session.ageMin % 4) + 1,
+    running: session.status === 'running',
+  };
 }
 
 /* ── the artifact seam (#155) ─────────────────────────────────────────────
