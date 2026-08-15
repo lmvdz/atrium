@@ -1551,3 +1551,24 @@ validate at EVERY boundary, the same lesson as #122/#127/#128. (4) A weak red-on
 witness (one that reds via a downstream rule, not your guard) is a false witness; the
 builder caught its own and wired a permissive verifier so the guard is provably
 load-bearing.
+
+## #146 — the funding + settle surfaces (closed 2026-08-14, 1 round + honesty fixes)
+
+Opus built it; both foreign lineages + a live page-drive gauntleted it. All three
+confirmed the cardinal covenant line at once: NO machine can reach set_plan_rlimit
+(server rejects a non-human before append; the client hold is friction, the socket's
+authenticated identity authorizes). The build also caught a load-bearing error in the
+orchestrator's brief: funding must NOT route through the certify path (a Next Server
+Action writing columns directly) — that would bypass the #115 spend gate entirely; it
+correctly used the WS command path where the gate lives.
+
+Process lessons: (1) a spend surface has two ways to lie, and the gauntlet found both —
+authorizing a DIFFERENT amount than displayed (parseInt coercion: '1e2'→1, '3.5'→3),
+and a code comment claiming a DB guarantee that doesn't exist (the trigger freezes only
+settled plans; the real guard is the app-level #115 gate). Neither is a covenant breach
+— both are 'the surface says more than the truth', the campaign's other core enemy.
+(2) Number() is not integer validation — Number('1e2')=100 and Number('')=0 pass
+isInteger; a digit-shape regex is required so the input can never fund a number the
+human didn't literally read. The builder caught this past the brief. (3) A live
+page-DRIVING critic remains worth its cost on a taste/spend surface — it confirmed the
+hold can't fire on a click and the affordance is invisible to an agent, by executing.
