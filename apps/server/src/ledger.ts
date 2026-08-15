@@ -14,8 +14,33 @@ import {
 } from '@atrium/core';
 import { commandReceipts, coreEvents, type Database } from '@atrium/db';
 import { and, asc, eq, gt, gte, inArray, lte, sql } from 'drizzle-orm';
+import { z } from 'zod';
 import type { Logger } from './logger.js';
 import { declaredRoomId, isCoreEvent, RoomEvent } from './room-events.js';
+
+/**
+ * The receipt-window column, read back through a schema rather than trusted
+ * (#46, r7 addendum 2).
+ *
+ * `trusted_messages` is a durable `jsonb` column, and the write path constrains
+ * only its *shape* via a CHECK — the same asymmetry #46 is about, one column
+ * over. A row whose window does not match `ProvenanceMessage[]` cannot be folded
+ * safely (for a model `object_accepted` the window is exactly what the receipt
+ * is checked against), so a column that fails this is treated as a malformed row
+ * on read, consistent with what a malformed `payload` gets, rather than folded
+ * under a window nobody can vouch for.
+ */
+const TrustedWindow = z
+  .array(z.object({ id: z.string(), authorId: z.string(), body: z.string() }))
+  .nullable();
+
+/** The first ~500 chars of a zod failure, as `path: message; …`. Bounded so a log line stays a log line. */
+function describeParseFailure(error: z.ZodError): string {
+  const detail = error.issues
+    .map((issue) => `${issue.path.join('.') || '<root>'}: ${issue.message}`)
+    .join('; ');
+  return detail.length > 500 ? `${detail.slice(0, 500)}…` : detail;
+}
 
 /**
  * The durable ledger, and the single writer in front of it.
@@ -255,8 +280,18 @@ export class CommandError extends Error {
   }
 }
 
-/** One row of the ledger, as everything downstream sees it. */
-export interface LedgerEntry {
+/**
+ * One *readable* row of the ledger, as everything downstream sees it.
+ *
+ * The `kind` discriminant exists because of #46: a row whose payload no longer
+ * parses as a `RoomEvent` cannot become one of these — there is no honest
+ * `event` to put in it — and the read path must not throw when it meets one. So
+ * `LedgerEntry` is a union, and a row that cannot be read comes back as a
+ * `MalformedLedgerEntry` marker instead. This is the folded arm.
+ */
+export interface FoldedLedgerEntry {
+  /** Discriminant. A row that parsed and can carry a real event. */
+  kind: 'event';
   /** Global position — the total order the core's cursor lives in. */
   seq: number;
   /** Per-room position — the `since(room, room_seq)` cursor. */
@@ -302,7 +337,62 @@ export interface LedgerEntry {
   issues: readonly string[];
 }
 
-export interface AppendResult extends LedgerEntry {
+/**
+ * A row that could not be read back as a `RoomEvent` — the #46 marker.
+ *
+ * ## Why this exists rather than a throw
+ *
+ * The write path validates the CHECKs and nothing else, so SQL runs no zod: a
+ * `message_posted` with `body: ""` (a `z.string().min(1)` violation) lands
+ * durably through a bad migration, a manual fix, or any future non-participant
+ * writer. Until #46 the read path called `RoomEvent.parse`, which **throws** on
+ * such a row — and because `hydrate` folds the whole ledger before serving and
+ * `since` walks it on every reconnect, one unreadable row took the room down on
+ * every subsequent hydration, forever, for every client, with no path back
+ * except editing the log by hand.
+ *
+ * The decision (recorded on #46) is **skip-and-report**: the row is never folded
+ * — a payload that cannot parse was never consumable, so excluding it is the
+ * correct fold, not a corruption of it — and it travels out as this marker so an
+ * operator sees which row and why, and so a client's `room_seq` cursor can
+ * advance *past* it (the position is real; only the payload is not) rather than
+ * reading a hole it re-requests forever.
+ *
+ * It carries no `event`, no `actor` and no `issues`: there is nothing trustworthy
+ * to fold, and fabricating a placeholder event would be exactly the laundering
+ * this marker exists to refuse.
+ */
+export interface MalformedLedgerEntry {
+  /** Discriminant. A row that exists but cannot be read as an event. */
+  kind: 'malformed';
+  /** Global position — real; the row is durable, only its payload is not. */
+  seq: number;
+  /** Per-room position — real, and what lets a client advance its cursor past it. */
+  roomSeq: number;
+  roomId: string;
+  /** The parse-failure detail: which field failed and why. Never a fabricated event. */
+  reason: string;
+}
+
+/**
+ * One row of the ledger, readable or not. Downstream code that folds or renders
+ * an event must narrow on `kind` first — `isFoldedEntry` / `isMalformedEntry`
+ * below — which is the whole point of making the marker a peer of the folded
+ * entry rather than a laundered variant of it.
+ */
+export type LedgerEntry = FoldedLedgerEntry | MalformedLedgerEntry;
+
+/** Narrow a `LedgerEntry` to the folded arm — the one that carries an event. */
+export function isFoldedEntry(entry: LedgerEntry): entry is FoldedLedgerEntry {
+  return entry.kind === 'event';
+}
+
+/** Narrow a `LedgerEntry` to the #46 malformed marker. */
+export function isMalformedEntry(entry: LedgerEntry): entry is MalformedLedgerEntry {
+  return entry.kind === 'malformed';
+}
+
+export interface AppendResult extends FoldedLedgerEntry {
   /** The reducer's verdict, or `null` for a ledger-only event. */
   outcome: EventOutcome | null;
 }
@@ -425,6 +515,14 @@ export interface Ledger {
   serialize: () => string;
   /** Global position of the last row this process has folded. */
   lastSeq: () => number;
+  /**
+   * How many distinct malformed rows this process has met and reported (#46).
+   *
+   * The operator-facing metric behind the WARN log: non-zero means the ledger
+   * holds a row no reader can fold, which stayed survivable rather than taking
+   * the room down. Deduped by `seq`, so it counts rows, not encounters.
+   */
+  malformedCount: () => number;
   append: <T extends RoomEvent>(request: AppendRequest<T>) => Promise<AppendResult>;
   appendBatch: (request: AppendBatchRequest) => Promise<AppendBatchResult>;
   /**
@@ -566,15 +664,50 @@ export function createLedger({ db, logger, instanceId }: LedgerOptions): Ledger 
     actorId: string | null;
     trustedMessages: ProvenanceMessage[] | null;
   }): LedgerRow {
-    // A payload that does not parse means the ledger disagrees with the code
-    // reading it. There is no safe way to skip it: skipping changes the fold.
-    const event = RoomEvent.parse(row.payload);
+    const seq = Number(row.seq);
+    const roomSeq = Number(row.roomSeq);
+    // #46: a payload that does not parse used to `throw` here, which took the
+    // whole room down on every hydration forever. It is now reported, not fatal:
+    // the row comes back as a `malformed` marker instead of a folded event. It is
+    // never fed to the reducer (a row that cannot parse was never consumable), so
+    // excluding it is the correct fold — see `catchUp`.
+    const parsed = RoomEvent.safeParse(row.payload);
+    if (!parsed.success) {
+      return {
+        entry: {
+          kind: 'malformed',
+          seq,
+          roomSeq,
+          roomId: row.roomId,
+          reason: `payload: ${describeParseFailure(parsed.error)}`,
+        },
+        trustedMessages: null,
+      };
+    }
+    // r7 addendum 2: the receipt window is a durable column the write path
+    // constrains only in shape. Read it through the schema too; a window that
+    // does not parse makes the row malformed on read, consistent with `payload`,
+    // rather than folding under a window nobody can vouch for.
+    const window = TrustedWindow.safeParse(row.trustedMessages);
+    if (!window.success) {
+      return {
+        entry: {
+          kind: 'malformed',
+          seq,
+          roomSeq,
+          roomId: row.roomId,
+          reason: `trusted_messages: ${describeParseFailure(window.error)}`,
+        },
+        trustedMessages: null,
+      };
+    }
     return {
       entry: {
-        seq: Number(row.seq),
-        roomSeq: Number(row.roomSeq),
+        kind: 'event',
+        seq,
+        roomSeq,
         roomId: row.roomId,
-        event,
+        event: parsed.data,
         actor: actorFromColumns(row.actorKind, row.actorId),
         // Filled by `withIssues` on the way out, never here: `catchUp` parses a
         // page *before* it folds it, so a verdict read at parse time is the
@@ -582,12 +715,35 @@ export function createLedger({ db, logger, instanceId }: LedgerOptions): Ledger 
         // refusal as clean.
         issues: EMPTY_ISSUES,
       },
-      trustedMessages: row.trustedMessages,
+      trustedMessages: window.data,
     };
   }
 
-  /** The one place a `LedgerEntry` acquires its verdict. */
-  function withIssues(entry: LedgerEntry): LedgerEntry {
+  /**
+   * Malformed rows seen so far this process, deduped by `seq` (#46).
+   *
+   * The metric an operator watches, and the dedup that keeps the WARN log from
+   * repeating on every `since`/`sync` that walks the same bad row: `catchUp`
+   * advances `lastSeq` past a malformed row exactly as past a folded one, so it
+   * reports each at most once — and `foldThrough`, which every read path calls
+   * before answering, funnels every first encounter through `catchUp`.
+   */
+  const reportedMalformed = new Set<number>();
+
+  /** Log-and-count a malformed row, once per distinct `seq`. */
+  function reportMalformed(entry: MalformedLedgerEntry): void {
+    if (reportedMalformed.has(entry.seq)) return;
+    reportedMalformed.add(entry.seq);
+    logger.warn('ledger row does not parse — skipped and reported, not folded (#46)', {
+      seq: entry.seq,
+      roomSeq: entry.roomSeq,
+      roomId: entry.roomId,
+      reason: entry.reason,
+    });
+  }
+
+  /** The one place a folded `LedgerEntry` acquires its verdict. */
+  function withIssues(entry: FoldedLedgerEntry): FoldedLedgerEntry {
     return { ...entry, issues: issuesFor(entry.event.id) };
   }
 
@@ -784,9 +940,11 @@ export function createLedger({ db, logger, instanceId }: LedgerOptions): Ledger 
       if (rows.length === 0) break;
 
       const parsed = rows.map(parseRow);
-      const entries = parsed.map((row) => row.entry);
       const core = [];
       for (const row of parsed) {
+        // #46: a malformed row is never folded. It was never a consumable event,
+        // so excluding it is the correct fold, not a skip that changes one.
+        if (row.entry.kind === 'malformed') continue;
         if (!isCoreEvent(row.entry.event)) continue;
         // From the row's own columns. No read of `messages` on any fold path —
         // see the module note on r3-delta blocking 2.
@@ -804,17 +962,8 @@ export function createLedger({ db, logger, instanceId }: LedgerOptions): Ledger 
         // replay reproduces. Since r3 the `rejected` half is refused in SQL — the
         // canonical-order gate and `core_events_id_key` are exactly
         // `out_of_order` and `duplicate` — so reaching *that* branch means
-        // something wrote around the boundary.
-        //
-        // The `malformed` branch below is different and the difference is worth
-        // stating rather than implying (#22 gauntlet r6, major 2's sweep): SQL
-        // runs no zod, so nothing in the database refuses a payload that
-        // `RoomEvent.parse` will. A row like that is reachable by any writer, and
-        // by one ordinary path too — #46 is the `body: ""` case, where a
-        // `z.string().min(1)` violation lands durably and then takes this room's
-        // catch-up down. So this throw is not "somebody wrote around the
-        // boundary"; it is "the boundary cannot see this class", which is the
-        // reason #46 exists.
+        // something wrote around the boundary. It stays fatal, on purpose (#46
+        // keeps the rejected half as it was).
         for (const outcome of result.outcomes) {
           if (outcome.outcome === 'rejected') {
             throw new Error(
@@ -822,14 +971,30 @@ export function createLedger({ db, logger, instanceId }: LedgerOptions): Ledger 
             );
           }
           if (outcome.outcome === 'malformed') {
-            throw new Error(
-              `ledger integrity: a row in core_events does not parse as a CoreEvent (${outcome.detail}) — the ledger contains a payload no replay can fold`,
+            // #46 deleted the throw that used to be here. A row this deep is one
+            // whose payload passed `RoomEvent` yet `CoreEvent.parse` refused —
+            // the two schemas disagreeing, which `parseRow`'s safe-skip does not
+            // catch because the row *did* parse as a `RoomEvent`. It is still a
+            // row no replay can fold, so it is reported rather than folded, and
+            // the room stays up. (In practice unreachable: the core kinds in
+            // `RoomEventVariants` are @atrium/core's own schemas, so a payload
+            // that parses as one parses as the other.)
+            logger.warn(
+              'ledger row parsed as a RoomEvent but not as a CoreEvent — reported, not folded (#46)',
+              { detail: outcome.detail, lastSeq },
             );
           }
         }
       }
-      for (const entry of entries) {
+      for (const entry of parsed.map((row) => row.entry)) {
         lastSeq = Math.max(lastSeq, entry.seq);
+        if (entry.kind === 'malformed') {
+          // Reported (once per seq) and carried out so the fan-out can advance a
+          // client's cursor past it without a hole, and an operator sees it.
+          reportMalformed(entry);
+          folded.push(entry);
+          continue;
+        }
         lastAtMs = Math.max(lastAtMs, Date.parse(entry.event.at));
         // After the fold above, so a row refused on the way in carries the
         // reason it was refused out to the fan-out (#22 r10, D4).
@@ -1016,7 +1181,22 @@ export function createLedger({ db, logger, instanceId }: LedgerOptions): Ledger 
                   ),
                 )
                 .orderBy(asc(coreEvents.roomSeq));
-              const recovered = rows.map((row) => parseEntry(row));
+              const recovered = rows
+                .map((row) => parseEntry(row))
+                .map((entry) => {
+                  // #46: a receipt that resolves to a malformed row cannot be
+                  // verified against its expected event types. This is the
+                  // command's own idempotent-replay path, not a read path a room
+                  // depends on to hydrate, so refusing the retry (rather than
+                  // skipping) is correct — the caller re-mints at the head.
+                  if (entry.kind === 'malformed') {
+                    throw new CommandError(
+                      'conflict',
+                      `the durable command receipt resolves to a malformed row (seq ${entry.seq}) that cannot be verified`,
+                    );
+                  }
+                  return entry;
+                });
               const actualTypes = recovered.map((entry) => entry.event.type);
               if (
                 recovered.length !== receipt.eventCount ||
@@ -1059,6 +1239,20 @@ export function createLedger({ db, logger, instanceId }: LedgerOptions): Ledger 
               throw new CommandError(
                 'invalid',
                 'a command may not choose its own ledger position — build() must use the assigned id and at',
+              );
+            }
+            // #46 append-time guard (defense-in-depth): refuse a payload that
+            // does not satisfy `RoomEvent` at the write boundary, so a bug in a
+            // command handler cannot mint the very row the read path now has to
+            // survive. It does NOT replace the read behaviour — rows predating
+            // this guard, or written by any future/raw path around it, still
+            // exist, which is the whole point of #46 — it just stops *this*
+            // server from being the writer that creates one.
+            const guard = RoomEvent.safeParse(event);
+            if (!guard.success) {
+              throw new CommandError(
+                'invalid',
+                `refusing to append a payload that does not satisfy RoomEvent: ${describeParseFailure(guard.error)}`,
               );
             }
             const roomId = resolveRoomId(event, request.roomId, stagedState);
@@ -1217,6 +1411,7 @@ export function createLedger({ db, logger, instanceId }: LedgerOptions): Ledger 
             });
 
             results.push({
+              kind: 'event',
               seq,
               roomSeq,
               roomId,
@@ -1302,11 +1497,17 @@ export function createLedger({ db, logger, instanceId }: LedgerOptions): Ledger 
   return {
     hydrate: async () => {
       const folded = await runExclusive(() => catchUp(db));
-      logger.info('ledger hydrated', { events: folded.length, lastSeq });
+      const malformed = folded.filter(isMalformedEntry).length;
+      logger.info('ledger hydrated', {
+        events: folded.length - malformed,
+        malformed,
+        lastSeq,
+      });
     },
     coreState: () => state,
     serialize: () => serializeState(state),
     lastSeq: () => lastSeq,
+    malformedCount: () => reportedMalformed.size,
     append,
     appendBatch,
     /**
@@ -1335,9 +1536,14 @@ export function createLedger({ db, logger, instanceId }: LedgerOptions): Ledger 
       const entries = rows.map(parseEntry);
       // Fold first, then answer. A page can contain rows another instance
       // committed a moment ago; asking `issuesFor` about one this process has
-      // not folded would answer "clean" for a row that was refused.
+      // not folded would answer "clean" for a row that was refused. This is also
+      // what reports a malformed row (#46): `foldThrough` runs `catchUp`, which
+      // logs and counts each malformed row once as it advances past it.
       await foldThrough(entries.at(-1)?.seq ?? 0);
-      return entries.map(withIssues);
+      // #46: a malformed row is named in the answer (the marker rides through),
+      // never thrown — `since(room, 0, 50)` resolves for a room with an
+      // unreadable row instead of rejecting every reconnect forever.
+      return entries.map((entry) => (entry.kind === 'malformed' ? entry : withIssues(entry)));
     },
     /**
      * The page and the head, read in **one transaction**.
@@ -1387,7 +1593,16 @@ export function createLedger({ db, logger, instanceId }: LedgerOptions): Ledger 
       // reader marked exactly as it reached a live one (#22 r10, D4) — this is
       // the catch-up half of that, and it is the same `issuesFor`.
       await foldThrough(page.entries.at(-1)?.seq ?? 0);
-      return { ...page, entries: page.entries.map(withIssues) };
+      // #46: `to`/`head` are computed over *all* rows including malformed ones,
+      // so a client's cursor advances past a bad row; the marker rides out in
+      // `entries` so the row is named rather than a silent hole. `withIssues`
+      // only touches folded entries.
+      return {
+        ...page,
+        entries: page.entries.map((entry) =>
+          entry.kind === 'malformed' ? entry : withIssues(entry),
+        ),
+      };
     },
     head: async (roomId) => {
       const [row] = await db
@@ -1429,6 +1644,12 @@ export function createLedger({ db, logger, instanceId }: LedgerOptions): Ledger 
         for (const row of page) {
           const { entry, trustedMessages } = parseRow(row);
           cursor = Math.max(cursor, entry.seq);
+          // #46: a malformed row is not foldable on replay any more than live —
+          // excluding it keeps live ≡ replay, since `catchUp` excludes it too.
+          if (entry.kind === 'malformed') {
+            reportMalformed(entry);
+            continue;
+          }
           if (!isCoreEvent(entry.event)) continue;
           // The row's own snapshot, not a fresh read of `messages`. This is the
           // replay half of r3-delta blocking 2: the substrate a replay folds is

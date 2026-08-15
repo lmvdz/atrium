@@ -3,6 +3,7 @@ import { acceptedObjects, corrections, proposals } from '@atrium/db/schema';
 import { and, eq } from 'drizzle-orm';
 import { afterAll, afterEach, beforeEach, describe, expect, it } from 'vitest';
 import type { CommandInput } from '../../apps/server/src/commands.js';
+import { isFoldedEntry } from '../../apps/server/src/ledger.js';
 import {
   openDatabase,
   resetDatabase,
@@ -678,7 +679,7 @@ describe('a refused append on the wire — D4', () => {
       expect(other.ledger.lastSeq()).toBeLessThan(ack.seq ?? 0);
 
       const page = await other.ledger.catchUpPage(room.roomId, 0);
-      const entry = page.entries.find((row) => row.event.id === ack.eventId);
+      const entry = page.entries.filter(isFoldedEntry).find((row) => row.event.id === ack.eventId);
       expect(entry?.issues).toEqual(ack.issues);
     } finally {
       await other.close();

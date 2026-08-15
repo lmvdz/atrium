@@ -2,7 +2,7 @@ import { type DatabaseHandle, workspaceMembers } from '@atrium/db';
 import { coreEvents, memberships } from '@atrium/db/schema';
 import { and, eq, sql } from 'drizzle-orm';
 import { afterAll, afterEach, beforeEach, describe, expect, it } from 'vitest';
-import { LEDGER_ADVISORY_LOCK_KEY } from '../../apps/server/src/ledger.js';
+import { isFoldedEntry, LEDGER_ADVISORY_LOCK_KEY } from '../../apps/server/src/ledger.js';
 import { createRealtimeClient, type RealtimeClient } from '../../apps/web/src/lib/realtime.js';
 import {
   nodeSocketFactory,
@@ -269,7 +269,7 @@ describe('cross-instance fan-out', () => {
       15_000,
       'instance A’s subscriber to receive instance B’s commits',
     );
-    const entries = await a.server.ledger.since(room.roomId, 0);
+    const entries = (await a.server.ledger.since(room.roomId, 0)).filter(isFoldedEntry);
     expect(
       JSON.stringify(
         reader.room(room.roomId).events.map((e) => ({ roomSeq: e.roomSeq, event: e.event })),

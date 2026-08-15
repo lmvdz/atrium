@@ -8,7 +8,13 @@ import type { CommandService, PresenceState } from './commands.js';
 import type { EventBus } from './event-bus.js';
 import { createHeadAcks } from './head-acks.js';
 import { createHub, type Hub } from './hub.js';
-import { CommandError, type Ledger, type LedgerEntry } from './ledger.js';
+import {
+  CommandError,
+  type FoldedLedgerEntry,
+  isFoldedEntry,
+  type Ledger,
+  type LedgerEntry,
+} from './ledger.js';
 import type { Logger } from './logger.js';
 import { ClientFrame, type EphemeralFrame, type ServerFrame, type WireEvent } from './protocol.js';
 import { createReconciler, DEFAULT_RECONCILE_INTERVAL_MS, type Reconciler } from './reconciler.js';
@@ -780,7 +786,11 @@ export function createRealtimeServer(options: RealtimeOptions): RealtimeServer {
          * everything.
          */
         more: page.more,
-        entries: page.entries.map(toWire),
+        // #46: malformed rows are filtered from the wire page — there is no
+        // event to send — while `to`/`head` still count them, so the client
+        // advances its cursor past the bad row rather than reading a hole and
+        // re-requesting it forever.
+        entries: page.entries.filter(isFoldedEntry).map(toWire),
       });
     } catch (error) {
       send(socket, { type: 'error', message: describe(error) });
@@ -928,6 +938,12 @@ export function createRealtimeServer(options: RealtimeOptions): RealtimeServer {
    */
   function fanOut(entries: LedgerEntry[]): void {
     for (const entry of entries) {
+      // #46: a malformed row has no wire event to carry — it cannot be a
+      // `RoomEvent`. It was already logged and counted by the ledger; a
+      // subscriber's cursor advances past it via the reconciler's `head` frame
+      // and the next `catchup`, whose `to` accounts for it. So there is nothing
+      // to broadcast here, only nothing to crash on.
+      if (!isFoldedEntry(entry)) continue;
       hub.broadcast(entry.roomId, {
         type: 'event',
         entry: toWire(entry),
@@ -1202,7 +1218,7 @@ export function createRealtimeServer(options: RealtimeOptions): RealtimeServer {
  * for a field to be forgotten, and `issues` is exactly the field it would have
  * been forgotten in (#22 r10, D4).
  */
-function toWire(entry: LedgerEntry): WireEvent {
+function toWire(entry: FoldedLedgerEntry): WireEvent {
   return {
     roomId: entry.roomId,
     roomSeq: entry.roomSeq,
