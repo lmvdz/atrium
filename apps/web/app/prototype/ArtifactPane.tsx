@@ -399,10 +399,17 @@ export function ArtifactPane({
         )}
       </div>
       {/* footer status — height-matched to the other bottom bars via --foot-h.
-          SEAM(#157): certify / "awaiting a human" wire to the human certification
-          gate (`certified_by`) — the machine never certifies. The `~`/`✓` is
-          DERIVED from `certified` through the shipped `<Glyph>`, never a literal
-          glyph (the glyph-source covenant); a doc note carries no epistemic mark. */}
+          SEAM(#157): certify is honestly INERT here. The gated door is
+          `correctObject('amend',{verification:'verified'})` (LiveRoomSession:603)
+          + the SQL-timed hold — a HUMAN act the reducer refuses for a machine.
+          On int/phase5 this route holds no live client or real object id, so
+          there is NO certify control that could mutate anything: the `✓`/`~` is
+          DERIVED from `active.certified` through the shipped `<Glyph>` (never a
+          literal glyph, never a local `certified = true`), and the footer only
+          states that it is awaiting a human. When app-integration binds a live
+          client, a hold-to-certify affordance (`primitives/HoldToAct`) routes
+          through `covenant.certify(objectId)` and paints `✓` only on the server's
+          ack. A doc note carries no epistemic mark. */}
       <div className={styles.artFoot}>
         {active.kind === 'doc' ? null : (
           <Glyph state={systemSettlementState(active.certified === true)} />
@@ -411,7 +418,10 @@ export function ArtifactPane({
           {active.kind === 'diff' ? 'proposed' : active.kind} · draft
         </span>
         <span className={styles.grow} />
-        <span className={styles.artFootHint}>
+        <span
+          className={styles.artFootHint}
+          title="certification is a human act, gated by the server (amend → verification: verified); not reachable from this surface yet (#157)"
+        >
           awaiting a human
           <IconCheck size={11} />
         </span>

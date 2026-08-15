@@ -138,8 +138,19 @@ export function ThreadStatus({ selected, stream }: { selected: Selection; stream
         </svg>
         {systemText(strip.host, 'ThreadStatus host')}
       </span>
-      {/* SEAM(#157): the run ▶ affordance dispatches through a gated door (dispatch/run). */}
-      <button className={styles.statRun} type="button" title="run" aria-label="run">
+      {/* SEAM(#157): run ▶ dispatches a session through the gated door
+          (open_session / resume_session — a resume is a DRAW, gated by the plan's
+          slice). Honestly INERT until app-integration: this route holds no live
+          session to dispatch, so the control is DISABLED rather than a no-op that
+          looks live. It carries no onClick — clicking it cannot mutate anything or
+          fake a run. Wired via `covenant.run(sessionId)` when a live client lands. */}
+      <button
+        className={styles.statRun}
+        type="button"
+        title="run — not reachable from this surface yet (#157: open_session / resume_session)"
+        aria-label="run (awaiting the live session)"
+        disabled
+      >
         <IconPlay size={12} />
       </button>
     </footer>

@@ -980,6 +980,29 @@ export interface RealtimeClient {
     },
   ) => string;
   answerBind: (roomId: string, questionId: string, answerObjectId: string) => string;
+  /**
+   * Signal an OPEN session — the gated door behind the covenant steer/interrupt
+   * affordance (#127/#157). `steer` is guidance any authenticated room member may
+   * append: public, receipted, and powerless over covenant and purse. `interrupt`
+   * is a request to stop and is the session's plan's agent principal or that
+   * agent's owner ONLY; the server checks that in-command (`commands.ts`
+   * `signal_session`) and refuses everyone else before the append.
+   *
+   * This is the verb the prototype's "@hexi stop" must reach: a real
+   * `signal_session` command that leaves the client and is refused or receipted by
+   * the server — never a local flag that fakes a stopped agent while it keeps
+   * spending. Returns the `commandId` its ack/nack is keyed on.
+   */
+  signalSession: (
+    roomId: string,
+    sessionId: string,
+    kind: 'steer' | 'interrupt',
+    options?: {
+      body?: string | null;
+      causeMessageId?: string | null;
+      supersedesEventId?: string | null;
+    },
+  ) => string;
   supersedeObject: (
     roomId: string,
     replacementObjectId: string,
@@ -1639,6 +1662,22 @@ export function createRealtimeClient(options: RealtimeClientOptions): RealtimeCl
       }),
     answerBind: (roomId, questionId, answerObjectId) =>
       command({ name: 'answer_bind', roomId, questionId, answerObjectId, note: null }),
+    // The steer/interrupt gated door (#127/#157). The command carries `kind` and
+    // nothing the server infers: `steer` is powerless guidance, `interrupt` is the
+    // stop the server gates to the agent principal or its owner. `body` is the
+    // steer's words or the interrupt's reason; the cause/supersede links default to
+    // null exactly as the wire schema does. The refusal, when it comes, arrives as
+    // a nack — the covenant enforced by the server, not simulated here.
+    signalSession: (roomId, sessionId, kind, signal = {}) =>
+      command({
+        name: 'signal_session',
+        roomId,
+        sessionId,
+        kind,
+        body: signal.body ?? null,
+        causeMessageId: signal.causeMessageId ?? null,
+        supersedesEventId: signal.supersedesEventId ?? null,
+      }),
     supersedeObject: (roomId, replacementObjectId, retiredObjectId, supersession = {}) => {
       const clientSupersessionId =
         supersession.clientSupersessionId ??
