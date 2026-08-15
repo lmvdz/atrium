@@ -8,6 +8,7 @@ import type { ReactNode } from 'react';
 // said would happen when the design branch landed.
 import './globals.css';
 import { AccountBar } from './account-bar';
+import { ChromeGate } from './chrome-gate';
 import styles from './shell.module.css';
 
 export const metadata: Metadata = {
@@ -49,13 +50,15 @@ export default function RootLayout({ children }: { children: ReactNode }) {
             carries a viewer's initials, not a session — so it stays here, on
             every route, which is what `/app` and `/app/<ws>/<room>` assert. */}
         <div className={styles.app}>
-          <header className={styles.topbar}>
-            <Link className={styles.wordmark} href="/">
-              atrium
-            </Link>
-            <span className={styles.spacer} />
-            <AccountBar />
-          </header>
+          <ChromeGate>
+            <header className={styles.topbar}>
+              <Link className={styles.wordmark} href="/">
+                atrium
+              </Link>
+              <span className={styles.spacer} />
+              <AccountBar />
+            </header>
+          </ChromeGate>
           {children}
         </div>
       </body>
