@@ -170,48 +170,11 @@ export function fmtMicros(micros: number): string {
   return `$${(micros / 1_000_000).toFixed(2)}`;
 }
 
-/* Org/team roll-up truth for the higher altitudes. At org scale the surface must
-   NOT show everything — it surfaces what needs a human. `drifting` is the
-   generative "look here" signal (hexi's off-scope auth drift, seen from above). */
-export interface TeamMember {
-  readonly name: string;
-  readonly building: number; // sessions actively writing
-  readonly needsYou: number; // decisions/reviews owed to a human
-  readonly drifting: boolean; // an agent gone off its plan's scope
-  readonly room: string;
-}
-export interface Team {
-  readonly id: string;
-  readonly name: string;
-  readonly members: readonly TeamMember[];
-}
-export const TEAMS: readonly Team[] = [
-  {
-    id: 't-payments',
-    name: 'payments',
-    members: [
-      { name: 'hexi', building: 1, needsYou: 1, drifting: true, room: 'billing-rewrite' },
-      { name: 'dane', building: 2, needsYou: 0, drifting: false, room: 'ledger-core' },
-      { name: 'iris', building: 0, needsYou: 2, drifting: false, room: 'refunds' },
-    ],
-  },
-  {
-    id: 't-discovery',
-    name: 'discovery',
-    members: [
-      { name: 'mira', building: 1, needsYou: 0, drifting: false, room: 'search-relevance' },
-      { name: 'omar', building: 1, needsYou: 1, drifting: false, room: 'catalog' },
-    ],
-  },
-  {
-    id: 't-platform',
-    name: 'platform',
-    members: [
-      { name: 'vale', building: 1, needsYou: 0, drifting: false, room: 'infra-audit' },
-      { name: 'noor', building: 3, needsYou: 0, drifting: false, room: 'ci-speed' },
-    ],
-  },
-];
+/* NOTE: the org/team roll-up mock (`TEAMS`/`Team`/`TeamMember`) was removed
+   during the phase-5 decomposition — the HANDOFF flagged it "may already be
+   dead — verify before porting", and a tree-wide grep confirmed it had no
+   readers. The higher-altitude org roll-up, when it exists, binds to a real
+   source and does not need this literal to scaffold it. */
 
 /* A REAL unified diff — the exact text `git diff` emits for this branch, complete
    (not streamed into being). The right pane parses and renders this the way any
@@ -296,11 +259,17 @@ const SCRIPT: readonly StreamStep[] = [
   { atMs: 1500, line: { kind: 'hunk', text: '@@ totals accumulation @@' } },
   { atMs: 1800, line: { kind: 'del', text: 'let total = 0' } },
   { atMs: 2100, line: { kind: 'add', text: 'const totals = new StreamingTotal()' } },
-  { atMs: 2600, line: { kind: 'add', text: 'for (const line of invoice.lines) totals.add(line.amountMicros)' } },
+  {
+    atMs: 2600,
+    line: { kind: 'add', text: 'for (const line of invoice.lines) totals.add(line.amountMicros)' },
+  },
   { atMs: 3200, line: { kind: 'ctx', text: 'return totals.settle()' } },
   { atMs: 3800, line: { kind: 'file', text: 'src/billing/invoice.test.ts' } },
   { atMs: 4100, line: { kind: 'hunk', text: '@@ streaming totals @@' } },
-  { atMs: 4400, line: { kind: 'add', text: "it('accumulates without a running mutable', () => {" } },
+  {
+    atMs: 4400,
+    line: { kind: 'add', text: "it('accumulates without a running mutable', () => {" },
+  },
   { atMs: 4900, line: { kind: 'add', text: '  expect(streamTotal([100, 250])).toBe(350)' } },
   { atMs: 5300, line: { kind: 'add', text: '})' } },
   { atMs: 6000, phase: 'testing' },
@@ -311,8 +280,14 @@ const SCRIPT: readonly StreamStep[] = [
     line: { kind: 'file', text: 'src/auth/session.ts', offScope: true },
     concern: 'touching src/auth/session.ts — outside this plan’s scope (billing)',
   },
-  { atMs: 7600, line: { kind: 'add', text: 'export function elevate(session: Session) {', offScope: true } },
-  { atMs: 8000, line: { kind: 'add', text: '  session.role = "admin" // to read all invoices', offScope: true } },
+  {
+    atMs: 7600,
+    line: { kind: 'add', text: 'export function elevate(session: Session) {', offScope: true },
+  },
+  {
+    atMs: 8000,
+    line: { kind: 'add', text: '  session.role = "admin" // to read all invoices', offScope: true },
+  },
 ];
 
 export interface StreamState {

@@ -1,0 +1,125 @@
+'use client';
+
+/* CHAT CHROME — the thread's header (`ChatTopBar`) and its footer status strip
+   (`ThreadStatus`), both contained to the chat column so they share its L/R
+   gutters and stop at the split rather than running under the artifact.
+
+   #151 marriage table: ChatTopBar / ThreadStatus are **port CSS, bind head +
+   client projection** (#156) — `frame/RoomHead` + a small client projection for
+   the branch/model status strip. The design shell stays; the derived data is
+   the seam. The status strip's **run ▶** is a covenant/dispatch affordance
+   wired by #157. */
+
+import { useState } from 'react';
+import { IconBase, IconPlay } from './icons';
+import { ProviderMark } from './ProviderMark';
+import styles from './prototype.module.css';
+import { SharePopover } from './SharePopover';
+import { participantsFor, type StreamState, sessionFor, threadHeadFor } from './seams';
+import type { Selection } from './types';
+
+/* CHAT TOP BAR — the thread's header: its title, the faces of everyone on it, and
+   share. Contained to the chat column, sharing the chat's L/R gutters. */
+export function ChatTopBar({ selected }: { selected: Selection }) {
+  // SEAM(#156): bind head + participants to `frame/RoomHead` + `ParticipantSummary`.
+  const head = threadHeadFor(selected);
+  const people = participantsFor(selected);
+  const [shareOpen, setShareOpen] = useState(false);
+  return (
+    <div className={styles.chatTop}>
+      <div className={styles.chatTopId}>
+        <span className={styles.chatTopName}>{head.title}</span>
+        <span className={styles.chatTopSub}>{head.sub}</span>
+      </div>
+      <span className={styles.grow} />
+      <div className={styles.chatFaces}>
+        {people.map((p) => (
+          <span
+            key={p.who}
+            className={`${styles.face} ${p.kind === 'human' ? styles.faceHuman : styles.faceAgent}`}
+            title={p.who}
+            aria-label={p.who}
+          >
+            {p.who.slice(0, 2)}
+          </span>
+        ))}
+      </div>
+      <div className={styles.shareWrap}>
+        <button
+          type="button"
+          className={`${styles.shareBtn} ${shareOpen ? styles.shareBtnOn : ''}`}
+          onClick={() => setShareOpen((o) => !o)}
+          aria-expanded={shareOpen}
+        >
+          <svg width="13" height="13" viewBox="0 0 24 24" fill="none" aria-hidden>
+            <circle cx="18" cy="5" r="2.6" stroke="currentColor" strokeWidth="1.7" />
+            <circle cx="6" cy="12" r="2.6" stroke="currentColor" strokeWidth="1.7" />
+            <circle cx="18" cy="19" r="2.6" stroke="currentColor" strokeWidth="1.7" />
+            <path d="M8.3 10.8l7.4-4.3M8.3 13.2l7.4 4.3" stroke="currentColor" strokeWidth="1.7" />
+          </svg>
+          share
+        </button>
+        {shareOpen ? <SharePopover people={people} onClose={() => setShareOpen(false)} /> : null}
+      </div>
+    </div>
+  );
+}
+
+/* THREAD STATUS BAR — the bottom strip: branch · base · diff · model · host · run.
+   Sits inside the thread, so it shares the chat's L/R gutters. */
+export function ThreadStatus({ selected, stream }: { selected: Selection; stream: StreamState }) {
+  // SEAM(#156): bind branch/base/diff/model/host to the real session projection.
+  const { agent, session } = sessionFor(selected);
+  const live = session.id === 's-live';
+  const added = live ? stream.added : Math.round(session.spendMicros / 90_000) + 3;
+  const removed = live ? stream.removed : (session.ageMin % 4) + 1;
+  const branch = session.branch.split('/').pop() ?? session.branch;
+  const running = session.status === 'running';
+  return (
+    <footer className={styles.status}>
+      <span className={styles.statItem}>
+        <svg width="12" height="12" viewBox="0 0 24 24" fill="none" aria-hidden>
+          <circle cx="6" cy="6" r="2.4" stroke="currentColor" strokeWidth="1.8" />
+          <circle cx="6" cy="18" r="2.4" stroke="currentColor" strokeWidth="1.8" />
+          <circle cx="18" cy="6" r="2.4" stroke="currentColor" strokeWidth="1.8" />
+          <path d="M6 8.4v7.2M18 8.4c0 4-4 4-8.6 4.2" stroke="currentColor" strokeWidth="1.8" />
+        </svg>
+        <span className={styles.statBranch}>{branch}</span>
+      </span>
+      <span className={styles.statSep} aria-label="based on">
+        <IconBase size={13} />
+      </span>
+      <span className={styles.statDim}>main</span>
+      <span className={styles.statDiff}>
+        <span className={styles.statAdd}>+{added}</span>
+        <span className={styles.statDel}>−{removed}</span>
+      </span>
+      {running ? <span className={`${styles.statDot} atr-pulse`} aria-hidden /> : null}
+      <span className={styles.grow} />
+      <span className={styles.statItem}>
+        <ProviderMark model={session.model} />
+        {session.model}
+      </span>
+      <span className={styles.statSep}>·</span>
+      <span className={styles.statItem}>
+        <svg width="12" height="12" viewBox="0 0 24 24" fill="none" aria-hidden>
+          <rect
+            x="3"
+            y="4"
+            width="18"
+            height="12"
+            rx="1.5"
+            stroke="currentColor"
+            strokeWidth="1.8"
+          />
+          <path d="M8 20h8" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" />
+        </svg>
+        {agent.host}
+      </span>
+      {/* SEAM(#157): the run ▶ affordance dispatches through a gated door (dispatch/run). */}
+      <button className={styles.statRun} type="button" title="run" aria-label="run">
+        <IconPlay size={12} />
+      </button>
+    </footer>
+  );
+}
