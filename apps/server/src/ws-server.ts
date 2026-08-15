@@ -887,6 +887,29 @@ export function createRealtimeServer(options: RealtimeOptions): RealtimeServer {
           ackEphemeral(socket, commandId, result.roomId);
           return;
         }
+        case 'progress': {
+          // The EPHEMERAL half of `report_session_progress` (#159): a heartbeat or a
+          // diff delta. Broadcast the server-minted frame(s) to the whole room — the
+          // sender included, unlike typing, because a diff is data the producer's own
+          // client renders — and relay across the bus for cross-instance subscribers.
+          for (const frame of result.frames) {
+            hub.broadcast(result.roomId, frame);
+            bus?.relay(result.roomId, frame);
+          }
+          // Ring the projection doorbell too: a client that MISSED the lossy frames
+          // (a reconnect, a cross-instance relay drop) rereads the durable
+          // `sessions.progress` snapshot on the doorbell, which the same command just
+          // refreshed. Same shape `realtime.projectionChanged` broadcasts.
+          const doorbell: EphemeralFrame = {
+            type: 'projection_changed',
+            roomId: result.roomId,
+            at: new Date().toISOString(),
+          };
+          hub.broadcast(result.roomId, doorbell);
+          bus?.relay(result.roomId, doorbell);
+          ackEphemeral(socket, commandId, result.roomId);
+          return;
+        }
         case 'seen':
           send(socket, {
             type: 'seen',

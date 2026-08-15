@@ -379,6 +379,9 @@ describe('ClientFrame', () => {
       'signal_session',
       'resume_session',
       'subscribe_session',
+      // The live progress channel (#159): the single door a running session's
+      // phases / heartbeat / diff deltas enter, authority-guarded like settle.
+      'report_session_progress',
     ];
     const declared = Command.options.map((option) => option.shape.name.value);
     expect([...declared].sort()).toEqual([...names].sort());
@@ -434,7 +437,9 @@ describe('the bus carries volatile state and invalidation, never history', () =>
   const user = '22222222-2222-4222-8222-222222222222';
   const presence = { type: 'presence', roomId: room, userId: user, state: 'online', at };
 
-  it('accepts exactly the three non-history frames', () => {
+  const session = '44444444-4444-4444-8444-444444444444';
+
+  it('accepts exactly the five non-history frames', () => {
     expect(EphemeralFrame.parse(presence)).toMatchObject({ type: 'presence' });
     expect(
       EphemeralFrame.parse({ type: 'typing', roomId: room, userId: user, typing: true, at }),
@@ -442,13 +447,57 @@ describe('the bus carries volatile state and invalidation, never history', () =>
     expect(EphemeralFrame.parse({ type: 'projection_changed', roomId: room, at })).toMatchObject({
       type: 'projection_changed',
     });
+    // The live progress frames (#159) — presence-shaped previews, never history.
+    expect(
+      EphemeralFrame.parse({
+        type: 'session_heartbeat',
+        roomId: room,
+        sessionId: session,
+        progressSeq: 0,
+        spendMicros: 100,
+        contextPct: 0.5,
+        at,
+      }),
+    ).toMatchObject({ type: 'session_heartbeat' });
+    expect(
+      EphemeralFrame.parse({
+        type: 'session_diff_delta',
+        roomId: room,
+        sessionId: session,
+        progressSeq: 1,
+        at,
+        truncated: false,
+        files: [{ path: 'a.ts', status: 'modified', additions: 1, deletions: 0 }],
+      }),
+    ).toMatchObject({ type: 'session_diff_delta' });
     // The whole union, so a frame added to `EphemeralFrame` without a decision
     // shows up here rather than in production.
     expect(EphemeralFrame.options.map((option) => option.shape.type.value).sort()).toEqual([
       'presence',
       'projection_changed',
+      'session_diff_delta',
+      'session_heartbeat',
       'typing',
     ]);
+  });
+
+  it('carries no epistemic field on the live progress frames (#159 covenant point 2)', () => {
+    // The covenant boundary: nothing on this channel asserts certification. A frame
+    // carrying a `certified`/`verified` discriminant is a `✓` the machine never
+    // earned; the schema strips unknown keys, so such a field cannot survive parse.
+    const heartbeat = EphemeralFrame.parse({
+      type: 'session_heartbeat',
+      roomId: room,
+      sessionId: session,
+      progressSeq: 0,
+      spendMicros: null,
+      contextPct: null,
+      at,
+      certified: true,
+      verification: 'verified',
+    });
+    expect(heartbeat).not.toHaveProperty('certified');
+    expect(heartbeat).not.toHaveProperty('verification');
   });
 
   it('has no spelling for a durable frame', () => {

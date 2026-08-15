@@ -8,6 +8,7 @@ import type {
   ExecutionArtifact,
   ExecutionProvider,
   ExecutionReport,
+  ProgressReporter,
   SessionContext,
   SignalDelivery,
 } from './provider.js';
@@ -303,17 +304,63 @@ export function createExecutionCoordinator(
       return { kind: 'failed', sessionId: granted.sessionId, artifact: null };
     }
 
+    const authority = claimed.authority;
+
+    // THE LIVE-PROGRESS SEAM (#159, decided in #152). The provider calls this during
+    // `run` to stream phases / heartbeat / diff deltas; it funnels into the ONE
+    // authority-guarded `report_session_progress` command on the session's token
+    // (obtained from `claim`, the only in-process holder), so the provider reports
+    // `~` progress and can never certify. Best-effort and LOSSY by design: a rejected
+    // report — a <1s heartbeat the server coalesces away, a progress against a session
+    // that just exited, any transient fault — is logged and swallowed, NEVER allowed
+    // to fail the run. Revert this swallow and a coalesced heartbeat would abort a
+    // healthy execution.
+    const reportProgress: ProgressReporter = async (report) => {
+      try {
+        await commands.execute(session, {
+          name: 'report_session_progress',
+          roomId: granted.roomId,
+          sessionId: granted.sessionId,
+          authority,
+          ...(report.phase !== undefined ? { phase: report.phase } : {}),
+          ...(report.heartbeat ? { heartbeat: report.heartbeat } : {}),
+          ...(report.diffDelta
+            ? {
+                diffDelta: {
+                  truncated: report.diffDelta.truncated ?? false,
+                  files: report.diffDelta.files.map((file) => ({
+                    path: file.path,
+                    status: file.status,
+                    additions: file.additions,
+                    deletions: file.deletions,
+                    ...(file.hunk
+                      ? { hunk: { header: file.hunk.header, lines: [...file.hunk.lines] } }
+                      : {}),
+                  })),
+                },
+              }
+            : {}),
+        });
+      } catch (error) {
+        logger.warn('progress report rejected — continuing the run', {
+          sessionId: granted.sessionId,
+          error: error instanceof Error ? error.message : String(error),
+        });
+      }
+    };
+
     // THE CONTEXT IS THE STORED CONTEXT (#120 round-6 F5). plan/harness/model come
     // from the row the claim returned, never from the caller's `granted` payload —
     // only `sessionId`/`roomId` (the keys the claim matched on) are taken from it.
+    // `onProgress` is this coordinator's live-progress seam (#159).
     const ctx: SessionContext = {
       sessionId: granted.sessionId,
       roomId: granted.roomId,
       planId: claimed.planId,
       harness: claimed.harness,
       model: claimed.model,
+      onProgress: reportProgress,
     };
-    const authority = claimed.authority;
 
     // RESOLVE → RUN → REPORT, disposing the ephemeral workspace no matter what.
     //

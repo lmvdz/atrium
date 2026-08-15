@@ -2,8 +2,64 @@ import type { Actor } from '@atrium/core';
 import { Id } from '@atrium/core';
 import { z } from 'zod';
 import { Command, type CommandInput, PresenceState } from './commands.js';
+import {
+  MAX_DIFF_DELTA_BYTES,
+  MAX_DIFF_HEADER_LEN,
+  MAX_DIFF_LINE_LEN,
+  MAX_DIFF_LINES,
+  MAX_DIFF_PATH_LEN,
+} from './execution/git.js';
 import type { CommandErrorCode } from './ledger.js';
 import type { RoomEvent } from './room-events.js';
+
+/**
+ * A running session's coalesced diff delta (#159). Field names mirror
+ * `SessionDiffFilePayload` (`room-events.ts`) so the client derives add/del/ctx
+ * from the unified-diff `+`/`-`/space prefixes exactly as it does for the durable
+ * receipt diff — one dialect, not two. A single optional `hunk` (not the receipt's
+ * `hunks` array) keeps a delta inside the 4KB bound; the snapshot carries the full
+ * coalesced `SessionDiff`.
+ */
+const SessionDiffDeltaFrame = z.object({
+  type: z.literal('session_diff_delta'),
+  roomId: Id,
+  sessionId: Id,
+  progressSeq: z.number().int().nonnegative(),
+  at: z.string().min(1),
+  truncated: z.boolean(),
+  files: z
+    .array(
+      z.object({
+        path: z.string().min(1).max(MAX_DIFF_PATH_LEN),
+        status: z.enum(['added', 'modified', 'deleted', 'renamed']),
+        additions: z.number().int().nonnegative(),
+        deletions: z.number().int().nonnegative(),
+        hunk: z
+          .object({
+            header: z.string().max(MAX_DIFF_HEADER_LEN + 1),
+            lines: z.array(z.string().max(MAX_DIFF_LINE_LEN + 1)).max(MAX_DIFF_LINES),
+          })
+          .optional(),
+      }),
+    )
+    .max(MAX_DIFF_LINES),
+});
+
+/**
+ * Does a built diff-delta frame fit the 4KB ephemeral ceiling (#159)?
+ *
+ * The bound is enforced HERE, in the producer, rather than in the union member —
+ * a `discriminatedUnion` member must be a plain object, and the covenant type-wall
+ * (`_EphemeralCarriesNothingDurable`) reads that union, so the frame stays a plain
+ * object and the aggregate check is a producer obligation. Counts ACTUAL UTF-8
+ * bytes (the encoding the bus serializes in), never `String.length` code units —
+ * the same accounting the durable diff's aggregate ceiling uses (#145 r3, FIX 2).
+ * A frame over the cap must be coalesced harder with `truncated:true`; the snapshot
+ * heals the dropped lines and the receipt replaces the stream at terminal.
+ */
+export function diffDeltaFrameFits(frame: unknown): boolean {
+  return Buffer.byteLength(JSON.stringify(frame), 'utf8') <= MAX_DIFF_DELTA_BYTES;
+}
 
 /**
  * The wire contract (#12): commands travel client→server, events travel
@@ -161,6 +217,42 @@ export type ServerFrame =
   | { type: 'typing'; roomId: string; userId: string; typing: boolean; at: string }
   /** A derived database projection changed after the last durable room event. */
   | { type: 'projection_changed'; roomId: string; at: string }
+  /**
+   * A running session's spend/context heartbeat (#159, decided in #152).
+   * Presence-shaped and LOSSY: server-minted from the `report_session_progress`
+   * command, relayed fire-and-forget, never journalled. The final values land
+   * durably on the session's exit event; this is the live `~` preview between.
+   */
+  | {
+      type: 'session_heartbeat';
+      roomId: string;
+      sessionId: string;
+      progressSeq: number;
+      spendMicros: number | null;
+      contextPct: number | null;
+      at: string;
+    }
+  /**
+   * A running session's coalesced diff delta (#159, decided in #152). Ephemeral
+   * and ≤4KB (the 8000-byte NOTIFY limit). The receipt's `SessionDiffPayload` is
+   * the ONE durable diff; this is a live preview the snapshot heals and the
+   * receipt replaces wholesale at terminal.
+   */
+  | {
+      type: 'session_diff_delta';
+      roomId: string;
+      sessionId: string;
+      progressSeq: number;
+      at: string;
+      truncated: boolean;
+      files: {
+        path: string;
+        status: 'added' | 'modified' | 'deleted' | 'renamed';
+        additions: number;
+        deletions: number;
+        hunk?: { header: string; lines: string[] };
+      }[];
+    }
   | { type: 'seen'; roomId: string; userId: string; seenSeq: number }
   | { type: 'error'; message: string };
 
@@ -250,6 +342,29 @@ export const EphemeralFrame = z.discriminatedUnion('type', [
     roomId: Id,
     at: z.string().min(1),
   }),
+  /**
+   * THE LIVE PROGRESS FRAMES (#159, decided in #152).
+   *
+   * Both join `EphemeralFrame`, which is the covenant point-3 type-wall: the
+   * compile-time `_EphemeralCarriesNothingDurable` assert below stays satisfied
+   * because neither is `event`/`catchup`, so live progress can NEVER arrive as a
+   * journalable `event`. Both are server-minted from the authority-guarded
+   * `report_session_progress` command — the bus authenticates nobody, so a forged
+   * frame is presence-class residual (a transient wrong preview, erased by the next
+   * snapshot read and by the receipt), never durable or certifiable. And neither
+   * carries a `certified`/`verified`/epistemic field (covenant point 2): every value
+   * is a `~` draft.
+   */
+  z.object({
+    type: z.literal('session_heartbeat'),
+    roomId: Id,
+    sessionId: Id,
+    progressSeq: z.number().int().nonnegative(),
+    spendMicros: z.number().int().nonnegative().nullable(),
+    contextPct: z.number().min(0).max(1).nullable(),
+    at: z.string().min(1),
+  }),
+  SessionDiffDeltaFrame,
 ]);
 export type EphemeralFrame = z.infer<typeof EphemeralFrame>;
 

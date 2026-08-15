@@ -625,6 +625,54 @@ export const SessionSubscribed = z.object({
 });
 export type SessionSubscribed = z.infer<typeof SessionSubscribed>;
 
+/* ── the live progress channel (#159, from #152's resolution) ─────────────────
+ *
+ * ONE durable ledger-only event: the phase a running session's work is in. It
+ * rides the spine for a `room_seq` and an append order and **never joins
+ * `CoreEvent`** — the reducer folds no concept of a phase, exactly like the
+ * lifecycle six: `isCoreEvent` is false for it (it is not in `coreEventTypes`),
+ * so a room's core-typed subsequence — and therefore its whole covenant state —
+ * is byte-for-byte identical whether a hundred phase transitions are present or
+ * absent.
+ *
+ * The high-frequency progress — spend/context heartbeat and diff deltas — is NOT
+ * here. Those are presence-shaped, lossy by design, and travel as EPHEMERAL WS
+ * frames (`session_heartbeat` / `session_diff_delta` in `protocol.ts`), never as
+ * a durable event: a durable delta would be a second, lossier copy of the
+ * receipt's one durable diff. Only the low-cardinality phase timeline is genuine
+ * history worth a ledger row.
+ *
+ * COVENANT (#152 boundary): a phase is non-epistemic. `certificationClassOf` puts
+ * the command that mints it (`report_session_progress`) in the `open` class, and
+ * `projectSessionPhaseChanged` writes ONLY the `sessions.progress` snapshot column
+ * — no `accepted_objects` judgement, no route to a `✓`. The `proposed` phase the
+ * client may DERIVE from a settle is not reportable here (a reportable phase
+ * duplicating a ledger-proven state would be a second copy of history free to
+ * disagree); the reportable set is the three genuine in-flight phases only.
+ * ─────────────────────────────────────────────────────────────────────────── */
+
+/** The three phases a running session's work moves through (#159; #152). */
+export const SessionPhase = z.enum(['planning', 'writing', 'testing']);
+export type SessionPhase = z.infer<typeof SessionPhase>;
+
+/**
+ * A running session's work entered a new phase (#159). Low-cardinality genuine
+ * history — ledger-only, like the lifecycle six. `progressSeq` is the
+ * server-assigned per-session counter the whole channel is ordered by; a client
+ * applies a live ephemeral frame only when its `progressSeq` is greater than the
+ * snapshot's, so the phase event and the frames share one clock.
+ */
+export const SessionPhaseChanged = z.object({
+  ...eventBase,
+  type: z.literal('session_phase_changed'),
+  roomId: Id,
+  sessionId: Id,
+  phase: SessionPhase,
+  /** The server-assigned per-session progress counter. Monotonic, from zero. */
+  progressSeq: z.number().int().nonnegative(),
+});
+export type SessionPhaseChanged = z.infer<typeof SessionPhaseChanged>;
+
 /** The payload union, before the no-actor guard. */
 const RoomEventVariants = z.discriminatedUnion('type', [
   ProposalRecorded,
@@ -645,6 +693,7 @@ const RoomEventVariants = z.discriminatedUnion('type', [
   DrawRefused,
   SessionSignaled,
   SessionSubscribed,
+  SessionPhaseChanged,
 ]);
 
 /**
@@ -728,7 +777,8 @@ export type ServerEvent =
   | PlanRlimitSet
   | DrawRefused
   | SessionSignaled
-  | SessionSubscribed;
+  | SessionSubscribed
+  | SessionPhaseChanged;
 
 /** True when @atrium/core's `reduce` consumes this event. */
 export function isCoreEvent(event: RoomEvent): event is CoreEvent {
@@ -771,6 +821,7 @@ export function declaredRoomId(event: RoomEvent): string | null {
     case 'draw_refused':
     case 'session_signaled':
     case 'session_subscribed':
+    case 'session_phase_changed':
       return event.roomId;
     case 'proposal_rejected':
     case 'proposal_superseded':

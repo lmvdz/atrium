@@ -344,6 +344,13 @@
       "when": 1788432000000,
       "tag": "0048_at_most_one_plan_per_routed_cause",
       "breakpoints": true
+    },
+    {
+      "idx": 49,
+      "version": "7",
+      "when": 1788518400000,
+      "tag": "0049_a_running_session_streams_its_progress",
+      "breakpoints": true
     }
   ]
 }

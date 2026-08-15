@@ -339,6 +339,15 @@ function kindRow(
         note: null,
       };
       break;
+    case 'session_phase_changed':
+      payload = {
+        ...base,
+        roomId,
+        sessionId: randomUUID(),
+        phase: 'writing',
+        progressSeq: 0,
+      };
+      break;
     default:
       // A ninth kind in the `event_type` enum with no fixture here would
       // otherwise be exercised by nothing, silently.
@@ -2736,6 +2745,9 @@ describe('core_events — the room key is the one this kind declares, and no oth
     // kind above them, and subject to exactly the same room-key discipline.
     session_signaled: 'roomId',
     session_subscribed: 'roomId',
+    // The live progress channel's durable phase event (#159), top-level `roomId`
+    // like every ledger-only kind above it — same room-key discipline.
+    session_phase_changed: 'roomId',
   };
 
   /** Write a room key into a payload at one of the four spellings. */
@@ -2791,11 +2803,12 @@ describe('core_events — the room key is the one this kind declares, and no oth
         }
       }
     }
-    // Non-vacuous, and the count is the product: 15 room-declaring kinds × 3
+    // Non-vacuous, and the count is the product: 16 room-declaring kinds × 3
     // foreign keys × 2 values. A loop that silently stopped iterating would
     // otherwise pass. (Five original kinds, the six #116 lifecycle kinds, the
-    // two #118 budget/rlimit kinds, plus the two #127 signal/interrupt kinds.)
-    expect(refused).toBe(90);
+    // two #118 budget/rlimit kinds, the two #127 signal/interrupt kinds, plus the
+    // #159 live-progress phase event.)
+    expect(refused).toBe(96);
   });
 
   it('refuses a room key on the three kinds that declare none', async () => {
@@ -2840,7 +2853,7 @@ describe('core_events — the room key is the one this kind declares, and no oth
       await expect(append(row)).resolves.toBeDefined();
       landed += 1;
     }
-    expect(landed).toBe(18);
+    expect(landed).toBe(19);
   });
 
   /**
@@ -2911,8 +2924,8 @@ describe('core_events — the room key is the one this kind declares, and no oth
         landed += 1;
       }
     }
-    // 15 room-declaring kinds × 3 foreign keys + 3 room-less kinds × 4 keys.
-    expect(landed).toBe(57);
+    // 16 room-declaring kinds × 3 foreign keys + 3 room-less kinds × 4 keys.
+    expect(landed).toBe(60);
     const filed = await handle.db
       .select({ roomId: coreEvents.roomId })
       .from(coreEvents)

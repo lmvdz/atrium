@@ -281,13 +281,17 @@ describe('a funded session runs the shim, produces an artifact, and settles inde
     );
     repo = await createScratchRepo(); // re-seed so afterEach dispose is safe
 
-    // Exactly the two lifecycle rows landed — an open and a clean exit.
+    // The lifecycle rows landed — an open, the durable phase timeline the run
+    // streamed (#159), and a clean exit. `session_phase_changed` is ledger-only and
+    // never folded (`isCoreEvent` false), so the covenant census below is unmoved by
+    // it; the coordinator now wires the shim's `onProgress`, so a full run appends the
+    // phase timeline as genuine history.
     const kinds = await handle.db
       .select({ type: coreEvents.type })
       .from(coreEvents)
       .where(eq(coreEvents.roomId, room.roomId));
     expect(new Set(kinds.map((k) => k.type))).toEqual(
-      new Set(['plan_opened', 'session_opened', 'session_settled']),
+      new Set(['plan_opened', 'session_opened', 'session_phase_changed', 'session_settled']),
     );
   });
 
@@ -1846,5 +1850,255 @@ describe('an authorized signal reaches the running shim (#147)', () => {
       .from(sessionSignals)
       .where(eq(sessionSignals.sessionId, sessionId));
     expect(rows).toHaveLength(0);
+  });
+});
+
+/**
+ * THE LIVE PROGRESS CHANNEL, through the REAL command boundary (#159, decided in
+ * #152). The producer→command→snapshot→frame path, and the four covenant points:
+ * the command is `open`-class and token-guarded, the snapshot write-set is
+ * `sessions`-only, the ephemeral frames carry nothing durable, and the stream
+ * converges to (is cleared by) the settle receipt.
+ */
+describe('the live progress channel streams a running session (#159)', () => {
+  async function sessionProgress(sessionId: string) {
+    const [row] = await handle.db
+      .select({ progress: sessions.progress, status: sessions.status })
+      .from(sessions)
+      .where(eq(sessions.id, sessionId));
+    return row;
+  }
+  async function progressWriteSet(planId: string) {
+    const [plan] = await handle.db
+      .select({ authorizedDraws: plans.authorizedDraws, rlimitSlice: plans.rlimitSlice })
+      .from(plans)
+      .where(eq(plans.id, planId));
+    return { census: await census(), plan };
+  }
+  async function ledgerCount(): Promise<number> {
+    const [{ n } = { n: 0 }] = await handle.db
+      .select({ n: sql<number>`count(*)::int` })
+      .from(coreEvents)
+      .where(eq(coreEvents.roomId, room.roomId));
+    return n;
+  }
+  async function phaseEventCount(sessionId: string): Promise<number> {
+    const [{ n } = { n: 0 }] = await handle.db
+      .select({ n: sql<number>`count(*)::int` })
+      .from(coreEvents)
+      .where(
+        and(
+          eq(coreEvents.roomId, room.roomId),
+          eq(coreEvents.type, 'session_phase_changed'),
+          sql`${coreEvents.payload} ->> 'sessionId' = ${sessionId}`,
+        ),
+      );
+    return n;
+  }
+
+  it('appends a DURABLE session_phase_changed, refreshes the snapshot, and moves no covenant table', async () => {
+    const commands = commandService();
+    const planId = await openPlan(commands);
+    await fundPlan(planId);
+    const sessionId = await openGrantedSession(planId, agentSession, commands);
+    const authority = await sessionAuthority(sessionId);
+    const before = await progressWriteSet(planId);
+
+    const ack = await commands.execute(agentSession, {
+      name: 'report_session_progress',
+      roomId: room.roomId,
+      sessionId,
+      authority,
+      phase: 'planning',
+    });
+    expect(ack.kind).toBe('appended');
+    expect(await phaseEventCount(sessionId)).toBe(1);
+
+    const row = await sessionProgress(sessionId);
+    expect(row?.progress?.phase).toBe('planning');
+    expect(row?.progress?.progressSeq).toBe(0);
+
+    // COVENANT point 1: a progress report moves no accepted_objects and no plan
+    // column. Revert the `open` classification / the sessions-only projection and
+    // this reddens.
+    expect(await progressWriteSet(planId)).toEqual(before);
+  });
+
+  it('a heartbeat is EPHEMERAL — a server-minted frame + a snapshot refresh, and NO ledger row', async () => {
+    const commands = commandService();
+    const planId = await openPlan(commands);
+    await fundPlan(planId);
+    const sessionId = await openGrantedSession(planId, agentSession, commands);
+    const authority = await sessionAuthority(sessionId);
+    const ledgerBefore = await ledgerCount();
+
+    const ack = await commands.execute(agentSession, {
+      name: 'report_session_progress',
+      roomId: room.roomId,
+      sessionId,
+      authority,
+      heartbeat: { spendMicros: 1234, contextPct: 0.5 },
+    });
+    expect(ack.kind).toBe('progress');
+    if (ack.kind === 'progress') {
+      expect(ack.frames).toHaveLength(1);
+      expect(ack.frames[0]?.type).toBe('session_heartbeat');
+    }
+    // No durable row — the ephemeral path never journals (covenant point 3).
+    expect(await ledgerCount()).toBe(ledgerBefore);
+    const row = await sessionProgress(sessionId);
+    expect(row?.progress?.spendMicros).toBe(1234);
+    expect(row?.progress?.contextPct).toBe(0.5);
+  });
+
+  it('NACKS a heartbeat less than a second after the last (#159 cadence, red-on-revert)', async () => {
+    const commands = commandService();
+    const planId = await openPlan(commands);
+    await fundPlan(planId);
+    const sessionId = await openGrantedSession(planId, agentSession, commands);
+    const authority = await sessionAuthority(sessionId);
+
+    const first = await commands.execute(agentSession, {
+      name: 'report_session_progress',
+      roomId: room.roomId,
+      sessionId,
+      authority,
+      heartbeat: { spendMicros: 1, contextPct: null },
+    });
+    expect(first.kind).toBe('progress');
+    // A second heartbeat in the same instant is refused — <1s apart.
+    await expect(
+      commands.execute(agentSession, {
+        name: 'report_session_progress',
+        roomId: room.roomId,
+        sessionId,
+        authority,
+        heartbeat: { spendMicros: 2, contextPct: null },
+      }),
+    ).rejects.toThrow(/less than 1s/);
+  });
+
+  it('a real edit moves the streamed diff — the snapshot follows the input (#159 flip-the-input)', async () => {
+    const commands = commandService();
+    const planId = await openPlan(commands);
+    await fundPlan(planId, 5);
+    const s1 = await openGrantedSession(planId, agentSession, commands);
+    const s2 = await openGrantedSession(planId, agentSession, commands);
+    const a1 = await sessionAuthority(s1);
+    const a2 = await sessionAuthority(s2);
+
+    await commands.execute(agentSession, {
+      name: 'report_session_progress',
+      roomId: room.roomId,
+      sessionId: s1,
+      authority: a1,
+      diffDelta: {
+        truncated: false,
+        files: [{ path: 'ALPHA.ts', status: 'added', additions: 3, deletions: 0 }],
+      },
+    });
+    await commands.execute(agentSession, {
+      name: 'report_session_progress',
+      roomId: room.roomId,
+      sessionId: s2,
+      authority: a2,
+      diffDelta: {
+        truncated: false,
+        files: [{ path: 'BETA.ts', status: 'added', additions: 7, deletions: 0 }],
+      },
+    });
+
+    const r1 = await sessionProgress(s1);
+    const r2 = await sessionProgress(s2);
+    // The streamed diff is a function of the input — a different edit yields a
+    // different snapshot. A stubbed constant would fail this.
+    expect(r1?.progress?.diff?.files?.[0]?.path).toBe('ALPHA.ts');
+    expect(r2?.progress?.diff?.files?.[0]?.path).toBe('BETA.ts');
+    expect(r1?.progress?.diff?.additions).toBe(3);
+    expect(r2?.progress?.diff?.additions).toBe(7);
+  });
+
+  it('REFUSES progress from a caller without the session capability token (#159)', async () => {
+    const commands = commandService();
+    const planId = await openPlan(commands);
+    await fundPlan(planId);
+    const sessionId = await openGrantedSession(planId, agentSession, commands);
+
+    await expect(
+      commands.execute(agentSession, {
+        name: 'report_session_progress',
+        roomId: room.roomId,
+        sessionId,
+        authority: 'not-the-real-token',
+        phase: 'writing',
+      }),
+    ).rejects.toThrow(/execution-authority capability/);
+    // Nothing was written.
+    const row = await sessionProgress(sessionId);
+    expect(row?.progress ?? null).toBeNull();
+  });
+
+  it('REFUSES progress against a session that already exited, and the settle CLEARED the snapshot (#159 convergence)', async () => {
+    const commands = commandService();
+    const planId = await openPlan(commands);
+    await fundPlan(planId);
+    const sessionId = await openGrantedSession(planId, agentSession, commands);
+    const authority = await sessionAuthority(sessionId);
+
+    // Report a phase, then drive the run to a terminal via the coordinator.
+    await commands.execute(agentSession, {
+      name: 'report_session_progress',
+      roomId: room.roomId,
+      sessionId,
+      authority,
+      phase: 'planning',
+    });
+    expect((await sessionProgress(sessionId))?.progress?.phase).toBe('planning');
+
+    const outcome = await coordinator(commands).runGranted(agentSession, {
+      sessionId,
+      roomId: room.roomId,
+      planId,
+      harness: 'omp',
+      model: 'haiku',
+    });
+    expect(outcome.kind).toBe('settled');
+
+    // Convergence: the settle CLEARED the snapshot — the receipt replaces the stream.
+    const settled = await sessionProgress(sessionId);
+    expect(settled?.status).toBe('settled');
+    expect(settled?.progress ?? null).toBeNull();
+
+    // And progress against the exited session is refused.
+    await expect(
+      commands.execute(agentSession, {
+        name: 'report_session_progress',
+        roomId: room.roomId,
+        sessionId,
+        authority,
+        phase: 'testing',
+      }),
+    ).rejects.toThrow(/not open/);
+  });
+
+  it('wires the producer end to end — a coordinator run streams the durable phase timeline (#159)', async () => {
+    const commands = commandService();
+    const planId = await openPlan(commands);
+    await fundPlan(planId);
+    const sessionId = await openGrantedSession(planId, agentSession, commands);
+
+    const outcome = await coordinator(commands).runGranted(agentSession, {
+      sessionId,
+      roomId: room.roomId,
+      planId,
+      harness: 'omp',
+      model: 'haiku',
+    });
+    expect(outcome.kind).toBe('settled');
+
+    // The shim streamed all three phases through the wired `onProgress` seam; those
+    // durable events persist past the settle (only the ephemeral snapshot is cleared).
+    // Revert the coordinator's `onProgress` wiring and this drops to zero.
+    expect(await phaseEventCount(sessionId)).toBe(3);
   });
 });

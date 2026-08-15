@@ -222,6 +222,40 @@ export const ServerFrame = z.discriminatedUnion('type', [
     roomId: z.string().min(1),
     at: z.string(),
   }),
+  /**
+   * THE LIVE PROGRESS FRAMES (#159, decided in #152). Parsed here, not dropped —
+   * an unparsed frame is silently discarded, so the two must be in the union for a
+   * consumer to see them at all. Both are `~` PREVIEW: presence-shaped, lossy, never
+   * history. A late joiner reconciles against the durable `sessions.progress`
+   * snapshot (an authenticated route read on the `projection_changed` doorbell); a
+   * live client applies a frame only when its `progressSeq` exceeds the snapshot's.
+   */
+  z.object({
+    type: z.literal('session_heartbeat'),
+    roomId: z.string().min(1),
+    sessionId: z.string().min(1),
+    progressSeq: z.number().int().min(0),
+    spendMicros: z.number().int().min(0).nullable(),
+    contextPct: z.number().min(0).max(1).nullable(),
+    at: z.string(),
+  }),
+  z.object({
+    type: z.literal('session_diff_delta'),
+    roomId: z.string().min(1),
+    sessionId: z.string().min(1),
+    progressSeq: z.number().int().min(0),
+    at: z.string(),
+    truncated: z.boolean(),
+    files: z.array(
+      z.object({
+        path: z.string().min(1),
+        status: z.enum(['added', 'modified', 'deleted', 'renamed']),
+        additions: z.number().int().min(0),
+        deletions: z.number().int().min(0),
+        hunk: z.object({ header: z.string(), lines: z.array(z.string()) }).optional(),
+      }),
+    ),
+  }),
   z.object({
     type: z.literal('seen'),
     roomId: z.string().min(1),
@@ -870,7 +904,24 @@ export interface RoomView {
   presence: Record<string, string>;
   typing: string[];
   subscribed: boolean;
+  /**
+   * THE LATEST LIVE PROGRESS FRAME per session (#159, decided in #152) — the `~`
+   * preview a running session is streaming. Keyed by session id; each holds the
+   * most recent heartbeat/diff frame whose `progressSeq` advanced. Never persisted
+   * and never replayed (presence-class): cleared on a socket drop like `presence`,
+   * and the durable truth is the `sessions.progress` snapshot + the settle receipt.
+   * The streaming VIEW that renders this binds after #161 — see the SEAM marker in
+   * `handleFrame`. Optional so a seeded/replayed view literal need not carry it; the
+   * live `view()` constructor always initialises it to `{}`.
+   */
+  progress?: Record<string, ProgressFrame>;
 }
+
+/** A live progress frame as the client last saw it (#159). Preview, never history. */
+export type ProgressFrame = Extract<
+  ServerFrame,
+  { type: 'session_heartbeat' | 'session_diff_delta' }
+>;
 
 export type ConnectionStatus = 'idle' | 'connecting' | 'open' | 'reconnecting' | 'closed';
 
@@ -1056,6 +1107,7 @@ export function createRealtimeClient(options: RealtimeClientOptions): RealtimeCl
         presence: {},
         typing: [],
         subscribed: false,
+        progress: {},
       };
       rooms.set(roomId, existing);
     }
@@ -1364,6 +1416,27 @@ export function createRealtimeClient(options: RealtimeClientOptions): RealtimeCl
         // re-read the authenticated route's persisted projection.
         changed(frame.roomId, 'projection');
         return;
+      case 'session_heartbeat':
+      case 'session_diff_delta': {
+        // THE MINIMAL LIVE-PROGRESS CONSUMER (#159, decided in #152). Store the
+        // latest frame per session, but ONLY when its `progressSeq` advanced — the
+        // channel is loss-tolerant and frames may arrive out of order or duplicated
+        // over the relay, so a stale seq is dropped (the same monotonic rule a late
+        // joiner applies against the snapshot). Nothing here asserts certification:
+        // every field is a `~` draft, and the streaming view renders it as such.
+        //
+        // SEAM(#159-consumer): render on the decomposed streaming view (binds after
+        // #161 lands — the surface is being decomposed in that parallel lane, so the
+        // renderer is intentionally NOT built here; this only lands the typed state).
+        const room = view(frame.roomId);
+        const current = room.progress ?? {};
+        const prior = current[frame.sessionId];
+        if (!prior || frame.progressSeq > prior.progressSeq) {
+          room.progress = { ...current, [frame.sessionId]: frame };
+          changed(frame.roomId);
+        }
+        return;
+      }
       case 'seen': {
         if (frame.userId !== options.userId) return;
         const room = view(frame.roomId);
@@ -1416,6 +1489,10 @@ export function createRealtimeClient(options: RealtimeClientOptions): RealtimeCl
       room.subscribed = false;
       room.presence = {};
       room.typing = [];
+      // Live progress is presence-class (#159): a `~` preview from a socket this
+      // client can no longer hear. Drop it like presence — the durable truth is the
+      // `sessions.progress` snapshot, reread on the next `projection_changed`.
+      room.progress = {};
       stalled.delete(room.roomId);
       changed(room.roomId);
     }

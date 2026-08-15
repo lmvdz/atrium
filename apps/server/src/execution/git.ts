@@ -929,6 +929,16 @@ export const MAX_DIFF_TOTAL_BYTES =
   MAX_DIFF_LINES * (MAX_DIFF_LINE_LEN + 1) +
   MAX_DIFF_FILES * (MAX_DIFF_HEADER_LEN + 1 + 2 * MAX_DIFF_PATH_LEN);
 
+/**
+ * THE EPHEMERAL DIFF-DELTA CEILING (#159, decided in #152) — a single live
+ * `session_diff_delta` frame, serialized. The ephemeral bus relays over Postgres
+ * `NOTIFY`, whose payload is capped at 8000 bytes; a delta is bounded well under
+ * that so the whole envelope (origin + room + frame) fits. It lives HERE, beside
+ * the durable caps and in a module neither `protocol.ts` nor `commands.ts` cycles
+ * through, so both the frame schema and the producer command import one number.
+ */
+export const MAX_DIFF_DELTA_BYTES = 4096;
+
 /** One file's whole-diff counts, from `git diff --numstat -z` (survives huge diffs). */
 interface NumstatEntry {
   readonly path: string;
