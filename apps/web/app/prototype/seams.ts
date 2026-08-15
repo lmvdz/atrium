@@ -30,6 +30,7 @@ import {
   type DiffLine,
   INVOICE_DIFF,
   AGENTS as MOCK_AGENTS,
+  type MockAgent,
   type StreamState,
   useMockPRStream,
 } from './mock';
