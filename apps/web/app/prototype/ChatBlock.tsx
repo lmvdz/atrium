@@ -25,7 +25,12 @@ import { MessageBody } from '@/src/components/primitives/MessageBody';
 import { SystemRow } from '@/src/components/timeline/SystemRow';
 import { TimelineRow } from '@/src/components/timeline/TimelineRow';
 import { ChatTopBar } from './ChatChrome';
-import { type ConversationItem, conversationModel, echoItem } from './conversation-model';
+import {
+  type ConversationItem,
+  conversationModel,
+  type Echo,
+  echoItem,
+} from './conversation-model';
 import { IconChevron, IconDot } from './icons';
 import { MessageText } from './MessageText';
 import styles from './prototype.module.css';
@@ -637,7 +642,7 @@ export function ChatBlock({
   onSay,
 }: {
   selected: Selection;
-  echoes: readonly string[];
+  echoes: readonly Echo[];
   draftComment: CommentDraft | null;
   steering: boolean;
   redirect: string;
@@ -668,9 +673,11 @@ export function ChatBlock({
      real typed records on the SAME register, so they render as shipped rows too. */
   const model = useMemo(() => conversationModel(shownSel), [shownSel]);
   const { records, items } = useMemo(() => {
-    const echoes_ = echoes.map((text, index) => echoItem(text, index, model.room));
+    const echoes_ = echoes.map((echo, index) => echoItem(echo, index, model.room));
     return {
-      records: [...model.records, ...echoes_.map((e) => e.record)],
+      // Only `said` echoes carry a record; a NOT-delivered notice is not the
+      // viewer's speech, so it never enters the attribution ledger.
+      records: [...model.records, ...echoes_.flatMap((e) => (e.record ? [e.record] : []))],
       items: [...model.items, ...echoes_.map((e) => e.item)],
     };
   }, [model, echoes]);

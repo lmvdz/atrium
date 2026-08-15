@@ -34,7 +34,8 @@ describe('the covenant seam is honestly inert and names its gated door', () => {
   /* Each surfaced (or ticket-named) covenant door: invoking it must NOT report
      success, and must name the exact server command it will call when live. */
   const cases: ReadonlyArray<{ label: string; run: () => CovenantOutcome }> = [
-    { label: 'certify', run: () => covenant.certify('obj-1') },
+    { label: 'certify', run: () => covenant.certify('sess-1') },
+    { label: 'certifyClaim', run: () => covenant.certifyClaim('obj-1') },
     { label: 'fund', run: () => covenant.fund('plan-1', 5) },
     { label: 'steer', run: () => covenant.steer('sess-1', 'keep it in billing') },
     { label: 'interrupt', run: () => covenant.interrupt('sess-1', 'stop') },
@@ -44,7 +45,10 @@ describe('the covenant seam is honestly inert and names its gated door', () => {
   ];
 
   const expectedDoor: Record<string, CovenantDoor> = {
-    certify: "correctObject('amend',{verification:'verified'})",
+    // The ArtifactPane hosts a session LANDING, so its certify names the
+    // server-timed session hold, NOT the claim-certify `amend` (#157 r1 D2).
+    certify: 'certifySession{arm→confirm}',
+    certifyClaim: "correctObject('amend',{verification:'verified'})",
     fund: 'set_plan_rlimit',
     steer: 'signal_session{steer}',
     interrupt: 'signal_session{interrupt}',

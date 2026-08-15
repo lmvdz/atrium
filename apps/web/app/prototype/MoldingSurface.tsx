@@ -26,6 +26,7 @@ import { useEffect, useMemo, useState } from 'react';
 import { ArtifactPane } from './ArtifactPane';
 import { ChatBlock } from './ChatBlock';
 import { ThreadStatus } from './ChatChrome';
+import type { Echo } from './conversation-model';
 import { covenant } from './covenant';
 import { IconPanel } from './icons';
 import { NavTree } from './NavTree';
@@ -34,14 +35,28 @@ import { sessionArtifacts, treeData, usePRStream } from './seams';
 import type { Comment, CommentDraft, Selection } from './types';
 import { UserBar } from './UserBar';
 
+/* The two covenant verbs the composer routes to, kept DISTINCT (#157 round-1
+   residual 3). An "@hexi stop/halt/pause" is an INTERRUPT — a request to stop,
+   gated by the server to the agent principal or its owner (`signal_session
+   {interrupt}`). An "@hexi steer/redirect/focus" is a STEER — public, receipted
+   guidance any room member may append (`signal_session{steer}`), powerless over
+   covenant and purse. Routing a steer cue through interrupt (or the reverse)
+   names the wrong gated door; the two are matched separately below, interrupt
+   winning when a message carries both (a hard stop dominates a redirect). */
+const INTERRUPT_CUE = /\b(stop|halt|drop|pause|kill|abort|interrupt|freeze)\b/;
+const STEER_CUE = /\b(steer|redirect|reroute|refocus|focus|guide)\b/;
+
 export function MoldingSurface() {
-  /* `steering` means the operator is COMPOSING a steer draft — it opens the
-     redirect composer. It is NOT a claim that the agent stopped: drafting is not
-     a covenant act, only the SEND is, and the send routes through the gated door
-     (`covenant.interrupt`), inert here. */
+  /* `steering` means the operator is COMPOSING a steer/interrupt draft — it opens
+     the redirect composer. It is NOT a claim that the agent stopped: drafting is
+     not a covenant act, only the SEND is, and the send routes through the gated
+     door (`covenant.steer` / `covenant.interrupt`), inert here. */
   const [steering, setSteering] = useState(false);
+  /* WHICH covenant verb the drafted send will route to — set from the cue that
+     opened the composer, so a "steer" reaches steer and a "stop" reaches interrupt. */
+  const [steerIntent, setSteerIntent] = useState<'steer' | 'interrupt'>('interrupt');
   const [redirect, setRedirect] = useState('');
-  const [echoes, setEchoes] = useState<readonly string[]>([]);
+  const [echoes, setEchoes] = useState<readonly Echo[]>([]);
   /* WHERE YOU ARE in the tree — which thread the main view shows. */
   const [selected, setSelected] = useState<Selection>({ kind: 'session', id: 's-live' });
   /* the tree is a collapsible, resizable left pane — its width is remembered. */
@@ -114,28 +129,60 @@ export function MoldingSurface() {
     const text = raw.trim();
     if (text.length === 0) return;
     const low = text.toLowerCase();
+    const interruptCue = /hexi/.test(low) && INTERRUPT_CUE.test(low);
+    const steerCue = /hexi/.test(low) && STEER_CUE.test(low);
+    if (interruptCue || steerCue) {
+      // A covenant cue. Do NOT append it as an authored "@hexi stop" line: that
+      // reads as a sent stop with nothing behind it (#157 round-1 D1). Instead
+      // open the draft composer AND, in the SAME action, append a NOT-delivered
+      // notice — so the very first thing the operator sees is that nothing was
+      // sent, not a message that looks delivered. Interrupt wins a message that
+      // carries both cues (a hard stop dominates a redirect).
+      const intent = interruptCue ? 'interrupt' : 'steer';
+      setSteerIntent(intent);
+      setSteering(true);
+      // The notice is a SYSTEM statement — it reports the state, it does not
+      // quote the operator (no quotation marks, no first person, no speech verbs;
+      // see the quotation invariant). So it describes what happened without
+      // echoing the typed words back as a quote.
+      setEchoes((e) => [
+        ...e,
+        {
+          delivery: 'pending',
+          text: `${intent} not delivered — the ${intent} composer is open, but this surface has no live session, so nothing reached any server (#157)`,
+        },
+      ]);
+      return;
+    }
     const isDelegation =
       text.startsWith('@') || /^(hexi|mira|vale|dane|iris|omar|noor)\b/.test(low);
-    setEchoes((e) => [...e, isDelegation ? `→ ${text}` : text]);
-    if (/hexi/.test(low) && /(stop|drop|steer|halt|pause)/.test(low)) {
-      // Open the steer-draft composer. NO fake stop, NO frozen stream, NO cleared
-      // concern — none of that reaches a server, so none of it is claimed.
-      setSteering(true);
-    }
+    setEchoes((e) => [...e, { delivery: 'said', text: isDelegation ? `→ ${text}` : text }]);
   };
 
-  /* SEND the drafted steer. The gated door is `signal_session{interrupt}`
-     (`commands.ts`; the server gates it to the agent principal or its owner).
-     On int/phase5 the route holds no live session, so `covenant.interrupt` is
-     honestly INERT: it performs NO durable mutation and returns `reached:false`,
-     and the operator is told — verbatim — that NOTHING was delivered. This is
-     the flip-the-input case the ticket demands: send it, and no durable command
-     and no fake success leaves the client. */
+  /* SEND the drafted steer/interrupt. The gated door is `signal_session{steer}`
+     or `signal_session{interrupt}` (`commands.ts`; the server gates interrupt to
+     the agent principal or its owner, and receipts a steer from any member) —
+     routed by the cue that opened the composer, so the drafted send reaches the
+     door it was named for. On int/phase5 the route holds no live session, so the
+     covenant seam is honestly INERT: it performs NO durable mutation and returns
+     `reached:false`, and the operator is told — verbatim — that NOTHING was
+     delivered. This is the flip-the-input case the ticket demands: send it, and
+     no durable command and no fake success leaves the client. */
   const sendSteer = () => {
-    const outcome = covenant.interrupt(steerTargetId, redirect.trim());
+    const body = redirect.trim();
+    const outcome =
+      steerIntent === 'interrupt'
+        ? covenant.interrupt(steerTargetId, body)
+        : covenant.steer(steerTargetId, body);
     setSteering(false);
     setRedirect('');
-    setEchoes((e) => [...e, `⚠ steer NOT delivered — ${outcome.inert} · door: ${outcome.door}`]);
+    setEchoes((e) => [
+      ...e,
+      {
+        delivery: 'refused',
+        text: `${steerIntent} not delivered — ${outcome.inert} · door: ${outcome.door}`,
+      },
+    ]);
   };
 
   /* commenting on an artifact anchors the note there AND appends it to the thread
@@ -144,7 +191,9 @@ export function MoldingSurface() {
   const addComment = (artifactId: string, anchor: string, quote: string, text: string) => {
     setComments((c) => [...c, { id: c.length + 1, artifactId, anchor, quote, text }]);
     const q = quote.length > 46 ? `${quote.slice(0, 46)}…` : quote;
-    setEchoes((e) => [...e, `💬 ${anchor} · “${q}” — ${text}`]);
+    // The viewer's own note, honestly authored on the room's register (a `said`
+    // echo) — a comment is the operator speaking, not a covenant act.
+    setEchoes((e) => [...e, { delivery: 'said', text: `💬 ${anchor} · “${q}” — ${text}` }]);
     setDraftComment(null); // the live draft becomes a permanent line
   };
 

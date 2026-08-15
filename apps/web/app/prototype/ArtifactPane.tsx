@@ -399,17 +399,21 @@ export function ArtifactPane({
         )}
       </div>
       {/* footer status — height-matched to the other bottom bars via --foot-h.
-          SEAM(#157): certify is honestly INERT here. The gated door is
-          `correctObject('amend',{verification:'verified'})` (LiveRoomSession:603)
-          + the SQL-timed hold — a HUMAN act the reducer refuses for a machine.
-          On int/phase5 this route holds no live client or real object id, so
-          there is NO certify control that could mutate anything: the `✓`/`~` is
-          DERIVED from `active.certified` through the shipped `<Glyph>` (never a
-          literal glyph, never a local `certified = true`), and the footer only
-          states that it is awaiting a human. When app-integration binds a live
-          client, a hold-to-certify affordance (`primitives/HoldToAct`) routes
-          through `covenant.certify(objectId)` and paints `✓` only on the server's
-          ack. A doc note carries no epistemic mark. */}
+          SEAM(#157): certify is honestly INERT here. This pane hosts a SESSION
+          LANDING, so the gated door is `certifySession` — the SQL-timed
+          arm→confirm hold (`lib/certify-session.ts`, driven by `HoldToAct`),
+          which measures its own arm→confirm interval and writes a human
+          signature on the session row — NOT `correctObject('amend',…)`, which
+          certifies a semantic claim, not a landing (#157 r1 D2). Either way it is
+          a HUMAN act the server refuses for a machine. On int/phase5 this route
+          holds no live client or real session id, so there is NO certify control
+          that could mutate anything: the `✓`/`~` is DERIVED from
+          `active.certified` through the shipped `<Glyph>` (never a literal glyph,
+          never a local `certified = true`), and the footer only states that it is
+          awaiting a human. When app-integration binds a live client, a
+          hold-to-certify affordance (`primitives/HoldToAct`) routes through
+          `covenant.certify(sessionId)` (arm→confirm) and paints `✓` only on the
+          server's ack. A doc note carries no epistemic mark. */}
       <div className={styles.artFoot}>
         {active.kind === 'doc' ? null : (
           <Glyph state={systemSettlementState(active.certified === true)} />
@@ -420,7 +424,7 @@ export function ArtifactPane({
         <span className={styles.grow} />
         <span
           className={styles.artFootHint}
-          title="certification is a human act, gated by the server (amend → verification: verified); not reachable from this surface yet (#157)"
+          title="certification is a human act, gated by the server (certifySession: a timed arm→confirm hold on the session landing); not reachable from this surface yet (#157)"
         >
           awaiting a human
           <IconCheck size={11} />
