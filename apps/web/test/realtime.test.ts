@@ -7,6 +7,7 @@ import {
   type RealtimeClientOptions,
   type RoomEventEnvelope,
   type RoomJournal,
+  type RoomTombstone,
   type ServerFrame,
   type SocketLike,
 } from '../src/lib/realtime.js';
@@ -117,6 +118,14 @@ function latest(): FakeSocket {
   const socket = sockets.at(-1);
   if (!socket) throw new Error('no socket was created');
   return socket;
+}
+
+/**
+ * A #46 wire tombstone: a durable position the server could not read back as an
+ * event. It advances the client's cursor and renders nothing.
+ */
+function tombstone(roomSeq: number, reason = 'payload: body: too small'): RoomTombstone {
+  return { roomId: ROOM, roomSeq, seq: roomSeq, malformed: true, reason };
 }
 
 /** A second client over the same fake-socket registry, connected and open. */
@@ -393,6 +402,140 @@ describe('subscribe and catch up', () => {
     // enough to produce a second page — which is exactly how multi-page catch-up
     // went unexercised against a real database (r2 delta, major 2).
     expect(latest().framesOfType('since').at(-1)).toMatchObject({ roomSeq: 0, limit: 5 });
+  });
+});
+
+/**
+ * #46, BLOCKER 1 — a malformed row on the wire is a tombstone, and the client
+ * walks its cursor past it.
+ *
+ * Before this, the server filtered the malformed marker off the wire, so a
+ * catch-up page skipped that `room_seq`. The client's `applyEntry` accepts only
+ * `lastSeq + 1`, so it saw a hole, re-requested the gap, and got the same holed
+ * page back forever — the server's in-process "cursor advances past it" undone
+ * one layer down. The tombstone is the fix: a position with no event that the
+ * client applies to advance its cursor, so the valid rows after it land. It
+ * renders nothing and fabricates nothing.
+ *
+ * The three positions the gauntlet named — HEAD, MID, TAIL — each get a test,
+ * because each exercises a different arm of the gap arithmetic.
+ */
+describe('a malformed position on the wire advances the cursor, renders nothing', () => {
+  it('walks past a tombstone at the HEAD of a catch-up page', () => {
+    client.join(ROOM);
+    latest().deliver({ type: 'subscribed', roomId: ROOM, head: 3, seenSeq: 0 });
+    const sinceBefore = latest().framesOfType('since').length;
+    latest().deliver({
+      type: 'catchup',
+      roomId: ROOM,
+      from: 0,
+      to: 3,
+      head: 3,
+      more: false,
+      entries: [tombstone(1), messageEvent(2, 'b'), messageEvent(3, 'c')],
+    });
+    // The cursor advanced to the head, and the rows after the tombstone landed.
+    expect(client.lastSeq(ROOM)).toBe(3);
+    // The tombstone is not in the timeline: it is a position, not an event.
+    expect(client.room(ROOM).events.map((e) => e.roomSeq)).toEqual([2, 3]);
+    // No stall: the client did not re-request the gap it could not previously
+    // cross. (Under the old filtered-page behaviour it would ask again here.)
+    expect(latest().framesOfType('since').length).toBe(sinceBefore);
+  });
+
+  it('walks past a tombstone in the MIDDLE of a catch-up page', () => {
+    client.join(ROOM);
+    latest().deliver({ type: 'subscribed', roomId: ROOM, head: 3, seenSeq: 0 });
+    const sinceBefore = latest().framesOfType('since').length;
+    latest().deliver({
+      type: 'catchup',
+      roomId: ROOM,
+      from: 0,
+      to: 3,
+      head: 3,
+      more: false,
+      entries: [messageEvent(1, 'a'), tombstone(2), messageEvent(3, 'c')],
+    });
+    expect(client.lastSeq(ROOM)).toBe(3);
+    expect(client.room(ROOM).events.map((e) => e.roomSeq)).toEqual([1, 3]);
+    expect(latest().framesOfType('since').length).toBe(sinceBefore);
+  });
+
+  it('walks past a tombstone at the TAIL of a catch-up page', () => {
+    client.join(ROOM);
+    latest().deliver({ type: 'subscribed', roomId: ROOM, head: 3, seenSeq: 0 });
+    const sinceBefore = latest().framesOfType('since').length;
+    latest().deliver({
+      type: 'catchup',
+      roomId: ROOM,
+      from: 0,
+      to: 3,
+      head: 3,
+      more: false,
+      entries: [messageEvent(1, 'a'), messageEvent(2, 'b'), tombstone(3)],
+    });
+    // Reached the head over a malformed tail — the client is not left one short,
+    // asking for a gap the server can only ever answer with the same tombstone.
+    expect(client.lastSeq(ROOM)).toBe(3);
+    expect(client.room(ROOM).events.map((e) => e.roomSeq)).toEqual([1, 2]);
+    expect(latest().framesOfType('since').length).toBe(sinceBefore);
+  });
+
+  it('journals the tombstone so a resumed client does not re-fetch or render it', () => {
+    const journal = memoryJournal();
+    const first = createRealtimeClient({
+      userId: ME,
+      url: 'ws://test/ws',
+      reconnect: false,
+      journal,
+      socketFactory: (url) => {
+        const socket = new FakeSocket(url);
+        sockets.push(socket);
+        return socket;
+      },
+      onError: (message) => errors.push(message),
+    });
+    return (async () => {
+      await first.connect();
+      latest().open();
+      first.join(ROOM);
+      latest().deliver({ type: 'subscribed', roomId: ROOM, head: 3, seenSeq: 0 });
+      latest().deliver({
+        type: 'catchup',
+        roomId: ROOM,
+        from: 0,
+        to: 3,
+        head: 3,
+        more: false,
+        entries: [messageEvent(1, 'a'), tombstone(2), messageEvent(3, 'c')],
+      });
+      expect(first.lastSeq(ROOM)).toBe(3);
+
+      // The journal holds the tombstone (so room_seq stays gap-free and the
+      // durable cursor names the last position held), and the cursor is 3.
+      const held = journal.load(ROOM);
+      expect(held.lastSeq).toBe(3);
+      expect(held.events.map((e) => e.roomSeq)).toEqual([1, 2, 3]);
+
+      // A fresh client resuming from the same journal renders the events only —
+      // the tombstone is filtered — and resumes at the cursor past it.
+      const resumed = createRealtimeClient({
+        userId: ME,
+        url: 'ws://test/ws',
+        reconnect: false,
+        journal,
+        socketFactory: (url) => {
+          const socket = new FakeSocket(url);
+          sockets.push(socket);
+          return socket;
+        },
+        onError: (message) => errors.push(message),
+      });
+      await resumed.connect();
+      latest().open();
+      expect(resumed.lastSeq(ROOM)).toBe(3);
+      expect(resumed.room(ROOM).events.map((e) => e.roomSeq)).toEqual([1, 3]);
+    })();
   });
 });
 

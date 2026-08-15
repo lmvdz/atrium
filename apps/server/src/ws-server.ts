@@ -12,11 +12,18 @@ import {
   CommandError,
   type FoldedLedgerEntry,
   isFoldedEntry,
+  isMalformedEntry,
   type Ledger,
   type LedgerEntry,
 } from './ledger.js';
 import type { Logger } from './logger.js';
-import { ClientFrame, type EphemeralFrame, type ServerFrame, type WireEvent } from './protocol.js';
+import {
+  ClientFrame,
+  type EphemeralFrame,
+  type ServerFrame,
+  type WireEntry,
+  type WireEvent,
+} from './protocol.js';
 import { createReconciler, DEFAULT_RECONCILE_INTERVAL_MS, type Reconciler } from './reconciler.js';
 import {
   type MembershipPair,
@@ -786,11 +793,13 @@ export function createRealtimeServer(options: RealtimeOptions): RealtimeServer {
          * everything.
          */
         more: page.more,
-        // #46: malformed rows are filtered from the wire page — there is no
-        // event to send — while `to`/`head` still count them, so the client
-        // advances its cursor past the bad row rather than reading a hole and
-        // re-requesting it forever.
-        entries: page.entries.filter(isFoldedEntry).map(toWire),
+        // #46 (BLOCKER 1): a malformed row rides the wire as a tombstone, not
+        // filtered off it. Filtering left a hole at that `room_seq`, and the
+        // client's `applyEntry` accepts only `lastSeq + 1`, so it re-requested the
+        // gap and stalled forever — the server outage moved to the client. The
+        // tombstone carries the position with no event, so the client advances its
+        // cursor past the bad row and the valid rows after it land.
+        entries: page.entries.map(toWireEntry),
       });
     } catch (error) {
       send(socket, { type: 'error', message: describe(error) });
@@ -938,11 +947,12 @@ export function createRealtimeServer(options: RealtimeOptions): RealtimeServer {
    */
   function fanOut(entries: LedgerEntry[]): void {
     for (const entry of entries) {
-      // #46: a malformed row has no wire event to carry — it cannot be a
-      // `RoomEvent`. It was already logged and counted by the ledger; a
-      // subscriber's cursor advances past it via the reconciler's `head` frame
-      // and the next `catchup`, whose `to` accounts for it. So there is nothing
-      // to broadcast here, only nothing to crash on.
+      // #46: a malformed row has no event to carry on the live path — it cannot
+      // be a `RoomEvent`. It is skipped here, and the subscriber closes the gap
+      // the same way it closes any other: the reconciler's `head` frame (repeated
+      // until acked) or the next valid row drives a `since`, and the catch-up
+      // reply carries the tombstone (BLOCKER 1) that advances the cursor past the
+      // bad position. The ledger already logged and counted the row.
       if (!isFoldedEntry(entry)) continue;
       hub.broadcast(entry.roomId, {
         type: 'event',
@@ -1227,6 +1237,28 @@ function toWire(entry: FoldedLedgerEntry): WireEvent {
     event: entry.event,
     issues: [...entry.issues],
   };
+}
+
+/**
+ * A ledger row as the wire carries it, tombstone included (#46, BLOCKER 1).
+ *
+ * A folded entry becomes a `WireEvent`; a malformed row becomes a `WireTombstone`
+ * — a position with no event, no actor, no issues — so the client can advance its
+ * cursor past the bad row without an event being fabricated for it. This is the
+ * only place a malformed row is turned into something the wire can carry, on both
+ * the live (`fanOut`) and catch-up (`handleSince`) paths.
+ */
+function toWireEntry(entry: LedgerEntry): WireEntry {
+  if (isMalformedEntry(entry)) {
+    return {
+      roomId: entry.roomId,
+      roomSeq: entry.roomSeq,
+      seq: entry.seq,
+      malformed: true,
+      reason: entry.reason,
+    };
+  }
+  return toWire(entry);
 }
 
 function describe(error: unknown): string {

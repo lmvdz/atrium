@@ -181,7 +181,7 @@
       "kind": "file",
       "why": "Round 2's `WatermarkStore` by construction: the cursor is durable and the events are not, so a reload is a room that believes it is up to date and holds nothing.",
       "file": "apps/web/src/lib/realtime.ts",
-      "find": "        events: held.events.filter((entry) => entry.issues.length === 0),",
+      "find": "        events: held.events.filter(\n          (entry): entry is RoomEventEnvelope => !isTombstone(entry) && entry.issues.length === 0,\n        ),",
       "replace": "        events: [],",
       "catches": ["resumes from a durable journal rather than replaying the room"]
     },

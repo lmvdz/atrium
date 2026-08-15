@@ -93,6 +93,54 @@ export interface WireEvent {
   issues: string[];
 }
 
+/**
+ * A durable ledger *position* that carries no event — the #46 wire tombstone.
+ *
+ * A row whose payload cannot be read back as a `RoomEvent` (a bad migration, a
+ * manual fix, a future non-participant writer — SQL runs no zod) is still a real
+ * row: it holds a `room_seq`, and `room_seq` is the client's only cursor.
+ * Filtering it off the wire — which is what this server did before — leaves a
+ * hole in the catch-up page, and the client's `applyEntry` accepts only
+ * `lastSeq + 1`, so it re-requests the gap and stalls after the
+ * max-stalled-catchups guard. The server outage #46 closed on the read path
+ * became a client outage one layer down.
+ *
+ * The tombstone is how the position travels without an event: the client applies
+ * it to advance its cursor **past** the bad row, so the valid rows after it land,
+ * and it renders nothing. It fabricates no event — there is no `event`, no
+ * `actor`, no `issues` — which is the covenant #46 keeps: nothing is invented to
+ * paper over a row that cannot be read. It is the wire twin of the ledger's
+ * `MalformedLedgerEntry`, and the client applies it exactly as it applies a
+ * refused row (`applied_with_issue`): journalled so `room_seq` stays gap-free,
+ * never shown because there is nothing that happened to show.
+ */
+export interface WireTombstone {
+  roomId: string;
+  /** Per-room position — real; this is the cursor the client advances past. */
+  roomSeq: number;
+  /** Global position. Diagnostics; not a client cursor. */
+  seq: number;
+  /** Discriminant: this position holds a row that could not be read as an event. */
+  malformed: true;
+  /** Why the row could not be read. Advisory, for an operator; never rendered. */
+  reason: string;
+}
+
+/**
+ * One position as a `catchup` page carries it: a readable event, or a tombstone
+ * for a row that is not (#46).
+ *
+ * Only the catch-up page carries the union. A live `event` frame stays a
+ * `WireEvent` — a malformed row is skipped on the live fan-out, and the
+ * subscriber closes the resulting gap the same way it closes any other: the
+ * reconciler's `head` frame, or the next valid row, drives a `since`, and the
+ * catch-up reply carries the tombstone that advances the cursor past the bad
+ * position. Keeping the live frame narrow means every existing reader of
+ * `event.entry.event` stays honest; the tombstone appears only where a cursor is
+ * actually being walked forward over history.
+ */
+export type WireEntry = WireEvent | WireTombstone;
+
 export type ServerFrame =
   | { type: 'welcome'; connectionId: string; userId: string; heartbeatIntervalMs: number }
   | { type: 'pong'; at: string }
@@ -127,7 +175,7 @@ export type ServerFrame =
       to: number;
       head: number;
       more: boolean;
-      entries: WireEvent[];
+      entries: WireEntry[];
     }
   /**
    * The command succeeded. The three positional fields are `null` exactly when

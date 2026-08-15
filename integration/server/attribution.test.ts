@@ -4,6 +4,7 @@ import { and, eq } from 'drizzle-orm';
 import { afterAll, afterEach, beforeEach, describe, expect, it } from 'vitest';
 import type { CommandInput } from '../../apps/server/src/commands.js';
 import { isFoldedEntry } from '../../apps/server/src/ledger.js';
+import type { WireEvent } from '../../apps/server/src/protocol.js';
 import {
   openDatabase,
   resetDatabase,
@@ -617,11 +618,14 @@ describe('a refused append on the wire — D4', () => {
     const cold = await connect(room.people.bystander as string);
     await cold.subscribe(room.roomId);
     const page = await cold.since(room.roomId, 0);
-    const replayed = page.entries.find((entry) => entry.event.id === ack.eventId);
+    // A catch-up page can carry #46 tombstones now; this room has none, but the
+    // narrow keeps the test honest that `entries` is a union of positions.
+    const events = page.entries.filter((entry): entry is WireEvent => !('malformed' in entry));
+    const replayed = events.find((entry) => entry.event.id === ack.eventId);
     expect(replayed?.issues).toEqual(ack.issues);
     // Not vacuous: the rows that *did* apply carry an empty list, so "marked"
     // is a distinction and not a constant.
-    expect(page.entries.filter((entry) => entry.issues.length === 0).length).toBeGreaterThan(0);
+    expect(events.filter((entry) => entry.issues.length === 0).length).toBeGreaterThan(0);
   });
 
   it('marks a refused row for a cold reader on an instance that never appended it', async () => {

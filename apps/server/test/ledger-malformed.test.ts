@@ -32,6 +32,7 @@ interface FakeRow {
   actorKind: string;
   actorId: string | null;
   trustedMessages: unknown;
+  occurredAt: string;
 }
 
 /**
@@ -71,15 +72,16 @@ function capturingLogger(): { logger: Logger; lines: Captured[] } {
   };
 }
 
-function messageRow(seq: number, body: string): FakeRow {
-  const roomId = randomUUID();
+function messageRow(seq: number, body: string, overrides: Partial<FakeRow> = {}): FakeRow {
+  const roomId = overrides.roomId ?? randomUUID();
+  const at = new Date(1_700_000_000_000 + seq * 1000).toISOString();
   return {
     seq,
     roomSeq: seq,
     roomId,
     payload: {
       id: randomUUID(),
-      at: new Date(1_700_000_000_000 + seq * 1000).toISOString(),
+      at,
       type: 'message_posted',
       roomId,
       messageId: randomUUID(),
@@ -88,6 +90,9 @@ function messageRow(seq: number, body: string): FakeRow {
     actorKind: 'human',
     actorId: randomUUID(),
     trustedMessages: null,
+    // `occurred_at` is pinned to `payload.at` by a CHECK in production; mirror it.
+    occurredAt: at,
+    ...overrides,
   };
 }
 
@@ -145,5 +150,68 @@ describe('#46 malformed rows are survivable at read', () => {
     await expect(ledger.hydrate()).resolves.toBeUndefined();
     expect(ledger.malformedCount()).toBe(1);
     expect(ledger.lastSeq()).toBe(3);
+  });
+
+  /**
+   * #46, HIGH 3 — a drifted `actor_kind` on an otherwise-valid payload used to
+   * `throw` from `actorFromColumns` inside `parseRow`, re-crashing every read the
+   * same way an unparseable payload did, one column over.
+   *
+   * This is a mutation-red guard for HIGH 3: reverting `parseRow` to call the
+   * throwing `actorFromColumns` makes `sync()` reject on the drifted row and this
+   * test fails by name.
+   */
+  it('reads a corrupt actor_kind as a malformed marker without throwing', async () => {
+    const rows = [
+      messageRow(1, 'fine'),
+      // A valid payload whose actor_kind is not one the enum has — a drifted or
+      // corrupt column. The payload parses; the actor does not.
+      messageRow(2, 'valid payload, drifted actor', { actorKind: 'wizard' }),
+      messageRow(3, 'still fine'),
+    ];
+    const { logger } = capturingLogger();
+    const ledger = createLedger({ db: fakeDatabase(rows), logger });
+
+    const folded = await ledger.sync();
+
+    expect(folded).toHaveLength(3);
+    const malformed = folded.filter(isMalformedEntry);
+    expect(malformed).toHaveLength(1);
+    expect(malformed[0]?.seq).toBe(2);
+    expect(malformed[0]?.reason).toMatch(/actor_kind/);
+    expect(ledger.malformedCount()).toBe(1);
+  });
+
+  /**
+   * grok's `trusted_messages` nuance, adjudicated: a bad receipt window discards
+   * an otherwise-valid payload's fold ONLY when the window is load-bearing for
+   * that event kind. The reducer reads the window for exactly one kind
+   * (`object_accepted`), so a `message_posted` — which never consults it — folds
+   * with the bad window dropped and reported, rather than losing a good event.
+   */
+  it('folds a valid non-acceptance event whose trusted_messages window is unreadable', async () => {
+    const rows = [
+      messageRow(1, 'before'),
+      // A window that does not satisfy ProvenanceMessage[] on a kind that never
+      // reads one. Under round 1 this marked the whole row malformed.
+      messageRow(2, 'valid message, bad window', {
+        trustedMessages: [{ id: 42 }] as unknown as FakeRow['trustedMessages'],
+      }),
+      messageRow(3, 'after'),
+    ];
+    const { logger, lines } = capturingLogger();
+    const ledger = createLedger({ db: fakeDatabase(rows), logger });
+
+    const folded = await ledger.sync();
+
+    // All three folded as events; nothing was marked malformed.
+    expect(folded.map((entry) => entry.kind)).toEqual(['event', 'event', 'event']);
+    expect(ledger.malformedCount()).toBe(0);
+    // The bad window was still reported, once, so an operator sees it.
+    const warned = lines.filter(
+      (line) => line.level === 'warn' && /trusted_messages/.test(line.message),
+    );
+    expect(warned).toHaveLength(1);
+    expect(warned[0]?.fields).toMatchObject({ seq: 2 });
   });
 });

@@ -553,8 +553,20 @@ export interface Ledger {
 
 const PAGE = 500;
 
-/** Turn the row's two actor columns back into the union core folds. */
-export function actorFromColumns(kind: string, id: string | null): Actor {
+/**
+ * Turn the row's two actor columns back into the union core folds, or `null` for
+ * an `actor_kind` the enum does not have (#46, HIGH 3).
+ *
+ * The read path uses this rather than {@link actorFromColumns} because a drifted
+ * or corrupt `actor_kind` is the same class of hazard as a payload that no longer
+ * parses — one column over — and used to `throw` here, re-crashing every
+ * `hydrate`/`since`/`replay` on a row whose *payload* was perfectly valid. A
+ * `null` return lets `parseRow` turn it into the same malformed marker instead of
+ * taking the room down. Guessing is refused, not the read: folding the row under
+ * an actor nobody chose would silently reopen every trust gate the reducer reads
+ * the actor for.
+ */
+export function safeActorFromColumns(kind: string, id: string | null): Actor | null {
   switch (kind) {
     case 'human':
       return { kind: 'human', userId: id ?? '' };
@@ -570,10 +582,24 @@ export function actorFromColumns(kind: string, id: string | null): Actor {
     case 'system':
       return { kind: 'system' };
     default:
-      // A kind the enum does not have means the ledger disagrees with this
-      // code. Guessing would fold the row under an actor nobody chose.
-      throw new Error(`core_events.actor_kind holds an unknown value "${kind}"`);
+      return null;
   }
+}
+
+/**
+ * Turn the row's two actor columns back into the union core folds.
+ *
+ * The strict form, kept for the write side and any caller that has already
+ * established the `actor_kind` is one the enum has. The read path uses
+ * {@link safeActorFromColumns} instead — see #46, HIGH 3.
+ */
+export function actorFromColumns(kind: string, id: string | null): Actor {
+  const actor = safeActorFromColumns(kind, id);
+  if (actor === null) {
+    // A kind the enum does not have means the ledger disagrees with this code.
+    throw new Error(`core_events.actor_kind holds an unknown value "${kind}"`);
+  }
+  return actor;
 }
 
 /** The two columns, from the union. `null` for the system actor, and only it. */
@@ -638,6 +664,15 @@ export function createLedger({ db, logger, instanceId }: LedgerOptions): Ledger 
     actorKind: coreEvents.actorKind,
     actorId: coreEvents.actorId,
     trustedMessages: coreEvents.trustedMessages,
+    // #46 (BLOCKER 2): the canonical-order column, selected for EVERY row so the
+    // ordering watermark can advance past a malformed row too. A malformed row's
+    // payload may not parse, but the row is still physically present in the
+    // `(occurred_at, id)` order the append gate enforces — and a future-dated bad
+    // row that did not move `lastAtMs` would make the next append's minted `at`
+    // fall behind it and be refused. `occurred_at` is pinned to `payload.at` by a
+    // CHECK, so it is the same instant the fold would have read, available even
+    // when the payload is not.
+    occurredAt: coreEvents.occurredAt,
   } as const;
 
   /**
@@ -653,6 +688,12 @@ export function createLedger({ db, logger, instanceId }: LedgerOptions): Ledger 
     entry: LedgerEntry;
     /** `null` when no window was supplied; `[]` when one was and it was empty. */
     trustedMessages: ProvenanceMessage[] | null;
+    /**
+     * The row's `occurred_at`, as stored (#46, BLOCKER 2). Present for every row,
+     * readable or not — it is a lifted column, not the payload — so `catchUp` can
+     * advance the ordering watermark past a malformed row.
+     */
+    occurredAt: string;
   }
 
   function parseRow(row: {
@@ -663,9 +704,16 @@ export function createLedger({ db, logger, instanceId }: LedgerOptions): Ledger 
     actorKind: string;
     actorId: string | null;
     trustedMessages: ProvenanceMessage[] | null;
+    occurredAt: string;
   }): LedgerRow {
     const seq = Number(row.seq);
     const roomSeq = Number(row.roomSeq);
+    const occurredAt = String(row.occurredAt);
+    const malformed = (reason: string): LedgerRow => ({
+      entry: { kind: 'malformed', seq, roomSeq, roomId: row.roomId, reason },
+      trustedMessages: null,
+      occurredAt,
+    });
     // #46: a payload that does not parse used to `throw` here, which took the
     // whole room down on every hydration forever. It is now reported, not fatal:
     // the row comes back as a `malformed` marker instead of a folded event. It is
@@ -673,32 +721,47 @@ export function createLedger({ db, logger, instanceId }: LedgerOptions): Ledger 
     // excluding it is the correct fold — see `catchUp`.
     const parsed = RoomEvent.safeParse(row.payload);
     if (!parsed.success) {
-      return {
-        entry: {
-          kind: 'malformed',
-          seq,
-          roomSeq,
-          roomId: row.roomId,
-          reason: `payload: ${describeParseFailure(parsed.error)}`,
-        },
-        trustedMessages: null,
-      };
+      return malformed(`payload: ${describeParseFailure(parsed.error)}`);
     }
-    // r7 addendum 2: the receipt window is a durable column the write path
-    // constrains only in shape. Read it through the schema too; a window that
-    // does not parse makes the row malformed on read, consistent with `payload`,
-    // rather than folding under a window nobody can vouch for.
+    // #46, HIGH 3: the actor columns are read defensively too. A drifted or
+    // corrupt `actor_kind` on an otherwise-valid payload used to `throw` from
+    // `actorFromColumns` one line below — re-crashing hydrate/since/replay, #46
+    // one column over. It now yields the same malformed marker.
+    const actor = safeActorFromColumns(row.actorKind, row.actorId);
+    if (actor === null) {
+      return malformed(`actor: core_events.actor_kind holds an unknown value "${row.actorKind}"`);
+    }
+    // r7 addendum 2 + grok's trusted_messages nuance: the receipt window is a
+    // durable column the write path constrains only in shape. Read it through the
+    // schema too — but a window that does not parse only makes the whole row
+    // malformed when the window is *load-bearing for this event kind*.
+    //
+    // The reducer consults the window for exactly one kind: `object_accepted`
+    // (`reduce.ts`'s `applyObjectAccepted` is its only reader). For that kind a
+    // bad window means the acceptance cannot be certified against the messages it
+    // cites, so the fold is not trustworthy and the row is malformed — the
+    // marker is correct. For every other kind the window is never read, so
+    // discarding an otherwise-valid payload's fold over it would be throwing away
+    // a good event for a column that changes nothing. Those fold, with the bad
+    // window dropped and reported separately.
     const window = TrustedWindow.safeParse(row.trustedMessages);
     if (!window.success) {
+      if (parsed.data.type === 'object_accepted') {
+        return malformed(`trusted_messages: ${describeParseFailure(window.error)}`);
+      }
+      reportDroppedWindow(seq, roomSeq, row.roomId, describeParseFailure(window.error));
       return {
         entry: {
-          kind: 'malformed',
+          kind: 'event',
           seq,
           roomSeq,
           roomId: row.roomId,
-          reason: `trusted_messages: ${describeParseFailure(window.error)}`,
+          event: parsed.data,
+          actor,
+          issues: EMPTY_ISSUES,
         },
         trustedMessages: null,
+        occurredAt,
       };
     }
     return {
@@ -708,7 +771,7 @@ export function createLedger({ db, logger, instanceId }: LedgerOptions): Ledger 
         roomSeq,
         roomId: row.roomId,
         event: parsed.data,
-        actor: actorFromColumns(row.actorKind, row.actorId),
+        actor,
         // Filled by `withIssues` on the way out, never here: `catchUp` parses a
         // page *before* it folds it, so a verdict read at parse time is the
         // verdict of the previous state and would report every freshly folded
@@ -716,6 +779,7 @@ export function createLedger({ db, logger, instanceId }: LedgerOptions): Ledger 
         issues: EMPTY_ISSUES,
       },
       trustedMessages: window.data,
+      occurredAt,
     };
   }
 
@@ -740,6 +804,23 @@ export function createLedger({ db, logger, instanceId }: LedgerOptions): Ledger 
       roomId: entry.roomId,
       reason: entry.reason,
     });
+  }
+
+  /**
+   * Rows whose `trusted_messages` window did not parse but whose event was folded
+   * anyway, because the window is not load-bearing for that kind (#46). Deduped
+   * by `seq` so a walk over the same row does not repeat the WARN.
+   */
+  const reportedDroppedWindow = new Set<number>();
+
+  /** Log a dropped (non-load-bearing) receipt window, once per distinct `seq`. */
+  function reportDroppedWindow(seq: number, roomSeq: number, roomId: string, reason: string): void {
+    if (reportedDroppedWindow.has(seq)) return;
+    reportedDroppedWindow.add(seq);
+    logger.warn(
+      'ledger row has an unreadable trusted_messages window on a kind that does not consult it — folded without the window (#46)',
+      { seq, roomSeq, roomId, reason },
+    );
   }
 
   /** The one place a folded `LedgerEntry` acquires its verdict. */
@@ -940,6 +1021,10 @@ export function createLedger({ db, logger, instanceId }: LedgerOptions): Ledger 
       if (rows.length === 0) break;
 
       const parsed = rows.map(parseRow);
+      // #46 (MEDIUM 5): event ids that parsed as a `RoomEvent` but were refused
+      // by `CoreEvent.parse` on fold, mapped to the reason. These are converted
+      // to markers below rather than fanned out as clean events.
+      const coreMalformed = new Map<string, string>();
       const core = [];
       for (const row of parsed) {
         // #46: a malformed row is never folded. It was never a consumable event,
@@ -975,10 +1060,13 @@ export function createLedger({ db, logger, instanceId }: LedgerOptions): Ledger 
             // whose payload passed `RoomEvent` yet `CoreEvent.parse` refused —
             // the two schemas disagreeing, which `parseRow`'s safe-skip does not
             // catch because the row *did* parse as a `RoomEvent`. It is still a
-            // row no replay can fold, so it is reported rather than folded, and
-            // the room stays up. (In practice unreachable: the core kinds in
-            // `RoomEventVariants` are @atrium/core's own schemas, so a payload
-            // that parses as one parses as the other.)
+            // row no replay can fold, so it is reported and — MEDIUM 5 — the
+            // matching entry is converted to a marker below rather than reaching
+            // `folded`/fan-out as a clean event. (In practice unreachable: the
+            // core kinds in `RoomEventVariants` are @atrium/core's own schemas, so
+            // a payload that parses as one parses as the other.)
+            const badId = (outcome.event as { id?: unknown }).id;
+            if (typeof badId === 'string') coreMalformed.set(badId, outcome.detail);
             logger.warn(
               'ledger row parsed as a RoomEvent but not as a CoreEvent — reported, not folded (#46)',
               { detail: outcome.detail, lastSeq },
@@ -986,8 +1074,16 @@ export function createLedger({ db, logger, instanceId }: LedgerOptions): Ledger 
           }
         }
       }
-      for (const entry of parsed.map((row) => row.entry)) {
+      for (const { entry, occurredAt } of parsed) {
         lastSeq = Math.max(lastSeq, entry.seq);
+        // #46 (BLOCKER 2): advance the ordering watermark for EVERY physical row,
+        // malformed included. `occurred_at` is pinned to `payload.at` by a CHECK
+        // and read from a lifted column, so it is available even when the payload
+        // is not — and a future-dated malformed row that left `lastAtMs` behind it
+        // would make the next append's minted `at` be refused by the append gate,
+        // trading "process down" for "ledger nobody can write to".
+        const atMs = Date.parse(occurredAt);
+        if (Number.isFinite(atMs)) lastAtMs = Math.max(lastAtMs, atMs);
         if (entry.kind === 'malformed') {
           // Reported (once per seq) and carried out so the fan-out can advance a
           // client's cursor past it without a hole, and an operator sees it.
@@ -995,7 +1091,22 @@ export function createLedger({ db, logger, instanceId }: LedgerOptions): Ledger 
           folded.push(entry);
           continue;
         }
-        lastAtMs = Math.max(lastAtMs, Date.parse(entry.event.at));
+        // #46 (MEDIUM 5): a row the reducer refused as malformed on fold is not a
+        // clean event — convert it to a marker before it reaches `folded`/fan-out,
+        // so cold-read and live fan-out agree that this position is unreadable.
+        const coreReason = coreMalformed.get(entry.event.id);
+        if (coreReason !== undefined) {
+          const marker: MalformedLedgerEntry = {
+            kind: 'malformed',
+            seq: entry.seq,
+            roomSeq: entry.roomSeq,
+            roomId: entry.roomId,
+            reason: `core: ${coreReason}`,
+          };
+          reportMalformed(marker);
+          folded.push(marker);
+          continue;
+        }
         // After the fold above, so a row refused on the way in carries the
         // reason it was refused out to the fan-out (#22 r10, D4).
         folded.push(withIssues(entry));
@@ -1234,8 +1345,8 @@ export function createLedger({ db, logger, instanceId }: LedgerOptions): Ledger 
             const atMs = Math.max(Date.now(), stagedAtMs + 1);
             const at = new Date(atMs).toISOString();
             const id = randomUUID();
-            const event = build({ id, at });
-            if (event.id !== id || event.at !== at) {
+            const built = build({ id, at });
+            if (built.id !== id || built.at !== at) {
               throw new CommandError(
                 'invalid',
                 'a command may not choose its own ledger position — build() must use the assigned id and at',
@@ -1248,13 +1359,21 @@ export function createLedger({ db, logger, instanceId }: LedgerOptions): Ledger 
             // this guard, or written by any future/raw path around it, still
             // exist, which is the whole point of #46 — it just stops *this*
             // server from being the writer that creates one.
-            const guard = RoomEvent.safeParse(event);
+            const guard = RoomEvent.safeParse(built);
             if (!guard.success) {
               throw new CommandError(
                 'invalid',
                 `refusing to append a payload that does not satisfy RoomEvent: ${describeParseFailure(guard.error)}`,
               );
             }
+            // #46 (MEDIUM 4): everything downstream uses the *parsed* event, not
+            // the raw `build()` output. What gets folded, inserted into `payload`,
+            // projected and returned in the `AppendResult` is `guard.data`, so a
+            // cold read (which parses the `payload` column back through the same
+            // schema) and this live fan-out cannot disagree — no `event as
+            // RoomEvent` laundering that persists an object the read path would
+            // narrow differently.
+            const event: RoomEvent = guard.data;
             const roomId = resolveRoomId(event, request.roomId, stagedState);
             const actor = request.actor;
 
@@ -1415,7 +1534,7 @@ export function createLedger({ db, logger, instanceId }: LedgerOptions): Ledger 
               seq,
               roomSeq,
               roomId,
-              event: event as RoomEvent,
+              event,
               actor,
               outcome,
               issues: EMPTY_ISSUES,

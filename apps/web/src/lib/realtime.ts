@@ -134,6 +134,45 @@ const Envelope = z.object({
 /** One ledger row, as the wire carries it. */
 export type RoomEventEnvelope = z.infer<typeof Envelope>;
 
+/**
+ * A durable ledger *position* with no event — the #46 wire tombstone.
+ *
+ * The server emits this for a row whose payload it could not read back as a
+ * `RoomEvent` (a bad migration, a manual fix, a future non-participant writer;
+ * SQL runs no zod). The row is real — it holds a `room_seq`, which is this
+ * client's only cursor — but there is no event to render. The client applies the
+ * tombstone to advance its cursor **past** the bad position, so the valid rows
+ * after it are not stranded behind a hole it re-requests forever.
+ *
+ * It is the client twin of a refused row (`applied_with_issue`): journalled so
+ * `room_seq` stays a gap-free sequence and the durable cursor names the last
+ * position held, but never pushed to `room.events` because nothing happened
+ * there to show. No event is fabricated — that would be exactly the laundering
+ * #46 refuses; the tombstone renders nothing at all.
+ */
+const Tombstone = z.object({
+  roomId: z.string().min(1),
+  roomSeq: z.number().int().positive(),
+  seq: z.number().int().positive(),
+  malformed: z.literal(true),
+  /** Advisory, for diagnostics; never rendered. Defaulted for an older server. */
+  reason: z.string().default(''),
+});
+
+/** One wire position: a readable event, or a tombstone for a row that is not (#46). */
+const WireEntry = z.union([Tombstone, Envelope]);
+
+/** A tombstone as this client holds it. */
+export type RoomTombstone = z.infer<typeof Tombstone>;
+
+/** One position this client applies: a readable event, or a tombstone (#46). */
+export type RoomEntry = RoomEventEnvelope | RoomTombstone;
+
+/** Narrow a held entry to the #46 tombstone — the one that carries no event. */
+export function isTombstone(entry: RoomEntry): entry is RoomTombstone {
+  return 'malformed' in entry && entry.malformed === true;
+}
+
 export const ServerFrame = z.discriminatedUnion('type', [
   z.object({
     type: z.literal('welcome'),
@@ -182,7 +221,7 @@ export const ServerFrame = z.discriminatedUnion('type', [
       to: z.number().int().min(0),
       head: z.number().int().min(0),
       more: z.boolean(),
-      entries: z.array(Envelope),
+      entries: z.array(WireEntry),
     })
     .refine((frame) => frame.entries.every((entry) => entry.roomId === frame.roomId), {
       message: 'a catch-up page carries an entry for a different room',
@@ -323,17 +362,26 @@ export type PendingMessage = PendingMessageBase &
  * client's `lastSeq` names an event it actually holds.
  */
 export interface RoomJournal {
-  /** Everything durably applied for this room, and the cursor that goes with it. */
-  load: (roomId: string) => { events: RoomEventEnvelope[]; lastSeq: number };
+  /**
+   * Everything durably applied for this room, and the cursor that goes with it.
+   *
+   * `events` holds every position the client walked past — folded events *and*
+   * #46 tombstones — because that is what makes the cursor meaningful. `view()`
+   * renders only the events; the tombstones are there so `room_seq` stays a
+   * gap-free sequence and the resumed cursor names a position actually held.
+   */
+  load: (roomId: string) => { events: RoomEntry[]; lastSeq: number };
   /**
    * Record one applied entry and the cursor it implies, **atomically**.
    *
    * `lastSeq` is always `entry.roomSeq`; it is a separate parameter rather than
    * derived so the contract is legible at the call site and an implementation
    * writing a compact record does not have to re-derive the client's own
-   * arithmetic. An implementation may not persist one without the other.
+   * arithmetic. An implementation may not persist one without the other. The
+   * entry may be a #46 tombstone — a position with no event — which is journalled
+   * for its cursor and never rendered.
    */
-  commit: (roomId: string, entry: RoomEventEnvelope, lastSeq: number) => void;
+  commit: (roomId: string, entry: RoomEntry, lastSeq: number) => void;
   /**
    * Throw this room's record away and start again from nothing.
    *
@@ -362,7 +410,7 @@ export interface RoomJournal {
  * one's bugs.
  */
 export function memoryJournal(): RoomJournal {
-  const rooms = new Map<string, { events: RoomEventEnvelope[]; lastSeq: number }>();
+  const rooms = new Map<string, { events: RoomEntry[]; lastSeq: number }>();
   const room = (roomId: string) => {
     let existing = rooms.get(roomId);
     if (!existing) {
@@ -476,7 +524,9 @@ function warnDegraded(roomId: string, reason: string): void {
  */
 const StoredRoom = z
   .object({
-    events: z.array(Envelope),
+    // Folded events and #46 tombstones alike: both carry a `roomSeq`, and the
+    // invariants below are stated over the position, not the payload.
+    events: z.array(WireEntry),
     lastSeq: z.number().int().min(0),
   })
   .superRefine((record, ctx) => {
@@ -634,7 +684,7 @@ export function localStorageJournal(
     }
   };
   /** Keep the newest `maxEvents`. The cursor names the last of them either way. */
-  const trim = (events: RoomEventEnvelope[]): RoomEventEnvelope[] =>
+  const trim = (events: RoomEntry[]): RoomEntry[] =>
     events.length <= maxEvents ? events : events.slice(events.length - maxEvents);
 
   /**
@@ -650,7 +700,7 @@ export function localStorageJournal(
    */
   const degrade = (
     roomId: string,
-    held: { events: RoomEventEnvelope[]; lastSeq: number },
+    held: { events: RoomEntry[]; lastSeq: number },
     reason: string,
   ): void => {
     if (degraded.has(roomId)) return;
@@ -665,7 +715,7 @@ export function localStorageJournal(
     }
   };
 
-  const readDurable = (roomId: string): { events: RoomEventEnvelope[]; lastSeq: number } => {
+  const readDurable = (roomId: string): { events: RoomEntry[]; lastSeq: number } => {
     const access = storage();
     if (!access.store) {
       // Not `{events: [], lastSeq: 0}`: "no history" is a legitimate answer that
@@ -725,7 +775,7 @@ export function localStorageJournal(
     }
   };
 
-  const readRoom = (roomId: string): { events: RoomEventEnvelope[]; lastSeq: number } => {
+  const readRoom = (roomId: string): { events: RoomEntry[]; lastSeq: number } => {
     if (degraded.has(roomId)) return fallback.load(roomId);
     // `readDurable` is the single place that decides whether a store exists and
     // says so. Asking `storage()` here as well was how the answer and the report
@@ -1047,11 +1097,13 @@ export function createRealtimeClient(options: RealtimeClientOptions): RealtimeCl
         head: held.lastSeq,
         seenSeq: 0,
         // The same filter `applyEntry` applies live, applied to what was
-        // resumed: the journal holds every row it walked past — that is what
-        // makes its cursor meaningful — and the room holds only the rows that
-        // took effect. A record written by an older build has no `issues` on any
-        // entry and so resumes exactly as it always did.
-        events: held.events.filter((entry) => entry.issues.length === 0),
+        // resumed: the journal holds every row it walked past — folded events,
+        // refused rows, and #46 tombstones — and the room holds only the events
+        // that took effect. A record written by an older build has no `issues` on
+        // any entry and so resumes exactly as it always did.
+        events: held.events.filter(
+          (entry): entry is RoomEventEnvelope => !isTombstone(entry) && entry.issues.length === 0,
+        ),
         pending: [],
         presence: {},
         typing: [],
@@ -1102,7 +1154,7 @@ export function createRealtimeClient(options: RealtimeClientOptions): RealtimeCl
     return resolveWsUrl(config);
   }
 
-  function applyEntry(entry: RoomEventEnvelope): void {
+  function applyEntry(entry: RoomEntry): void {
     const room = view(entry.roomId);
     // Already applied. At-least-once delivery plus catch-up means a client sees
     // the same event twice routinely; applying it twice would double every
@@ -1124,6 +1176,21 @@ export function createRealtimeClient(options: RealtimeClientOptions): RealtimeCl
     // own cursor where it was, so the entry is simply re-delivered by the next
     // catch-up rather than skipped.
     journal.commit(entry.roomId, entry, entry.roomSeq);
+    // ── A malformed position is not an event either (#46, BLOCKER 1) ──────────
+    //
+    // A tombstone is a durable ledger row the server could not read back as an
+    // event. Journalled just above — so `room_seq` stays gap-free and the cursor
+    // names the last position held, exactly the reasons a refused row is
+    // journalled — but never shown and never reconciled against a pending echo:
+    // there is no event to render and nothing to confirm. It exists only to carry
+    // the cursor PAST the bad row so the valid rows after it land, instead of the
+    // client re-requesting the hole forever. No event is fabricated.
+    if (isTombstone(entry)) {
+      room.lastSeq = entry.roomSeq;
+      room.head = Math.max(room.head, entry.roomSeq);
+      changed(entry.roomId);
+      return;
+    }
     // ── A refused row is not an event that happened ──────────────────────────
     //
     // #22 r10, D4. The server appends a row whose business checks failed
