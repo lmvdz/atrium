@@ -714,6 +714,23 @@
   cursor: not-allowed;
 }
 
+/* #157 r3: steer / interrupt are STRUCTURED covenant controls on the running
+   session, not chat prose. Inert on this route (no live session), so they read as
+   inert — muted, not-allowed, no invitation to press. A disabled control cannot
+   fake a stop. */
+.statCovenant {
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+  padding: 2px 6px;
+  border-radius: 3px;
+  border: 1px solid var(--line);
+  background: var(--bg4);
+  color: var(--tx3);
+  font-size: 11px;
+  cursor: not-allowed;
+}
+
 /* ---- the log: ambient at rest, receded once the diff takes the floor ---- */
 .log {
   display: flex;

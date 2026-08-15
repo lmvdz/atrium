@@ -14,6 +14,7 @@ import { useState } from 'react';
 import { systemText } from '@/src/components/model/quotation';
 import type { ParticipantSummary } from '@/src/components/model/records';
 import { initials } from '@/src/components/model/text';
+import { covenant } from './covenant';
 import { IconBase, IconPlay } from './icons';
 import { ProviderMark } from './ProviderMark';
 import styles from './prototype.module.css';
@@ -97,6 +98,13 @@ export function ChatTopBar({ selected }: { selected: Selection }) {
 export function ThreadStatus({ selected, stream }: { selected: Selection; stream: StreamState }) {
   // #156: the branch/base/diff/model/host strip, assembled by a client projection.
   const strip = statusStripFor(selected, stream);
+  // #157 r3: the session this row's covenant controls target. The steer/interrupt
+  // doors are named from the covenant SEAM itself (single source of truth) — the
+  // seam returns `reached:false` and mutates nothing, so reading `.door` here is
+  // side-effect free and cannot fake a signal.
+  const sessionId = selected.kind === 'session' ? selected.id : 's-live';
+  const steerDoor = covenant.steer(sessionId, '').door;
+  const interruptDoor = covenant.interrupt(sessionId, '').door;
   return (
     <footer className={styles.status}>
       <span className={styles.statItem}>
@@ -138,6 +146,34 @@ export function ThreadStatus({ selected, stream }: { selected: Selection; stream
         </svg>
         {systemText(strip.host, 'ThreadStatus host')}
       </span>
+      {/* SEAM(#157 r3): steer / interrupt are STRUCTURED covenant controls on the
+          running session — a discrete affordance, NOT a phrase inferred from chat
+          prose. Rounds 1–2 guessed the act from composer text; that mechanism both
+          let cues bypass and swallowed ordinary speech, so it is gone. These are
+          the explicit doors: steer (`signal_session{steer}`, public/receipted, any
+          member) and interrupt (`signal_session{interrupt}`, the agent principal or
+          its owner). Honestly INERT here — this route holds no live session, so both
+          are DISABLED: no onClick, no mutation, and they NEVER emit a
+          `session_signaled`. Wired via `covenant.steer` / `covenant.interrupt` when
+          a live client lands (#168). */}
+      <button
+        className={styles.statCovenant}
+        type="button"
+        title={`steer — awaiting a human and the live session (#157 → ${steerDoor})`}
+        aria-label="steer (awaiting the live session)"
+        disabled
+      >
+        steer
+      </button>
+      <button
+        className={styles.statCovenant}
+        type="button"
+        title={`interrupt — awaiting a human and the live session (#157 → ${interruptDoor})`}
+        aria-label="interrupt (awaiting the live session)"
+        disabled
+      >
+        interrupt
+      </button>
       {/* SEAM(#157): run ▶ dispatches a session through the gated door
           (open_session / resume_session — a resume is a DRAW, gated by the plan's
           slice). Honestly INERT until app-integration: this route holds no live

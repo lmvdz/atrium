@@ -1,7 +1,9 @@
 'use client';
 
-/* CHAT BLOCK — the room's conversation and the ONLY input. `@mention` an agent to
-   delegate; when the agent is paused mid-steer, the same input takes the redirect.
+/* CHAT BLOCK — the room's conversation and the ONLY text input. `@mention` an
+   agent to delegate. The composer is ONLY chat: it never intercepts a covenant
+   act. Steer/interrupt is a STRUCTURED control on the running session
+   (ThreadStatus), not inferred from what is typed here (#157 r3).
  *
  * #155 marriage, THROUGH THE CONVERSATION MODEL (conversation-model.ts):
  *   - The feed no longer reads `ChatMsg[]`. It reads a `ConversationModel` — real
@@ -464,19 +466,18 @@ function ChatMinimap({
 /* COMPOSER — delta.dev-simple: the input is the last row of the thread. Your
    avatar, a field that blends in, a blinking cursor. No toolbar, no send button.
    Typing `@` or `/` still opens a popover ABOVE the field. Enter sends.
-   SEAM(#157): send / `@mention` delegate / `@hexi stop` steer → real dispatch. */
+   SEAM(#155): send / `@mention` delegate → a real durable room message. This
+   composer is ONLY chat — it does not read the text for covenant cues (#157 r3). */
 function Composer({
   inputRef,
   value,
   onChange,
   onSubmit,
-  steering,
 }: {
   inputRef: React.RefObject<HTMLTextAreaElement | null>;
   value: string;
   onChange: (v: string) => void;
   onSubmit: () => void;
-  steering: boolean;
 }) {
   const [active, setActive] = useState(0);
   const [dismissed, setDismissed] = useState<string | null>(null);
@@ -493,9 +494,9 @@ function Composer({
     n.startsWith(mentionMatch?.[2]?.toLowerCase() ?? ''),
   );
   const kind =
-    !steering && slashMatch !== null && commands.length > 0
+    slashMatch !== null && commands.length > 0
       ? 'slash'
-      : !steering && mentionMatch !== null && mentions.length > 0
+      : mentionMatch !== null && mentions.length > 0
         ? 'mention'
         : null;
   const list = kind === 'slash' ? commands : kind === 'mention' ? mentions : [];
@@ -517,7 +518,7 @@ function Composer({
   };
 
   return (
-    <div className={styles.chatRow} data-kind={steering ? 'steer' : 'human'}>
+    <div className={styles.chatRow} data-kind="human">
       <Avatar who="you" kind="human" />
       <div className={styles.composeWrap}>
         {open ? (
@@ -646,19 +647,11 @@ export function ChatBlock({
   selected,
   echoes,
   draftComment,
-  steering,
-  redirect,
-  setRedirect,
-  onSteerSend,
   onSay,
 }: {
   selected: Selection;
   echoes: readonly Echo[];
   draftComment: CommentDraft | null;
-  steering: boolean;
-  redirect: string;
-  setRedirect: (v: string) => void;
-  onSteerSend: () => void;
   onSay: (text: string) => void;
 }) {
   const [value, setValue] = useState('');
@@ -724,13 +717,10 @@ export function ChatBlock({
           {/* the input is just the next line of the thread — your avatar + a cursor */}
           <Composer
             inputRef={inputRef}
-            steering={steering}
-            value={steering ? redirect : value}
-            onChange={steering ? setRedirect : setValue}
+            value={value}
+            onChange={setValue}
             onSubmit={() => {
-              if (steering) {
-                if (redirect.trim().length > 0) onSteerSend();
-              } else if (value.trim().length > 0) {
+              if (value.trim().length > 0) {
                 onSay(value);
                 setValue('');
               }

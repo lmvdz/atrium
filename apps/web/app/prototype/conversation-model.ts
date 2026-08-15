@@ -344,19 +344,18 @@ export function conversationModel(selection: Selection): ConversationModel {
  *
  *  - `said`     — the viewer's own words, honestly typed into the room. A real
  *                 authored line on the same register as the rest of the feed.
- *  - `pending`  — a covenant act the operator has BEGUN but which has NOT been
- *                 delivered to any server (e.g. "@hexi stop" opened the steer
- *                 composer). Rendered as a NOT-delivered system notice.
  *  - `refused`  — a covenant act that returned honestly inert: nothing reached
- *                 the server. Also a NOT-delivered system notice.
+ *                 the server. Rendered as a NOT-delivered system notice.
  *
  * The distinction is the whole point of #157 round-1 D1: a covenant act that
  * did not reach a durable door must NEVER render as a sent-looking authored
- * message. Only `said` becomes an authored viewer row; `pending`/`refused`
- * render as a system notice carrying a ✗ (not-delivered) glyph, so no single
- * action can show a "sent" stop with no command behind it.
+ * message. Only `said` becomes an authored viewer row; a `refused` echo renders
+ * as a system notice carrying a ✗ (not-delivered) glyph, so no covenant act can
+ * show a "sent" outcome with no command behind it. (Steer/interrupt is no longer
+ * inferred from chat prose — it is a structured control, #157 r3 — so the only
+ * `refused` echo today is the anchored comment-to-steer mediation, #158/#152.)
  */
-export type EchoDelivery = 'said' | 'pending' | 'refused';
+export type EchoDelivery = 'said' | 'refused';
 
 /** A locally-appended feed line and how far it actually got. */
 export interface Echo {
@@ -383,7 +382,7 @@ const NOT_DELIVERED: EpistemicState = {
  *
  * A `said` echo is the viewer TYPING — a real typed message on the same
  * register as the rest of the feed, so its record and entry come back together
- * for `ChatBlock` to add to both the ledger and the feed. A `pending`/`refused`
+ * for `ChatBlock` to add to both the ledger and the feed. A `refused`
  * echo is a covenant act that reached no durable door: it renders as a SYSTEM
  * notice with a ✗ (not-delivered) glyph and carries NO `MessageRecord` — it is
  * structurally not an authored, sent-looking message. (SEAM #157: a real send
