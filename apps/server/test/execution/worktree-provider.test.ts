@@ -7,7 +7,7 @@ import {
   disposeScratchRepo,
   type ScratchRepo,
 } from '../../src/execution/git.js';
-import type { SessionContext } from '../../src/execution/provider.js';
+import { MAX_QUEUED_STEERS, type SessionContext } from '../../src/execution/provider.js';
 import {
   createWorktreeCommandProvider,
   harnessEnv,
@@ -151,8 +151,13 @@ describe('the unsandboxed provider cannot be constructed without the opt-in (#12
  * harness kept executing after Atrium abandoned the session. `cancelAll` is the
  * verb, and this proves it terminates not just the direct child but its whole
  * process GROUP: a `bash -lc` AND the grandchild it backgrounded both die.
+ *
+ * BEST-EFFORT, honestly (#147 FIX 1, the #141 lesson): this proves the COOPERATING
+ * case — a grandchild that stayed in the group dies. It does NOT claim to kill a
+ * grandchild that `setsid()`s out of the group; a process group cannot reach that,
+ * only the #138 sandbox can (see the `setsid escape survives` test below).
  */
-describe('cancelAll terminates a running harness and its whole process group (#120 r7 F4)', () => {
+describe('cancelAll terminates the process group — best-effort; a setsid escape needs #138 (#120 r7 F4)', () => {
   let savedOptIn: string | undefined;
   beforeEach(() => {
     savedOptIn = process.env.EXECUTION_ALLOW_UNSANDBOXED;
@@ -183,7 +188,7 @@ describe('cancelAll terminates a running harness and its whole process group (#1
     throw new Error(`process ${pid} was still alive after ${timeoutMs}ms`);
   }
 
-  it('kills the child and the grandchild it backgrounded, so nothing runs loose', async () => {
+  it('terminates the process group (best-effort; a setsid escape needs #138)', async () => {
     const repo = await createScratchRepo();
     // The harness backgrounds a long `sleep` (the grandchild), records BOTH its own
     // pid ($$) and the grandchild's ($!), then blocks on `wait`. A run this shape is
@@ -246,11 +251,14 @@ describe('cancelAll terminates a running harness and its whole process group (#1
 /**
  * #147 — DELIVERY of an already-authorized signal to a RUNNING worktree harness.
  *
- * The headline is the process-group interrupt: an `interrupt` must terminate the
- * harness AND every grandchild it spawned, leaving NO orphan (the #120/#141
- * lesson), exactly as `cancelAll` does but targeted at one session. A `steer` is
- * queued in the session's inbox for a cooperating harness to read at its turn
- * boundary; a signal for a session this provider is not running is a safe no-op.
+ * The interrupt terminates the harness AND every grandchild that STAYED in its
+ * process group, exactly as `cancelAll` does but targeted at one session. This is
+ * BEST-EFFORT, not an absolute no-orphan guarantee (#147 FIX 1 / #141): a
+ * `setsid()`-escaping grandchild survives — only the #138 sandbox contains that —
+ * and a dedicated test below documents the limit. A `steer` is DELIVERED to the
+ * session's inbox for a COOPERATING harness to read at ITS own boundary (the
+ * provider does not enforce the boundary of a foreign process, #147 FIX 4); a
+ * signal for a session this provider is not running is a safe no-op.
  */
 describe('deliver reaches a running worktree harness (#147)', () => {
   let savedOptIn: string | undefined;
@@ -287,7 +295,7 @@ describe('deliver reaches a running worktree harness (#147)', () => {
     model: 'haiku',
   });
 
-  it('an interrupt group-kills the harness and its grandchild — NO orphan', async () => {
+  it('an interrupt group-kills the harness and its in-group grandchild (best-effort)', async () => {
     const repo = await createScratchRepo();
     const provider = createWorktreeCommandProvider({
       repo,
@@ -396,6 +404,226 @@ describe('deliver reaches a running worktree harness (#147)', () => {
     expect(
       await provider.deliver({ sessionId: 'ghost', roomId: 'r', kind: 'resume', body: null }),
     ).toEqual({ kind: 'ignored', reason: 'resume-noop' });
+    await disposeScratchRepo(repo);
+  });
+
+  // ── FIX 2 (#147): an interrupt acked BEFORE the harness spawns must LATCH, and
+  // `run` must refuse to spawn — an acked interrupt can never be followed by a clean
+  // settle. RED-ON-REVERT: drop the `if (record?.interrupted)` pre-spawn check in
+  // `run` and the harness (`true`) spawns and settles clean (terminal.ok === true).
+  it('an interrupt after resolve but before spawn latches — run does not settle clean', async () => {
+    const repo = await createScratchRepo();
+    // `true` WOULD settle a clean terminal if it were allowed to spawn.
+    const provider = createWorktreeCommandProvider({ repo, command: ['true'] });
+    const c = ctx('interrupt-pre-spawn');
+    const workspace = await provider.resolve(c);
+
+    // Deliver the interrupt AFTER resolve fully completed but BEFORE `run` — the
+    // pre-spawn window. There is no live child yet, so it only latches.
+    const outcome = await provider.deliver({
+      sessionId: c.sessionId,
+      roomId: c.roomId,
+      kind: 'interrupt',
+      body: 'stop',
+      signalId: 'i1',
+    });
+    expect(outcome).toEqual({ kind: 'interrupted' });
+
+    // The run refuses to spawn the already-interrupted session: a FAILED terminal
+    // with no artifact, not a clean settle.
+    const report = await provider.run(workspace, c);
+    expect(report.terminal.ok).toBe(false);
+    expect(report.receipt.artifact).toBeNull();
+    expect(report.terminal.detail).toContain('interrupted');
+
+    await workspace.dispose().catch(() => undefined);
+    await disposeScratchRepo(repo);
+  });
+
+  // ── FIX 3 (#147): a signal delivered DURING the resolve window (before resolve's
+  // awaited work finishes) is applied, not dropped. The record is registered in
+  // resolve's synchronous prefix, so a steer delivered before `resolve` resolves is
+  // buffered and flushed to the inbox. RED-ON-REVERT: move the `inflight.set(...)`
+  // back below `addWorktree`/`mkdtemp` in `resolve` and this steer returns
+  // `not-running` (dropped) — the harness never sees it and times out (exit 3).
+  it('a steer delivered in the resolve window is applied, not dropped', async () => {
+    const repo = await createScratchRepo();
+    const provider = createWorktreeCommandProvider({
+      repo,
+      command: [
+        'bash',
+        '-lc',
+        'for i in $(seq 1 200); do if [ -s "$ATRIUM_STEER_INBOX" ]; then cat "$ATRIUM_STEER_INBOX" > steer-seen.txt; exit 0; fi; sleep 0.05; done; exit 3',
+      ],
+    });
+    const c = ctx('resolve-window');
+
+    // Start resolve but DO NOT await it — deliver synchronously, inside the window
+    // while `addWorktree`/`mkdtemp` are still pending. The record exists (synchronous
+    // prefix), the inbox file does not yet, so the steer is buffered.
+    const resolveP = provider.resolve(c);
+    const outcome = await provider.deliver({
+      sessionId: c.sessionId,
+      roomId: c.roomId,
+      kind: 'steer',
+      body: 'window-steer',
+      signalId: 'w1',
+    });
+    expect(outcome).toEqual({ kind: 'delivered' });
+
+    const workspace = await resolveP;
+    const report = await provider.run(workspace, c);
+    // The buffered steer was flushed to the inbox and the harness read it.
+    expect(report.terminal.ok).toBe(true);
+    const seen = (await readFile(join(workspace.dir, 'steer-seen.txt'), 'utf8')).trim();
+    expect(seen).toBe('window-steer');
+
+    await workspace.dispose().catch(() => undefined);
+    await disposeScratchRepo(repo);
+  });
+
+  // ── FIX 5 (#147): a redelivered signal id is deduped — the steer queues ONCE.
+  // RED-ON-REVERT: drop the `record.seen` guard in `deliver` and the second
+  // delivery appends a second line (count === 2).
+  it('dedups a redelivered signal id — the steer is queued exactly once', async () => {
+    const repo = await createScratchRepo();
+    const provider = createWorktreeCommandProvider({
+      repo,
+      // Copy the inbox out and count its lines, so the queued count is observable.
+      command: ['bash', '-lc', 'cp "$ATRIUM_STEER_INBOX" seen.txt; wc -l < seen.txt > count.txt'],
+    });
+    const c = ctx('dedup-me');
+    const workspace = await provider.resolve(c);
+
+    const first = await provider.deliver({
+      sessionId: c.sessionId,
+      roomId: c.roomId,
+      kind: 'steer',
+      body: 'only-once',
+      signalId: 'dup-1',
+    });
+    const second = await provider.deliver({
+      sessionId: c.sessionId,
+      roomId: c.roomId,
+      kind: 'steer',
+      body: 'the-retry',
+      signalId: 'dup-1',
+    });
+    expect(first).toEqual({ kind: 'delivered' });
+    expect(second).toEqual({ kind: 'ignored', reason: 'duplicate' });
+
+    await provider.run(workspace, c);
+    const count = Number((await readFile(join(workspace.dir, 'count.txt'), 'utf8')).trim());
+    expect(count).toBe(1);
+    const seen = (await readFile(join(workspace.dir, 'seen.txt'), 'utf8')).trim();
+    expect(seen).toBe('only-once');
+
+    await workspace.dispose().catch(() => undefined);
+    await disposeScratchRepo(repo);
+  });
+
+  // ── FIX 5 (#147): the steer queue is BOUNDED. Beyond the cap a steer is dropped
+  // with `queue-full`, never an unbounded inbox append.
+  it('bounds the steer queue at the cap and drops the overflow honestly', async () => {
+    const repo = await createScratchRepo();
+    const provider = createWorktreeCommandProvider({ repo, command: ['true'] });
+    const c = ctx('flood-me');
+    await provider.resolve(c);
+
+    for (let i = 0; i < MAX_QUEUED_STEERS; i += 1) {
+      const outcome = await provider.deliver({
+        sessionId: c.sessionId,
+        roomId: c.roomId,
+        kind: 'steer',
+        body: `steer-${i}`,
+        signalId: `flood-${i}`,
+      });
+      expect(outcome).toEqual({ kind: 'delivered' });
+    }
+    // The (cap + 1)th is refused — dropped, not appended.
+    const overflow = await provider.deliver({
+      sessionId: c.sessionId,
+      roomId: c.roomId,
+      kind: 'steer',
+      body: 'one-too-many',
+      signalId: 'flood-overflow',
+    });
+    expect(overflow).toEqual({ kind: 'ignored', reason: 'queue-full' });
+
+    await disposeScratchRepo(repo);
+  });
+
+  // ── FIX 1 (#147, the #141 lesson): the process-group interrupt is BEST-EFFORT.
+  // A harness that `setsid()`s a grandchild into a NEW session ESCAPES the `-pid`
+  // group signal and SURVIVES — a process group cannot contain it. This is not a
+  // bug to patch in the provider: escape-proof termination is cgroup/container
+  // containment, which is the #138 sandbox. This test DOCUMENTS the limit (the
+  // escapee is still alive after the interrupt) so the claim stays honest and the
+  // guarantee is routed to #138, not overstated here.
+  it('a setsid escape survives the interrupt — best-effort, routed to #138', async () => {
+    const repo = await createScratchRepo();
+    const provider = createWorktreeCommandProvider({
+      repo,
+      // The harness runs a grandchild in a NEW session via `setsid`; that grandchild
+      // records its own pid (the escaped session leader) and sleeps. The harness
+      // records its own pid and waits. `-pid` on the harness group cannot reach the
+      // escaped session.
+      command: [
+        'bash',
+        '-lc',
+        'setsid bash -c \'echo $$ > escaped.txt; sleep 300\' & echo "$$" > bash.txt; sleep 300 & wait',
+      ],
+    });
+    const c = ctx('setsid-escape');
+    const workspace = await provider.resolve(c);
+    const runPromise = provider.run(workspace, c);
+
+    // Wait for both pids to be recorded.
+    let escapedPid = 0;
+    let bashPid = 0;
+    const deadline = Date.now() + 5_000;
+    while (Date.now() < deadline) {
+      try {
+        escapedPid = Number((await readFile(join(workspace.dir, 'escaped.txt'), 'utf8')).trim());
+        bashPid = Number((await readFile(join(workspace.dir, 'bash.txt'), 'utf8')).trim());
+        if (escapedPid > 0 && bashPid > 0) break;
+      } catch {
+        // not written yet
+      }
+      await new Promise((r) => setTimeout(r, 25));
+    }
+    expect(escapedPid).toBeGreaterThan(0);
+    expect(bashPid).toBeGreaterThan(0);
+    expect(alive(escapedPid)).toBe(true);
+
+    // THE INTERRUPT. It group-kills the harness — but the setsid'd grandchild is in
+    // its OWN session and escapes. The provider does not, and cannot, claim to kill it.
+    const outcome = await provider.deliver({
+      sessionId: c.sessionId,
+      roomId: c.roomId,
+      kind: 'interrupt',
+      body: 'stop',
+      signalId: 'escape-int',
+    });
+    expect(outcome).toEqual({ kind: 'interrupted' });
+    await waitUntilDead(bashPid);
+
+    // THE HONEST TRUTH: the escapee is STILL ALIVE. A process group did not contain
+    // it; only #138's sandbox would. This is the scoped claim, proven.
+    expect(alive(escapedPid)).toBe(true);
+
+    // Clean up the escaped session ourselves (the sandbox's job in the real system).
+    try {
+      process.kill(-escapedPid, 'SIGKILL');
+    } catch {
+      try {
+        process.kill(escapedPid, 'SIGKILL');
+      } catch {
+        // already gone
+      }
+    }
+    await runPromise.catch(() => undefined);
+    await workspace.dispose().catch(() => undefined);
     await disposeScratchRepo(repo);
   });
 });

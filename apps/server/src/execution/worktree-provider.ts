@@ -16,13 +16,14 @@ import {
   type ScratchRepo,
   type WorktreeCheckout,
 } from './git.js';
-import type {
-  DeliveryOutcome,
-  ExecutionProvider,
-  ExecutionReport,
-  SessionContext,
-  SignalDelivery,
-  Workspace,
+import {
+  type DeliveryOutcome,
+  type ExecutionProvider,
+  type ExecutionReport,
+  MAX_QUEUED_STEERS,
+  type SessionContext,
+  type SignalDelivery,
+  type Workspace,
 } from './provider.js';
 
 /**
@@ -44,7 +45,9 @@ interface HarnessRun {
  * Spawn the harness in its OWN process group and run it to completion (#120
  * round-7 F4). `detached: true` makes the child a group leader (pgid = pid), so a
  * later signal to `-pid` reaches the whole tree — a `bash -lc` and everything it
- * spawned — which is what `cancelAll` needs to leave nothing running loose.
+ * spawned INTO THAT GROUP — which is what `cancelAll`/`deliver` use to stop a
+ * cooperating harness's tree (best-effort: a `setsid()` escape survives, #147 FIX 1 /
+ * #141; escape-proof containment is the #138 sandbox).
  * `execFile` cannot do this: it does not forward `detached` to `spawn`.
  *
  * stdout/stderr are drained into a small capped tail (not the harness's payload —
@@ -320,15 +323,35 @@ export function createWorktreeCommandProvider(options: WorktreeCommandOptions): 
   // ── IN-FLIGHT EXECUTIONS, TRACKED FOR CANCELLATION AND DELIVERY (#120 r7 F4;
   // #147) ────────────────────────────────────────────────────────────────────
   //
-  // One record per live session, keyed by id: the harness `child` (set at spawn,
-  // for the interrupt/shutdown group-kill) and the `steerInbox` path (allocated at
-  // resolve, where a delivered steer is appended). Without the child map a
-  // `SIGTERM` abandons the harness — Atrium exits and it runs loose; the inbox is
-  // what a delivered steer lands in.
+  // One record per live session, keyed by id. The record is registered SYNCHRONOUSLY
+  // at the START of `resolve` (#147 FIX 3), before `resolve` awaits the worktree
+  // checkout or allocates the inbox — so a signal that arrives in the resolve window
+  // finds a record and is latched/queued, never dropped as `not-running`.
+  //
+  //  - `child` — the harness process, set at spawn, for the interrupt/shutdown
+  //    group-kill. Without it a `SIGTERM` abandons the harness and it runs loose.
+  //  - `interrupted` — the INTERRUPT LATCH (#147 FIX 2). An interrupt delivered
+  //    after resolve but before the harness spawns has no `child` to kill; it sets
+  //    this flag, and `run` refuses to spawn an already-interrupted session (an
+  //    acked interrupt must never be followed by a clean settle). A spawn that races
+  //    the latch is group-killed at `onSpawn`.
+  //  - `steerInbox`/`inboxDir` — the inbox file a delivered steer is appended to,
+  //    allocated once `resolve` finishes its `mkdtemp`. Undefined during the resolve
+  //    window; a steer delivered then is buffered in `pendingSteers` and flushed to
+  //    the file once the inbox exists.
+  //  - `pendingSteers` — steers delivered before the inbox file exists (the resolve
+  //    window), flushed in order when `resolve` allocates the inbox.
+  //  - `steerCount` — how many steers have been queued (buffered + appended), to
+  //    enforce the cap (#147 FIX 5) across both paths.
+  //  - `seen` — signal ids already delivered, for at-least-once dedup (#147 FIX 5).
   interface InFlight {
     child?: ChildProcess;
-    readonly steerInbox: string;
-    readonly inboxDir: string;
+    interrupted: boolean;
+    steerInbox?: string;
+    inboxDir?: string;
+    pendingSteers: string[];
+    steerCount: number;
+    readonly seen: Set<string>;
   }
   const inflight = new Map<string, InFlight>();
 
@@ -336,13 +359,35 @@ export function createWorktreeCommandProvider(options: WorktreeCommandOptions): 
     kind: 'worktree',
 
     async resolve(ctx: SessionContext): Promise<Workspace> {
+      // Register the in-flight record FIRST, before any awaited work (#147 FIX 3).
+      // `resolve` awaits `addWorktree` and `mkdtemp`; a signal that arrives during
+      // that window used to hit no record and be dropped as `not-running` (never
+      // retried). Registering in the synchronous prefix — the code that runs before
+      // the first await — closes the window: a steer delivered then is buffered in
+      // `pendingSteers`, an interrupt latches, and both are applied at the boundary.
+      const record: InFlight = {
+        interrupted: false,
+        pendingSteers: [],
+        steerCount: 0,
+        seen: new Set<string>(),
+      };
+      inflight.set(ctx.sessionId, record);
+
       const checkout = await addWorktree(repo, ctx.sessionId);
       // Allocate the steer inbox OUTSIDE the checkout (#147), so a delivered steer
-      // never dirties the artifact tree. Registered before run so a steer delivered
-      // between resolve and spawn is not dropped as `not-running`.
+      // never dirties the artifact tree.
       const inboxDir = await mkdtemp(join(tmpdir(), 'atrium-steer-'));
       const steerInbox = join(inboxDir, 'steer.inbox');
-      inflight.set(ctx.sessionId, { steerInbox, inboxDir });
+      record.inboxDir = inboxDir;
+      record.steerInbox = steerInbox;
+      // Flush any steers buffered during the resolve window into the inbox now, in
+      // delivery order, so a cooperating harness sees them at its first boundary.
+      if (record.pendingSteers.length > 0) {
+        const buffered = record.pendingSteers.splice(0, record.pendingSteers.length);
+        await appendFile(steerInbox, buffered.map((s) => `${s}\n`).join('')).catch(() => {
+          // Inbox unwritable (disposed mid-resolve) — nothing to flush.
+        });
+      }
       const workspace: WorktreeWorkspace = {
         sessionId: ctx.sessionId,
         dir: checkout.dir,
@@ -366,11 +411,35 @@ export function createWorktreeCommandProvider(options: WorktreeCommandOptions): 
       // configured command inside it. Verified here, before checkout.dir is a cwd.
       assertAuthenticRunCheckout(checkout);
 
+      const record = inflight.get(ctx.sessionId);
+
+      // THE INTERRUPT LATCH, CHECKED BEFORE SPAWN (#147 FIX 2). An interrupt
+      // delivered after `resolve` but before this spawn had no `child` to kill, so
+      // it only LATCHED (`record.interrupted`). Spawning the harness now would run a
+      // clean turn and settle it — a clean settle AFTER an acked interrupt, the bug
+      // both lineages flagged. So an already-interrupted session does NOT spawn: it
+      // reports the interrupted terminal, and the coordinator settles `session_failed`.
+      // Revert this check and the harness spawns and settles clean despite the ack.
+      if (record?.interrupted) {
+        return {
+          terminal: {
+            ok: false,
+            exitCode: null,
+            detail: 'interrupted before the harness spawned',
+          },
+          receipt: {
+            exitSummary: `worktree harness for session ${ctx.sessionId} interrupted before spawn`,
+            spendMicros: null,
+            contextPct: null,
+            artifact: null,
+          },
+        };
+      }
+
       // Run the harness in its own process group, tracked for cancellation and
       // steer delivery. The harness gets an allowlisted env — never the server's
       // secrets, and scrubbed of any var that could retarget its git off this
       // worktree — plus its steer inbox (#147).
-      const record = inflight.get(ctx.sessionId);
       const outcome = await runHarness(
         bin as string,
         args,
@@ -385,6 +454,11 @@ export function createWorktreeCommandProvider(options: WorktreeCommandOptions): 
           // on close keeps the steer inbox addressable until dispose.
           const live = inflight.get(ctx.sessionId);
           if (live) live.child = child;
+          // SPAWN/INTERRUPT RACE (#147 FIX 2): an interrupt that latched AFTER the
+          // pre-spawn check above (during the `harnessEnv` await) saw no child and
+          // could not kill. Now that the child exists, honour the latch immediately —
+          // group-kill it — so an acked interrupt still terminates a just-spawned run.
+          if (live?.interrupted) killGroup(child);
           child.once('close', () => {
             const r = inflight.get(ctx.sessionId);
             if (r) r.child = undefined;
@@ -454,11 +528,14 @@ export function createWorktreeCommandProvider(options: WorktreeCommandOptions): 
     async cancelAll(): Promise<void> {
       // Kill every in-flight harness's whole process GROUP (#120 round-7 F4).
       // Each child was spawned `detached`, so its pgid is its own pid and the
-      // negated-pid signal reaches the harness AND anything it spawned. `SIGKILL`
-      // rather than `SIGTERM` because this is the shutdown backstop — the run
-      // already had its drain grace, and a harness that ignores `SIGTERM` must not
-      // outlive the process that abandoned it. Best-effort and never throws: a
-      // child that already exited (ESRCH) is exactly the state we want.
+      // negated-pid signal reaches the harness AND anything it spawned INTO THAT
+      // GROUP. `SIGKILL` rather than `SIGTERM` because this is the shutdown backstop
+      // — the run already had its drain grace, and a harness that ignores `SIGTERM`
+      // must not outlive the process that abandoned it. Best-effort and never throws:
+      // a child that already exited (ESRCH) is exactly the state we want. BEST-EFFORT
+      // in the #141 sense too (#147 FIX 1): a harness that `setsid()`d a grandchild
+      // out of the group escapes this kill — escape-proof containment is the #138
+      // sandbox, not a process group. See `killGroup`.
       for (const record of inflight.values()) {
         if (record.child) killGroup(record.child);
       }
@@ -468,37 +545,68 @@ export function createWorktreeCommandProvider(options: WorktreeCommandOptions): 
     //
     //  - interrupt → GROUP-kill the harness child, exactly as `cancelAll` does but
     //    for the one session: the child is a `detached` group leader, so `-pid`
-    //    reaches it AND every grandchild a `bash -lc` spawned — NO orphan (the
-    //    #120/#141 lesson). The run's own `close` handler then reports the failed
-    //    terminal and the coordinator settles `session_failed`; delivery writes
-    //    nothing durable and certifies nothing.
+    //    reaches it AND every grandchild it spawned INTO THAT GROUP. This is
+    //    BEST-EFFORT, not an absolute no-orphan guarantee (#147 FIX 1, the #141
+    //    lesson): a harness that `setsid()`s a grandchild into a NEW session/group
+    //    escapes the `-pid` signal and survives — a process group cannot contain
+    //    that, only cgroup/container containment (the #138 sandbox) can. If no child
+    //    is live yet, the interrupt LATCHES (`record.interrupted`) so `run` refuses
+    //    to spawn (#147 FIX 2). Either way the run reports the failed terminal and
+    //    the coordinator settles `session_failed`; delivery writes nothing durable
+    //    and certifies nothing.
     //  - steer → append the guidance as one line in the session's steer inbox for a
-    //    cooperating harness to read at its next turn boundary. Queued, never
-    //    mid-token, and outside the checkout so it never dirties the artifact.
+    //    cooperating harness to read at ITS next turn boundary — cooperative
+    //    delivery, not a provider-enforced boundary (#147 FIX 4). Queued, never
+    //    mid-token on Atrium's side, outside the checkout so it never dirties the
+    //    artifact, and BOUNDED (#147 FIX 5): beyond the cap a steer is dropped
+    //    (`queue-full`), never an unbounded file append.
     //  - resume → the daemon's wake, not a mutation of a run in flight.
     //
     // A signal for a session with no in-flight record is `not-running` — the safe
-    // no-op (another coordinator may run it; the row is already durable).
+    // no-op (another coordinator may run it; the row is already durable). A
+    // redelivered `signalId` is `duplicate` — the at-least-once dedup (#147 FIX 5).
     async deliver(delivery: SignalDelivery): Promise<DeliveryOutcome> {
       if (delivery.kind === 'resume') return { kind: 'ignored', reason: 'resume-noop' };
       const record = inflight.get(delivery.sessionId);
       if (!record) return { kind: 'ignored', reason: 'not-running' };
+      // DEDUP (#147 FIX 5): a redelivered signal id — #139's at-least-once dispatch
+      // retrying — is ignored, so a steer queues once and an interrupt latches once.
+      if (delivery.signalId !== undefined) {
+        if (record.seen.has(delivery.signalId)) return { kind: 'ignored', reason: 'duplicate' };
+        record.seen.add(delivery.signalId);
+      }
       if (delivery.kind === 'interrupt') {
-        // Group-kill only if a child is live; an interrupt racing the harness's own
-        // exit (no live child) still consumed a real, authorized in-flight record,
-        // so it is reported `interrupted` — the session is on its way terminal.
+        // LATCH the interrupt (#147 FIX 2). A child racing its own exit (or not yet
+        // spawned) has none to kill, but the record was real and authorized: latch
+        // so `run` will not spawn (or, if it just did, `onSpawn` group-kills), and
+        // report `interrupted` — the session is on its way terminal either way.
+        record.interrupted = true;
         if (record.child) killGroup(record.child);
         return { kind: 'interrupted' };
       }
-      // steer: one line per delivery, best-effort. A failed append must not throw
-      // into the coordinator's fire-and-forget delivery — the harness simply does
-      // not see this steer, the same as any dropped turn-boundary message.
+      // steer: BOUND the queue (#147 FIX 5). At the cap the steer is dropped and the
+      // outcome says so — an unbounded producer cannot grow the inbox without limit.
+      if (record.steerCount >= MAX_QUEUED_STEERS) {
+        return { kind: 'ignored', reason: 'queue-full' };
+      }
+      const line = (delivery.body ?? '').replace(/\n/g, ' ');
+      // If the inbox file is not allocated yet (a steer in the resolve window),
+      // buffer it in memory; `resolve` flushes the buffer to the file once it exists.
+      if (record.steerInbox === undefined) {
+        record.pendingSteers.push(line);
+        record.steerCount += 1;
+        return { kind: 'delivered' };
+      }
+      // one line per delivery, best-effort. A failed append must not throw into the
+      // coordinator's fire-and-forget delivery — the harness simply does not see this
+      // steer, the same as any dropped turn-boundary message.
       try {
-        await appendFile(record.steerInbox, `${(delivery.body ?? '').replace(/\n/g, ' ')}\n`);
+        await appendFile(record.steerInbox, `${line}\n`);
       } catch {
         // Inbox unwritable (disposed mid-delivery) — nothing was queued.
         return { kind: 'ignored', reason: 'not-running' };
       }
+      record.steerCount += 1;
       return { kind: 'delivered' };
     },
   };
@@ -507,9 +615,19 @@ export function createWorktreeCommandProvider(options: WorktreeCommandOptions): 
 /**
  * Terminate a detached child's whole process group (#120 round-7 F4). The child
  * is its own group leader (spawned `detached`), so signalling `-pid` reaches every
- * descendant. Falls back to signalling the child directly if the group send fails
- * (e.g. the leader already reaped), and swallows `ESRCH` — an already-dead process
- * is the goal, not an error.
+ * descendant IN THAT GROUP. Falls back to signalling the child directly if the
+ * group send fails (e.g. the leader already reaped), and swallows `ESRCH` — an
+ * already-dead process is the goal, not an error.
+ *
+ * BEST-EFFORT, NOT ESCAPE-PROOF (#147 FIX 1, the #141 lesson). A process group
+ * contains only the descendants that STAYED in it. A harness that calls `setsid()`
+ * (or `setpgid`) to move a grandchild into a NEW session/group breaks the `-pid`
+ * reach — that grandchild is no longer in this group and survives the signal. This
+ * is a hard limit of process groups, not a bug to patch here: only cgroup/container
+ * containment can guarantee no survivor, and that is the #138 sandbox provider. So
+ * this kill stops a COOPERATING / non-escaping harness's whole tree; it does not
+ * claim to stop one that deliberately breaks out. See the `deliver`/`cancelAll`
+ * docs, which scope the guarantee honestly rather than over-claiming "no orphan".
  */
 function killGroup(child: ChildProcess): void {
   const pid = child.pid;

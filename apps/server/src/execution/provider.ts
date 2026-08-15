@@ -149,31 +149,61 @@ export interface Workspace {
  *    does NOT wake a run here, that is the daemon's concern, #124/#128).
  *  - `body` — the steer's words / the interrupt's reason, exactly as the ledger
  *    row carries it.
+ *  - `signalId` — the `session_signaled` event's id (#147 FIX 5). It is the
+ *    DEDUP KEY for the daemon's future at-least-once dispatch (#139): if a signal
+ *    is delivered twice (a retry, a redelivery after a crash), a provider that has
+ *    already seen this id ignores the second — a steer queues once, an interrupt
+ *    latches once. Optional because an in-process caller/test may deliver a signal
+ *    that carries no durable event id; absent, no dedup is possible and every
+ *    delivery is treated as distinct (the pre-#139 behaviour).
  */
 export interface SignalDelivery {
   readonly sessionId: string;
   readonly roomId: string;
   readonly kind: 'steer' | 'interrupt' | 'resume';
   readonly body: string | null;
+  readonly signalId?: string;
 }
+
+/**
+ * The cap on a single session's pending-steer queue (#147 FIX 5). A steer queue is
+ * a PRODUCER-only structure from Atrium's side — the provider appends, the harness
+ * drains at its own pace (and a foreign worktree harness may never drain at all) —
+ * so without a bound a signal flood grows an unbounded in-memory array (shim) or an
+ * unbounded inbox file (worktree). At the cap a further steer is DROPPED and its
+ * delivery returns `ignored: queue-full`: an honest refusal a caller can see, not a
+ * silent leak. The cap is deliberately generous — a real turn consumes its steers
+ * long before this — so it bites only a pathological flood, never ordinary use.
+ */
+export const MAX_QUEUED_STEERS = 64;
 
 /**
  * What delivery did — an OBSERVATION, never a ledger act.
  *
  *  - `delivered` — a steer was queued for the session's next turn boundary.
  *  - `interrupted` — the running process was terminated (the whole process GROUP,
- *    so grandchildren die too); the ordinary run/settle path writes the terminal
- *    `session_failed` receipt, delivery writes nothing.
+ *    so grandchildren die too — BEST-EFFORT: a `setsid()` escape survives, and
+ *    escape-proof termination is the #138 sandbox, see `deliver`); the ordinary
+ *    run/settle path writes the terminal `session_failed` receipt, delivery writes
+ *    nothing.
  *  - `ignored` — nothing was delivered. `not-running`: this provider has no
  *    in-flight execution for the session (another coordinator may run it; the row
  *    is already durable, so this is a SAFE no-op, never a crash). `resume-noop`: a
  *    resume is a draw the daemon acts on by OPENING a fresh run, not a delivery
- *    into an execution already in flight (see `deliver`).
+ *    into an execution already in flight (see `deliver`). `duplicate`: this exact
+ *    `signalId` was already delivered to this session (#147 FIX 5) — the dedup
+ *    that makes #139's at-least-once dispatch idempotent; nothing was queued or
+ *    latched a second time. `queue-full`: the session's steer queue is at its cap
+ *    and this steer was DROPPED rather than queued (#147 FIX 5) — an honest refusal,
+ *    not a silent unbounded append.
  */
 export type DeliveryOutcome =
   | { readonly kind: 'delivered' }
   | { readonly kind: 'interrupted' }
-  | { readonly kind: 'ignored'; readonly reason: 'not-running' | 'resume-noop' };
+  | {
+      readonly kind: 'ignored';
+      readonly reason: 'not-running' | 'resume-noop' | 'duplicate' | 'queue-full';
+    };
 
 /**
  * The seam. One provider per deployment; the deterministic shim is the DEFAULT
@@ -216,23 +246,45 @@ export interface ExecutionProvider {
    * counterpart to `cancelAll`'s shutdown-wide kill, but targeted at one session
    * and one signal:
    *
-   *  - `steer` → QUEUE the guidance for the session's next TURN BOUNDARY. Never
-   *    mid-token: the running turn finishes, and the queued steer is consumed
-   *    before the next one begins. The shim makes this observable — a delivered
-   *    steer's text appears in its next-turn artifact — and the worktree provider
-   *    drops it in the harness's steer inbox for a cooperating harness to read.
-   *    Returns `delivered`.
+   *  - `steer` → QUEUE the guidance for the session's next TURN BOUNDARY. WHERE
+   *    the boundary is enforced differs by provider, and the seam does not pretend
+   *    otherwise (#147 FIX 4):
+   *      • the SHIM enforces the boundary itself — it is a deterministic in-process
+   *        harness that drains its mailbox at a boundary it controls, so "never
+   *        mid-token" is a provider guarantee there;
+   *      • the WORKTREE cannot force a foreign process. It DELIVERS the steer to an
+   *        inbox file and a cooperating harness reads it at ITS own next boundary.
+   *        The provider guarantees the steer is queued (not mid-token on Atrium's
+   *        side); it CANNOT guarantee when — or whether — a foreign harness reads
+   *        it. That is cooperative delivery, not an enforced boundary.
+   *    Returns `delivered`. A steer beyond the queue cap is dropped and returns
+   *    `ignored: queue-full` (#147 FIX 5); a redelivered `signalId` returns
+   *    `ignored: duplicate`.
    *  - `interrupt` → TERMINATE the running process PROMPTLY, killing the whole
    *    process GROUP (`worktree` reuses the `cancelAll` group-kill, so a `bash -lc`
-   *    and its grandchildren die too — no orphan, the #120/#141 lesson). The run's
-   *    ordinary terminal/settle path then writes `session_failed`. Delivery itself
-   *    writes NOTHING to the ledger — an interrupt cannot land or certify. Returns
-   *    `interrupted`.
+   *    and the grandchildren it did NOT detach die too). This is BEST-EFFORT, not
+   *    an absolute no-orphan guarantee (#147 FIX 1, the #141 lesson): a process
+   *    GROUP cannot contain a harness that `setsid()`s a grandchild into its own new
+   *    group — that grandchild escapes the `-pid` signal and survives. Full,
+   *    escape-proof termination needs cgroup/container containment, which is the
+   *    #138 sandbox provider, not a process group. The worktree interrupt stops a
+   *    cooperating / non-escaping harness's whole tree; it does not claim to stop
+   *    one that deliberately breaks out. The run's ordinary terminal/settle path
+   *    then writes `session_failed`. Delivery itself writes NOTHING to the ledger —
+   *    an interrupt cannot land or certify. Returns `interrupted`.
    *  - `resume` → a continuation DRAW (#127), which the daemon (#124/#128) acts on
    *    by OPENING a fresh run from the matched event, NOT by mutating an execution
    *    already in flight. So the provider does not "wake" a run here — a session
    *    that is currently running is not one waiting to be woken, and re-running it
    *    would duplicate authorized-but-unspent work. Returns `ignored: resume-noop`.
+   *
+   * SINGLE-COORDINATOR DELIVERY (#147 FIX 6): a signal is delivered LIVE by the
+   * coordinator that is running the session — the one whose provider holds the
+   * in-flight record. Routing a signal for session A (run by coordinator A) to a
+   * different coordinator B is a MULTI-COORDINATOR concern (#139): B correctly
+   * reports `not-running`, but nothing here forwards the durable row to A. The
+   * dogfood is single-coordinator, so live delivery by the running coordinator is
+   * the whole of what this seam does; cross-coordinator routing is not built.
    *
    * COVENANT: delivery consumes an already-enforced row and NEVER exceeds its
    * authorization. It does not re-check identity (that happened at append, #127),

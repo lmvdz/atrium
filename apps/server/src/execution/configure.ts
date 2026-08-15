@@ -451,6 +451,10 @@ export function wireExecutionCoordinator(input: {
             roomId: event.roomId,
             kind: event.kind,
             body: event.body,
+            // The durable event id is the DEDUP KEY (#147 FIX 5): #139's future
+            // at-least-once dispatch may redeliver this row, and the provider ignores
+            // a signal id it has already applied.
+            signalId: event.id,
           })
           .catch((error: unknown) => {
             logger.error('routing an authorized signal to the provider failed', {

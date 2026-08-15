@@ -15,7 +15,7 @@ import {
   type ScratchRepo,
   sessionBranch,
 } from '../../src/execution/git.js';
-import type { SessionContext } from '../../src/execution/provider.js';
+import { MAX_QUEUED_STEERS, type SessionContext } from '../../src/execution/provider.js';
 import {
   createDeterministicShimProvider,
   deterministicArtifact,
@@ -398,5 +398,88 @@ describe('the shim delivers already-authorized signals to a running session (#14
     await workspace.dispose();
     const body = await readFileAtBranch(repo, sessionBranch(c.sessionId), SHIM_ARTIFACT_PATH);
     expect(body).toBe(deterministicArtifact(c));
+  });
+
+  // ── FIX 3 (#147): a steer delivered DURING the resolve window (before resolve's
+  // awaited `addWorktree` finishes) is applied, not dropped. The mailbox is
+  // registered in resolve's synchronous prefix. RED-ON-REVERT: move the
+  // `mailboxes.set(...)` back below `addWorktree` in `resolve` and this steer
+  // returns `not-running` (dropped) — the artifact reverts to the unsteered bytes.
+  it('a steer delivered in the resolve window lands in the artifact, not dropped', async () => {
+    const provider = createDeterministicShimProvider({ repo });
+    const c = ctx();
+    // Start resolve but DO NOT await — deliver synchronously, inside the window.
+    const resolveP = provider.resolve(c);
+    const outcome = await provider.deliver({
+      sessionId: c.sessionId,
+      roomId: c.roomId,
+      kind: 'steer',
+      body: 'window-steer',
+      signalId: 'w1',
+    });
+    expect(outcome).toEqual({ kind: 'delivered' });
+
+    const workspace = await resolveP;
+    await provider.run(workspace, c);
+    await workspace.dispose();
+    const body = await readFileAtBranch(repo, sessionBranch(c.sessionId), SHIM_ARTIFACT_PATH);
+    expect(body).toBe(deterministicArtifact(c, ['window-steer']));
+  });
+
+  // ── FIX 5 (#147): a redelivered signal id is deduped — the steer is drained once.
+  // RED-ON-REVERT: drop the `mailbox.seen` guard in deliver() and the artifact
+  // carries the steer twice.
+  it('dedups a redelivered signal id — the steer lands exactly once', async () => {
+    const provider = createDeterministicShimProvider({ repo });
+    const c = ctx();
+    const workspace = await provider.resolve(c);
+    const first = await provider.deliver({
+      sessionId: c.sessionId,
+      roomId: c.roomId,
+      kind: 'steer',
+      body: 'once',
+      signalId: 'dup-1',
+    });
+    const second = await provider.deliver({
+      sessionId: c.sessionId,
+      roomId: c.roomId,
+      kind: 'steer',
+      body: 'the-retry',
+      signalId: 'dup-1',
+    });
+    expect(first).toEqual({ kind: 'delivered' });
+    expect(second).toEqual({ kind: 'ignored', reason: 'duplicate' });
+
+    await provider.run(workspace, c);
+    await workspace.dispose();
+    const body = await readFileAtBranch(repo, sessionBranch(c.sessionId), SHIM_ARTIFACT_PATH);
+    // Queued once: the artifact is the single-steer encoding, not two.
+    expect(body).toBe(deterministicArtifact(c, ['once']));
+  });
+
+  // ── FIX 5 (#147): the steer queue is BOUNDED. Beyond the cap a steer is dropped
+  // with `queue-full`, never an unbounded array append.
+  it('bounds the steer queue at the cap and refuses the overflow honestly', async () => {
+    const provider = createDeterministicShimProvider({ repo });
+    const c = ctx();
+    await provider.resolve(c);
+    for (let i = 0; i < MAX_QUEUED_STEERS; i += 1) {
+      const outcome = await provider.deliver({
+        sessionId: c.sessionId,
+        roomId: c.roomId,
+        kind: 'steer',
+        body: `steer-${i}`,
+        signalId: `flood-${i}`,
+      });
+      expect(outcome).toEqual({ kind: 'delivered' });
+    }
+    const overflow = await provider.deliver({
+      sessionId: c.sessionId,
+      roomId: c.roomId,
+      kind: 'steer',
+      body: 'one-too-many',
+      signalId: 'flood-overflow',
+    });
+    expect(overflow).toEqual({ kind: 'ignored', reason: 'queue-full' });
   });
 });

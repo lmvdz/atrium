@@ -13,13 +13,14 @@ import {
   type ScratchRepo,
   type WorktreeCheckout,
 } from './git.js';
-import type {
-  DeliveryOutcome,
-  ExecutionProvider,
-  ExecutionReport,
-  SessionContext,
-  SignalDelivery,
-  Workspace,
+import {
+  type DeliveryOutcome,
+  type ExecutionProvider,
+  type ExecutionReport,
+  MAX_QUEUED_STEERS,
+  type SessionContext,
+  type SignalDelivery,
+  type Workspace,
 } from './provider.js';
 
 /**
@@ -133,17 +134,30 @@ interface ShimWorkspace extends Workspace {
 
 /**
  * THE PER-SESSION SIGNAL MAILBOX (#147). One per in-flight shim run, created at
- * `resolve` and removed when `run` returns. `deliver` posts into it; the run
- * drains it at its turn boundary. It is the whole of what makes a delivered steer
- * observable and an interrupt promptly terminal in a purely in-process harness.
+ * the START of `resolve` (before its awaited work, #147 FIX 3) and removed when the
+ * workspace is disposed. `deliver` posts into it; the run drains it at its turn
+ * boundary. It is the whole of what makes a delivered steer observable and an
+ * interrupt promptly terminal in a purely in-process harness.
+ *
+ * The SHIM enforces the turn boundary itself (#147 FIX 4): it is a deterministic
+ * in-process harness that drains `steers` at a boundary it controls, so "queued to
+ * the next boundary, never mid-token" is a genuine provider guarantee here — unlike
+ * the worktree, which can only DELIVER to an inbox a foreign harness reads on its
+ * own schedule.
  */
 interface ShimMailbox {
-  /** Steer bodies queued for the next turn boundary, in delivery order. */
+  /** Steer bodies queued for the next turn boundary, in delivery order (capped). */
   readonly steers: string[];
   /** Set by a delivered interrupt — checked at every boundary. */
   interrupted: boolean;
   /** Armed by a parked run (the await directive); a delivery resolves it. */
   wake: (() => void) | null;
+  /**
+   * Signal ids already delivered to this session (#147 FIX 5). A redelivered id —
+   * #139's at-least-once dispatch retrying — is ignored so a steer queues once and
+   * an interrupt latches once. Ids without a `signalId` are never deduped.
+   */
+  readonly seen: Set<string>;
 }
 
 /**
@@ -190,10 +204,20 @@ export function createDeterministicShimProvider(
     kind: 'shim',
 
     async resolve(ctx: SessionContext): Promise<Workspace> {
+      // Register the mailbox FIRST, before any awaited work (#147 FIX 3). `resolve`
+      // awaits `addWorktree`; a signal that arrives during THAT window used to hit
+      // no mailbox and be dropped as `not-running` (never retried). Registering at
+      // the very start of resolve — the synchronous prefix that runs before the
+      // first await — closes the window: a steer/interrupt in it is queued/latched
+      // and applied at the boundary. Revert this to after `addWorktree` and an
+      // in-window signal is dropped.
+      mailboxes.set(ctx.sessionId, {
+        steers: [],
+        interrupted: false,
+        wake: null,
+        seen: new Set<string>(),
+      });
       const checkout = await addWorktree(repo, ctx.sessionId);
-      // Register the mailbox at resolve, so a steer delivered any time between now
-      // and the run's turn boundary is caught, not dropped as `not-running`.
-      mailboxes.set(ctx.sessionId, { steers: [], interrupted: false, wake: null });
       const workspace: ShimWorkspace = {
         sessionId: ctx.sessionId,
         dir: checkout.dir,
@@ -239,6 +263,7 @@ export function createDeterministicShimProvider(
         steers: [],
         interrupted: false,
         wake: null,
+        seen: new Set<string>(),
       };
       if (ctx.model === EXECUTION_AWAIT_STEER_DIRECTIVE) {
         await awaitSignalAtBoundary(mailbox);
@@ -338,12 +363,24 @@ export function createDeterministicShimProvider(
       if (delivery.kind === 'resume') return { kind: 'ignored', reason: 'resume-noop' };
       const mailbox = mailboxes.get(delivery.sessionId);
       if (!mailbox) return { kind: 'ignored', reason: 'not-running' };
+      // DEDUP (#147 FIX 5): a redelivered signal id — #139's at-least-once dispatch
+      // retrying — is ignored, so a steer queues once and an interrupt latches once.
+      // Deliveries without a durable id are never deduped (each is distinct).
+      if (delivery.signalId !== undefined) {
+        if (mailbox.seen.has(delivery.signalId)) return { kind: 'ignored', reason: 'duplicate' };
+        mailbox.seen.add(delivery.signalId);
+      }
       if (delivery.kind === 'interrupt') {
         mailbox.interrupted = true;
         mailbox.wake?.();
         return { kind: 'interrupted' };
       }
-      // steer: queue the guidance for the next turn boundary, never mid-token.
+      // steer: queue the guidance for the next turn boundary, never mid-token. BOUND
+      // the queue (#147 FIX 5): at the cap the steer is dropped, not appended, and
+      // the outcome says so — an unbounded producer cannot grow this array without limit.
+      if (mailbox.steers.length >= MAX_QUEUED_STEERS) {
+        return { kind: 'ignored', reason: 'queue-full' };
+      }
       mailbox.steers.push(delivery.body ?? '');
       mailbox.wake?.();
       return { kind: 'delivered' };

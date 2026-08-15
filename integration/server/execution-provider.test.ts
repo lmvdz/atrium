@@ -1664,11 +1664,20 @@ async function shimResolve(ctx: SessionContext): Promise<Workspace> {
  *
  * The steered/interrupted runs use the shim's await-steer directive so the run PARKS
  * at one turn boundary — the deterministic window the coordinator's resolve→run
- * leaves no room for otherwise. Delivery is retried until the mailbox exists (the
- * run has resolved its workspace), so there is no wall-clock race.
+ * leaves no room for otherwise.
+ *
+ * The retry below spans the PRE-RESOLVE claim gap only, NOT the resolve window: the
+ * command wrapper drives `runGranted` fire-and-forget, so `claim` (a DB update) may
+ * still be in flight when the test delivers, and until `resolve` is entered there is
+ * no session to deliver to. Once `resolve` is entered the mailbox exists from its
+ * FIRST line (#147 FIX 3), so a signal in the resolve window is NOT dropped — that
+ * fix's red-on-revert is proven deterministically in the unit suites
+ * (`shim.test.ts` / `worktree-provider.test.ts`), which deliver synchronously inside
+ * the window with no retry. The retry here is not masking that guard; it only waits
+ * out an async claim that has not reached `resolve` yet.
  */
 describe('an authorized signal reaches the running shim (#147)', () => {
-  /** Retry delivery until the run has resolved its workspace (mailbox exists). */
+  /** Retry delivery until the run has ENTERED resolve (past the async claim gap). */
   async function deliverWhenRunning(
     coord: ReturnType<typeof coordinator>,
     signal: { sessionId: string; roomId: string; kind: 'steer' | 'interrupt'; body: string | null },
