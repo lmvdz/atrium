@@ -19,41 +19,26 @@
  *   - The line-anchored comment write is **bind-shipped** to ledger comments
  *     (#156). */
 
-import { useEffect, useLayoutEffect, useRef, useState } from 'react';
-import ReactMarkdown from 'react-markdown';
-import remarkGfm from 'remark-gfm';
+import { useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
+import { MessageBody, RichMessageBody } from '@/src/components';
 /* The DIFF renders through the SHIPPED renderer now (#151/#155: shipped wins on
    the diff, the prototype's client `parseDiff` is DELETED). `DiffView` is the
    `ReviewPane` structured-diff view, extracted so both the control plane and this
    pane render THROUGH it — honest empty/truncated states, a forgery-proof CSS
    gutter, control-char neutralisation, none of it re-implemented here. */
 import { DiffView } from '@/src/components/control/DiffView';
+import { AttributionLedger, fileText, offeredText } from '@/src/components/model';
 import { Glyph } from '@/src/components/primitives/Glyph';
-import { systemSettlementState } from './conversation-model';
+import {
+  ARTIFACT_DOC_ROOM,
+  artifactDocModel,
+  messageBody,
+  systemSettlementState,
+} from './conversation-model';
 import { ArtifactKindIcon, IconCheck } from './icons';
 import styles from './prototype.module.css';
 import type { Artifact, Comment, CommentDraft } from './types';
 import { NO_AUTOFILL } from './types';
-
-/* markdown component overrides → the pane's own type scale (real react-markdown). */
-const MD_COMPONENTS = {
-  h1: ({ children }: { children?: React.ReactNode }) => <h3 className={styles.mdH1}>{children}</h3>,
-  h2: ({ children }: { children?: React.ReactNode }) => <h4 className={styles.mdH2}>{children}</h4>,
-  h3: ({ children }: { children?: React.ReactNode }) => <h5 className={styles.mdH3}>{children}</h5>,
-  p: ({ children }: { children?: React.ReactNode }) => <p className={styles.mdP}>{children}</p>,
-  ul: ({ children }: { children?: React.ReactNode }) => <ul className={styles.mdUl}>{children}</ul>,
-  li: ({ children }: { children?: React.ReactNode }) => <li className={styles.mdLi}>{children}</li>,
-  strong: ({ children }: { children?: React.ReactNode }) => (
-    <strong className={styles.mdStrong}>{children}</strong>
-  ),
-  em: ({ children }: { children?: React.ReactNode }) => <em className={styles.mdEm}>{children}</em>,
-  blockquote: ({ children }: { children?: React.ReactNode }) => (
-    <blockquote className={styles.mdQuote}>{children}</blockquote>
-  ),
-  code: ({ children }: { children?: React.ReactNode }) => (
-    <code className={styles.mdCode}>{children}</code>
-  ),
-};
 
 /* find the text caret (node + offset) under a viewport point — the boundary the
    dragged selection handle should snap to. Chromium exposes caretRangeFromPoint. */
@@ -116,10 +101,22 @@ function DocView({
   const [sel, setSel] = useState<DocSel | null>(null);
   const [draft, setDraft] = useState('');
 
+  /* The doc/plan artifact, as an attributed record the SHIPPED `RichMessageBody`
+     cites (#158). Null for a diff artifact or an empty body — those never reach
+     this renderer. */
+  const doc = useMemo(() => artifactDocModel(artifact), [artifact]);
+
+  /* The shipped body wraps its markdown in one `[data-rich-message]` container
+     whose DIRECT children are the top-level blocks. The select-to-comment
+     machinery pushes the block holding the selection down for the composer, so
+     it must walk to THAT container, not to the `styles.md` wrapper above it. */
+  const richEl = (): HTMLElement | null =>
+    (mdRef.current?.querySelector('[data-rich-message]') as HTMLElement | null) ?? mdRef.current;
+
   const refreshFromRange = () => {
     const range = rangeRef.current;
     const body = bodyRef.current;
-    const md = mdRef.current;
+    const md = richEl();
     if (!range || !body || !md) return;
     const b = body.getBoundingClientRect();
     const rects = Array.from(range.getClientRects())
@@ -150,7 +147,7 @@ function DocView({
   };
 
   const onMouseUp = (e: React.MouseEvent) => {
-    const md = mdRef.current;
+    const md = richEl();
     const composer = composeRef.current;
     if (!md) return;
     // selecting inside the composer (its quote line or textarea) is NOT a new
@@ -234,10 +231,19 @@ function DocView({
   return (
     // biome-ignore lint/a11y/noStaticElementInteractions: select-to-comment surface
     <div className={styles.docBody} ref={bodyRef} onMouseUp={onMouseUp}>
+      {/* THE DOC/PLAN BODY, THROUGH THE SHIPPED `RichMessageBody` GRAMMAR (#158).
+          The prototype's hand-rolled `react-markdown` + `MD_COMPONENTS` is
+          DELETED: the shipped body renders GFM, refuses authored HTML, tokenises
+          code, and — the reason it retires the printed-strings finding this pane
+          owned — resolves every printed span from the attribution register
+          (`useAttribution`) instead of raw-printing `artifact.md`. It is cited
+          against a one-record `<AttributionLedger>` built from the artifact. */}
       <div className={styles.md} ref={mdRef}>
-        <ReactMarkdown remarkPlugins={[remarkGfm]} components={MD_COMPONENTS}>
-          {artifact.md ?? ''}
-        </ReactMarkdown>
+        {doc ? (
+          <AttributionLedger messages={[doc.record]} room={ARTIFACT_DOC_ROOM}>
+            <RichMessageBody citation={doc.citation} />
+          </AttributionLedger>
+        ) : null}
       </div>
 
       {/* the persistent quote highlight + draggable end-handles */}
@@ -297,7 +303,15 @@ function DocView({
           }}
         >
           <div className={styles.docComposeQuote}>
-            “{sel.quote.length > 90 ? `${sel.quote.slice(0, 90)}…` : sel.quote}”
+            {/* The selection is VERBATIM doc content — a slice of `artifact.md` —
+                so it is painted through the `fileText` content door (control-char
+                neutralised), never raw. */}
+            “
+            {fileText(
+              sel.quote.length > 90 ? `${sel.quote.slice(0, 90)}…` : sel.quote,
+              'DocView selection quote',
+            )}
+            ”
           </div>
           <textarea
             className={styles.docComposeArea}
@@ -337,9 +351,20 @@ function DocView({
           {comments.map((c) => (
             <div key={c.id} className={styles.artComment}>
               <span className={styles.artCommentQuote}>
-                “{c.quote.length > 40 ? `${c.quote.slice(0, 40)}…` : c.quote}”
+                {/* the anchored quote is verbatim doc content → the `fileText`
+                    door; the comment is the viewer's OWN words → the shipped
+                    `MessageBody`, whose runs render through `segmentText` (the
+                    same read the attribution model reconciles a body against). */}
+                “
+                {fileText(
+                  c.quote.length > 40 ? `${c.quote.slice(0, 40)}…` : c.quote,
+                  'DocView comment quote',
+                )}
+                ”
               </span>
-              <span className={styles.artCommentText}>{c.text}</span>
+              <span className={styles.artCommentText}>
+                <MessageBody body={messageBody(c.text)} />
+              </span>
             </div>
           ))}
         </div>
@@ -378,8 +403,11 @@ export function ArtifactPane({
               type="button"
               className={`${styles.artIconBtn} ${a.id === active.id ? styles.artIconBtnOn : ''}`}
               onClick={() => onSelectArtifact(a.id)}
-              title={`${a.title} · ${a.sub}`}
-              aria-label={`${a.title} (${a.kind})`}
+              /* the switcher label is the copy ON a control (this button), so it
+                 goes through the `offeredText` door — the one that keeps its
+                 pronouns but is bounded to a control's own copy. */
+              title={offeredText(`${a.title} · ${a.sub}`, 'ArtifactPane switcher title')}
+              aria-label={offeredText(`${a.title} (${a.kind})`, 'ArtifactPane switcher label')}
               aria-pressed={a.id === active.id}
             >
               <ArtifactKindIcon kind={a.kind} />

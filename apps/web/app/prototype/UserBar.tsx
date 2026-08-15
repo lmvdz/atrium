@@ -9,6 +9,13 @@
    binds to `ControlPlane` identity + real routes. */
 
 import { useEffect, useRef, useState } from 'react';
+/* The REAL, reachable sign-out door: the `signOutAction` Server Action the
+   shipped top-bar (`app/account-bar.tsx`) already uses. It calls
+   `auth().api.signOut()` and redirects to `/sign-in`, terminating the session on
+   the server — no auth token ever near the client bundle. A client component may
+   hand a Server Action to a `<form action>`, so this is a genuine wiring, not a
+   local mutation (#158). */
+import { signOutAction } from '../(auth)/actions';
 import { IconSettings, IconSignOut, IconUpDown, IconUser } from './icons';
 import styles from './prototype.module.css';
 
@@ -44,12 +51,17 @@ export function UserBar() {
               <span className={styles.userEmail}>operator@atrium.dev</span>
             </div>
           </div>
-          {/* SEAM(#158): wire to a real preferences/profile route. */}
+          {/* Profile / Preferences have NO shipped route yet, so they are HONEST
+              SEAMS — disabled, labelled, and inert — never a fake local action.
+              SEAM(#168 go-live): MUST call the real preferences/profile route
+              once one exists; wire like sign-out below, do not flip local state. */}
           <button
             type="button"
             className={styles.userMenuItem}
             role="menuitem"
-            onClick={() => setOpen(false)}
+            disabled
+            aria-disabled
+            title="not yet wired — no preferences route ships yet (#168)"
           >
             <IconUser size={14} />
             Profile
@@ -58,22 +70,27 @@ export function UserBar() {
             type="button"
             className={styles.userMenuItem}
             role="menuitem"
-            onClick={() => setOpen(false)}
+            disabled
+            aria-disabled
+            title="not yet wired — no preferences route ships yet (#168)"
           >
             <IconSettings size={14} />
             Preferences
           </button>
           <div className={styles.userMenuDiv} />
-          {/* SEAM(#158): wire to the real sign-out action. */}
-          <button
-            type="button"
-            className={`${styles.userMenuItem} ${styles.userMenuDanger}`}
-            role="menuitem"
-            onClick={() => setOpen(false)}
-          >
-            <IconSignOut size={14} />
-            Sign out
-          </button>
+          {/* Sign out is WIRED to the real gated door: the `signOutAction` Server
+              Action ends the session on the server and redirects to `/sign-in`.
+              A `<form action>` submit, not an `onClick` local mutation. */}
+          <form action={signOutAction} className={styles.userMenuForm}>
+            <button
+              type="submit"
+              className={`${styles.userMenuItem} ${styles.userMenuDanger}`}
+              role="menuitem"
+            >
+              <IconSignOut size={14} />
+              Sign out
+            </button>
+          </form>
         </div>
       ) : null}
       <button

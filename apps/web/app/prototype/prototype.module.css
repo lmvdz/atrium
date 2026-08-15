@@ -3170,9 +3170,20 @@
   color: var(--tx1);
   text-align: left;
 }
-.userMenuItem:hover {
+.userMenuItem:hover:not(:disabled) {
   background: var(--bg3);
   color: var(--tx0);
+}
+/* the sign-out form is a layout no-op — its submit button lays out as if it were
+   a direct child of the menu (a real Server-Action form, not an onClick). */
+.userMenuForm {
+  display: contents;
+}
+/* Profile / Preferences are honest, disabled seams until a route ships (#168). */
+.userMenuItem:disabled {
+  cursor: default;
+  color: var(--tx3);
+  opacity: 0.55;
 }
 .userMenuItem svg {
   color: var(--tx3);
