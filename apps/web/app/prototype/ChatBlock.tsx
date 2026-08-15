@@ -1,0 +1,708 @@
+'use client';
+
+/* CHAT BLOCK — the room's conversation and the ONLY input. `@mention` an agent to
+   delegate; when the agent is paused mid-steer, the same input takes the redirect.
+ *
+ * #151 marriage table, read carefully: the feed is a HYBRID. The conversation
+ * *feed rows* are **bind-shipped** to `Timeline`/`TimelineRow` (#155) — but the
+ * SAME table keeps `Turn`/`TurnStep` as the **design shell, blocked on the live
+ * channel (#159)**, and a turn renders INSIDE this feed. You cannot delete the
+ * feed container and keep the turn accordion, so the design feed SHELL stays and
+ * hosts both: plain human/agent rows (which #155 swaps to `TimelineRow` once
+ * bodies are ledger `MessageRecord`s) and design `Turn` accordions (until #159).
+ * The inline body rendering is already bound to the shipped `MessageBody` via
+ * `MessageText` (the prototype's `RichText` regex is DELETED). The conversation
+ * DATA is the `SEAM(#155)` behind `conversationFor`. */
+
+import { useEffect, useRef, useState } from 'react';
+import { ChatTopBar } from './ChatChrome';
+import { IconChevron, IconDot } from './icons';
+import { MessageText } from './MessageText';
+import styles from './prototype.module.css';
+import { conversationFor } from './seams';
+import {
+  type ChatKind,
+  type ChatMsg,
+  type CommentDraft,
+  type DiffLine,
+  MENTION_TARGETS,
+  NO_AUTOFILL,
+  type Selection,
+  SLASH_COMMANDS,
+  STEP_TAG,
+  type TurnData,
+  type TurnStep,
+} from './types';
+
+/* PRIMITIVE: a stream of diff hunks. Rendered identically whether it has the
+   floor or is materialized inside a tree node — that sameness IS the algebra. */
+function DiffLines({ lines }: { lines: readonly DiffLine[] }) {
+  return (
+    <>
+      {lines.map((line, i) => (
+        <div
+          // biome-ignore lint/suspicious/noArrayIndexKey: append-only stream, index is stable
+          key={i}
+          className={[
+            styles.dline,
+            styles[`d_${line.kind}`],
+            line.offScope ? styles.offScope : '',
+          ].join(' ')}
+        >
+          <span className={styles.gutter} aria-hidden>
+            {line.kind === 'add'
+              ? '+'
+              : line.kind === 'del'
+                ? '−'
+                : line.kind === 'file'
+                  ? '›'
+                  : ' '}
+          </span>
+          <span className={styles.dtext}>{line.text}</span>
+        </div>
+      ))}
+    </>
+  );
+}
+
+function stepPreview(s: TurnStep): string {
+  if (s.edit) return `${s.edit.file}`;
+  if (s.command) return s.command;
+  return (s.text ?? '').replace(/[`=]/g, '');
+}
+
+/* one step inside an opened turn — full detail (edit block, command, or prose) */
+function TurnStepRow({ step }: { step: TurnStep }) {
+  return (
+    <div className={styles.turnStep}>
+      <span className={styles.stepTag} data-step={step.kind}>
+        {STEP_TAG[step.kind]}
+      </span>
+      <span className={styles.stepBody}>
+        {step.edit ? (
+          <div className={styles.editBlock}>
+            <div className={styles.editHead}>
+              <span className={styles.editLabel}>edit</span>
+              <span className={styles.branch}>{step.edit.file}</span>
+            </div>
+            <div className={styles.editDiff}>
+              <DiffLines lines={step.edit.lines} />
+            </div>
+          </div>
+        ) : step.command ? (
+          <pre className={styles.cmdBlock}>{step.command}</pre>
+        ) : (
+          <MessageText text={step.text ?? ''} />
+        )}
+      </span>
+    </div>
+  );
+}
+
+/* A TURN — the agent's whole tool-call history for one session turn, folded into
+   a skewed accordion. Hover peeks; click opens a scrollable inner pane that is
+   itself resizable (drag its bottom edge). This is what keeps the chat uncluttered:
+   a hundred tool calls read as ONE row until you want them.
+   #151: keep this design shell (blocked on the live channel #159). */
+function Turn({ turn }: { turn: TurnData }) {
+  const [open, setOpen] = useState(false);
+  const [h, setH] = useState(240);
+  const startResize = (e: React.PointerEvent) => {
+    e.stopPropagation();
+    const sy = e.clientY;
+    const start = h;
+    const move = (ev: PointerEvent) => setH(Math.min(560, Math.max(120, start + ev.clientY - sy)));
+    const up = () => {
+      window.removeEventListener('pointermove', move);
+      window.removeEventListener('pointerup', up);
+    };
+    window.addEventListener('pointermove', move);
+    window.addEventListener('pointerup', up);
+  };
+  return (
+    <div className={styles.turn} data-open={open ? 'true' : undefined}>
+      <button type="button" className={styles.turnBar} onClick={() => setOpen((o) => !o)}>
+        <span className={styles.mark}>~</span>
+        <span className={styles.turnSummary}>{turn.summary}</span>
+        <span className={styles.grow} />
+        <span className={styles.turnMeta}>
+          {turn.steps.length} steps · {turn.spend}
+        </span>
+        <span className={styles.turnGlyph} aria-hidden>
+          <IconChevron open={open} />
+        </span>
+      </button>
+
+      {/* THE MIDDLE — the tool-call history. This is the only part that folds. */}
+      {open ? (
+        <div className={styles.turnPane} style={{ height: `${h}px` }}>
+          <div className={styles.turnScroll}>
+            {turn.steps.map((s, i) => (
+              // biome-ignore lint/suspicious/noArrayIndexKey: fixed step list
+              <TurnStepRow key={i} step={s} />
+            ))}
+          </div>
+          {/* biome-ignore lint/a11y/noStaticElementInteractions: pane resize grip */}
+          <div className={styles.turnResize} onPointerDown={startResize} aria-hidden />
+        </div>
+      ) : (
+        // the folded, skewed stack — peeks on hover, whole area opens on click
+        <button
+          type="button"
+          className={styles.turnStackBtn}
+          onClick={() => setOpen(true)}
+          aria-label="open turn history"
+        >
+          <span className={styles.turnStack} aria-hidden>
+            {turn.steps.slice(0, 3).map((s, i) => (
+              <span
+                // biome-ignore lint/suspicious/noArrayIndexKey: fixed preview list
+                key={i}
+                className={styles.turnStackRow}
+                style={{ ['--i' as string]: i }}
+              >
+                <span className={styles.stepTag} data-step={s.kind}>
+                  {STEP_TAG[s.kind]}
+                </span>
+                <span className={styles.turnStackText}>{stepPreview(s)}</span>
+              </span>
+            ))}
+          </span>
+        </button>
+      )}
+
+      {/* THE CONCLUSION — always shown, part of the same thread; only the middle
+          above collapses. */}
+      {turn.conclusion ? (
+        <div className={styles.turnConcl}>
+          <span className={styles.mark}>~</span>
+          <span className={styles.chatBody}>
+            <MessageText text={turn.conclusion.text} />
+            {turn.conclusion.reply ? (
+              <div className={styles.threadReply}>
+                <span className={`${styles.logWho} ${styles.human}`}>
+                  {turn.conclusion.reply.who}
+                </span>
+                <span className={styles.threadText}>{turn.conclusion.reply.text}</span>
+              </div>
+            ) : null}
+          </span>
+        </div>
+      ) : null}
+    </div>
+  );
+}
+
+/* an author monogram in the left gutter — groups a message's content under it */
+function Avatar({ who, kind }: { who?: string; kind: ChatKind }) {
+  if (kind === 'system') {
+    return (
+      <span className={styles.avatarSys} aria-hidden>
+        <IconDot size={7} />
+      </span>
+    );
+  }
+  return (
+    <span
+      className={`${styles.avatar} ${kind === 'human' ? styles.avatarHuman : styles.avatarAgent}`}
+      aria-hidden
+    >
+      {(who ?? '').slice(0, 2)}
+    </span>
+  );
+}
+
+/* Every chat item is a two-column row: a gutter (avatar/dot) and an indented
+   content column, so what belongs together lines up under one author.
+   SEAM(#155): a plain-message row is swapped to the shipped `TimelineRow` once
+   messages arrive as ledger records; a `turn` row keeps the design `Turn`. */
+function ChatMessage({ msg }: { msg: ChatMsg }) {
+  const mmExcerpt = (
+    msg.text ??
+    msg.turn?.conclusion?.text ??
+    msg.turn?.summary ??
+    (msg.image ? `[image] ${msg.image.alt}` : '')
+  )
+    .replace(/[`=*]/g, '')
+    .trim();
+  if (msg.kind === 'system') {
+    return (
+      <div
+        className={styles.chatRow}
+        data-kind="system"
+        data-mm-id={msg.id}
+        data-mm-kind="system"
+        data-mm-who="system"
+        data-mm-excerpt={mmExcerpt}
+      >
+        <Avatar kind="system" />
+        <div className={styles.chatContent}>
+          <span className={styles.chatSysText}>
+            <span className={styles.chatTime}>{msg.time}</span>{' '}
+            <MessageText text={msg.text ?? ''} />
+          </span>
+        </div>
+      </div>
+    );
+  }
+  return (
+    <div
+      className={styles.chatRow}
+      data-kind={msg.kind}
+      data-mm-id={msg.id}
+      data-mm-kind={msg.kind}
+      data-mm-who={msg.who ?? ''}
+      data-mm-excerpt={mmExcerpt}
+    >
+      <Avatar who={msg.who} kind={msg.kind} />
+      <div className={styles.chatContent}>
+        <div className={styles.chatMeta}>
+          <span
+            className={`${styles.chatWho} ${msg.kind === 'human' ? styles.human : styles.agent}`}
+          >
+            {msg.who}
+          </span>
+          <span className={styles.chatTime}>{msg.time}</span>
+        </div>
+        {msg.turn ? <Turn turn={msg.turn} /> : null}
+        {msg.text ? (
+          <div className={styles.chatBody}>
+            <MessageText text={msg.text} />
+          </div>
+        ) : null}
+        {msg.image ? (
+          // biome-ignore lint/nursery/noImgElement: inline chat image (mock data URI)
+          <img className={styles.chatImage} src={msg.image.src} alt={msg.image.alt} />
+        ) : null}
+        {msg.reply ? (
+          <div className={styles.threadReply}>
+            <span className={`${styles.logWho} ${styles.human}`}>{msg.reply.who}</span>
+            <span className={styles.threadText}>{msg.reply.text}</span>
+          </div>
+        ) : null}
+      </div>
+    </div>
+  );
+}
+
+/* CHAT MINIMAP — a VSCode-style scrubber in the chat's right gutter. Each message
+   is a proportional tick (width ∝ length, coloured by author); a draggable window
+   shows the viewport; click/drag scrubs the thread; hover previews the message;
+   ⌘-click bookmarks it. Everything is measured live from the scroll container. */
+interface MMTick {
+  id: string;
+  top: number;
+  height: number;
+  who: string;
+  kind: string;
+  excerpt: string;
+}
+function ChatMinimap({
+  scrollRef,
+  revision,
+}: {
+  scrollRef: React.RefObject<HTMLDivElement | null>;
+  revision: string;
+}) {
+  const railRef = useRef<HTMLDivElement>(null);
+  const [ticks, setTicks] = useState<MMTick[]>([]);
+  const [view, setView] = useState({ top: 0, height: 0, scrollable: false });
+  const [hover, setHover] = useState<MMTick | null>(null);
+  const [marks, setMarks] = useState<ReadonlySet<string>>(() => new Set());
+
+  const syncView = () => {
+    const sc = scrollRef.current;
+    const rail = railRef.current;
+    if (!sc || !rail) return;
+    const total = sc.scrollHeight || 1;
+    const H = rail.clientHeight;
+    setView({
+      top: (sc.scrollTop / total) * H,
+      height: Math.max(18, (sc.clientHeight / total) * H),
+      scrollable: sc.scrollHeight > sc.clientHeight + 8,
+    });
+  };
+
+  // biome-ignore lint/correctness/useExhaustiveDependencies: remeasure whenever content revision changes
+  useEffect(() => {
+    const sc = scrollRef.current;
+    const rail = railRef.current;
+    if (!sc || !rail) return;
+    const measure = () => {
+      const total = sc.scrollHeight || 1;
+      const H = rail.clientHeight;
+      const scTop = sc.getBoundingClientRect().top;
+      const rows = Array.from(sc.querySelectorAll('[data-mm-id]')) as HTMLElement[];
+      setTicks(
+        rows.map((el) => {
+          const r = el.getBoundingClientRect();
+          return {
+            id: el.dataset.mmId ?? '',
+            // a thin tick at the message's proportional position — a clean message
+            // map, not a proportional block that reads as a blob for tall turns
+            top: ((r.top - scTop + sc.scrollTop) / total) * H,
+            height: 3,
+            who: el.dataset.mmWho ?? '',
+            kind: el.dataset.mmKind ?? 'agent',
+            excerpt: (el.dataset.mmExcerpt || el.textContent || '')
+              .replace(/\s+/g, ' ')
+              .trim()
+              .slice(0, 140),
+          };
+        }),
+      );
+      syncView();
+    };
+    measure();
+    sc.addEventListener('scroll', syncView, { passive: true });
+    return () => sc.removeEventListener('scroll', syncView);
+  }, [scrollRef, revision]);
+
+  const scrubTo = (clientY: number) => {
+    const rail = railRef.current;
+    const sc = scrollRef.current;
+    if (!rail || !sc) return;
+    const r = rail.getBoundingClientRect();
+    const frac = Math.min(1, Math.max(0, (clientY - r.top) / r.height));
+    sc.scrollTop = frac * (sc.scrollHeight - sc.clientHeight);
+  };
+  const onPointerDown = (e: React.PointerEvent) => {
+    if (e.metaKey || e.ctrlKey) return; // ⌘-click is a bookmark, handled on the tick
+    scrubTo(e.clientY);
+    const move = (ev: PointerEvent) => scrubTo(ev.clientY);
+    const up = () => {
+      window.removeEventListener('pointermove', move);
+      window.removeEventListener('pointerup', up);
+    };
+    window.addEventListener('pointermove', move);
+    window.addEventListener('pointerup', up);
+  };
+  const toggleMark = (id: string) =>
+    setMarks((m) => {
+      const n = new Set(m);
+      if (n.has(id)) n.delete(id);
+      else n.add(id);
+      return n;
+    });
+  const width = (t: MMTick) => Math.round(Math.min(30, Math.max(7, t.excerpt.length * 0.42)));
+
+  return (
+    // biome-ignore lint/a11y/noStaticElementInteractions: scrubber rail
+    <div
+      className={styles.minimap}
+      ref={railRef}
+      onPointerDown={onPointerDown}
+      onPointerLeave={() => setHover(null)}
+    >
+      {ticks.map((t) => (
+        // biome-ignore lint/a11y/noStaticElementInteractions: minimap tick
+        <div
+          key={t.id}
+          className={styles.mmTick}
+          data-kind={t.kind}
+          data-mark={marks.has(t.id) ? 'true' : undefined}
+          style={{ top: `${t.top}px`, height: `${t.height}px`, width: `${width(t)}px` }}
+          onPointerEnter={() => setHover(t)}
+          onClickCapture={(e) => {
+            if (e.metaKey || e.ctrlKey) {
+              e.stopPropagation();
+              // SEAM(#156): ⌘-click bookmark should persist to the ledger.
+              toggleMark(t.id);
+            }
+          }}
+        />
+      ))}
+      {view.scrollable ? (
+        <div
+          className={styles.mmView}
+          style={{ top: `${view.top}px`, height: `${view.height}px` }}
+          aria-hidden
+        />
+      ) : null}
+      {hover ? (
+        <div
+          className={styles.mmPreview}
+          style={{
+            top: `${Math.max(0, Math.min(hover.top, (railRef.current?.clientHeight ?? 0) - 96))}px`,
+          }}
+        >
+          <div className={styles.mmPreviewText}>
+            {hover.excerpt.length > 120 ? `${hover.excerpt.slice(0, 120)}…` : hover.excerpt}
+          </div>
+          <div className={styles.mmPreviewMeta}>
+            <span
+              className={`${styles.face} ${hover.kind === 'human' ? styles.faceHuman : styles.faceAgent}`}
+              aria-hidden
+            >
+              {(hover.who || '··').slice(0, 2)}
+            </span>
+            <span className={styles.mmPreviewWho}>{hover.who || 'system'}</span>
+            <span className={styles.grow} />
+            <span className={styles.mmPreviewHint}>⌘-click to bookmark</span>
+          </div>
+        </div>
+      ) : null}
+    </div>
+  );
+}
+
+/* COMPOSER — delta.dev-simple: the input is the last row of the thread. Your
+   avatar, a field that blends in, a blinking cursor. No toolbar, no send button.
+   Typing `@` or `/` still opens a popover ABOVE the field. Enter sends.
+   SEAM(#157): send / `@mention` delegate / `@hexi stop` steer → real dispatch. */
+function Composer({
+  inputRef,
+  value,
+  onChange,
+  onSubmit,
+  steering,
+}: {
+  inputRef: React.RefObject<HTMLTextAreaElement | null>;
+  value: string;
+  onChange: (v: string) => void;
+  onSubmit: () => void;
+  steering: boolean;
+}) {
+  const [active, setActive] = useState(0);
+  const [dismissed, setDismissed] = useState<string | null>(null);
+  const grow = (el: HTMLTextAreaElement) => {
+    el.style.height = 'auto';
+    el.style.height = `${Math.min(el.scrollHeight, 160)}px`;
+  };
+  const slashMatch = /^\/(\S*)$/.exec(value);
+  const mentionMatch = /(^|\s)@([\w-]*)$/.exec(value);
+  const commands = SLASH_COMMANDS.filter(([c]) =>
+    c.slice(1).startsWith(slashMatch?.[1]?.toLowerCase() ?? ''),
+  );
+  const mentions = MENTION_TARGETS.filter(([n]) =>
+    n.startsWith(mentionMatch?.[2]?.toLowerCase() ?? ''),
+  );
+  const kind =
+    !steering && slashMatch !== null && commands.length > 0
+      ? 'slash'
+      : !steering && mentionMatch !== null && mentions.length > 0
+        ? 'mention'
+        : null;
+  const list = kind === 'slash' ? commands : kind === 'mention' ? mentions : [];
+  const open = kind !== null && dismissed !== value;
+  const activeIdx = Math.min(active, Math.max(0, list.length - 1));
+
+  const select = (i: number) => {
+    const item = list[i];
+    if (!item) return;
+    if (kind === 'slash') onChange(`${item[0]} `);
+    else {
+      const next = mentionMatch
+        ? value.slice(0, mentionMatch.index) + (mentionMatch[1] ?? '') + `@${item[0]} `
+        : `${value}@${item[0]} `;
+      onChange(next);
+    }
+    setActive(0);
+    inputRef.current?.focus();
+  };
+
+  return (
+    <div className={styles.chatRow} data-kind={steering ? 'steer' : 'human'}>
+      <Avatar who="you" kind="human" />
+      <div className={styles.composeWrap}>
+        {open ? (
+          <div className={styles.popover} role="listbox">
+            <div className={styles.popHead}>{kind === 'slash' ? 'commands' : 'reference'}</div>
+            {list.map(([a, d], i) => (
+              <button
+                key={a}
+                type="button"
+                role="option"
+                aria-selected={i === activeIdx}
+                className={`${styles.popItem} ${i === activeIdx ? styles.popActive : ''}`}
+                onMouseEnter={() => setActive(i)}
+                onClick={() => select(i)}
+              >
+                <span className={kind === 'slash' ? styles.popCmd : styles.mention}>
+                  {kind === 'slash' ? a : `@${a}`}
+                </span>
+                <span className={styles.popDesc}>{d}</span>
+              </button>
+            ))}
+          </div>
+        ) : null}
+        <textarea
+          ref={inputRef}
+          className={styles.composeField}
+          name="atrium-message"
+          rows={1}
+          // biome-ignore lint/a11y/noAutofocus: the caret at the thread's end IS the affordance
+          autoFocus
+          value={value}
+          onChange={(e) => {
+            onChange(e.target.value);
+            grow(e.target);
+          }}
+          onKeyDown={(e) => {
+            if (open) {
+              if (e.key === 'ArrowDown') {
+                e.preventDefault();
+                setActive((i) => Math.min(i + 1, list.length - 1));
+                return;
+              }
+              if (e.key === 'ArrowUp') {
+                e.preventDefault();
+                setActive((i) => Math.max(i - 1, 0));
+                return;
+              }
+              if (e.key === 'Tab' || (e.key === 'Enter' && !e.shiftKey)) {
+                e.preventDefault();
+                select(activeIdx);
+                return;
+              }
+              if (e.key === 'Escape') {
+                e.preventDefault();
+                setDismissed(value);
+                return;
+              }
+            }
+            if (e.key === 'Enter' && !e.shiftKey) {
+              e.preventDefault();
+              onSubmit();
+            }
+          }}
+          {...NO_AUTOFILL}
+        />
+      </div>
+    </div>
+  );
+}
+
+/* the comment being written in the artifact pane, mirrored into the chat live —
+   as you type over there, it materialises here as a draft line. */
+function DraftComment({ draft }: { draft: CommentDraft }) {
+  const quote = draft.quote.length > 52 ? `${draft.quote.slice(0, 52)}…` : draft.quote;
+  return (
+    <div className={`${styles.chatRow} ${styles.draftRow}`} data-kind="human">
+      <Avatar who="you" kind="human" />
+      <div className={styles.chatContent}>
+        <div className={styles.chatMeta}>
+          <span className={`${styles.chatWho} ${styles.human}`}>you</span>
+          <span className={styles.draftTag}>commenting…</span>
+        </div>
+        <div className={styles.draftBody}>
+          <span className={styles.draftQuote}>“{quote}”</span>
+          {draft.text ? (
+            <span className={styles.draftText}>{draft.text}</span>
+          ) : (
+            <span className={styles.draftPlaceholder}>start typing your comment…</span>
+          )}
+        </div>
+      </div>
+    </div>
+  );
+}
+
+/* who else is typing — multiplayer presence, shown just above the composer.
+   SEAM(#156): bind to real room presence. */
+function TypingRow({ who }: { who: string }) {
+  return (
+    <div className={styles.chatRow} data-kind="agent">
+      <Avatar who={who} kind="human" />
+      <div className={styles.chatContent}>
+        <span className={styles.typing}>
+          {who} is typing
+          <span className={styles.typingDots} aria-hidden>
+            <span />
+            <span />
+            <span />
+          </span>
+        </span>
+      </div>
+    </div>
+  );
+}
+
+export function ChatBlock({
+  selected,
+  echoes,
+  draftComment,
+  steering,
+  redirect,
+  setRedirect,
+  onSteerSend,
+  onSay,
+}: {
+  selected: Selection;
+  echoes: readonly string[];
+  draftComment: CommentDraft | null;
+  steering: boolean;
+  redirect: string;
+  setRedirect: (v: string) => void;
+  onSteerSend: () => void;
+  onSay: (text: string) => void;
+}) {
+  const [value, setValue] = useState('');
+  const inputRef = useRef<HTMLTextAreaElement>(null);
+  const logRef = useRef<HTMLDivElement>(null);
+  /* cross-fade the thread on selection change: the old conversation dematerializes
+     and the new one materializes in place, so switching threads never snaps. */
+  const [shownSel, setShownSel] = useState(selected);
+  const [fading, setFading] = useState(false);
+  useEffect(() => {
+    if (shownSel.kind === selected.kind && shownSel.id === selected.id) return;
+    setFading(true);
+    const t = window.setTimeout(() => {
+      setShownSel(selected);
+      setFading(false);
+    }, 170);
+    return () => window.clearTimeout(t);
+  }, [selected, shownSel]);
+  // SEAM(#155): bind to the thread's real messages.
+  const convo = conversationFor(shownSel);
+  /* keep the input focused: clicking anywhere in the thread (that isn't a control
+     or a text selection) returns the caret to the composer. */
+  const refocus = (e: React.MouseEvent) => {
+    if ((window.getSelection()?.toString().length ?? 0) > 0) return;
+    if ((e.target as HTMLElement).closest('button, a, textarea, input')) return;
+    inputRef.current?.focus();
+  };
+  return (
+    // biome-ignore lint/a11y/noStaticElementInteractions: click-to-refocus the composer
+    <section className={styles.chat} aria-label="conversation" onMouseUp={refocus}>
+      <ChatTopBar selected={selected} />
+      <ChatMinimap
+        scrollRef={logRef}
+        revision={`${shownSel.kind}:${shownSel.id}|${echoes.length}|${draftComment ? draftComment.text.length : -1}|${fading ? 1 : 0}`}
+      />
+      <div className={styles.chatLog} ref={logRef}>
+        <div className={`${styles.chatConvo} ${fading ? styles.chatConvoOut : ''}`}>
+          {convo.map((msg) => (
+            <ChatMessage key={msg.id} msg={msg} />
+          ))}
+        </div>
+        {echoes.map((e, i) => (
+          <ChatMessage
+            // biome-ignore lint/suspicious/noArrayIndexKey: append-only echo list
+            key={`e${i}`}
+            msg={{ id: `e${i}`, time: 'now', kind: 'human', who: 'you', text: e }}
+          />
+        ))}
+        {/* the comment being composed in the artifact pane, portaled here live */}
+        {draftComment ? <DraftComment draft={draftComment} /> : null}
+        {/* multiplayer: someone else is typing, right above your input */}
+        <TypingRow who="dane" />
+        {/* the input is just the next line of the thread — your avatar + a cursor */}
+        <Composer
+          inputRef={inputRef}
+          steering={steering}
+          value={steering ? redirect : value}
+          onChange={steering ? setRedirect : setValue}
+          onSubmit={() => {
+            if (steering) {
+              if (redirect.trim().length > 0) onSteerSend();
+            } else if (value.trim().length > 0) {
+              onSay(value);
+              setValue('');
+            }
+          }}
+        />
+      </div>
+    </section>
+  );
+}
