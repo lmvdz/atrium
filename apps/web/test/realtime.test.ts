@@ -1,4 +1,12 @@
 import { beforeEach, describe, expect, it } from 'vitest';
+import type { z } from 'zod';
+/**
+ * `ServerFrame` is used as a VALUE below (`typeof ServerFrame`, to derive
+ * `WireFrame`'s pre-default input type) — the `useImportType` rule can't see
+ * through `typeof` in a type position and would offer a fix that breaks that
+ * derivation under isolatedModules.
+ */
+// biome-ignore lint/style/useImportType: typeof ServerFrame needs the value import
 import {
   createRealtimeClient,
   localStorageJournal,
@@ -7,9 +15,20 @@ import {
   type RealtimeClientOptions,
   type RoomEventEnvelope,
   type RoomJournal,
-  type ServerFrame,
+  ServerFrame,
   type SocketLike,
 } from '../src/lib/realtime.js';
+
+/**
+ * The pre-parse (wire) shape, not the post-default one (#159 round-4, finding
+ * 3). `subscribed.progress` gained a `.default([])`, which makes it required on
+ * `z.infer` (what every fixture used to be typed against) but optional on
+ * `z.input` — exactly like a real server frame arrives over the wire before
+ * this client's own `.parse` fills it in. Typing `deliver` against the input
+ * shape keeps every existing two-hundred-fixture call site honest without
+ * hand-editing each one to carry a field the schema already defaults.
+ */
+type WireFrame = z.input<typeof ServerFrame>;
 
 /**
  * The client's three rules, exercised against a fake socket: `room_seq` is the
@@ -44,7 +63,7 @@ class FakeSocket implements SocketLike {
   }
 
   /** Server → client. */
-  deliver(frame: ServerFrame): void {
+  deliver(frame: WireFrame): void {
     this.onmessage?.({ data: JSON.stringify(frame) });
   }
 
@@ -2070,7 +2089,7 @@ describe('live progress converges to the settle receipt (#159 finding 4)', () =>
     };
   }
 
-  function heartbeat(sessionId: string, progressSeq: number): ServerFrame {
+  function heartbeat(sessionId: string, progressSeq: number): WireFrame {
     return {
       type: 'session_heartbeat',
       roomId: ROOM,
@@ -2219,7 +2238,7 @@ describe('live progress converges to the settle receipt (#159 finding 4)', () =>
 describe('reconnect/late-join recovers the durable progress snapshot (#159 finding 3)', () => {
   const SESSION = 'sess-recover';
 
-  function heartbeat(sessionId: string, progressSeq: number): ServerFrame {
+  function heartbeat(sessionId: string, progressSeq: number): WireFrame {
     return {
       type: 'session_heartbeat',
       roomId: ROOM,

@@ -147,6 +147,16 @@ export const ServerFrame = z.discriminatedUnion('type', [
     roomId: z.string().min(1),
     head: z.number().int().min(0),
     seenSeq: z.number().int().min(0),
+    /**
+     * THE DURABLE PROGRESS FLOOR (#159 round-4, finding 3). Read at subscribe
+     * time and carried on the frame that already answers every (re)subscribe.
+     * `.default([])` so a server that predates this field (or a journal record
+     * written by an older build, though `subscribed` itself is never persisted)
+     * parses the same as an empty snapshot rather than failing closed.
+     */
+    progress: z
+      .array(z.object({ sessionId: z.string().min(1), progressSeq: z.number().int().min(0) }))
+      .default([]),
   }),
   z.object({ type: z.literal('unsubscribed'), roomId: z.string().min(1) }),
   z.object({ type: z.literal('event'), entry: Envelope }),
@@ -1339,6 +1349,51 @@ export function createRealtimeClient(options: RealtimeClientOptions): RealtimeCl
     send({ type: 'ack_head', roomId, roomSeq: view(roomId).lastSeq });
   }
 
+  /**
+   * Raise `progressFloor` to a durable `sessions.progress` snapshot (#159 round-3,
+   * finding 3), so a live frame at or below the recovered seq is dropped rather
+   * than shown. Monotonic: only ever raises a session's floor, never lowers it.
+   *
+   * A named function rather than only an object-literal method (#159 round-4,
+   * finding 3) — `handleFrame`'s `subscribed` case calls this DIRECTLY, on the
+   * production subscribe path, instead of leaving the floor to a consumer that
+   * may never call the public method. The public `recoverProgress` on the
+   * returned client is this same function, so a caller who reads the snapshot
+   * through some other route (e.g. the authenticated projection re-read on
+   * `projection_changed`) still floors through the one implementation.
+   */
+  function recoverProgress(
+    roomId: string,
+    snapshots: ReadonlyArray<{ sessionId: string; progressSeq: number }>,
+  ): void {
+    if (snapshots.length === 0) return;
+    const room = view(roomId);
+    const floor = { ...(room.progressFloor ?? {}) };
+    let raised = false;
+    for (const { sessionId, progressSeq } of snapshots) {
+      const prior = floor[sessionId];
+      // Monotonic: only ever RAISE the floor. A stale snapshot re-read cannot pull a
+      // session back below a seq this client already applied live.
+      if (prior === undefined || progressSeq > prior) {
+        floor[sessionId] = progressSeq;
+        raised = true;
+      }
+      // If the live preview currently held for this session is OLDER than the durable
+      // snapshot, it is a frame the snapshot already superseded — drop it so the
+      // recovered snapshot (read by the consumer) is what shows, not a stale frame.
+      const held = room.progress?.[sessionId];
+      if (held !== undefined && held.progressSeq < progressSeq) {
+        const { [sessionId]: _superseded, ...rest } = room.progress ?? {};
+        room.progress = rest;
+        raised = true;
+      }
+    }
+    if (raised) {
+      room.progressFloor = floor;
+      changed(roomId);
+    }
+  }
+
   function handleFrame(frame: ServerFrame): void {
     switch (frame.type) {
       case 'subscribed': {
@@ -1404,6 +1459,14 @@ export function createRealtimeClient(options: RealtimeClientOptions): RealtimeCl
         // `progressSeq` via `recoverProgress`. A plain `changed(state)` above does not
         // trigger the projection reread — that path is gated on `reason==='projection'`.
         changed(frame.roomId, 'projection');
+        // ACTUALLY RAISE THE FLOOR (#159 round-4, finding 3). Round-3 wired the
+        // projection-refresh PROMPT above but nothing on the production path ever
+        // called `recoverProgress` — the mechanism existed, unit-tested, uncalled.
+        // The server now reads the same durable `sessions.progress` snapshot at
+        // subscribe time and carries it right here on `frame.progress`, so the
+        // floor is raised on every (re)subscribe without waiting on a consumer
+        // that binds after #161. `[]` on a room with nothing running is a no-op.
+        recoverProgress(frame.roomId, frame.progress);
         // Always ask, even on a first join: `lastSeq` is 0 then, so this is
         // both "load the room" and "close the gap" with one code path.
         requestSince(frame.roomId);
@@ -1860,34 +1923,7 @@ export function createRealtimeClient(options: RealtimeClientOptions): RealtimeCl
     setTyping: (roomId, typing) => {
       command({ name: 'set_typing', roomId, typing });
     },
-    recoverProgress: (roomId, snapshots) => {
-      if (snapshots.length === 0) return;
-      const room = view(roomId);
-      const floor = { ...(room.progressFloor ?? {}) };
-      let raised = false;
-      for (const { sessionId, progressSeq } of snapshots) {
-        const prior = floor[sessionId];
-        // Monotonic: only ever RAISE the floor. A stale snapshot re-read cannot pull a
-        // session back below a seq this client already applied live.
-        if (prior === undefined || progressSeq > prior) {
-          floor[sessionId] = progressSeq;
-          raised = true;
-        }
-        // If the live preview currently held for this session is OLDER than the durable
-        // snapshot, it is a frame the snapshot already superseded — drop it so the
-        // recovered snapshot (read by the consumer) is what shows, not a stale frame.
-        const held = room.progress?.[sessionId];
-        if (held !== undefined && held.progressSeq < progressSeq) {
-          const { [sessionId]: _superseded, ...rest } = room.progress ?? {};
-          room.progress = rest;
-          raised = true;
-        }
-      }
-      if (raised) {
-        room.progressFloor = floor;
-        changed(roomId);
-      }
-    },
+    recoverProgress,
     onChange: (listener) => {
       changeListeners.add(listener);
       return () => changeListeners.delete(listener);

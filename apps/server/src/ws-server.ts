@@ -726,11 +726,19 @@ export function createRealtimeServer(options: RealtimeOptions): RealtimeServer {
       // on this connection said. The client's own `since` and the `ack_head`
       // that follows it are what move this.
       headAcks.reset(connection.id, roomId);
+      // THE PROGRESS FLOOR (#159 round-4, finding 3). Read alongside the head on
+      // every (re)subscribe — not only the first join — so a reconnecting or
+      // late-joining client's `recoverProgress` floor is raised from the durable
+      // `sessions.progress` snapshot before it judges a single live frame. Without
+      // this a reconnect started `progressFloor` empty and accepted a stale seq
+      // sitting in `(0, snapshot]`.
+      const progress = await commands.progressSnapshot(roomId);
       send(socket, {
         type: 'subscribed',
         roomId,
         head: await ledger.head(roomId),
         seenSeq: membership.seenSeq,
+        progress,
       });
       /* A subscriber must learn who was already here, not only who changes
          after it arrives. Presence stays ephemeral: this is a snapshot of the

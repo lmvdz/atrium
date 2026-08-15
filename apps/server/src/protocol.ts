@@ -159,7 +159,25 @@ export interface WireEvent {
 export type ServerFrame =
   | { type: 'welcome'; connectionId: string; userId: string; heartbeatIntervalMs: number }
   | { type: 'pong'; at: string }
-  | { type: 'subscribed'; roomId: string; head: number; seenSeq: number }
+  | {
+      type: 'subscribed';
+      roomId: string;
+      head: number;
+      seenSeq: number;
+      /**
+       * THE DURABLE PROGRESS FLOOR (#159 round-4, finding 3). One `{sessionId,
+       * progressSeq}` pair per session with a live `sessions.progress` snapshot in
+       * this room, read at subscribe time — the same authenticated read
+       * `loadControlPlane` performs, carried on the frame that already answers
+       * every (re)subscribe rather than a second round trip. The client floors its
+       * `progressFloor` by these on every `subscribed` (first join AND reconnect),
+       * so a stale/reordered/forged live frame in `(client's old floor, snapshot]`
+       * is refused instead of shown — the gap round-3's fix left open, because
+       * `recoverProgress` existed but nothing on the production path ever called
+       * it. `[]` for a room with no running session's progress yet.
+       */
+      progress: readonly { sessionId: string; progressSeq: number }[];
+    }
   | { type: 'unsubscribed'; roomId: string }
   | { type: 'event'; entry: WireEvent }
   /**

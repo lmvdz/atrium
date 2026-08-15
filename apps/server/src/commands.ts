@@ -38,7 +38,7 @@ import {
   sessions,
   users,
 } from '@atrium/db/schema';
-import { and, eq, inArray } from 'drizzle-orm';
+import { and, eq, inArray, isNotNull } from 'drizzle-orm';
 import { z } from 'zod';
 import {
   MAX_DIFF_DELTA_BYTES,
@@ -1183,6 +1183,22 @@ export interface CommandService {
    * appended, nothing is authorized *for*, and the caller is a timer.
    */
   stillMembers: (pairs: readonly MembershipPair[]) => Promise<Set<string>>;
+  /**
+   * The room's durable `sessions.progress` snapshot, one `{sessionId,
+   * progressSeq}` pair per RUNNING session that has ever reported (#159 round-4,
+   * finding 3). This is the floor a (re)subscribe hands the client so a
+   * reconnect/late-join can raise `progressFloor` to the snapshot before any live
+   * frame is judged against it — see `recoverProgress` in
+   * `apps/web/src/lib/realtime.ts`. `progress` is NULL for every session that has
+   * no live stream yet AND for every TERMINAL session (the settle projection
+   * clears it — `sessions_progress_open_or_null`, migration 0049), so filtering
+   * non-null here naturally excludes a settled session from the floor: its
+   * `~` preview is gone, replaced by the durable receipt, and the client's own
+   * terminal wall (`settledSessions`) is the authority on that, not a stale seq.
+   */
+  progressSnapshot: (
+    roomId: string,
+  ) => Promise<ReadonlyArray<{ sessionId: string; progressSeq: number }>>;
 }
 
 const REFERENCE_UNAVAILABLE = 'reference is unavailable';
@@ -3219,10 +3235,26 @@ export function createCommandService({
     }
   }
 
+  async function progressSnapshot(
+    roomId: string,
+  ): Promise<ReadonlyArray<{ sessionId: string; progressSeq: number }>> {
+    const rows = await db
+      .select({ id: sessions.id, progress: sessions.progress })
+      .from(sessions)
+      .where(and(eq(sessions.roomId, roomId), isNotNull(sessions.progress)));
+    return rows
+      .map((row) => ({ sessionId: row.id, progressSeq: row.progress?.progressSeq }))
+      .filter(
+        (entry): entry is { sessionId: string; progressSeq: number } =>
+          typeof entry.progressSeq === 'number',
+      );
+  }
+
   return {
     execute,
     requireMembership,
     stillMembers: (pairs) => authorizer.present(pairs),
+    progressSnapshot,
   };
 }
 

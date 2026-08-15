@@ -3,13 +3,27 @@ import { advanceSeenSeq, provisionAgentConfig } from '@atrium/auth';
 import { attentionItems, messages, plans, sessions } from '@atrium/db';
 import { eq, sql } from 'drizzle-orm';
 import { afterAll, beforeEach, describe, expect, it } from 'vitest';
+import type { z } from 'zod';
 import { loadControlPlane } from '../../apps/web/lib/control-plane-data.js';
+/**
+ * `ServerFrame` is used as a VALUE below (`typeof ServerFrame`, to derive
+ * `WireFrame`'s pre-default input type) — the `useImportType` rule can't see
+ * through `typeof` in a type position and would offer a fix that breaks that
+ * derivation under isolatedModules.
+ */
+// biome-ignore lint/style/useImportType: typeof ServerFrame needs the value import
 import {
   createRealtimeClient,
-  type ServerFrame,
+  ServerFrame,
   type SocketLike,
 } from '../../apps/web/src/lib/realtime.js';
 import { openDatabase, resetDatabase, seedRoom } from '../support/harness.js';
+
+/**
+ * The pre-parse (wire) shape (#159 round-4, finding 3) — `subscribed.progress`
+ * defaults on parse, so it is optional here even though `z.infer` requires it.
+ */
+type WireFrame = z.input<typeof ServerFrame>;
 
 /**
  * The minimum WebSocket the realtime client drives, for the cross-layer finding-3
@@ -31,7 +45,7 @@ class FakeWs implements SocketLike {
     this.readyState = 1;
     this.onopen?.({});
   }
-  deliver(frame: ServerFrame): void {
+  deliver(frame: WireFrame): void {
     this.onmessage?.({ data: JSON.stringify(frame) });
   }
 }
