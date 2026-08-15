@@ -290,6 +290,16 @@ export const eventType = pgEnum('event_type', [
   // names, no overloading (#123 resolution 7).
   'session_signaled',
   'session_subscribed',
+  // ── the live progress channel (#159, from #152's resolution) ──────────────
+  //
+  // ONE more ledger-only kind, KEPT OUT of `coreEventTypes` exactly as the ten
+  // above are. `session_phase_changed` is the DURABLE phase timeline of a running
+  // session's work (`planning | writing | testing`) — low-cardinality genuine
+  // history the reducer never folds (a phase is not the room's understanding).
+  // Its projection writes only the `sessions.progress` snapshot column. The
+  // high-frequency progress (heartbeat, diff deltas) is NOT here — those are
+  // ephemeral WS frames, never a ledger row.
+  'session_phase_changed',
 ]);
 
 /**
@@ -964,6 +974,7 @@ export const coreEvents = pgTable(
         WHEN 'draw_refused' THEN ARRAY['roomId']
         WHEN 'session_signaled' THEN ARRAY['roomId']
         WHEN 'session_subscribed' THEN ARRAY['roomId']
+        WHEN 'session_phase_changed' THEN ARRAY['roomId']
         WHEN 'proposal_rejected' THEN ARRAY[]::text[]
         WHEN 'proposal_superseded' THEN ARRAY[]::text[]
         WHEN 'object_corrected' THEN ARRAY[]::text[]
@@ -983,6 +994,7 @@ export const coreEvents = pgTable(
         WHEN 'draw_refused' THEN ${t.payload}->>'roomId'
         WHEN 'session_signaled' THEN ${t.payload}->>'roomId'
         WHEN 'session_subscribed' THEN ${t.payload}->>'roomId'
+        WHEN 'session_phase_changed' THEN ${t.payload}->>'roomId'
         ELSE ${t.roomId}::text
       END, false)`,
     ),
@@ -1638,6 +1650,50 @@ export interface SessionArtifact {
   readonly summary?: string;
 }
 
+/** The three phases a running session's work moves through (#159, decided in #152). */
+export type SessionPhase = 'planning' | 'writing' | 'testing';
+
+/**
+ * THE LIVE PROGRESS SNAPSHOT (#159, decided in #152) — a projection ROW, never a
+ * ledger payload.
+ *
+ * A running session streams its work as ephemeral frames (`session_heartbeat`,
+ * `session_diff_delta`) that are lost on reconnect and a durable phase timeline
+ * (`session_phase_changed`). This column is the LATE-JOIN/LOSS-RECOVERY snapshot:
+ * a cross-instance client that just subscribed reads it (an authenticated row
+ * read) and then applies live frames whose `progressSeq` is greater. It is
+ * cleared (set null) by the settle projection — at terminal the durable receipt
+ * (`sessions.artifact`) REPLACES the stream wholesale, so a stale preview never
+ * outlives the real object.
+ *
+ * COVENANT (#152 boundary point 2): nothing here is epistemic. There is no
+ * `certified`/`verified` field and there can never be one — every value is a `~`
+ * draft the running process reported, and the `diff` reuses the receipt's own
+ * `SessionDiff` schema (one diff dialect, ceilinged and coherence-checked), NOT a
+ * second lossier copy free to disagree.
+ */
+export interface SessionProgress {
+  /** The server-assigned per-session progress counter this snapshot was written at. */
+  readonly progressSeq: number;
+  /** The last durable phase, or null before any phase was reported. */
+  readonly phase: SessionPhase | null;
+  /** Last reported spend, micro-dollars — a `~` fact, never enforced on (§9.2). */
+  readonly spendMicros: number | null;
+  /** Last reported context-window fill, 0..1 — the session's own, never aggregated. */
+  readonly contextPct: number | null;
+  /** The latest coalesced diff, in the receipt's own `SessionDiff` dialect. */
+  readonly diff?: SessionDiff;
+  /** ISO wall-clock of the last snapshot write. */
+  readonly updatedAt: string;
+  /**
+   * ISO wall-clock of the last HEARTBEAT specifically — the gate the server nacks
+   * a heartbeat <1s apart against (#152 cadence). Distinct from `updatedAt`, which
+   * also moves on a phase or a diff, so a diff 100ms before a heartbeat does not
+   * spuriously block it.
+   */
+  readonly heartbeatAt?: string;
+}
+
 export const sessions = pgTable(
   'sessions',
   {
@@ -1672,6 +1728,16 @@ export const sessions = pgTable(
      * process receipt, never an `accepted_objects` `~`→`✓`.
      */
     artifact: jsonb('artifact').$type<SessionArtifact>(),
+    /**
+     * THE LIVE PROGRESS SNAPSHOT (#159, decided in #152). A `~` preview of a
+     * running session's work — phase, spend/context heartbeat, coalesced diff —
+     * written by the `report_session_progress` command's projection and CLEARED
+     * (set null) by the settle projection, where the durable receipt replaces the
+     * stream wholesale. Non-epistemic and covenant-safe: no `certified`/`verified`
+     * field exists here, and this column is `sessions`-local, so a progress write
+     * can never reach an `accepted_objects` `✓` (pinned by `progress-writeset.test.ts`).
+     */
+    progress: jsonb('progress').$type<SessionProgress>(),
     /**
      * WHO LANDED THIS SESSION — the human who certified it, and only ever a
      * human. NULL until a person formally certifies (#121's hold-to-arm land),
@@ -1844,6 +1910,16 @@ export const sessions = pgTable(
       columns: [t.roomId, t.causeMessageId],
       foreignColumns: [messages.roomId, messages.id],
     }),
+    /**
+     * TERMINAL-NULL PROGRESS IS A TABLE FACT (#159, decided in #152). The settle
+     * projection clears `progress` to NULL in the same UPDATE as the exit receipt —
+     * the durable receipt replaces the live stream wholesale — and this CHECK makes
+     * that a construction-time invariant rather than one writer's discipline: a
+     * settled/failed session may not carry a live `~` preview. Enforced here (schema
+     * + drizzle/0049) and, for a LATER mutation of an already-terminal row, by the
+     * `sessions_terminal_immutable` trigger's `progress` clause (0049).
+     */
+    check('sessions_progress_open_or_null', sql`${t.status} = 'open' OR ${t.progress} IS NULL`),
   ],
 );
 

@@ -299,6 +299,11 @@ describe('the durable ledger (issue #22)', () => {
       // move it out of this list, and this pins that it did not.
       'session_signaled',
       'session_subscribed',
+      // The live progress channel's durable phase event (#159): the low-cardinality
+      // phase timeline of a running session's work. Ledger-only for the same reason
+      // — a phase is not the room's understanding, the covenant reducer folds it not,
+      // and adding it to `coreEventTypeSet` would move it out of this list.
+      'session_phase_changed',
     ]);
   });
 

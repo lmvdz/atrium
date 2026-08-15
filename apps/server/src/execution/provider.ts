@@ -1,4 +1,4 @@
-import type { SessionDiff, SessionTestResults } from '@atrium/db';
+import type { SessionDiff, SessionPhase, SessionTestResults } from '@atrium/db';
 
 /**
  * The ExecutionProvider seam (#120, from its binding Resolution).
@@ -48,7 +48,47 @@ export interface SessionContext {
   readonly harness: string;
   /** The model it runs — a label; NO model abstraction lives inside Atrium. */
   readonly model: string;
+  /**
+   * THE LIVE-PROGRESS SEAM (#159, decided in #152). Present when the coordinator
+   * wired it — the provider calls it during `run` to stream a running session's
+   * phases, spend/context heartbeat and diff deltas. It funnels into the ONE
+   * authority-guarded `report_session_progress` command (the coordinator holds the
+   * session's token from `claim`), so the provider reports `~` progress and can
+   * never certify. Best-effort and LOSSY by design: a rejected report (a <1s
+   * heartbeat, a transient fault) never fails the run. Absent under a provider that
+   * predates the seam or a caller that does not wire it.
+   */
+  readonly onProgress?: ProgressReporter;
 }
+
+/** One file's change in a live diff delta (#159) — `SessionDiffFile` fields, one hunk. */
+export interface ProgressDiffFile {
+  readonly path: string;
+  readonly status: 'added' | 'modified' | 'deleted' | 'renamed';
+  readonly additions: number;
+  readonly deletions: number;
+  /** A single hunk (the delta stays ≤4KB); the snapshot carries the full coalesced diff. */
+  readonly hunk?: { readonly header: string; readonly lines: readonly string[] };
+}
+
+/**
+ * One live progress report (#159). Exactly one of the three is set per call — a
+ * PHASE is durable (`session_phase_changed`), a HEARTBEAT / DIFF is ephemeral — the
+ * same shape `report_session_progress` carries. The reporter (the coordinator's
+ * wiring) enforces the single-door authorization; the provider only describes what
+ * its run is doing.
+ */
+export interface ProgressReport {
+  readonly phase?: SessionPhase;
+  readonly heartbeat?: { readonly spendMicros: number | null; readonly contextPct: number | null };
+  readonly diffDelta?: {
+    readonly truncated?: boolean;
+    readonly files: readonly ProgressDiffFile[];
+  };
+}
+
+/** The seam the coordinator wires and the provider calls to stream progress (#159). */
+export type ProgressReporter = (report: ProgressReport) => Promise<void>;
 
 /**
  * The verified artifact a run produces: a branch and the commit it points at, in

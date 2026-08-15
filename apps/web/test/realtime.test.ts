@@ -1,4 +1,12 @@
 import { beforeEach, describe, expect, it } from 'vitest';
+import type { z } from 'zod';
+/**
+ * `ServerFrame` is used as a VALUE below (`typeof ServerFrame`, to derive
+ * `WireFrame`'s pre-default input type) — the `useImportType` rule can't see
+ * through `typeof` in a type position and would offer a fix that breaks that
+ * derivation under isolatedModules.
+ */
+// biome-ignore lint/style/useImportType: typeof ServerFrame needs the value import
 import {
   createRealtimeClient,
   localStorageJournal,
@@ -7,9 +15,20 @@ import {
   type RealtimeClientOptions,
   type RoomEventEnvelope,
   type RoomJournal,
-  type ServerFrame,
+  ServerFrame,
   type SocketLike,
 } from '../src/lib/realtime.js';
+
+/**
+ * The pre-parse (wire) shape, not the post-default one (#159 round-4, finding
+ * 3). `subscribed.progress` gained a `.default([])`, which makes it required on
+ * `z.infer` (what every fixture used to be typed against) but optional on
+ * `z.input` — exactly like a real server frame arrives over the wire before
+ * this client's own `.parse` fills it in. Typing `deliver` against the input
+ * shape keeps every existing two-hundred-fixture call site honest without
+ * hand-editing each one to carry a field the schema already defaults.
+ */
+type WireFrame = z.input<typeof ServerFrame>;
 
 /**
  * The client's three rules, exercised against a fake socket: `room_seq` is the
@@ -44,7 +63,7 @@ class FakeSocket implements SocketLike {
   }
 
   /** Server → client. */
-  deliver(frame: ServerFrame): void {
+  deliver(frame: WireFrame): void {
     this.onmessage?.({ data: JSON.stringify(frame) });
   }
 
@@ -2076,5 +2095,246 @@ describe('ephemeral channels', () => {
     latest().deliver({ type: 'event', entry: messageEvent(2, 'b') });
     client.advanceSeen(ROOM);
     expect(latest().commands().at(-1)).toMatchObject({ name: 'advance_seen', roomSeq: 2 });
+  });
+});
+
+describe('live progress converges to the settle receipt (#159 finding 4)', () => {
+  const SESSION = 'sess-live';
+
+  /** A durable session exit, as the wire carries it — actor beside the event. */
+  function exitEvent(
+    roomSeq: number,
+    sessionId: string,
+    type: 'session_settled' | 'session_failed' = 'session_settled',
+    issues: string[] = [],
+  ): RoomEventEnvelope {
+    return {
+      roomId: ROOM,
+      roomSeq,
+      seq: roomSeq,
+      issues,
+      actor: { kind: 'agent', userId: 'agent-1' },
+      event: {
+        id: `e${roomSeq}`,
+        at: `2026-07-31T00:00:${String(roomSeq).padStart(2, '0')}.000Z`,
+        type,
+        roomId: ROOM,
+        sessionId,
+      },
+    };
+  }
+
+  function heartbeat(sessionId: string, progressSeq: number): WireFrame {
+    return {
+      type: 'session_heartbeat',
+      roomId: ROOM,
+      sessionId,
+      progressSeq,
+      spendMicros: 10,
+      contextPct: 0.5,
+      at: '2026-07-31T00:00:00.000Z',
+    };
+  }
+
+  it('clears a session preview when its settle event lands, not only on socket close', async () => {
+    const c = await clientWith({});
+    c.join(ROOM);
+    latest().deliver({ type: 'subscribed', roomId: ROOM, head: 0, seenSeq: 0 });
+
+    // A live heartbeat sets the `~` preview.
+    latest().deliver(heartbeat(SESSION, 0));
+    expect(c.room(ROOM).progress?.[SESSION]).toBeDefined();
+
+    // The durable receipt REPLACES the stream (#152 convergence): the preview is
+    // dropped on the settle event itself. Mutation this catches: remove the
+    // settle-clear from `applyEntry` and the stale preview outlives the receipt
+    // until the socket closes.
+    latest().deliver({ type: 'event', entry: exitEvent(1, SESSION) });
+    expect(c.room(ROOM).progress?.[SESSION]).toBeUndefined();
+  });
+
+  it('a failed exit converges too, and leaves other sessions previewing', async () => {
+    const c = await clientWith({});
+    c.join(ROOM);
+    latest().deliver({ type: 'subscribed', roomId: ROOM, head: 0, seenSeq: 0 });
+    latest().deliver(heartbeat('sess-a', 0));
+    latest().deliver(heartbeat('sess-b', 0));
+    expect(c.room(ROOM).progress?.['sess-a']).toBeDefined();
+    expect(c.room(ROOM).progress?.['sess-b']).toBeDefined();
+
+    // A session_failed converges the same way, and only for the session it names.
+    latest().deliver({ type: 'event', entry: exitEvent(1, 'sess-a', 'session_failed') });
+    expect(c.room(ROOM).progress?.['sess-a']).toBeUndefined();
+    expect(c.room(ROOM).progress?.['sess-b']).toBeDefined();
+  });
+
+  it('a REFUSED exit row is not a settle and does not clear the preview', async () => {
+    const c = await clientWith({});
+    c.join(ROOM);
+    latest().deliver({ type: 'subscribed', roomId: ROOM, head: 0, seenSeq: 0 });
+    latest().deliver(heartbeat(SESSION, 0));
+
+    // A row the server refused (`issues` non-empty) took a log position but changed
+    // nothing — it is not this session's exit, so the preview stands.
+    latest().deliver({
+      type: 'event',
+      entry: exitEvent(1, SESSION, 'session_settled', ['refused for some reason']),
+    });
+    expect(c.room(ROOM).progress?.[SESSION]).toBeDefined();
+  });
+
+  // ── Round-3 regressions: a preview MUST NOT be resurrected after the receipt ──
+  //
+  // Round-2's gauntlet confirmed (both lineages) that the settle-clear only ran once
+  // and the live-apply gate accepted any later frame with `progressSeq > prior` — and
+  // clearing dropped `prior`, so a delayed/reordered/FORGED frame (a `progressSeq:0`
+  // included) resurrected the stale `~` under the durable receipt. Each of these fails
+  // on the round-2 code and passes on the terminal-wall + surviving-floor fix.
+
+  it('REFUSES a reordered progress frame that arrives AFTER the settle (finding 4)', async () => {
+    const c = await clientWith({});
+    c.join(ROOM);
+    latest().deliver({ type: 'subscribed', roomId: ROOM, head: 0, seenSeq: 0 });
+    latest().deliver(heartbeat(SESSION, 5));
+    expect(c.room(ROOM).progress?.[SESSION]).toBeDefined();
+
+    latest().deliver({ type: 'event', entry: exitEvent(1, SESSION) });
+    expect(c.room(ROOM).progress?.[SESSION]).toBeUndefined();
+
+    // A later, HIGHER-seq frame — delayed past the receipt on the lossy bus. On the
+    // round-2 code `6 > (cleared prior)` re-added the preview under the receipt; the
+    // terminal wall refuses it regardless of seq.
+    latest().deliver(heartbeat(SESSION, 6));
+    expect(c.room(ROOM).progress?.[SESSION]).toBeUndefined();
+  });
+
+  it('REFUSES a progressSeq:0 frame forged after the settle (finding 4)', async () => {
+    const c = await clientWith({});
+    c.join(ROOM);
+    latest().deliver({ type: 'subscribed', roomId: ROOM, head: 0, seenSeq: 0 });
+    latest().deliver(heartbeat(SESSION, 3));
+    latest().deliver({ type: 'event', entry: exitEvent(1, SESSION) });
+    expect(c.room(ROOM).progress?.[SESSION]).toBeUndefined();
+
+    // The exact forge round-2 named: clearing the preview dropped `prior`, so `!prior`
+    // read as "first frame ever" and a zero-seq frame re-previewed. Refused by the
+    // terminal wall (and, were the session still open, floored below the last seq).
+    latest().deliver(heartbeat(SESSION, 0));
+    expect(c.room(ROOM).progress?.[SESSION]).toBeUndefined();
+  });
+
+  it('REFUSES a forged frame for a session that settled before this client ever previewed it (finding 4)', async () => {
+    const c = await clientWith({});
+    c.join(ROOM);
+    latest().deliver({ type: 'subscribed', roomId: ROOM, head: 0, seenSeq: 0 });
+
+    // No preview was ever shown — the settle lands first, so there is NO floor to lean
+    // on. This pins the `settledSessions` wall specifically: a well-formed progress
+    // notification off the unauthenticated ephemeral bus for a terminal session is
+    // refused on the strength of the durable terminal alone.
+    latest().deliver({ type: 'event', entry: exitEvent(1, SESSION) });
+    latest().deliver(heartbeat(SESSION, 9));
+    expect(c.room(ROOM).progress?.[SESSION]).toBeUndefined();
+  });
+
+  it('the seq floor SURVIVES the settle-clear even for the session-still-open reorder case (finding 4)', async () => {
+    const c = await clientWith({});
+    c.join(ROOM);
+    latest().deliver({ type: 'subscribed', roomId: ROOM, head: 0, seenSeq: 0 });
+    latest().deliver(heartbeat(SESSION, 4));
+    expect(c.room(ROOM).progress?.[SESSION]?.progressSeq).toBe(4);
+
+    // A duplicate/reorder at or below the last-applied seq is dropped — the ordinary
+    // monotonic rule, but now anchored on a floor that outlives a clear rather than on
+    // the (clearable) preview itself.
+    latest().deliver(heartbeat(SESSION, 4));
+    latest().deliver(heartbeat(SESSION, 2));
+    expect(c.room(ROOM).progress?.[SESSION]?.progressSeq).toBe(4);
+    // Forward still advances.
+    latest().deliver(heartbeat(SESSION, 5));
+    expect(c.room(ROOM).progress?.[SESSION]?.progressSeq).toBe(5);
+  });
+
+  it('seeds the terminal wall from the journal, so a forged frame after a RELOAD is refused (finding 4)', async () => {
+    const journal = memoryJournal();
+    // A prior page load saw the settle and persisted it. A fresh client resumes
+    // `room.events` straight from the journal WITHOUT replaying them through
+    // `applyEntry`, so the wall must be seeded from that resumed history.
+    journal.commit(ROOM, exitEvent(1, SESSION), 1);
+    const c = await clientWith({ journal });
+    c.join(ROOM);
+    latest().deliver({ type: 'subscribed', roomId: ROOM, head: 1, seenSeq: 0 });
+
+    latest().deliver(heartbeat(SESSION, 9));
+    expect(c.room(ROOM).progress?.[SESSION]).toBeUndefined();
+  });
+});
+
+describe('reconnect/late-join recovers the durable progress snapshot (#159 finding 3)', () => {
+  const SESSION = 'sess-recover';
+
+  function heartbeat(sessionId: string, progressSeq: number): WireFrame {
+    return {
+      type: 'session_heartbeat',
+      roomId: ROOM,
+      sessionId,
+      progressSeq,
+      spendMicros: 10,
+      contextPct: 0.5,
+      at: '2026-07-31T00:00:00.000Z',
+    };
+  }
+
+  it('a (re)subscribe triggers a projection refresh so the durable snapshot is re-read', async () => {
+    const c = await clientWith({});
+    const reasons: string[] = [];
+    c.onChange((rid, _room, reason) => {
+      if (rid === ROOM) reasons.push(reason);
+    });
+    c.join(ROOM);
+
+    // The ephemeral progress frames a client missed while disconnected are gone — the
+    // bus does not replay them. `subscribed` (which fires on every reconnect) must
+    // prompt a projection re-read of the durable `sessions.progress` snapshot. Round-2
+    // emitted only a `'state'` change here, so no projection reread fired on reconnect.
+    latest().deliver({ type: 'subscribed', roomId: ROOM, head: 0, seenSeq: 0 });
+    expect(reasons).toContain('projection');
+  });
+
+  it('recoverProgress floors the live channel so a frame older than the snapshot is dropped', async () => {
+    const c = await clientWith({});
+    c.join(ROOM);
+    latest().deliver({ type: 'subscribed', roomId: ROOM, head: 0, seenSeq: 0 });
+
+    // The authenticated route recovered a snapshot at seq 7 — a late joiner never saw
+    // frames 1..7. `room.progress` starting empty would otherwise let a stale frame in.
+    c.recoverProgress(ROOM, [{ sessionId: SESSION, progressSeq: 7 }]);
+
+    // A frame OLDER than the snapshot is dropped, not shown as if it were fresh.
+    latest().deliver(heartbeat(SESSION, 5));
+    expect(c.room(ROOM).progress?.[SESSION]).toBeUndefined();
+
+    // A frame past the snapshot is applied.
+    latest().deliver(heartbeat(SESSION, 8));
+    expect(c.room(ROOM).progress?.[SESSION]?.progressSeq).toBe(8);
+  });
+
+  it('recoverProgress supersedes a held preview the snapshot moved past, and only ever raises the floor', async () => {
+    const c = await clientWith({});
+    c.join(ROOM);
+    latest().deliver({ type: 'subscribed', roomId: ROOM, head: 0, seenSeq: 0 });
+    latest().deliver(heartbeat(SESSION, 4));
+    expect(c.room(ROOM).progress?.[SESSION]?.progressSeq).toBe(4);
+
+    // A durable snapshot AHEAD of the held preview supersedes it — drop the stale frame
+    // so the recovered snapshot (read by the consumer) is authoritative.
+    c.recoverProgress(ROOM, [{ sessionId: SESSION, progressSeq: 6 }]);
+    expect(c.room(ROOM).progress?.[SESSION]).toBeUndefined();
+
+    // A stale snapshot re-read cannot LOWER the floor back below what we already moved
+    // past: a seq-5 frame is still dropped after a bogus seq-2 recovery.
+    c.recoverProgress(ROOM, [{ sessionId: SESSION, progressSeq: 2 }]);
+    latest().deliver(heartbeat(SESSION, 5));
+    expect(c.room(ROOM).progress?.[SESSION]).toBeUndefined();
   });
 });

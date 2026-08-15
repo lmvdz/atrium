@@ -55,6 +55,7 @@ function stubCommands(members: Set<string>): CommandService {
             .filter((key) => members.has(key)),
         ),
       ),
+    progressSnapshot: () => Promise.resolve([]),
   };
 }
 

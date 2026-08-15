@@ -505,6 +505,62 @@ describe('terminal plan/session states are frozen at the table (F-B)', () => {
     expect(row?.status).toBe('settled');
     expect(row?.exit_summary).toBe('done');
   });
+
+  // ── TERMINAL-NULL PROGRESS IS A TABLE FACT (#159 fix, finding 5) ──────────────
+  //
+  // The settle projection clears `sessions.progress` to NULL in the same UPDATE as
+  // the exit receipt — the durable receipt replaces the live stream wholesale — and
+  // a CHECK + the terminal trigger's progress clause make that the TABLE's fact, not
+  // one writer's discipline. A `~` preview may never outlive the receipt.
+  const sampleProgress = sql`'{"progressSeq":0,"phase":"writing","spendMicros":null,"contextPct":null,"updatedAt":"2026-08-15T00:00:00.000Z"}'::jsonb`;
+
+  it('REFUSES constructing a terminal session that carries a live preview (the CHECK)', async () => {
+    // A settled row with non-null progress is refused at INSERT — no trigger involved
+    // (the terminal-immutability trigger is BEFORE UPDATE only), so the CHECK itself
+    // is what binds. Revert the `status = 'open' OR progress IS NULL` CHECK and this
+    // row lands.
+    const ch = await seedAgentChannel('fleet');
+    const planId = await insertPlan(ch.roomId, ch.agentId);
+    await violatesConstraint('sessions_progress_open_or_null', () =>
+      handle.db.execute(sql`
+        INSERT INTO sessions (id, room_id, plan_id, harness, model, status, exit_summary, progress)
+        VALUES (${randomUUID()}, ${ch.roomId}, ${planId}, 'claude', 'opus', 'settled', 'done', ${sampleProgress})
+      `),
+    );
+  });
+
+  it('ALLOWS a live preview on an OPEN session — the CHECK binds only the terminal state', async () => {
+    // The control that keeps the CHECK honest: a running session streams its `~`
+    // preview freely; it is only refused once the session is terminal.
+    const ch = await seedAgentChannel('fleet');
+    const planId = await insertPlan(ch.roomId, ch.agentId);
+    const sessionId = randomUUID();
+    await handle.db.execute(sql`
+      INSERT INTO sessions (id, room_id, plan_id, harness, model, progress)
+      VALUES (${sessionId}, ${ch.roomId}, ${planId}, 'claude', 'opus', ${sampleProgress})
+    `);
+    const [row] = await handle.db.execute<{ status: string }>(
+      sql`SELECT status FROM sessions WHERE id = ${sessionId}`,
+    );
+    expect(row?.status).toBe('open');
+  });
+
+  it('REFUSES resurrecting a live preview onto an already-terminal session (the trigger)', async () => {
+    // A terminal session's progress was cleared to NULL at exit. Writing a new preview
+    // onto it — the "stale preview outlives the receipt" hazard — is refused by the
+    // terminal-immutability trigger's progress clause (which fires BEFORE the CHECK).
+    // Revert the trigger's progress clause AND the CHECK and this UPDATE lands.
+    const { sessionId } = await exitedSession('settled');
+    await violatesConstraint('sessions_terminal_immutable', () =>
+      handle.db.execute(
+        sql`UPDATE sessions SET progress = ${sampleProgress} WHERE id = ${sessionId}`,
+      ),
+    );
+    const [row] = await handle.db.execute<{ progress: unknown }>(
+      sql`SELECT progress FROM sessions WHERE id = ${sessionId}`,
+    );
+    expect(row?.progress ?? null).toBeNull();
+  });
 });
 
 /**

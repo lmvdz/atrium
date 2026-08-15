@@ -1,6 +1,6 @@
 import { writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
-import type { SessionTestResults } from '@atrium/db';
+import type { SessionDiff, SessionTestResults } from '@atrium/db';
 import {
   type ArtifactRepo,
   addWorktree,
@@ -20,6 +20,7 @@ import {
   type ExecutionReport,
   MAX_QUEUED_STEERS,
   newDeliveryQueue,
+  type ProgressReport,
   rememberAppliedSignal,
   type SessionContext,
   type SignalDelivery,
@@ -342,6 +343,18 @@ export function createDeterministicShimProvider(
       // Consume the queued steers into this turn — they become part of the artifact.
       const steers = mailbox.steers.splice(0, mailbox.steers.length);
 
+      // THE LIVE PROGRESS SEQUENCE (#159, decided in #152). A scripted, session-
+      // derived stream so the whole producer→command→snapshot→frame path is
+      // flip-the-input testable. The phases march planning → writing → testing, a
+      // single heartbeat carries the reported `~` spend/context, and the diff delta
+      // below is derived from the REAL git diff — so a different session (a different
+      // artifact) moves the streamed diff, exactly as a stubbed constant would not.
+      // All best-effort: `onProgress` is the coordinator's swallow-on-nack wiring, so
+      // a report that is coalesced or refused never fails this run.
+      await ctx.onProgress?.({ phase: 'planning' });
+      await ctx.onProgress?.({ heartbeat: { spendMicros: 0, contextPct: null } });
+      await ctx.onProgress?.({ phase: 'writing' });
+
       // The clean harness: write the deterministic artifact, commit it onto the
       // session branch. The content is a pure function of the context (plus any
       // delivered steers), so the commit is reproducible and flip-the-input — a
@@ -377,6 +390,13 @@ export function createDeterministicShimProvider(
       // fails the shim's flip-the-input test. The test results are the harness's own
       // report, deterministic here.
       const diff = await diffWorktree(checkout);
+
+      // Stream the real diff as a live delta, then the testing phase (#159). The
+      // delta is derived from `diff`, so flipping the input moves it — the producer
+      // is reading its work, not emitting a constant.
+      await ctx.onProgress?.({ diffDelta: diffToDelta(diff) });
+      await ctx.onProgress?.({ phase: 'testing' });
+
       const tests = deterministicTestResults(ctx);
 
       // Push the branch to the DURABLE artifact repo so the receipt resolves
@@ -453,4 +473,28 @@ export function deterministicArtifact(ctx: SessionContext, steers: readonly stri
   };
   const payload = steers.length > 0 ? { ...base, steers: [...steers] } : base;
   return JSON.stringify(payload, null, 2);
+}
+
+/**
+ * Derive a live diff delta (#159) from the run's REAL `SessionDiff`. Each file
+ * carries its FIRST hunk only — a delta is a coalesced preview bounded to ≤4KB
+ * (the snapshot carries the full diff and the receipt replaces it at terminal), so
+ * a file with more than one hunk is marked `truncated`. The values are a pure
+ * function of the diff, so a different session's different artifact yields a
+ * different delta — the flip-the-input witness on the streamed diff.
+ */
+export function diffToDelta(diff: SessionDiff): ProgressReport['diffDelta'] {
+  let truncated = diff.truncated;
+  const files = diff.files.map((file) => {
+    const first = file.hunks[0];
+    if (file.hunks.length > 1) truncated = true;
+    return {
+      path: file.path,
+      status: file.status,
+      additions: file.additions,
+      deletions: file.deletions,
+      ...(first ? { hunk: { header: first.header, lines: [...first.lines] } } : {}),
+    };
+  });
+  return { truncated, files };
 }

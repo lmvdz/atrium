@@ -22,7 +22,7 @@ import {
   type Relation,
   Timestamp,
 } from '@atrium/core';
-import type { Database } from '@atrium/db';
+import type { Database, SessionDiff, SessionProgress } from '@atrium/db';
 import {
   acceptedObjects,
   agents,
@@ -38,15 +38,27 @@ import {
   sessions,
   users,
 } from '@atrium/db/schema';
-import { and, eq, inArray } from 'drizzle-orm';
+import { and, eq, inArray, isNotNull } from 'drizzle-orm';
 import { z } from 'zod';
+import {
+  MAX_DIFF_DELTA_BYTES,
+  MAX_DIFF_FILES,
+  MAX_DIFF_HEADER_LEN,
+  MAX_DIFF_LINE_LEN,
+  MAX_DIFF_LINES,
+  MAX_DIFF_PATH_LEN,
+} from './execution/git.js';
 import { CommandError, type Ledger, type Tx } from './ledger.js';
 import { type ProjectionHooks, projectRoomEvent } from './projections.js';
+import type { EphemeralFrame } from './protocol.js';
 import {
   ExecutionArtifact,
   MessageAttachment,
   MessageReference,
   type RoomEvent,
+  SessionDiffPayload,
+  SessionPhase,
+  SessionPhaseChanged,
 } from './room-events.js';
 import type { Authorizer, MembershipPair, Session } from './session.js';
 
@@ -518,6 +530,58 @@ export const Command = z.discriminatedUnion('name', [
      */
     expiresAt: Timestamp,
   }),
+
+  // ── the live progress channel (#159, from #152's resolution) ───────────────
+  //
+  // THE SINGLE DOOR all progress enters. `open`-class in `certificationClassOf`
+  // (non-epistemic, can never flip `~`→`✓`), and guarded by the session's
+  // `execution_authority` token EXACTLY as `settle_session` is — the producer is
+  // the ExecutionProvider the coordinator wires in-process, holding the token from
+  // `claim`; a room member holds no token and cannot forge progress. The server
+  // assigns `progressSeq` (a per-session counter), nacks a heartbeat <1s apart and
+  // any progress against a non-`running` (status != open) session, and bounds every
+  // field. Exactly one of `phase` / `heartbeat` / `diffDelta` is carried per call
+  // (enforced in the handler — a `discriminatedUnion` member cannot superRefine):
+  // a phase is DURABLE (it appends `session_phase_changed`), a heartbeat/diff is
+  // EPHEMERAL (a server-minted frame + a snapshot refresh, no ledger row).
+  z.object({
+    name: z.literal('report_session_progress'),
+    roomId: Id,
+    sessionId: Id,
+    /** The session's `execution_authority` capability, exactly as `settle_session`. */
+    authority: z.string().min(1).max(200),
+    /** A durable phase transition, or absent. */
+    phase: SessionPhase.optional(),
+    /** An ephemeral spend/context heartbeat, or absent. */
+    heartbeat: z
+      .object({
+        spendMicros: z.number().int().nonnegative().nullable(),
+        contextPct: z.number().min(0).max(1).nullable(),
+      })
+      .optional(),
+    /** An ephemeral coalesced diff delta, or absent. Field names = SessionDiffFilePayload. */
+    diffDelta: z
+      .object({
+        truncated: z.boolean().default(false),
+        files: z
+          .array(
+            z.object({
+              path: z.string().min(1).max(MAX_DIFF_PATH_LEN),
+              status: z.enum(['added', 'modified', 'deleted', 'renamed']),
+              additions: z.number().int().nonnegative(),
+              deletions: z.number().int().nonnegative(),
+              hunk: z
+                .object({
+                  header: z.string().max(MAX_DIFF_HEADER_LEN + 1),
+                  lines: z.array(z.string().max(MAX_DIFF_LINE_LEN + 1)).max(MAX_DIFF_LINES),
+                })
+                .optional(),
+            }),
+          )
+          .max(MAX_DIFF_FILES),
+      })
+      .optional(),
+  }),
 ]);
 export type Command = z.infer<typeof Command>;
 
@@ -668,6 +732,12 @@ export function certificationClassOf(name: CommandName): CertificationClass {
     case 'signal_session':
     case 'resume_session':
     case 'subscribe_session':
+    // The live progress channel (#159). `open`, for the same reason the lifecycle
+    // and signal verbs are: it mints or moves no `✓`, its projection reaches only
+    // the `sessions.progress` snapshot column, and the running process performs it
+    // as itself. This classification is covenant boundary point 1 — a machine may
+    // report its progress (`~`) and can never certify (`✓`) through this door.
+    case 'report_session_progress':
       return 'open';
     // The spend-authorization (#118). NOT `open`: setting or raising a plan's
     // rlimit slice is `human = init`'s act, refused to a machine before the
@@ -843,6 +913,39 @@ export function subscriptionHorizonRefusal(expiresAt: string, now: string): stri
   return `expiresAt "${expiresAt}" is not in the future (it is now ${now}) — a subscription's expiry is mandatory because an unmatched wait must become owed ATTENTION rather than a forever-open session silently blocking its plan's settle, and a wait born past its horizon owes it immediately. Nothing was appended`;
 }
 
+/* ── the live progress refusals (#159) ───────────────────────────────────────
+ *
+ * One message per CLAUSE, the same discipline the signal refusals keep (#122):
+ * a shared string makes every red-on-revert test assert the disjunction, and a
+ * guard can then be deleted while its own test stays green because a neighbour
+ * catches the same input. Each names exactly one rule.
+ * ─────────────────────────────────────────────────────────────────────────── */
+
+/** Progress carrying none, or more than one, of phase/heartbeat/diffDelta. */
+export function progressShapeRefusal(): string {
+  return 'report_session_progress carries exactly one of phase, heartbeat, or diffDelta — a phase is durable and a heartbeat/diff is ephemeral, so they travel by different paths and are reported one per call. Nothing was appended or broadcast';
+}
+
+/** Progress against a session whose provider token was not presented (#159; #120 r6). */
+export function progressAuthorityRefusal(sessionId: string): string {
+  return `report_session_progress of session "${sessionId}" is authorized by the session's execution-authority capability, minted row-only at grant and held by the running provider — a room member holds no token and cannot report a process it is not running. Nothing was appended or broadcast`;
+}
+
+/** Progress against a session that is not RUNNING (#159): the stream is for live work. */
+export function progressTargetRefusal(sessionId: string, status: string): string {
+  return `report_session_progress targets session "${sessionId}", which is ${status}, not open — progress is the live preview of a RUNNING process, and a session that has published its exit receipt is not running; the durable receipt has replaced the stream. Nothing was appended or broadcast`;
+}
+
+/** A heartbeat less than a second after the last one (#159 cadence). */
+export function progressHeartbeatCadenceRefusal(sessionId: string): string {
+  return `report_session_progress heartbeat for session "${sessionId}" arrived less than 1s after the last — a heartbeat is presence-shaped and LWW-coalesced at ≤1/2s, so a faster one is refused rather than relayed. Nothing was broadcast; the last heartbeat still stands`;
+}
+
+/** A diff delta over the 4KB ephemeral ceiling (#159). */
+export function progressDiffOversizeRefusal(sessionId: string, bytes: number): string {
+  return `report_session_progress diff delta for session "${sessionId}" serializes to ${bytes} bytes, over the 4KB ephemeral ceiling (the 8000-byte NOTIFY limit) — coalesce harder and set truncated:true; the snapshot heals the dropped lines. Nothing was broadcast`;
+}
+
 /**
  * #102 finding 1 — the refusal a self-verifying source author gets.
  *
@@ -1006,7 +1109,15 @@ export type CommandResult =
     }
   | { kind: 'presence'; roomId: string; userId: string; state: PresenceState; at: string }
   | { kind: 'typing'; roomId: string; userId: string; typing: boolean; at: string }
-  | { kind: 'seen'; roomId: string; userId: string; seenSeq: number };
+  | { kind: 'seen'; roomId: string; userId: string; seenSeq: number }
+  /**
+   * The EPHEMERAL half of `report_session_progress` (#159) — a heartbeat or a diff
+   * delta. No ledger row was appended (the snapshot was refreshed in its own
+   * transaction); `frames` are the server-minted ephemeral frames the socket layer
+   * broadcasts and relays over the bus, then rings the projection doorbell and acks
+   * ephemerally. A DURABLE phase report takes the ordinary `appended` path instead.
+   */
+  | { kind: 'progress'; roomId: string; frames: readonly import('./protocol.js').EphemeralFrame[] };
 
 export interface CommandServiceOptions {
   db: Database;
@@ -1072,6 +1183,22 @@ export interface CommandService {
    * appended, nothing is authorized *for*, and the caller is a timer.
    */
   stillMembers: (pairs: readonly MembershipPair[]) => Promise<Set<string>>;
+  /**
+   * The room's durable `sessions.progress` snapshot, one `{sessionId,
+   * progressSeq}` pair per RUNNING session that has ever reported (#159 round-4,
+   * finding 3). This is the floor a (re)subscribe hands the client so a
+   * reconnect/late-join can raise `progressFloor` to the snapshot before any live
+   * frame is judged against it — see `recoverProgress` in
+   * `apps/web/src/lib/realtime.ts`. `progress` is NULL for every session that has
+   * no live stream yet AND for every TERMINAL session (the settle projection
+   * clears it — `sessions_progress_open_or_null`, migration 0049), so filtering
+   * non-null here naturally excludes a settled session from the floor: its
+   * `~` preview is gone, replaced by the durable receipt, and the client's own
+   * terminal wall (`settledSessions`) is the authority on that, not a stale seq.
+   */
+  progressSnapshot: (
+    roomId: string,
+  ) => Promise<ReadonlyArray<{ sessionId: string; progressSeq: number }>>;
 }
 
 const REFERENCE_UNAVAILABLE = 'reference is unavailable';
@@ -1158,6 +1285,113 @@ async function validateMessageReferences(input: {
   ) {
     throw new CommandError('invalid', REFERENCE_UNAVAILABLE);
   }
+}
+
+/* ── the live progress channel's shared machinery (#159) ─────────────────────── */
+
+/** The session facts `report_session_progress` authorizes and orders against. */
+interface ProgressGate {
+  readonly status: string;
+  readonly executionMode: string | null;
+  readonly executionAuthority: string | null;
+  readonly progress: SessionProgress | null;
+}
+
+/**
+ * Read the session's authority record, status and current snapshot — the whole
+ * of what `report_session_progress` needs to decide authorization and the next
+ * `progressSeq`. `lock` takes `for('update')` on the EPHEMERAL path (a plain
+ * transaction that read-modify-writes the snapshot); the DURABLE phase path reads
+ * under the append lock the ledger already holds, so it passes `lock=false`.
+ */
+async function readProgressGate(
+  tx: Tx,
+  roomId: string,
+  sessionId: string,
+  lock: boolean,
+): Promise<ProgressGate | null> {
+  const base = tx
+    .select({
+      status: sessions.status,
+      executionMode: sessions.executionMode,
+      executionAuthority: sessions.executionAuthority,
+      progress: sessions.progress,
+    })
+    .from(sessions)
+    .where(and(eq(sessions.id, sessionId), eq(sessions.roomId, roomId)));
+  const [row] = await (lock ? base.for('update') : base.for('share'));
+  return row ? { ...row, progress: row.progress ?? null } : null;
+}
+
+/**
+ * Authorize a progress report EXACTLY as a provider settle is (#120 r6, #159):
+ * the session must exist, present the row-only `execution_authority` token, and be
+ * RUNNING (status `open`). Order — existence, then token, then status — so a room
+ * member holding no token is refused for that (not told the session's status), and
+ * a token holder reporting against an exited session is told the stream has ended.
+ * Throws `CommandError`; returns the gate on success.
+ */
+function assertProgressAuthorized(
+  gate: ProgressGate | null,
+  authority: string,
+  sessionId: string,
+): asserts gate is ProgressGate {
+  if (!gate) {
+    throw new CommandError(
+      'invalid',
+      `no session "${sessionId}" to report progress for — it does not exist here`,
+    );
+  }
+  const tokenAuthorized =
+    gate.executionMode === 'provider' &&
+    gate.executionAuthority !== null &&
+    authority === gate.executionAuthority;
+  if (!tokenAuthorized) {
+    throw new CommandError('invalid', progressAuthorityRefusal(sessionId));
+  }
+  if (gate.status !== 'open') {
+    throw new CommandError('invalid', progressTargetRefusal(sessionId, gate.status));
+  }
+}
+
+/**
+ * Convert an incoming ephemeral diff delta into the snapshot's `SessionDiff`
+ * dialect — the receipt's OWN schema (#152: one diff dialect, not two). The delta
+ * carries a single optional `hunk` per file (to stay inside the 4KB frame); the
+ * snapshot carries the full coalesced diff, so a `hunk` becomes a one-element
+ * `hunks` array and the whole-diff totals are summed from the carried files.
+ */
+function buildSnapshotDiff(delta: {
+  truncated: boolean;
+  files: readonly {
+    path: string;
+    status: 'added' | 'modified' | 'deleted' | 'renamed';
+    additions: number;
+    deletions: number;
+    hunk?: { header: string; lines: readonly string[] };
+  }[];
+}): SessionDiff {
+  let additions = 0;
+  let deletions = 0;
+  const files = delta.files.map((file) => {
+    additions += file.additions;
+    deletions += file.deletions;
+    return {
+      path: file.path,
+      status: file.status,
+      additions: file.additions,
+      deletions: file.deletions,
+      binary: false,
+      hunks: file.hunk ? [{ header: file.hunk.header, lines: [...file.hunk.lines] }] : [],
+    };
+  });
+  return {
+    files,
+    fileCount: files.length,
+    additions,
+    deletions,
+    truncated: delta.truncated,
+  };
 }
 
 export function createCommandService({
@@ -1505,8 +1739,16 @@ export function createCommandService({
     // token-authorized settle before its own authorization could run. So settle
     // does all of its authorization (membership for a manual settle, the token for
     // a provider one) inside its `guard`, under the append lock, and skips this
-    // proxy. Every other command keeps the cheap early check.
-    if (command.name !== 'settle_session') {
+    // proxy.
+    //
+    // `report_session_progress` (#159) is the SECOND, for the same reason and
+    // "exactly as settle_session" (#152): it is authorized WHOLLY by the session's
+    // execution-authority token, checked in its handler under the append/transaction
+    // lock. The running provider reports as the opener, who may have lost membership
+    // mid-run; a membership refusal here would drop a legitimate progress report. A
+    // caller without the token is refused by `assertProgressAuthorized`, not by
+    // membership. Every other command keeps the cheap early check.
+    if (command.name !== 'settle_session' && command.name !== 'report_session_progress') {
       await requireMembership(session, command.roomId);
     }
 
@@ -2748,6 +2990,169 @@ export function createCommandService({
         );
       }
 
+      // ── the live progress channel (#159, from #152's resolution) ───────────
+      //
+      // The single door all progress enters. Authorized by the session's
+      // `execution_authority` token EXACTLY as `settle_session` (the provider holds
+      // it from `claim`; a room member holds none). Exactly one of phase / heartbeat
+      // / diffDelta per call: a PHASE is durable (it appends `session_phase_changed`,
+      // whose projection writes the snapshot) and takes the ordinary `appended` path;
+      // a HEARTBEAT / DIFF is ephemeral (a server-minted frame + a snapshot refresh in
+      // its own transaction, no ledger row). Both are covenant-safe — `open`-class,
+      // sessions-local projection, no epistemic field.
+      case 'report_session_progress': {
+        const roomId = command.roomId;
+        const sessionId = command.sessionId;
+        const present =
+          Number(command.phase !== undefined) +
+          Number(command.heartbeat !== undefined) +
+          Number(command.diffDelta !== undefined);
+        if (present !== 1) {
+          throw new CommandError('invalid', progressShapeRefusal());
+        }
+
+        // ── THE DURABLE PHASE PATH ─────────────────────────────────────────
+        // Appends `session_phase_changed` as SYSTEM (the provider's authority, not
+        // the opener as a participant), authorized by the token in the guard — the
+        // `settle_session` pattern. `seq` is computed in the guard and stamped on
+        // the event; `projectSessionPhaseChanged` writes the snapshot at that seq.
+        if (command.phase !== undefined) {
+          // RUNTIME-VALIDATE THE PHASE BEFORE IT BECOMES DURABLE (#159 fix, finding 1).
+          // `execute` trusts its typed `Command`; the wire earns that trust by parsing
+          // every inbound frame with `Command.parse`, but the in-process coordinator
+          // constructs this command directly, and `ledger.append` does NOT re-parse a
+          // ledger-only event (`isCoreEvent` is false for `session_phase_changed`, so
+          // no fold and no `RoomEvent.parse` on the way in). A TS-only out-of-enum
+          // phase would therefore append an invalid durable event and poison replay.
+          // `SessionPhase.parse` is the boundary guard; the `SessionPhaseChanged.parse`
+          // in `build` re-validates the whole assembled payload right before insertion,
+          // so no caller of `execute` — coordinator or a future one — can journal a
+          // schema-invalid phase.
+          const phase = SessionPhase.parse(command.phase);
+          let seq = 0;
+          return appendAndProject(
+            session,
+            roomId,
+            ({ id, at }): RoomEvent =>
+              SessionPhaseChanged.parse({
+                id,
+                at,
+                type: 'session_phase_changed',
+                roomId,
+                sessionId,
+                phase,
+                progressSeq: seq,
+              }),
+            async (tx) => {
+              const gate = await readProgressGate(tx, roomId, sessionId, false);
+              assertProgressAuthorized(gate, command.authority, sessionId);
+              seq = (gate.progress?.progressSeq ?? -1) + 1;
+            },
+            // Authorized by the token in the guard, not by membership — skip the
+            // built-in membership gate, exactly as a token-authorized settle does.
+            true,
+            // Append as SYSTEM: the report is the provider's authority (the token),
+            // covenant-safe (non-epistemic), and the DB actor trigger exempts system.
+            { kind: 'system' },
+          );
+        }
+
+        // ── THE EPHEMERAL HEARTBEAT / DIFF PATH ────────────────────────────
+        // No ledger row. Read-modify-write the snapshot under `for('update')`, then
+        // return the server-minted frame(s) for the socket layer to broadcast/relay.
+        const at = new Date().toISOString();
+        const frame: EphemeralFrame = await db.transaction(async (tx) => {
+          const gate = await readProgressGate(tx, roomId, sessionId, true);
+          assertProgressAuthorized(gate, command.authority, sessionId);
+          const seq = (gate.progress?.progressSeq ?? -1) + 1;
+          const prev = gate.progress;
+
+          if (command.heartbeat) {
+            // ≥1s cadence, measured against the last HEARTBEAT specifically (not
+            // `updatedAt`, which also moves on a phase/diff), so a diff just before
+            // a heartbeat does not spuriously block it.
+            if (prev?.heartbeatAt && Date.parse(at) - Date.parse(prev.heartbeatAt) < 1000) {
+              throw new CommandError('invalid', progressHeartbeatCadenceRefusal(sessionId));
+            }
+            const snapshot: SessionProgress = {
+              progressSeq: seq,
+              phase: prev?.phase ?? null,
+              spendMicros: command.heartbeat.spendMicros,
+              contextPct: command.heartbeat.contextPct,
+              ...(prev?.diff !== undefined ? { diff: prev.diff } : {}),
+              updatedAt: at,
+              heartbeatAt: at,
+            };
+            await tx
+              .update(sessions)
+              .set({ progress: snapshot, updatedAt: new Date(at) })
+              .where(and(eq(sessions.id, sessionId), eq(sessions.roomId, roomId)));
+            return {
+              type: 'session_heartbeat',
+              roomId,
+              sessionId,
+              progressSeq: seq,
+              spendMicros: command.heartbeat.spendMicros,
+              contextPct: command.heartbeat.contextPct,
+              at,
+            };
+          }
+
+          // diffDelta. The frame carries the raw delta; the snapshot carries the
+          // full coalesced diff in the receipt's own `SessionDiff` dialect, re-parsed
+          // through `SessionDiffPayload` so the durable coherence + ceiling refine
+          // (#145) vets a progress diff exactly as it vets a settle diff — one dialect.
+          const delta = command.diffDelta;
+          if (!delta) throw new CommandError('invalid', progressShapeRefusal());
+          const deltaFrame: EphemeralFrame = {
+            type: 'session_diff_delta',
+            roomId,
+            sessionId,
+            progressSeq: seq,
+            at,
+            truncated: delta.truncated,
+            files: delta.files.map((file) => ({
+              path: file.path,
+              status: file.status,
+              additions: file.additions,
+              deletions: file.deletions,
+              ...(file.hunk
+                ? { hunk: { header: file.hunk.header, lines: [...file.hunk.lines] } }
+                : {}),
+            })),
+          };
+          const bytes = Buffer.byteLength(JSON.stringify(deltaFrame), 'utf8');
+          if (bytes > MAX_DIFF_DELTA_BYTES) {
+            throw new CommandError('invalid', progressDiffOversizeRefusal(sessionId, bytes));
+          }
+          const snapshotDiff = buildSnapshotDiff(delta);
+          const parsed = SessionDiffPayload.safeParse(snapshotDiff);
+          if (!parsed.success) {
+            throw new CommandError(
+              'invalid',
+              `report_session_progress diff for session "${sessionId}" is incoherent: ${parsed.error.issues
+                .map((issue) => `${issue.path.join('.') || '(root)'}: ${issue.message}`)
+                .join('; ')}`,
+            );
+          }
+          const snapshot: SessionProgress = {
+            progressSeq: seq,
+            phase: prev?.phase ?? null,
+            spendMicros: prev?.spendMicros ?? null,
+            contextPct: prev?.contextPct ?? null,
+            diff: parsed.data,
+            updatedAt: at,
+            ...(prev?.heartbeatAt ? { heartbeatAt: prev.heartbeatAt } : {}),
+          };
+          await tx
+            .update(sessions)
+            .set({ progress: snapshot, updatedAt: new Date(at) })
+            .where(and(eq(sessions.id, sessionId), eq(sessions.roomId, roomId)));
+          return deltaFrame;
+        });
+        return { kind: 'progress', roomId, frames: [frame] };
+      }
+
       // ── ephemeral: broadcast, never appended (#14) ─────────────────────────
       case 'set_presence':
         return {
@@ -2830,10 +3235,26 @@ export function createCommandService({
     }
   }
 
+  async function progressSnapshot(
+    roomId: string,
+  ): Promise<ReadonlyArray<{ sessionId: string; progressSeq: number }>> {
+    const rows = await db
+      .select({ id: sessions.id, progress: sessions.progress })
+      .from(sessions)
+      .where(and(eq(sessions.roomId, roomId), isNotNull(sessions.progress)));
+    return rows
+      .map((row) => ({ sessionId: row.id, progressSeq: row.progress?.progressSeq }))
+      .filter(
+        (entry): entry is { sessionId: string; progressSeq: number } =>
+          typeof entry.progressSeq === 'number',
+      );
+  }
+
   return {
     execute,
     requireMembership,
     stillMembers: (pairs) => authorizer.present(pairs),
+    progressSnapshot,
   };
 }
 

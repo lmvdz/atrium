@@ -191,6 +191,48 @@ describe('the deterministic shim produces a real, verifiable artifact', () => {
     });
   });
 
+  it('streams a scripted, session-derived progress sequence, and flips the input (#159)', async () => {
+    const provider = createDeterministicShimProvider({ repo });
+    // Capture what the run reports through the live-progress seam.
+    const capture = () => {
+      const reports: import('../../src/execution/provider.js').ProgressReport[] = [];
+      const onProgress = async (
+        report: import('../../src/execution/provider.js').ProgressReport,
+      ) => {
+        reports.push(report);
+      };
+      return { reports, onProgress };
+    };
+
+    const a = capture();
+    const c1 = ctx({ onProgress: a.onProgress });
+    await provider.run(await provider.resolve(c1), c1);
+
+    // The scripted phase timeline marches through all three phases, a heartbeat is
+    // reported, and a diff delta is emitted — the whole producer vocabulary.
+    const phases = a.reports.flatMap((r) => (r.phase ? [r.phase] : []));
+    expect(phases).toEqual(['planning', 'writing', 'testing']);
+    expect(a.reports.some((r) => r.heartbeat !== undefined)).toBe(true);
+    const delta1 = a.reports.find((r) => r.diffDelta !== undefined)?.diffDelta;
+    expect(delta1?.files.length).toBeGreaterThan(0);
+    // The diff delta is DERIVED from the real diff — the session id is inside the
+    // artifact the run committed, so it shows up in the streamed hunk. A stubbed
+    // constant would not carry it. This is the flip-the-input witness on the stream.
+    const streamed1 = (delta1?.files ?? []).flatMap((f) => f.hunk?.lines ?? []).join('\n');
+    expect(streamed1).toContain(c1.sessionId);
+
+    // Flip the input: a DIFFERENT session streams a different diff — the streamed
+    // hunk carries the new session id, never the old one.
+    const b = capture();
+    const c2 = ctx({ onProgress: b.onProgress });
+    await provider.run(await provider.resolve(c2), c2);
+    const streamed2 = (b.reports.find((r) => r.diffDelta)?.diffDelta?.files ?? [])
+      .flatMap((f) => f.hunk?.lines ?? [])
+      .join('\n');
+    expect(streamed2).toContain(c2.sessionId);
+    expect(streamed2).not.toContain(c1.sessionId);
+  });
+
   it('flips the input on TESTS: the tests-fail directive settles clean but reports a failure', async () => {
     const provider = createDeterministicShimProvider({ repo });
     const pass = ctx();

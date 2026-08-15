@@ -6,6 +6,7 @@ import {
   type CoreState,
   type Relation,
 } from '@atrium/core';
+import type { SessionProgress } from '@atrium/db';
 import {
   acceptedObjects,
   agents,
@@ -118,6 +119,8 @@ export async function projectRoomEvent(
       return projectSessionSignaled(context, event);
     case 'session_subscribed':
       return projectSessionSubscribed(context, event);
+    case 'session_phase_changed':
+      return projectSessionPhaseChanged(context, event);
     default: {
       const exhaustive: never = event;
       throw new Error(`no projection for event ${JSON.stringify(exhaustive)}`);
@@ -940,6 +943,14 @@ async function projectSessionExit(
             ...(event.artifact.tests !== undefined ? { tests: event.artifact.tests } : {}),
           }
         : null,
+      // THE STREAM CONVERGES TO THE RECEIPT (#159, decided in #152). At terminal the
+      // durable receipt (`artifact` above) REPLACES the live stream wholesale, so the
+      // `~` progress snapshot is CLEARED in the SAME exit UPDATE — a stale preview must
+      // never outlive the real object a human reviews. Written beside the terminal
+      // status (not as a later mutation of a frozen row), so `sessions_terminal_immutable`
+      // (0025) does not refuse it. `settle-writeset`/`progress-writeset` keep pinning that
+      // this exit touches no `accepted_objects` column.
+      progress: null,
       settledByEventId: eventId,
       updatedAt: new Date(event.at),
     })
@@ -980,6 +991,60 @@ async function projectSessionExit(
         eq(sessionSubscriptions.status, 'waiting'),
       ),
     );
+}
+
+/**
+ * A durable phase transition refreshes the live progress snapshot (#159, decided
+ * in #152).
+ *
+ * PINNED WRITE-SET (covenant point 1). This writes the `sessions.progress` column
+ * and NOTHING else — no `accepted_objects` judgement, no `plans.rlimit_slice`, no
+ * `plans.authorized_draws`. A phase is non-epistemic; it has no route to a `✓`.
+ * `progress-writeset.test.ts` folds a phase change and pins the write-set to
+ * `sessions` alone.
+ *
+ * The snapshot MERGES: the phase and the event's `progressSeq` are written, and the
+ * spend/context/diff/heartbeatAt the ephemeral frames last left are PRESERVED (the
+ * command service assigned `progressSeq` under the same append lock this projection
+ * runs in, so the two agree). Scoped to an `open` session in this room — a phase
+ * against an exited or absent session matches zero rows and throws, aborting the
+ * append, exactly as `projectSessionExit` guards its own write.
+ */
+async function projectSessionPhaseChanged(
+  { tx, roomId, event }: ProjectionContext<RoomEvent>,
+  phaseEvent: EventOf<'session_phase_changed'>,
+): Promise<void> {
+  const [current] = await tx
+    .select({ progress: sessions.progress })
+    .from(sessions)
+    .where(
+      and(
+        eq(sessions.id, phaseEvent.sessionId),
+        eq(sessions.roomId, roomId),
+        eq(sessions.status, 'open'),
+      ),
+    )
+    .for('share');
+  if (!current) {
+    throw new CommandError(
+      'invalid',
+      `no open session "${phaseEvent.sessionId}" to report a phase for in room "${roomId}" — it does not exist here or has already exited`,
+    );
+  }
+  const prev = current.progress ?? null;
+  const snapshot: SessionProgress = {
+    progressSeq: phaseEvent.progressSeq,
+    phase: phaseEvent.phase,
+    spendMicros: prev?.spendMicros ?? null,
+    contextPct: prev?.contextPct ?? null,
+    ...(prev?.diff !== undefined ? { diff: prev.diff } : {}),
+    updatedAt: event.at,
+    ...(prev?.heartbeatAt ? { heartbeatAt: prev.heartbeatAt } : {}),
+  };
+  await tx
+    .update(sessions)
+    .set({ progress: snapshot, updatedAt: new Date(event.at) })
+    .where(and(eq(sessions.id, phaseEvent.sessionId), eq(sessions.roomId, roomId)));
 }
 
 async function projectSessionSettled(

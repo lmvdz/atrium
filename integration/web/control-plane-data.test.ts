@@ -3,8 +3,52 @@ import { advanceSeenSeq, provisionAgentConfig } from '@atrium/auth';
 import { attentionItems, messages, plans, sessions } from '@atrium/db';
 import { eq, sql } from 'drizzle-orm';
 import { afterAll, beforeEach, describe, expect, it } from 'vitest';
+import type { z } from 'zod';
 import { loadControlPlane } from '../../apps/web/lib/control-plane-data.js';
+/**
+ * `ServerFrame` is used as a VALUE below (`typeof ServerFrame`, to derive
+ * `WireFrame`'s pre-default input type) — the `useImportType` rule can't see
+ * through `typeof` in a type position and would offer a fix that breaks that
+ * derivation under isolatedModules.
+ */
+// biome-ignore lint/style/useImportType: typeof ServerFrame needs the value import
+import {
+  createRealtimeClient,
+  ServerFrame,
+  type SocketLike,
+} from '../../apps/web/src/lib/realtime.js';
 import { openDatabase, resetDatabase, seedRoom } from '../support/harness.js';
+
+/**
+ * The pre-parse (wire) shape (#159 round-4, finding 3) — `subscribed.progress`
+ * defaults on parse, so it is optional here even though `z.infer` requires it.
+ */
+type WireFrame = z.input<typeof ServerFrame>;
+
+/**
+ * The minimum WebSocket the realtime client drives, for the cross-layer finding-3
+ * recovery test below. Server→client frames arrive via `deliver`.
+ */
+class FakeWs implements SocketLike {
+  readyState = 1;
+  onopen: ((event: unknown) => void) | null = null;
+  onclose: ((event: { code?: number }) => void) | null = null;
+  onerror: ((event: unknown) => void) | null = null;
+  onmessage: ((event: { data: unknown }) => void) | null = null;
+  constructor(readonly url: string) {}
+  send(): void {}
+  close(): void {
+    this.readyState = 3;
+    this.onclose?.({ code: 1000 });
+  }
+  open(): void {
+    this.readyState = 1;
+    this.onopen?.({});
+  }
+  deliver(frame: WireFrame): void {
+    this.onmessage?.({ data: JSON.stringify(frame) });
+  }
+}
 
 /* ---------------------------------------------------------------------------
  * THE CONTROL PLANE'S SURFACES BELONG TO A VIEWER — #121 fix round, finding 5.
@@ -285,6 +329,141 @@ describe('a session row carries the certifier KIND, not only the name', () => {
     expect(session?.id).toBe((row as { id: string }).id);
     expect(session?.certifiedByName).toBeNull();
     expect(session?.certifiedByKind).toBeNull();
+  });
+
+  it('carries the live progress snapshot so a reconnecting client recovers the preview (#159 fix, finding 3)', async () => {
+    // The late-join / loss-recovery read: `sessions.progress` is selected via
+    // `getTableColumns` but was dropped by the mapper before this fix, so a client
+    // that reconnected mid-run could not recover the running session's `~` preview.
+    // Revert the mapper's `progress` line and this reads `undefined`.
+    const room = await seedRoom(handle, ['ada', 'hexi'], { agents: ['hexi'] });
+    const ada = room.people.ada as string;
+    const hexi = room.people.hexi as string;
+    await agentWithChannel(hexi, ada, room.roomId);
+    const planId = randomUUID();
+    await handle.db.insert(plans).values({
+      id: planId,
+      roomId: room.roomId,
+      agentUserId: hexi,
+      title: 'a plan',
+      status: 'open',
+    });
+    const [row] = await handle.db
+      .insert(sessions)
+      .values({
+        roomId: room.roomId,
+        planId,
+        harness: 'claude-code',
+        model: 'opus',
+        status: 'open',
+        progress: {
+          progressSeq: 3,
+          phase: 'writing',
+          spendMicros: 4200,
+          contextPct: 0.5,
+          updatedAt: '2026-08-15T00:00:00.000Z',
+        },
+      })
+      .returning({ id: sessions.id });
+
+    const view = await loadControlPlane(handle.db, room.roomId, 'fleet', ada);
+    const session = view.agents[0]?.plans[0]?.sessions[0];
+    expect(session?.id).toBe((row as { id: string }).id);
+    // The whole preview is recovered — phase, seq, and heartbeat — as `~` data.
+    expect(session?.progress?.phase).toBe('writing');
+    expect(session?.progress?.progressSeq).toBe(3);
+    expect(session?.progress?.spendMicros).toBe(4200);
+    expect(session?.progress?.contextPct).toBe(0.5);
+  });
+
+  it('a reconnecting client recovers the durable snapshot and FLOORS the live channel by its seq (#159 round-3, finding 3)', async () => {
+    // END TO END across the seam. The server persists a durable `sessions.progress`
+    // snapshot; `loadControlPlane` is the authenticated recovery read a reconnecting
+    // client performs; and the realtime client floors its lossy live channel by the
+    // recovered `progressSeq`, so a frame OLDER than the snapshot — a straggler or a
+    // late duplicate on the bus, the frames a disconnect otherwise loses silently — is
+    // dropped rather than shown as if it were current. `room.progress` starting empty
+    // is exactly what let an un-floored late joiner accept a stale frame (round-2
+    // finding 3); this proves the floor closes it.
+    const room = await seedRoom(handle, ['ada', 'hexi'], { agents: ['hexi'] });
+    const ada = room.people.ada as string;
+    const hexi = room.people.hexi as string;
+    await agentWithChannel(hexi, ada, room.roomId);
+    const planId = randomUUID();
+    await handle.db.insert(plans).values({
+      id: planId,
+      roomId: room.roomId,
+      agentUserId: hexi,
+      title: 'a plan',
+      status: 'open',
+    });
+    const [row] = await handle.db
+      .insert(sessions)
+      .values({
+        roomId: room.roomId,
+        planId,
+        harness: 'claude-code',
+        model: 'opus',
+        status: 'open',
+        progress: {
+          progressSeq: 7,
+          phase: 'writing',
+          spendMicros: 4200,
+          contextPct: 0.5,
+          updatedAt: '2026-08-15T00:00:00.000Z',
+        },
+      })
+      .returning({ id: sessions.id });
+    const sessionId = (row as { id: string }).id;
+
+    // The authenticated recovery read.
+    const view = await loadControlPlane(handle.db, room.roomId, 'fleet', ada);
+    const recovered = view.agents[0]?.plans[0]?.sessions[0]?.progress;
+    expect(recovered?.progressSeq).toBe(7);
+
+    // A reconnecting realtime client floors by the recovered snapshot.
+    const sockets: FakeWs[] = [];
+    const client = createRealtimeClient({
+      userId: ada,
+      url: 'ws://recover/ws',
+      reconnect: false,
+      socketFactory: (url) => {
+        const socket = new FakeWs(url);
+        sockets.push(socket);
+        return socket;
+      },
+    });
+    await client.connect();
+    sockets.at(-1)?.open();
+    client.join(room.roomId);
+    sockets.at(-1)?.deliver({ type: 'subscribed', roomId: room.roomId, head: 0, seenSeq: 0 });
+    client.recoverProgress(room.roomId, [{ sessionId, progressSeq: recovered?.progressSeq ?? 0 }]);
+
+    // A straggler at seq 5 — older than the recovered snapshot — is dropped.
+    sockets.at(-1)?.deliver({
+      type: 'session_heartbeat',
+      roomId: room.roomId,
+      sessionId,
+      progressSeq: 5,
+      spendMicros: 1,
+      contextPct: 0.1,
+      at: '2026-08-15T00:00:01.000Z',
+    });
+    expect(client.room(room.roomId).progress?.[sessionId]).toBeUndefined();
+
+    // A frame past the snapshot is applied.
+    sockets.at(-1)?.deliver({
+      type: 'session_heartbeat',
+      roomId: room.roomId,
+      sessionId,
+      progressSeq: 9,
+      spendMicros: 2,
+      contextPct: 0.2,
+      at: '2026-08-15T00:00:02.000Z',
+    });
+    expect(client.room(room.roomId).progress?.[sessionId]?.progressSeq).toBe(9);
+
+    client.close();
   });
 
   it('a human-certified session projects kind `human`, which is what mints the tick', async () => {

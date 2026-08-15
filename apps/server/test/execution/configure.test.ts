@@ -74,6 +74,7 @@ function baseService(draw: NonNullable<Extract<CommandResult, { kind: 'appended'
     }),
     requireMembership: vi.fn(async () => ({ seenSeq: 0 })),
     stillMembers: vi.fn(async () => new Set<string>()),
+    progressSnapshot: vi.fn(async () => []),
   };
   return { service, settled, settlePromise };
 }
@@ -202,6 +203,7 @@ describe('the wrapper routes appended signals to the provider (#147)', () => {
       ),
       requireMembership: vi.fn(async () => ({ seenSeq: 0 })),
       stillMembers: vi.fn(async () => new Set<string>()),
+      progressSnapshot: vi.fn(async () => []),
     };
   }
 

@@ -21,6 +21,7 @@ import { createAcceptanceProvider } from './jobs/acceptance-provider.js';
 import { createGatewayProvider } from './jobs/provider.js';
 import { createLedger, type Tx } from './ledger.js';
 import { createLogger } from './logger.js';
+import type { EphemeralFrame } from './protocol.js';
 import { startQueue } from './queue.js';
 import { createMembershipAuthorizer } from './session.js';
 import { sweepExpiredSubscriptions } from './subscriptions.js';
@@ -142,6 +143,16 @@ async function main(): Promise<void> {
     });
   };
 
+  // The live-progress delivery sink (#159 fix, finding 2). Before the socket server
+  // exists there are no local subscribers; still relay the frames + the snapshot
+  // doorbell to already-running instances. Once realtime is constructed this is
+  // replaced with the local-broadcast+relay implementation below — the same shape
+  // `signalProjectionChanged` uses, for the same reason.
+  let deliverProgress = (roomId: string, frames: readonly EphemeralFrame[]) => {
+    for (const frame of frames) bus.relay(roomId, frame);
+    bus.relay(roomId, { type: 'projection_changed', roomId, at: new Date().toISOString() });
+  };
+
   const queue = await startQueue({
     databaseUrl: env.DATABASE_URL,
     concurrency: env.INTERPRET_WORKER_CONCURRENCY,
@@ -241,6 +252,10 @@ async function main(): Promise<void> {
           commands: baseCommands,
           logger,
           ownership: executionOwnership,
+          // The coordinator holds the running session's token, so it is the only real
+          // producer of live-progress frames; the sink below (bound to realtime after
+          // it is constructed) is how they reach subscribers (#159 fix, finding 2).
+          deliverProgress: (roomId, frames) => deliverProgress(roomId, frames),
         })
       : null;
   const commands = executionWiring?.commands ?? baseCommands;
@@ -396,6 +411,7 @@ async function main(): Promise<void> {
     revalidateTtlMs: env.WS_REVALIDATE_TTL_MS,
   });
   signalProjectionChanged = (roomId) => realtime.projectionChanged(roomId);
+  deliverProgress = (roomId, frames) => realtime.deliverProgress(roomId, frames);
 
   await realtime.listen();
 
