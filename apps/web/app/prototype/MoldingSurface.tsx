@@ -29,7 +29,7 @@ import { ThreadStatus } from './ChatChrome';
 import { IconPanel } from './icons';
 import { NavTree } from './NavTree';
 import styles from './prototype.module.css';
-import { sessionArtifacts, usePRStream } from './seams';
+import { sessionArtifacts, treeData, usePRStream } from './seams';
 import type { Comment, CommentDraft, Selection } from './types';
 import { UserBar } from './UserBar';
 
@@ -62,6 +62,12 @@ export function MoldingSurface() {
     window.addEventListener('pointermove', move);
     window.addEventListener('pointerup', up);
   };
+  /* SEAM(#154) — BOUND. The process tree reads the real control-plane shape
+     (`ControlPlaneData`), derived through the shipped `control/state.ts`
+     selectors. The seam is called at the composition root and handed down, so a
+     test can render `NavTree` against a seeded plane and assert a mutated cost
+     moves the rendered cell. */
+  const tree = useMemo(() => treeData(), []);
   /* the right split — an artifact host (diff / plan / doc) you comment on. */
   // SEAM(#155): bind to the session's real artifacts.
   const artifacts = useMemo(() => sessionArtifacts(), []);
@@ -158,12 +164,7 @@ export function MoldingSurface() {
               <span className={styles.sideTitle}>threads</span>
             </div>
             <div className={styles.sideBody}>
-              <NavTree
-                stream={stream}
-                selected={selected}
-                onSelect={setSelected}
-                concern={concern}
-              />
+              <NavTree data={tree} selected={selected} onSelect={setSelected} concern={concern} />
             </div>
             <UserBar />
           </aside>

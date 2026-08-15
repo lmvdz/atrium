@@ -8,7 +8,7 @@
  * and leaves the *data* exactly here, behind typed accessors, so the four pane
  * lanes can each bind their own seam on their own file without colliding:
  *
- *   #154 — the process tree            → `treeAgents()`
+ *   #154 — the process tree            → `treeData()`  (BOUND — real shape)
  *   #155 — the conversation feed + diff → `conversationFor()`, artifacts, stream
  *   #156 — chat head / participants     → `threadHeadFor()`, `participantsFor()`
  *   #157 — covenant affordances         → wired to gated doors (not here)
@@ -18,12 +18,12 @@
  * with its real source; the component that consumes it never changes shape.
  * ═════════════════════════════════════════════════════════════════════════ */
 
+import type { ControlPlaneData } from '@/lib/control-plane-data';
+import { controlPlaneFixture } from './control-fixture';
 import {
   type DiffLine,
   INVOICE_DIFF,
   AGENTS as MOCK_AGENTS,
-  type MockAgent,
-  fmtMicros as mockFmtMicros,
   type StreamState,
   useMockPRStream,
 } from './mock';
@@ -31,15 +31,16 @@ import type { Artifact, ChatMsg, Participant, Selection } from './types';
 
 export type { StreamState } from './mock';
 
-/* the micro-dollars → $x.xx formatter. Provenance-neutral pure math; stays. */
-export const fmtMicros = mockFmtMicros;
-
-/* SEAM(#154): bind to the real ledger (agents → plans → sessions).
-   Real source: `apps/web/lib/control-plane-data.ts` (`ControlAgentRow` /
-   `ControlPlanRow` / `ControlSessionRow`) + `src/components/control/state.ts`
-   selectors + `ProcessTree.tsx`. Replace this body; keep the shape. */
-export function treeAgents(): readonly MockAgent[] {
-  return MOCK_AGENTS;
+/* SEAM(#154) — BOUND. The process tree now reads the REAL control-plane shape:
+   `ControlPlaneData` (`lib/control-plane-data.ts`: `ControlAgentRow` /
+   `ControlPlanRow` / `ControlSessionRow`), rendered through the shipped
+   `control/state.ts` selectors (`planCost`, `formatMicros`, `sessionCertified`),
+   exactly as `ProcessTree.tsx` does. The value is a SEEDED fixture standing in
+   for `loadControlPlane` (server-only; its live channel is #159, out of scope) —
+   every field is a real column, nothing invented. Swap this body for the load
+   when #159 lands; `NavTree` never changes shape. */
+export function treeData(): ControlPlaneData {
+  return controlPlaneFixture();
 }
 
 /* SEAM(#159): bind to the real diff / turn stream (settle events + live).
