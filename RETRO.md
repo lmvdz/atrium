@@ -1572,3 +1572,26 @@ isInteger; a digit-shape regex is required so the input can never fund a number 
 human didn't literally read. The builder caught this past the brief. (3) A live
 page-DRIVING critic remains worth its cost on a taste/spend surface — it confirmed the
 hold can't fire on a click and the affordance is invisible to an agent, by executing.
+
+## #147 — signal→harness dispatch (closed 2026-08-14, 1 build + 3 rounds)
+
+Opus built it; both foreign lineages gauntleted it three times, EXECUTING every defect
+(the setsid escape, the pre-spawn race, the harnessEnv 2/20 race, the concurrent cap
+bypass) — a process-control path where a code read alone finds nothing. The covenant
+ceiling (delivery writes no ledger, no re-auth, resume no-op) held every single round;
+what surfaced was delivery RELIABILITY and honest SCOPING, never a covenant breach.
+
+Process lessons: (1) on a process-control/async path, the gauntlet's value is EXECUTION —
+both lineages ran attack scripts and reproduced races (2/20, 100-id floods) that no
+static read would surface; run the critics against a tree they can execute. (2) The #141
+lesson repeated: the unsandboxed worktree provider is BEST-EFFORT over a foreign process
+— a setsid grandchild escapes the process group; escape-proof termination is #138's
+cgroup sandbox. Scope the claim (a test asserts the escapee survives) rather than pretend
+a process group can contain what it can't. (3) A class of check-then-act races is closed
+by a STRUCTURE (per-session serialized delivery = atomic check-then-act), not by patching
+each race — the same move that settled #141 (a construction invariant) and #128 (a claim
+table). (4) Red-on-revert witnesses that REPRODUCE the race are stronger evidence than a
+read-only critic's reasoned re-read (the critics couldn't even execute — EROFS every
+round); closing on executed reverts + a held pre-commit beats a weaker confirmation pass.
+(5) A residual that is a SCOPING matter (the tail-window interrupt is #139's multi-turn
+concern, breaches nothing) is not a new mechanism — name it and close, don't spiral.
