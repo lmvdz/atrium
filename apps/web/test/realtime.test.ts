@@ -1763,6 +1763,41 @@ describe('optimism is limited to your own message row', () => {
     });
   });
 
+  /**
+   * CATCHES the covenant defect #157 exists to kill: a steer/interrupt that never
+   * leaves the client. `signalSession` must send a DURABLE `signal_session`
+   * command — the gated door — not flip a local flag. The server refuses a
+   * non-owner interrupt; that refusal can only ever come back if the command was
+   * actually sent, which is what this asserts.
+   */
+  it('sends a durable signal_session command for a steer', () => {
+    client.signalSession(ROOM, 'sess-1', 'steer', { body: 'keep it in billing' });
+    expect(latest().commands().at(-1)).toEqual({
+      name: 'signal_session',
+      roomId: ROOM,
+      sessionId: 'sess-1',
+      kind: 'steer',
+      body: 'keep it in billing',
+      causeMessageId: null,
+      supersedesEventId: null,
+    });
+  });
+
+  /** The interrupt (stop) verb carries `kind: 'interrupt'` and defaults the links. */
+  it('sends a durable signal_session command for an interrupt, with defaulted links', () => {
+    const commandId = client.signalSession(ROOM, 'sess-1', 'interrupt');
+    expect(commandId).toMatch(/^c\d+$/);
+    expect(latest().commands().at(-1)).toEqual({
+      name: 'signal_session',
+      roomId: ROOM,
+      sessionId: 'sess-1',
+      kind: 'interrupt',
+      body: null,
+      causeMessageId: null,
+      supersedesEventId: null,
+    });
+  });
+
   it('retires the optimistic row when the server’s event confirms it', () => {
     const clientMessageId = client.sendMessage(ROOM, 'typed just now');
     latest().deliver({

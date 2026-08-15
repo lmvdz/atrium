@@ -26,6 +26,7 @@ import { useEffect, useMemo, useState } from 'react';
 import { ArtifactPane } from './ArtifactPane';
 import { ChatBlock } from './ChatBlock';
 import { ThreadStatus } from './ChatChrome';
+import { covenant } from './covenant';
 import { IconPanel } from './icons';
 import { NavTree } from './NavTree';
 import styles from './prototype.module.css';
@@ -34,9 +35,12 @@ import type { Comment, CommentDraft, Selection } from './types';
 import { UserBar } from './UserBar';
 
 export function MoldingSurface() {
+  /* `steering` means the operator is COMPOSING a steer draft — it opens the
+     redirect composer. It is NOT a claim that the agent stopped: drafting is not
+     a covenant act, only the SEND is, and the send routes through the gated door
+     (`covenant.interrupt`), inert here. */
   const [steering, setSteering] = useState(false);
   const [redirect, setRedirect] = useState('');
-  const [sent, setSent] = useState(false);
   const [echoes, setEchoes] = useState<readonly string[]>([]);
   /* WHERE YOU ARE in the tree — which thread the main view shows. */
   const [selected, setSelected] = useState<Selection>({ kind: 'session', id: 's-live' });
@@ -90,13 +94,22 @@ export function MoldingSurface() {
     window.addEventListener('pointerup', up);
   };
 
-  // SEAM(#159): bind to the live diff / turn stream.
-  const stream = usePRStream(steering);
-  const concern = !steering && stream.concern !== null;
+  /* SEAM(#159): bind to the live diff / turn stream. The stream is NOT frozen by
+     any local flag — a real pause of the agent is the SERVER's, minted only when
+     `signal_session{interrupt}` is accepted. The prototype's old "@hexi stop"
+     froze this mock stream and cleared the drift concern with nothing reaching
+     any server: a faked stop for an agent that would keep spending. That theater
+     is gone (#157); the drift stays until a real, gated act clears it. */
+  const stream = usePRStream(false);
+  const concern = stream.concern !== null;
+
+  /* The session the steer targets — the selected one, or the live thread. */
+  const steerTargetId = selected.kind === 'session' ? selected.id : 's-live';
 
   /* The chat is the only input. A message that @-addresses an agent is a
-     delegation; anything else is just said in the room. "@hexi stop" steers.
-     SEAM(#157): a delegation / steer routes through a real gated dispatch. */
+     delegation; anything else is just said in the room. "@hexi stop" opens a
+     steer DRAFT — the operator composes guidance/a reason; sending it is the
+     covenant act, gated below (`sendSteer`). */
   const say = (raw: string) => {
     const text = raw.trim();
     if (text.length === 0) return;
@@ -105,9 +118,24 @@ export function MoldingSurface() {
       text.startsWith('@') || /^(hexi|mira|vale|dane|iris|omar|noor)\b/.test(low);
     setEchoes((e) => [...e, isDelegation ? `→ ${text}` : text]);
     if (/hexi/.test(low) && /(stop|drop|steer|halt|pause)/.test(low)) {
+      // Open the steer-draft composer. NO fake stop, NO frozen stream, NO cleared
+      // concern — none of that reaches a server, so none of it is claimed.
       setSteering(true);
-      setSent(true);
     }
+  };
+
+  /* SEND the drafted steer. The gated door is `signal_session{interrupt}`
+     (`commands.ts`; the server gates it to the agent principal or its owner).
+     On int/phase5 the route holds no live session, so `covenant.interrupt` is
+     honestly INERT: it performs NO durable mutation and returns `reached:false`,
+     and the operator is told — verbatim — that NOTHING was delivered. This is
+     the flip-the-input case the ticket demands: send it, and no durable command
+     and no fake success leaves the client. */
+  const sendSteer = () => {
+    const outcome = covenant.interrupt(steerTargetId, redirect.trim());
+    setSteering(false);
+    setRedirect('');
+    setEchoes((e) => [...e, `⚠ steer NOT delivered — ${outcome.inert} · door: ${outcome.door}`]);
   };
 
   /* commenting on an artifact anchors the note there AND appends it to the thread
@@ -187,10 +215,10 @@ export function MoldingSurface() {
               selected={selected}
               echoes={echoes}
               draftComment={draftComment}
-              steering={steering && !sent}
+              steering={steering}
               redirect={redirect}
               setRedirect={setRedirect}
-              onSteerSend={() => setSent(true)}
+              onSteerSend={sendSteer}
               onSay={say}
             />
             {/* the status strip is the CHAT's footer — contained to this column,
