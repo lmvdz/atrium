@@ -1910,6 +1910,16 @@ export const sessions = pgTable(
       columns: [t.roomId, t.causeMessageId],
       foreignColumns: [messages.roomId, messages.id],
     }),
+    /**
+     * TERMINAL-NULL PROGRESS IS A TABLE FACT (#159, decided in #152). The settle
+     * projection clears `progress` to NULL in the same UPDATE as the exit receipt —
+     * the durable receipt replaces the live stream wholesale — and this CHECK makes
+     * that a construction-time invariant rather than one writer's discipline: a
+     * settled/failed session may not carry a live `~` preview. Enforced here (schema
+     * + drizzle/0049) and, for a LATER mutation of an already-terminal row, by the
+     * `sessions_terminal_immutable` trigger's `progress` clause (0049).
+     */
+    check('sessions_progress_open_or_null', sql`${t.status} = 'open' OR ${t.progress} IS NULL`),
   ],
 );
 

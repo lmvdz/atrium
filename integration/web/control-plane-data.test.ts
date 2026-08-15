@@ -287,6 +287,51 @@ describe('a session row carries the certifier KIND, not only the name', () => {
     expect(session?.certifiedByKind).toBeNull();
   });
 
+  it('carries the live progress snapshot so a reconnecting client recovers the preview (#159 fix, finding 3)', async () => {
+    // The late-join / loss-recovery read: `sessions.progress` is selected via
+    // `getTableColumns` but was dropped by the mapper before this fix, so a client
+    // that reconnected mid-run could not recover the running session's `~` preview.
+    // Revert the mapper's `progress` line and this reads `undefined`.
+    const room = await seedRoom(handle, ['ada', 'hexi'], { agents: ['hexi'] });
+    const ada = room.people.ada as string;
+    const hexi = room.people.hexi as string;
+    await agentWithChannel(hexi, ada, room.roomId);
+    const planId = randomUUID();
+    await handle.db.insert(plans).values({
+      id: planId,
+      roomId: room.roomId,
+      agentUserId: hexi,
+      title: 'a plan',
+      status: 'open',
+    });
+    const [row] = await handle.db
+      .insert(sessions)
+      .values({
+        roomId: room.roomId,
+        planId,
+        harness: 'claude-code',
+        model: 'opus',
+        status: 'open',
+        progress: {
+          progressSeq: 3,
+          phase: 'writing',
+          spendMicros: 4200,
+          contextPct: 0.5,
+          updatedAt: '2026-08-15T00:00:00.000Z',
+        },
+      })
+      .returning({ id: sessions.id });
+
+    const view = await loadControlPlane(handle.db, room.roomId, 'fleet', ada);
+    const session = view.agents[0]?.plans[0]?.sessions[0];
+    expect(session?.id).toBe((row as { id: string }).id);
+    // The whole preview is recovered — phase, seq, and heartbeat — as `~` data.
+    expect(session?.progress?.phase).toBe('writing');
+    expect(session?.progress?.progressSeq).toBe(3);
+    expect(session?.progress?.spendMicros).toBe(4200);
+    expect(session?.progress?.contextPct).toBe(0.5);
+  });
+
   it('a human-certified session projects kind `human`, which is what mints the tick', async () => {
     const room = await seedRoom(handle, ['ada', 'hexi'], { agents: ['hexi'] });
     const ada = room.people.ada as string;

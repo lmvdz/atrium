@@ -7,6 +7,7 @@ import { and, eq, isNotNull, isNull } from 'drizzle-orm';
 import type { ArtifactVerifier, CommandResult, CommandService } from '../commands.js';
 import type { Env } from '../env.js';
 import type { Logger } from '../logger.js';
+import type { EphemeralFrame } from '../protocol.js';
 import type { Session } from '../session.js';
 import {
   createExecutionCoordinator,
@@ -374,6 +375,12 @@ export function wireExecutionCoordinator(input: {
   logger: Logger;
   /** The granted-draw guard + once-only claim (#120 round-6). MANDATORY — no bypass. */
   ownership: ExecutionOwnership;
+  /**
+   * Deliver the live-progress frames a run produces to the room (#159 fix, finding
+   * 2). Passed straight to the coordinator; `index.ts` binds it to the realtime
+   * server's broadcast+relay+doorbell. Absent on a caller that wires no transport.
+   */
+  deliverProgress?: (roomId: string, frames: readonly EphemeralFrame[]) => void;
 }): {
   coordinator: ExecutionCoordinator;
   commands: CommandService;
@@ -386,8 +393,14 @@ export function wireExecutionCoordinator(input: {
   /** How many executions are running right now. For tests and the boot log. */
   inFlight(): number;
 } {
-  const { provider, commands, logger, ownership } = input;
-  const coordinator = createExecutionCoordinator({ commands, provider, logger, ownership });
+  const { provider, commands, logger, ownership, deliverProgress } = input;
+  const coordinator = createExecutionCoordinator({
+    commands,
+    provider,
+    logger,
+    ownership,
+    deliverProgress,
+  });
 
   // ── EXECUTIONS ARE TRACKED, NOT DETACHED (#120 round-3 F5) ─────────────────
   //
@@ -518,8 +531,10 @@ export async function configureExecution(input: {
   instanceId?: string;
   /** A fake claim for tests that hold no DB. Production passes `db` instead. */
   ownership?: ExecutionOwnership;
+  /** Deliver live-progress frames to the room (#159 fix, finding 2). Optional. */
+  deliverProgress?: (roomId: string, frames: readonly EphemeralFrame[]) => void;
 }): Promise<ConfiguredExecution | null> {
-  const { env, commands, logger, db, instanceId } = input;
+  const { env, commands, logger, db, instanceId, deliverProgress } = input;
   const runtime = await createExecutionProvider({ env, logger });
   if (runtime === null) return null;
   const ownership =
@@ -541,6 +556,7 @@ export async function configureExecution(input: {
     commands,
     logger,
     ownership,
+    deliverProgress,
   });
   return {
     provider: runtime.provider,

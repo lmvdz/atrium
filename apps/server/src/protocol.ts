@@ -4,6 +4,7 @@ import { z } from 'zod';
 import { Command, type CommandInput, PresenceState } from './commands.js';
 import {
   MAX_DIFF_DELTA_BYTES,
+  MAX_DIFF_FILES,
   MAX_DIFF_HEADER_LEN,
   MAX_DIFF_LINE_LEN,
   MAX_DIFF_LINES,
@@ -42,7 +43,13 @@ const SessionDiffDeltaFrame = z.object({
           .optional(),
       }),
     )
-    .max(MAX_DIFF_LINES),
+    // The FILE bound is the number of files (#159 fix, finding 8), not the line
+    // ceiling: a diff delta carries at most `MAX_DIFF_FILES` files, each of whose
+    // single `hunk.lines` array is separately capped at `MAX_DIFF_LINES` above.
+    // Bounding `files` by `MAX_DIFF_LINES` (2000) let an untrusted bus frame carry
+    // 2000 file entries — fifty times the durable diff's own file ceiling — before
+    // the 4KB byte cap or this length cap refused it.
+    .max(MAX_DIFF_FILES),
 });
 
 /**

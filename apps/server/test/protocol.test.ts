@@ -481,6 +481,42 @@ describe('the bus carries volatile state and invalidation, never history', () =>
     ]);
   });
 
+  it('bounds a diff-delta frame by the FILE count, not the line ceiling (#159 finding 8)', () => {
+    // The `files` array is capped at MAX_DIFF_FILES (40), not MAX_DIFF_LINES (2000):
+    // a diff carries files, and each file's single hunk is separately line-capped.
+    // Mutation this catches: restore `.max(MAX_DIFF_LINES)` on the files array and a
+    // frame carrying 41 files parses — fifty times the durable diff's file ceiling.
+    const file = (i: number) => ({
+      path: `f${i}.ts`,
+      status: 'added' as const,
+      additions: 0,
+      deletions: 0,
+    });
+    const base = {
+      type: 'session_diff_delta',
+      roomId: room,
+      sessionId: session,
+      at,
+      truncated: false,
+    };
+    // 40 files is the cap and still parses.
+    expect(
+      EphemeralFrame.parse({
+        ...base,
+        progressSeq: 0,
+        files: Array.from({ length: 40 }, (_v, i) => file(i)),
+      }),
+    ).toMatchObject({ type: 'session_diff_delta' });
+    // 41 files — one over the FILE cap, and far under the old line cap — is refused.
+    expect(() =>
+      EphemeralFrame.parse({
+        ...base,
+        progressSeq: 1,
+        files: Array.from({ length: 41 }, (_v, i) => file(i)),
+      }),
+    ).toThrow();
+  });
+
   it('carries no epistemic field on the live progress frames (#159 covenant point 2)', () => {
     // The covenant boundary: nothing on this channel asserts certification. A frame
     // carrying a `certified`/`verified` discriminant is a `✓` the machine never

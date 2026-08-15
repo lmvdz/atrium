@@ -1,8 +1,10 @@
 import { randomUUID } from 'node:crypto';
 import { acceptedObjects, plans, sessions } from '@atrium/db/schema';
 import { describe, expect, it } from 'vitest';
+import { createCommandService } from '../src/commands.js';
 import { projectRoomEvent } from '../src/projections.js';
 import { RoomEvent } from '../src/room-events.js';
+import type { Session } from '../src/session.js';
 
 /**
  * THE LIVE PROGRESS CHANNEL WRITES ONLY `sessions.progress` (#159 covenant point 1).
@@ -126,8 +128,11 @@ describe('a session_phase_changed writes only the sessions.progress snapshot (#1
     const sessionUpdates = updates.filter((write) => write.table === sessions);
     expect(sessionUpdates, 'a phase change updates sessions exactly once').toHaveLength(1);
 
-    // THE COVENANT: no judgement column, no plan column. A progress report has no
-    // route to a `✓` or a draw.
+    // THE POSITIVE WRITE-SET (#159 fix, finding 7). EVERY update targets `sessions` —
+    // not merely "none touched accepted_objects/plans", which a denylist satisfies the
+    // day a fourth table is added. A projection that grew a write to ANY other table
+    // reddens here. The two explicit denials below stay as legible covenant sentences.
+    expect(updates.every((write) => write.table === sessions)).toBe(true);
     expect(updates.filter((write) => write.table === acceptedObjects)).toHaveLength(0);
     expect(updates.filter((write) => write.table === plans)).toHaveLength(0);
 
@@ -149,5 +154,94 @@ describe('a session_phase_changed writes only the sessions.progress snapshot (#1
     // Nothing epistemic can be in the snapshot — covenant point 2.
     expect(snapshot).not.toHaveProperty('certified');
     expect(snapshot).not.toHaveProperty('verified');
+  });
+});
+
+/**
+ * THE EPHEMERAL PATH ALSO WRITES ONLY `sessions.progress` (#159 fix, finding 7).
+ *
+ * A heartbeat/diff never becomes a ledger event, so it does NOT go through
+ * `projectRoomEvent` — its snapshot refresh is a direct `tx.update(sessions)` inside
+ * `execute`, a second write the projection-only test above cannot see. This folds a
+ * heartbeat through the REAL command boundary over a recording stub db and pins THAT
+ * write-set to `sessions` alone, so the ephemeral door has the same covenant proof
+ * the durable one does.
+ */
+describe('the ephemeral heartbeat/diff write-set is sessions-only (#159 finding 7)', () => {
+  const authority = 'the-row-only-token';
+
+  /** A stub db whose transaction hands a recording tx that answers the one gate read. */
+  function recordingDb(updates: UpdateWrite[], inserts: unknown[]) {
+    const tx = {
+      select() {
+        return {
+          from(table: unknown) {
+            // The gate read: a RUNNING provider session holding the token.
+            const rows =
+              table === sessions
+                ? [
+                    {
+                      status: 'open',
+                      executionMode: 'provider',
+                      executionAuthority: authority,
+                      progress: null,
+                    },
+                  ]
+                : [];
+            const result = {
+              where: () => result,
+              for: async () => rows,
+            };
+            return result;
+          },
+        };
+      },
+      insert(table: unknown) {
+        return {
+          async values(values: Record<string, unknown>) {
+            inserts.push({ table, values });
+          },
+        };
+      },
+      update(table: unknown) {
+        return {
+          set(values: Record<string, unknown>) {
+            updates.push({ table, values });
+            const result = Object.assign(Promise.resolve(undefined), {
+              returning: async () => [{ id: randomUUID() }],
+            });
+            return { where: () => result };
+          },
+        };
+      },
+    };
+    return { transaction: async <T>(cb: (tx: unknown) => Promise<T>) => cb(tx) };
+  }
+
+  it('a heartbeat updates sessions exactly once and touches no other table', async () => {
+    const updates: UpdateWrite[] = [];
+    const inserts: unknown[] = [];
+    const commands = createCommandService({
+      db: recordingDb(updates, inserts) as never,
+      ledger: {} as never,
+      authorizer: {} as never,
+    });
+    const agentSession: Session = { userId: randomUUID(), principalKind: 'agent' };
+
+    const result = await commands.execute(agentSession, {
+      name: 'report_session_progress',
+      roomId,
+      sessionId,
+      authority,
+      heartbeat: { spendMicros: 5, contextPct: 0.5 },
+    });
+
+    // The ephemeral result — a server-minted frame, no ledger row.
+    expect(result.kind).toBe('progress');
+    expect(inserts).toHaveLength(0);
+    // THE WRITE-SET: every update targets sessions, exactly once, `progress` + `updatedAt`.
+    expect(updates.every((write) => write.table === sessions)).toBe(true);
+    expect(updates).toHaveLength(1);
+    expect(Object.keys(updates[0]?.values ?? {}).sort()).toEqual(['progress', 'updatedAt']);
   });
 });

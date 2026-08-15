@@ -242,6 +242,15 @@ export interface RealtimeServer {
   revalidateSubscriptions: () => Promise<void>;
   /** Tell authorized subscribers to re-read non-ledger projections. */
   projectionChanged: (roomId: string, at?: string) => void;
+  /**
+   * Fan the live-progress frames a run produced to a room (#159 fix, finding 2) —
+   * local sockets + peer instances — and ring the `projection_changed` doorbell so
+   * a client that missed the lossy frames rereads the durable snapshot. The one
+   * delivery path for both the in-process coordinator (which holds the session
+   * token) and the socket `progress` handler; the coordinator is wired to this in
+   * `index.ts`. An empty `frames` rings only the doorbell (a phase refresh).
+   */
+  deliverProgress: (roomId: string, frames: readonly EphemeralFrame[]) => void;
   listen: () => Promise<void>;
   close: () => Promise<void>;
 }
@@ -889,24 +898,12 @@ export function createRealtimeServer(options: RealtimeOptions): RealtimeServer {
         }
         case 'progress': {
           // The EPHEMERAL half of `report_session_progress` (#159): a heartbeat or a
-          // diff delta. Broadcast the server-minted frame(s) to the whole room — the
-          // sender included, unlike typing, because a diff is data the producer's own
-          // client renders — and relay across the bus for cross-instance subscribers.
-          for (const frame of result.frames) {
-            hub.broadcast(result.roomId, frame);
-            bus?.relay(result.roomId, frame);
-          }
-          // Ring the projection doorbell too: a client that MISSED the lossy frames
-          // (a reconnect, a cross-instance relay drop) rereads the durable
-          // `sessions.progress` snapshot on the doorbell, which the same command just
-          // refreshed. Same shape `realtime.projectionChanged` broadcasts.
-          const doorbell: EphemeralFrame = {
-            type: 'projection_changed',
-            roomId: result.roomId,
-            at: new Date().toISOString(),
-          };
-          hub.broadcast(result.roomId, doorbell);
-          bus?.relay(result.roomId, doorbell);
+          // diff delta. One delivery path, shared with the in-process coordinator
+          // (#159 fix, finding 2) so a frame is fanned out the same way whichever door
+          // it entered — broadcast to the whole room (the sender included, unlike
+          // typing, because a diff is data the producer's own client renders), relayed
+          // across the bus, and followed by the snapshot doorbell.
+          deliverProgress(result.roomId, result.frames);
           ackEphemeral(socket, commandId, result.roomId);
           return;
         }
@@ -956,6 +953,29 @@ export function createRealtimeServer(options: RealtimeOptions): RealtimeServer {
         entry: toWire(entry),
       });
     }
+  }
+
+  /**
+   * Deliver live-progress frames to a room (#159 fix, finding 2), and always ring
+   * the snapshot doorbell after them. ONE implementation, called by both the socket
+   * `progress` handler and — via the returned method — the in-process coordinator,
+   * which is the only holder of a running session's token and so the only real
+   * producer of these frames. Each frame goes to this instance's sockets (`hub`) and
+   * to peer instances (`bus`); the trailing `projection_changed` lets a client that
+   * missed the lossy frames reread the durable `sessions.progress` snapshot.
+   */
+  function deliverProgress(roomId: string, frames: readonly EphemeralFrame[]): void {
+    for (const frame of frames) {
+      hub.broadcast(roomId, frame);
+      bus?.relay(roomId, frame);
+    }
+    const doorbell: EphemeralFrame = {
+      type: 'projection_changed',
+      roomId,
+      at: new Date().toISOString(),
+    };
+    hub.broadcast(roomId, doorbell);
+    bus?.relay(roomId, doorbell);
   }
 
   /**
@@ -1163,6 +1183,7 @@ export function createRealtimeServer(options: RealtimeOptions): RealtimeServer {
       hub.broadcast(roomId, frame);
       bus?.relay(roomId, frame);
     },
+    deliverProgress,
     listen: async () => {
       // Before the port opens, so no client can connect into a window where
       // this instance is serving but deaf to its peers.

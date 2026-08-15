@@ -58,6 +58,7 @@ import {
   type RoomEvent,
   SessionDiffPayload,
   SessionPhase,
+  SessionPhaseChanged,
 } from './room-events.js';
 import type { Authorizer, MembershipPair, Session } from './session.js';
 
@@ -3000,20 +3001,32 @@ export function createCommandService({
         // `settle_session` pattern. `seq` is computed in the guard and stamped on
         // the event; `projectSessionPhaseChanged` writes the snapshot at that seq.
         if (command.phase !== undefined) {
-          const phase = command.phase;
+          // RUNTIME-VALIDATE THE PHASE BEFORE IT BECOMES DURABLE (#159 fix, finding 1).
+          // `execute` trusts its typed `Command`; the wire earns that trust by parsing
+          // every inbound frame with `Command.parse`, but the in-process coordinator
+          // constructs this command directly, and `ledger.append` does NOT re-parse a
+          // ledger-only event (`isCoreEvent` is false for `session_phase_changed`, so
+          // no fold and no `RoomEvent.parse` on the way in). A TS-only out-of-enum
+          // phase would therefore append an invalid durable event and poison replay.
+          // `SessionPhase.parse` is the boundary guard; the `SessionPhaseChanged.parse`
+          // in `build` re-validates the whole assembled payload right before insertion,
+          // so no caller of `execute` — coordinator or a future one — can journal a
+          // schema-invalid phase.
+          const phase = SessionPhase.parse(command.phase);
           let seq = 0;
           return appendAndProject(
             session,
             roomId,
-            ({ id, at }): RoomEvent => ({
-              id,
-              at,
-              type: 'session_phase_changed',
-              roomId,
-              sessionId,
-              phase,
-              progressSeq: seq,
-            }),
+            ({ id, at }): RoomEvent =>
+              SessionPhaseChanged.parse({
+                id,
+                at,
+                type: 'session_phase_changed',
+                roomId,
+                sessionId,
+                phase,
+                progressSeq: seq,
+              }),
             async (tx) => {
               const gate = await readProgressGate(tx, roomId, sessionId, false);
               assertProgressAuthorized(gate, command.authority, sessionId);

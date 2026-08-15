@@ -1199,7 +1199,25 @@ export function createRealtimeClient(options: RealtimeClientOptions): RealtimeCl
     //    names.
     //
     // The actor already learns why, from the `issues` on their own `ack`.
-    if (entry.issues.length === 0) room.events.push(entry);
+    if (entry.issues.length === 0) {
+      room.events.push(entry);
+      // CONVERGENCE (#159 fix, finding 4). A session's exit receipt REPLACES its live
+      // stream wholesale (#152): once `session_settled`/`session_failed` lands
+      // durably, the `~` preview this client accumulated is stale and the durable
+      // receipt is the truth. Drop that session's preview HERE, on the settle event —
+      // not only on socket close (below). Without this, a settle on a still-open
+      // socket left the last diff/heartbeat frozen on screen under the receipt. A
+      // refused row (`issues.length > 0`) is not a settle and never reaches here.
+      const settled = entry.event as { type: string; sessionId?: unknown };
+      if (
+        (settled.type === 'session_settled' || settled.type === 'session_failed') &&
+        typeof settled.sessionId === 'string' &&
+        room.progress?.[settled.sessionId] !== undefined
+      ) {
+        const { [settled.sessionId]: _converged, ...rest } = room.progress;
+        room.progress = rest;
+      }
+    }
     room.lastSeq = entry.roomSeq;
     room.head = Math.max(room.head, entry.roomSeq);
     // Called for a refused row too: the optimistic echo it would have confirmed

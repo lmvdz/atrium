@@ -1156,8 +1156,8 @@
       "kind": "file",
       "why": "#22 r10, D4's client half. A refused row is not an event that happened, and the room's materialised history must not contain a sentence the server refused — but the cursor must still advance past it, because `room_seq` is gap-free and the journal's record requires its cursor to name the entry it holds. Puts the row back in `room.events`, which is where r9 left it: in every subscriber's timeline and in their durable journal, across a reload.",
       "file": "apps/web/src/lib/realtime.ts",
-      "find": "    if (entry.issues.length === 0) room.events.push(entry);",
-      "replace": "    room.events.push(entry);",
+      "find": "    if (entry.issues.length === 0) {\n      room.events.push(entry);",
+      "replace": "    if (true) {\n      room.events.push(entry);",
       "catches": [
         "walks past a refused row without putting it in the room",
         "applies the same rule to a catch-up page as to a live frame"

@@ -2043,3 +2043,89 @@ describe('ephemeral channels', () => {
     expect(latest().commands().at(-1)).toMatchObject({ name: 'advance_seen', roomSeq: 2 });
   });
 });
+
+describe('live progress converges to the settle receipt (#159 finding 4)', () => {
+  const SESSION = 'sess-live';
+
+  /** A durable session exit, as the wire carries it — actor beside the event. */
+  function exitEvent(
+    roomSeq: number,
+    sessionId: string,
+    type: 'session_settled' | 'session_failed' = 'session_settled',
+    issues: string[] = [],
+  ): RoomEventEnvelope {
+    return {
+      roomId: ROOM,
+      roomSeq,
+      seq: roomSeq,
+      issues,
+      actor: { kind: 'agent', userId: 'agent-1' },
+      event: {
+        id: `e${roomSeq}`,
+        at: `2026-07-31T00:00:${String(roomSeq).padStart(2, '0')}.000Z`,
+        type,
+        roomId: ROOM,
+        sessionId,
+      },
+    };
+  }
+
+  function heartbeat(sessionId: string, progressSeq: number): ServerFrame {
+    return {
+      type: 'session_heartbeat',
+      roomId: ROOM,
+      sessionId,
+      progressSeq,
+      spendMicros: 10,
+      contextPct: 0.5,
+      at: '2026-07-31T00:00:00.000Z',
+    };
+  }
+
+  it('clears a session preview when its settle event lands, not only on socket close', async () => {
+    const c = await clientWith({});
+    c.join(ROOM);
+    latest().deliver({ type: 'subscribed', roomId: ROOM, head: 0, seenSeq: 0 });
+
+    // A live heartbeat sets the `~` preview.
+    latest().deliver(heartbeat(SESSION, 0));
+    expect(c.room(ROOM).progress?.[SESSION]).toBeDefined();
+
+    // The durable receipt REPLACES the stream (#152 convergence): the preview is
+    // dropped on the settle event itself. Mutation this catches: remove the
+    // settle-clear from `applyEntry` and the stale preview outlives the receipt
+    // until the socket closes.
+    latest().deliver({ type: 'event', entry: exitEvent(1, SESSION) });
+    expect(c.room(ROOM).progress?.[SESSION]).toBeUndefined();
+  });
+
+  it('a failed exit converges too, and leaves other sessions previewing', async () => {
+    const c = await clientWith({});
+    c.join(ROOM);
+    latest().deliver({ type: 'subscribed', roomId: ROOM, head: 0, seenSeq: 0 });
+    latest().deliver(heartbeat('sess-a', 0));
+    latest().deliver(heartbeat('sess-b', 0));
+    expect(c.room(ROOM).progress?.['sess-a']).toBeDefined();
+    expect(c.room(ROOM).progress?.['sess-b']).toBeDefined();
+
+    // A session_failed converges the same way, and only for the session it names.
+    latest().deliver({ type: 'event', entry: exitEvent(1, 'sess-a', 'session_failed') });
+    expect(c.room(ROOM).progress?.['sess-a']).toBeUndefined();
+    expect(c.room(ROOM).progress?.['sess-b']).toBeDefined();
+  });
+
+  it('a REFUSED exit row is not a settle and does not clear the preview', async () => {
+    const c = await clientWith({});
+    c.join(ROOM);
+    latest().deliver({ type: 'subscribed', roomId: ROOM, head: 0, seenSeq: 0 });
+    latest().deliver(heartbeat(SESSION, 0));
+
+    // A row the server refused (`issues` non-empty) took a log position but changed
+    // nothing — it is not this session's exit, so the preview stands.
+    latest().deliver({
+      type: 'event',
+      entry: exitEvent(1, SESSION, 'session_settled', ['refused for some reason']),
+    });
+    expect(c.room(ROOM).progress?.[SESSION]).toBeDefined();
+  });
+});

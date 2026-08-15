@@ -47,6 +47,7 @@ import {
 import { createWorktreeCommandProvider } from '../../apps/server/src/execution/worktree-provider.js';
 import { createLedger, type Ledger } from '../../apps/server/src/ledger.js';
 import { createLogger } from '../../apps/server/src/logger.js';
+import type { EphemeralFrame } from '../../apps/server/src/protocol.js';
 import { createMembershipAuthorizer, type Session } from '../../apps/server/src/session.js';
 import { openDatabase, resetDatabase, type SeededRoom, seedRoom } from '../support/harness.js';
 
@@ -2100,5 +2101,71 @@ describe('the live progress channel streams a running session (#159)', () => {
     // durable events persist past the settle (only the ephemeral snapshot is cleared).
     // Revert the coordinator's `onProgress` wiring and this drops to zero.
     expect(await phaseEventCount(sessionId)).toBe(3);
+  });
+
+  it('REJECTS an out-of-enum phase before any durable append (#159 fix, finding 1)', async () => {
+    const commands = commandService();
+    const planId = await openPlan(commands);
+    await fundPlan(planId);
+    const sessionId = await openGrantedSession(planId, agentSession, commands);
+    const authority = await sessionAuthority(sessionId);
+    const before = await phaseEventCount(sessionId);
+
+    // A phase the enum does not contain. `execute` trusts its typed input and
+    // `ledger.append` does not re-parse a ledger-only event, so without the handler's
+    // runtime guard this would append an invalid durable `session_phase_changed` and
+    // poison replay. The guard refuses it at the boundary.
+    await expect(
+      commands.execute(agentSession, {
+        name: 'report_session_progress',
+        roomId: room.roomId,
+        sessionId,
+        authority,
+        phase: 'deploying' as never,
+      }),
+    ).rejects.toThrow();
+
+    // Nothing durable landed, and the snapshot was never written.
+    expect(await phaseEventCount(sessionId)).toBe(before);
+    expect((await sessionProgress(sessionId))?.progress ?? null).toBeNull();
+  });
+
+  it('delivers the ephemeral progress frames a run produces to the broadcast sink (#159 fix, finding 2)', async () => {
+    const commands = commandService();
+    const planId = await openPlan(commands);
+    await fundPlan(planId);
+    const sessionId = await openGrantedSession(planId, agentSession, commands);
+
+    // The coordinator is the only holder of the session token, so it is the only real
+    // producer of these frames — and before this fix it discarded the command result,
+    // so the ephemeral frames reached nobody. Wire a recording sink and assert the run
+    // hands it the heartbeat and the diff the shim streamed.
+    const delivered: EphemeralFrame[] = [];
+    const provider = createDeterministicShimProvider({ repo, artifactRepo });
+    const coord = createExecutionCoordinator({
+      commands,
+      provider,
+      logger,
+      ownership: ownership(),
+      deliverProgress: (_roomId, frames) => {
+        delivered.push(...frames);
+      },
+    });
+    const outcome = await coord.runGranted(agentSession, {
+      sessionId,
+      roomId: room.roomId,
+      planId,
+      harness: 'omp',
+      model: 'haiku',
+    });
+    expect(outcome.kind).toBe('settled');
+
+    const types = delivered.map((frame) => frame.type);
+    expect(types).toContain('session_heartbeat');
+    expect(types).toContain('session_diff_delta');
+    // Every delivered frame names the session's room — the sink fans it to the right
+    // subscribers. (The doorbell for a phase-only report delivers an empty frame set,
+    // so it never lands here.)
+    expect(delivered.every((frame) => frame.roomId === room.roomId)).toBe(true);
   });
 });

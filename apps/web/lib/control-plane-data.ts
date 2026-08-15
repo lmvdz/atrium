@@ -7,6 +7,7 @@ import {
   type Database,
   plans,
   type SessionArtifact,
+  type SessionProgress,
   sessions,
   users,
 } from '@atrium/db';
@@ -60,7 +61,7 @@ import { and, asc, desc, eq, getTableColumns, gt, inArray, sql } from 'drizzle-o
  * never hand-set — holds across the seam. See src/components/control/state.ts.
  * ------------------------------------------------------------------------- */
 
-export type { SessionArtifact };
+export type { SessionArtifact, SessionProgress };
 
 export interface ControlSessionRow {
   readonly id: string;
@@ -78,6 +79,17 @@ export interface ControlSessionRow {
    * revision (round-6 finding 1). NULL when there is no artifact.
    */
   readonly artifactDigest: string | null;
+  /**
+   * THE LIVE PROGRESS SNAPSHOT (#159, decided in #152) — the `~` preview a running
+   * session is streaming: phase, spend/context heartbeat, coalesced diff. This is
+   * the LATE-JOIN / LOSS-RECOVERY read: a client that reconnects or joins mid-run
+   * recovers the current preview from this authenticated row read, then applies live
+   * frames whose `progressSeq` exceeds the snapshot's. NULL when no progress has been
+   * reported and once the session settles (the settle projection clears it — the
+   * durable receipt replaces the stream wholesale). Non-epistemic: every field is a
+   * `~` draft, and it can never carry a `certified`/`verified` discriminant.
+   */
+  readonly progress: SessionProgress | null;
   /**
    * The raw id of the human who certified it — carried BESIDE the display name so
    * the render backstop can check the armer and the certifier are the SAME person
@@ -427,6 +439,11 @@ export async function loadControlPlane(
       exitSummary: session.exitSummary,
       artifact: session.artifact ?? null,
       artifactDigest: session.artifactDigest ?? null,
+      // The late-join/loss-recovery progress snapshot (#159 fix, finding 3). Selected
+      // via `getTableColumns(sessions)` above but dropped by the mapper before this
+      // fix, so a reconnecting client could not recover the live preview. Carried
+      // through raw — the component layer renders it as `~`, derives no glyph here.
+      progress: session.progress ?? null,
       certifiedById: session.certifiedBy,
       certifyArmedById: session.certifyArmedBy,
       certifiedByName:

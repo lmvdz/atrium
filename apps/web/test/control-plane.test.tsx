@@ -95,6 +95,7 @@ function session(overrides: Partial<ControlSessionRow>): ControlSessionRow {
     exitSummary: null,
     artifact: null,
     artifactDigest: null,
+    progress: null,
     certifiedById: null,
     certifyArmedById: null,
     certifiedByName: null,

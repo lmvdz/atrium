@@ -1,6 +1,7 @@
 import { z } from 'zod';
-import type { Command, CommandResult } from '../commands.js';
+import { Command, type CommandResult } from '../commands.js';
 import type { Logger } from '../logger.js';
+import type { EphemeralFrame } from '../protocol.js';
 import { ExecutionArtifact as ExecutionArtifactSchema } from '../room-events.js';
 import type { Session } from '../session.js';
 import type {
@@ -126,6 +127,22 @@ export interface ExecutionCoordinatorOptions {
   logger: Logger;
   /** The granted-draw guard + ownership claim (#120 round-6). MANDATORY — no bypass. */
   ownership: ExecutionOwnership;
+  /**
+   * DELIVER THE LIVE-PROGRESS FRAMES A RUN PRODUCES TO THE ROOM (#159 fix, finding 2).
+   *
+   * The coordinator is the ONLY holder of a running session's execution-authority
+   * token, so it is the only caller of `report_session_progress` — and the ephemeral
+   * heartbeat/diff frames the command mints come back ONLY on its `CommandResult`,
+   * never on the wire (a WS client holds no token, so the socket layer's `progress`
+   * broadcast is unreachable for real progress). This sink is how those frames reach
+   * subscribers: the wiring in `index.ts` fans each frame to local sockets (`hub`)
+   * and peer instances (`bus`), and rings the `projection_changed` doorbell so a
+   * client that missed the lossy frames rereads the durable `sessions.progress`
+   * snapshot. Absent in a unit test that only asserts the command result; when
+   * absent the frames are simply not delivered, exactly as before this fix — the run
+   * never fails on delivery.
+   */
+  deliverProgress?: (roomId: string, frames: readonly EphemeralFrame[]) => void;
 }
 
 /** What the coordinator is asked to open and run. */
@@ -198,7 +215,7 @@ export interface ExecutionCoordinator {
 export function createExecutionCoordinator(
   options: ExecutionCoordinatorOptions,
 ): ExecutionCoordinator {
-  const { commands, provider, logger, ownership } = options;
+  const { commands, provider, logger, ownership, deliverProgress } = options;
 
   /**
    * Append one `settle_session`, and THROW if it did not land. Both spellings of
@@ -317,7 +334,13 @@ export function createExecutionCoordinator(
     // healthy execution.
     const reportProgress: ProgressReporter = async (report) => {
       try {
-        await commands.execute(session, {
+        // PARSE THE CONSTRUCTED COMMAND AT THE BOUNDARY (#159 fix, finding 1). The
+        // wire runs `Command.parse` on every inbound frame; this in-process producer
+        // constructs the command directly, so it must earn the same trust before it
+        // reaches `execute` (which trusts its typed input). An out-of-enum phase or an
+        // out-of-bounds field is refused HERE, before any durable append — the handler
+        // re-validates the phase at the ledger boundary as defence in depth.
+        const command = Command.parse({
           name: 'report_session_progress',
           roomId: granted.roomId,
           sessionId: granted.sessionId,
@@ -341,6 +364,19 @@ export function createExecutionCoordinator(
               }
             : {}),
         });
+        const result = await commands.execute(session, command);
+        // DELIVER TO SUBSCRIBERS (#159 fix, finding 2). The ephemeral heartbeat/diff
+        // frames live only on this result — the coordinator holds the token, so the
+        // socket layer's `progress` broadcast never fires for real progress. Hand them
+        // to the injected sink, which fans them to local sockets + peer instances and
+        // rings the snapshot doorbell. A durable PHASE (`appended`) is delivered to
+        // clients by the ordinary ledger fan-out; we still ring the doorbell for it so
+        // a client rereads the phase-refreshed `sessions.progress` snapshot promptly.
+        if (result.kind === 'progress') {
+          deliverProgress?.(result.roomId, result.frames);
+        } else if (result.kind === 'appended' && report.phase !== undefined) {
+          deliverProgress?.(result.roomId, []);
+        }
       } catch (error) {
         logger.warn('progress report rejected — continuing the run', {
           sessionId: granted.sessionId,
