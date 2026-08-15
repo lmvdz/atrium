@@ -77,6 +77,7 @@ function spyProvider(report: ExecutionReport): ExecutionProvider & {
       return report;
     },
     cancelAll: async () => {},
+    deliver: async () => ({ kind: 'ignored', reason: 'not-running' }),
     get resolved() {
       return state.resolved;
     },
@@ -263,6 +264,7 @@ describe('the coordinator enforces the budget guard (#118)', () => {
         return settledReport;
       },
       cancelAll: async () => {},
+      deliver: async () => ({ kind: 'ignored', reason: 'not-running' }),
     };
     const coordinator = createExecutionCoordinator({
       commands,
@@ -561,6 +563,7 @@ describe('the run context is the STORED context, not the caller payload (#120 r6
       },
       run: async () => settledReport,
       cancelAll: async () => {},
+      deliver: async () => ({ kind: 'ignored', reason: 'not-running' }),
     };
     // The STORED context differs from what the caller passes to runGranted — the
     // coordinator must use the stored values, never the caller's.
@@ -622,6 +625,7 @@ describe('a malformed provider report never leaves the session open (#120 r6 F7)
       // Malformed: not an ExecutionReport at all.
       run: async () => undefined as never,
       cancelAll: async () => {},
+      deliver: async () => ({ kind: 'ignored', reason: 'not-running' }),
     };
     const coordinator = createExecutionCoordinator({
       commands,
@@ -684,6 +688,7 @@ describe('a malformed provider report never leaves the session open (#120 r6 F7)
         },
       }),
       cancelAll: async () => {},
+      deliver: async () => ({ kind: 'ignored', reason: 'not-running' }),
     };
     const coordinator = createExecutionCoordinator({
       commands,
@@ -763,5 +768,97 @@ describe('a claim throw is inside the failure boundary (#120 r7 F3, red-on-rever
     expect(provider.resolved).toBe(0);
     expect(provider.ran).toBe(0);
     expect(commands.calls.find((c) => c.name === 'settle_session')).toBeUndefined();
+  });
+});
+
+/**
+ * #147 — the coordinator ROUTES an already-authorized signal to the provider and
+ * does NOT re-authorize, settle, or certify. Delivery consumes a row #127 already
+ * enforced; the coordinator only hands it to the seam and reports the outcome.
+ */
+describe('the coordinator routes authorized signals to the provider (#147)', () => {
+  function recordingProvider(outcome: {
+    delivered: () => Awaited<ReturnType<ExecutionProvider['deliver']>>;
+  }) {
+    const calls: Parameters<ExecutionProvider['deliver']>[0][] = [];
+    const provider: ExecutionProvider = {
+      kind: 'recording',
+      resolve: async () => {
+        throw new Error('not used');
+      },
+      run: async () => settledReport,
+      cancelAll: async () => {},
+      deliver: async (signal) => {
+        calls.push(signal);
+        return outcome.delivered();
+      },
+    };
+    return { provider, calls };
+  }
+
+  it('hands the exact signal to the provider and returns its outcome — no settle, no draw', async () => {
+    const commands = fakeCommands({
+      kind: 'appended',
+      roomId: 'r',
+      seq: 1,
+      roomSeq: 1,
+      actor: { kind: 'agent', userId: agent.userId },
+      event: {} as never,
+      issues: [],
+    });
+    const { provider, calls } = recordingProvider({ delivered: () => ({ kind: 'delivered' }) });
+    const coordinator = createExecutionCoordinator({
+      commands,
+      provider,
+      logger,
+      ownership: okOwnership(),
+    });
+
+    const roomId = randomUUID();
+    const sessionId = randomUUID();
+    const outcome = await coordinator.deliverSignal({
+      sessionId,
+      roomId,
+      kind: 'steer',
+      body: 'prefer the smaller diff',
+    });
+
+    // The provider got EXACTLY the row, and the coordinator returned its outcome.
+    expect(calls).toEqual([{ sessionId, roomId, kind: 'steer', body: 'prefer the smaller diff' }]);
+    expect(outcome).toEqual({ kind: 'delivered' });
+    // COVENANT: delivery is not an act. No command was issued at all — no settle,
+    // no open, nothing that could spend or certify. REVERT-REDS: make deliverSignal
+    // append a settle/settle-on-interrupt and this reds.
+    expect(commands.calls).toEqual([]);
+  });
+
+  it('reports a not-running no-op without throwing (a signal for a session it does not run)', async () => {
+    const commands = fakeCommands({
+      kind: 'appended',
+      roomId: 'r',
+      seq: 1,
+      roomSeq: 1,
+      actor: { kind: 'agent', userId: agent.userId },
+      event: {} as never,
+      issues: [],
+    });
+    const { provider } = recordingProvider({
+      delivered: () => ({ kind: 'ignored', reason: 'not-running' }),
+    });
+    const coordinator = createExecutionCoordinator({
+      commands,
+      provider,
+      logger,
+      ownership: okOwnership(),
+    });
+
+    const outcome = await coordinator.deliverSignal({
+      sessionId: randomUUID(),
+      roomId: randomUUID(),
+      kind: 'interrupt',
+      body: null,
+    });
+    expect(outcome).toEqual({ kind: 'ignored', reason: 'not-running' });
+    expect(commands.calls).toEqual([]);
   });
 });

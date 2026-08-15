@@ -1,4 +1,7 @@
 import { type ChildProcess, spawn } from 'node:child_process';
+import { appendFile, mkdtemp, rm } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import {
   type ArtifactRepo,
   addWorktree,
@@ -13,7 +16,23 @@ import {
   type ScratchRepo,
   type WorktreeCheckout,
 } from './git.js';
-import type { ExecutionProvider, ExecutionReport, SessionContext, Workspace } from './provider.js';
+import type {
+  DeliveryOutcome,
+  ExecutionProvider,
+  ExecutionReport,
+  SessionContext,
+  SignalDelivery,
+  Workspace,
+} from './provider.js';
+
+/**
+ * The env var naming a session's STEER INBOX (#147). A delivered steer is appended
+ * as one line here; a cooperating harness reads it at its turn boundary. The inbox
+ * lives OUTSIDE the git checkout (in the scrubbed HOME/TMPDIR the harness already
+ * gets), so a steer never dirties the artifact tree, and it is queued — never
+ * signalled mid-token — exactly as the seam promises.
+ */
+export const STEER_INBOX_ENV = 'ATRIUM_STEER_INBOX';
 
 /** The outcome of running a harness child to completion (or timeout/kill). */
 interface HarnessRun {
@@ -143,12 +162,18 @@ export interface WorktreeCommandOptions {
  * HOME with no dotfiles, locale, a temp dir, the scrubbing that keeps its own
  * git bound to its worktree, and its session id. Nothing else crosses the seam.
  */
-export async function harnessEnv(sessionId: string): Promise<NodeJS.ProcessEnv> {
+export async function harnessEnv(
+  sessionId: string,
+  steerInbox?: string,
+): Promise<NodeJS.ProcessEnv> {
   const home = await cleanHome();
   const allow = ['PATH', 'LANG', 'LC_ALL', 'LC_CTYPE', 'TERM', 'TZ'] as const;
   const env: NodeJS.ProcessEnv = {
     HOME: home,
     TMPDIR: home,
+    // The steer inbox (#147): a cooperating harness reads queued steers here at its
+    // turn boundary. Only set when the provider allocated one for this session.
+    ...(steerInbox ? { [STEER_INBOX_ENV]: steerInbox } : {}),
     // Bind any git the harness itself runs to its own worktree, never the real
     // repo — the same scrub the adapter's own git operations get.
     GIT_CONFIG_NOSYSTEM: '1',
@@ -292,25 +317,43 @@ export function createWorktreeCommandProvider(options: WorktreeCommandOptions): 
   }
   const [bin, ...args] = command;
 
-  // ── IN-FLIGHT CHILDREN, TRACKED FOR CANCELLATION (#120 round-7 F4) ──────────
+  // ── IN-FLIGHT EXECUTIONS, TRACKED FOR CANCELLATION AND DELIVERY (#120 r7 F4;
+  // #147) ────────────────────────────────────────────────────────────────────
   //
-  // Every live harness child, keyed by session id, so `cancelAll` can terminate
-  // it on shutdown. Without this the child is spawned fire-and-forget and a
-  // `SIGTERM` abandons it: Atrium exits and the harness keeps running loose.
-  const children = new Map<string, ChildProcess>();
+  // One record per live session, keyed by id: the harness `child` (set at spawn,
+  // for the interrupt/shutdown group-kill) and the `steerInbox` path (allocated at
+  // resolve, where a delivered steer is appended). Without the child map a
+  // `SIGTERM` abandons the harness — Atrium exits and it runs loose; the inbox is
+  // what a delivered steer lands in.
+  interface InFlight {
+    child?: ChildProcess;
+    readonly steerInbox: string;
+    readonly inboxDir: string;
+  }
+  const inflight = new Map<string, InFlight>();
 
   return {
     kind: 'worktree',
 
     async resolve(ctx: SessionContext): Promise<Workspace> {
       const checkout = await addWorktree(repo, ctx.sessionId);
+      // Allocate the steer inbox OUTSIDE the checkout (#147), so a delivered steer
+      // never dirties the artifact tree. Registered before run so a steer delivered
+      // between resolve and spawn is not dropped as `not-running`.
+      const inboxDir = await mkdtemp(join(tmpdir(), 'atrium-steer-'));
+      const steerInbox = join(inboxDir, 'steer.inbox');
+      inflight.set(ctx.sessionId, { steerInbox, inboxDir });
       const workspace: WorktreeWorkspace = {
         sessionId: ctx.sessionId,
         dir: checkout.dir,
         branch: checkout.branch,
         remote: artifactRepo?.dir ?? repo.dir,
         checkout,
-        dispose: () => removeWorktree(checkout),
+        dispose: async () => {
+          inflight.delete(ctx.sessionId);
+          await rm(inboxDir, { recursive: true, force: true });
+          await removeWorktree(checkout);
+        },
       };
       return workspace;
     },
@@ -323,17 +366,33 @@ export function createWorktreeCommandProvider(options: WorktreeCommandOptions): 
       // configured command inside it. Verified here, before checkout.dir is a cwd.
       assertAuthenticRunCheckout(checkout);
 
-      // Run the harness in its own process group, tracked for cancellation. The
-      // harness gets an allowlisted env — never the server's secrets, and scrubbed
-      // of any var that could retarget its git off this worktree.
+      // Run the harness in its own process group, tracked for cancellation and
+      // steer delivery. The harness gets an allowlisted env — never the server's
+      // secrets, and scrubbed of any var that could retarget its git off this
+      // worktree — plus its steer inbox (#147).
+      const record = inflight.get(ctx.sessionId);
       const outcome = await runHarness(
         bin as string,
         args,
-        { cwd: checkout.dir, env: await harnessEnv(ctx.sessionId), timeoutMs },
+        {
+          cwd: checkout.dir,
+          env: await harnessEnv(ctx.sessionId, record?.steerInbox),
+          timeoutMs,
+        },
         (child) => {
-          children.set(ctx.sessionId, child);
-          child.once('close', () => children.delete(ctx.sessionId));
-          child.once('error', () => children.delete(ctx.sessionId));
+          // Bind the live child to its in-flight record so `deliver`'s interrupt and
+          // `cancelAll` can group-kill it. Clearing only the child (not the record)
+          // on close keeps the steer inbox addressable until dispose.
+          const live = inflight.get(ctx.sessionId);
+          if (live) live.child = child;
+          child.once('close', () => {
+            const r = inflight.get(ctx.sessionId);
+            if (r) r.child = undefined;
+          });
+          child.once('error', () => {
+            const r = inflight.get(ctx.sessionId);
+            if (r) r.child = undefined;
+          });
         },
       );
       const exitCode = outcome.exitCode;
@@ -400,8 +459,47 @@ export function createWorktreeCommandProvider(options: WorktreeCommandOptions): 
       // already had its drain grace, and a harness that ignores `SIGTERM` must not
       // outlive the process that abandoned it. Best-effort and never throws: a
       // child that already exited (ESRCH) is exactly the state we want.
-      for (const child of children.values()) killGroup(child);
-      children.clear();
+      for (const record of inflight.values()) {
+        if (record.child) killGroup(record.child);
+      }
+    },
+
+    // DELIVER an already-authorized signal to a running harness (#147).
+    //
+    //  - interrupt → GROUP-kill the harness child, exactly as `cancelAll` does but
+    //    for the one session: the child is a `detached` group leader, so `-pid`
+    //    reaches it AND every grandchild a `bash -lc` spawned — NO orphan (the
+    //    #120/#141 lesson). The run's own `close` handler then reports the failed
+    //    terminal and the coordinator settles `session_failed`; delivery writes
+    //    nothing durable and certifies nothing.
+    //  - steer → append the guidance as one line in the session's steer inbox for a
+    //    cooperating harness to read at its next turn boundary. Queued, never
+    //    mid-token, and outside the checkout so it never dirties the artifact.
+    //  - resume → the daemon's wake, not a mutation of a run in flight.
+    //
+    // A signal for a session with no in-flight record is `not-running` — the safe
+    // no-op (another coordinator may run it; the row is already durable).
+    async deliver(delivery: SignalDelivery): Promise<DeliveryOutcome> {
+      if (delivery.kind === 'resume') return { kind: 'ignored', reason: 'resume-noop' };
+      const record = inflight.get(delivery.sessionId);
+      if (!record) return { kind: 'ignored', reason: 'not-running' };
+      if (delivery.kind === 'interrupt') {
+        // Group-kill only if a child is live; an interrupt racing the harness's own
+        // exit (no live child) still consumed a real, authorized in-flight record,
+        // so it is reported `interrupted` — the session is on its way terminal.
+        if (record.child) killGroup(record.child);
+        return { kind: 'interrupted' };
+      }
+      // steer: one line per delivery, best-effort. A failed append must not throw
+      // into the coordinator's fire-and-forget delivery — the harness simply does
+      // not see this steer, the same as any dropped turn-boundary message.
+      try {
+        await appendFile(record.steerInbox, `${(delivery.body ?? '').replace(/\n/g, ' ')}\n`);
+      } catch {
+        // Inbox unwritable (disposed mid-delivery) — nothing was queued.
+        return { kind: 'ignored', reason: 'not-running' };
+      }
+      return { kind: 'delivered' };
     },
   };
 }

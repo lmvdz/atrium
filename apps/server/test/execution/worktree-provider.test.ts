@@ -242,3 +242,160 @@ describe('cancelAll terminates a running harness and its whole process group (#1
     await disposeScratchRepo(repo);
   });
 });
+
+/**
+ * #147 — DELIVERY of an already-authorized signal to a RUNNING worktree harness.
+ *
+ * The headline is the process-group interrupt: an `interrupt` must terminate the
+ * harness AND every grandchild it spawned, leaving NO orphan (the #120/#141
+ * lesson), exactly as `cancelAll` does but targeted at one session. A `steer` is
+ * queued in the session's inbox for a cooperating harness to read at its turn
+ * boundary; a signal for a session this provider is not running is a safe no-op.
+ */
+describe('deliver reaches a running worktree harness (#147)', () => {
+  let savedOptIn: string | undefined;
+  beforeEach(() => {
+    savedOptIn = process.env.EXECUTION_ALLOW_UNSANDBOXED;
+    process.env.EXECUTION_ALLOW_UNSANDBOXED = '1';
+  });
+  afterEach(() => {
+    if (savedOptIn === undefined) delete process.env.EXECUTION_ALLOW_UNSANDBOXED;
+    else process.env.EXECUTION_ALLOW_UNSANDBOXED = savedOptIn;
+  });
+
+  function alive(pid: number): boolean {
+    try {
+      process.kill(pid, 0);
+      return true;
+    } catch (error) {
+      return (error as NodeJS.ErrnoException).code === 'EPERM';
+    }
+  }
+  async function waitUntilDead(pid: number, timeoutMs = 5_000): Promise<void> {
+    const deadline = Date.now() + timeoutMs;
+    while (Date.now() < deadline) {
+      if (!alive(pid)) return;
+      await new Promise((r) => setTimeout(r, 25));
+    }
+    throw new Error(`process ${pid} was still alive after ${timeoutMs}ms`);
+  }
+  const ctx = (sessionId: string): SessionContext => ({
+    sessionId,
+    roomId: 'r',
+    planId: 'p',
+    harness: 'omp',
+    model: 'haiku',
+  });
+
+  it('an interrupt group-kills the harness and its grandchild — NO orphan', async () => {
+    const repo = await createScratchRepo();
+    const provider = createWorktreeCommandProvider({
+      repo,
+      command: ['bash', '-lc', 'sleep 300 & echo "$!" > pids.txt; echo "$$" >> pids.txt; wait'],
+    });
+    const c = ctx('interrupt-me');
+    const workspace = await provider.resolve(c);
+    const runPromise = provider.run(workspace, c);
+
+    const pidfile = join(workspace.dir, 'pids.txt');
+    let sleepPid = 0;
+    let bashPid = 0;
+    const deadline = Date.now() + 5_000;
+    while (Date.now() < deadline) {
+      try {
+        const lines = (await readFile(pidfile, 'utf8')).trim().split('\n');
+        if (lines.length >= 2 && lines[0] && lines[1]) {
+          sleepPid = Number(lines[0]);
+          bashPid = Number(lines[1]);
+          break;
+        }
+      } catch {
+        // not written yet
+      }
+      await new Promise((r) => setTimeout(r, 25));
+    }
+    expect(sleepPid).toBeGreaterThan(0);
+    expect(bashPid).toBeGreaterThan(0);
+    expect(alive(bashPid)).toBe(true);
+    expect(alive(sleepPid)).toBe(true);
+
+    // THE INTERRUPT. It consumes an already-authorized row (#127) and only kills —
+    // no ledger write, no certify. REVERT-REDS: swap the `killGroup(record.child)`
+    // in deliver()'s interrupt arm for `record.child.kill('SIGKILL')` (the direct
+    // child only, not the group) and the grandchild `sleep` SURVIVES — an orphan.
+    const outcome = await provider.deliver({
+      sessionId: c.sessionId,
+      roomId: c.roomId,
+      kind: 'interrupt',
+      body: 'stop',
+    });
+    expect(outcome).toEqual({ kind: 'interrupted' });
+
+    // The whole group is gone — assert the grandchild specifically (the orphan).
+    await waitUntilDead(bashPid);
+    await waitUntilDead(sleepPid);
+    expect(alive(sleepPid)).toBe(false);
+
+    // The run itself reaches a FAILED terminal (the harness was SIGKILLed) — the
+    // coordinator settles session_failed; delivery certified nothing.
+    const report = await runPromise;
+    expect(report.terminal.ok).toBe(false);
+
+    await workspace.dispose().catch(() => undefined);
+    await disposeScratchRepo(repo);
+  });
+
+  it('a steer is queued in the inbox and a cooperating harness reads it at its boundary', async () => {
+    const repo = await createScratchRepo();
+    // The harness polls its steer inbox (the env var the provider sets) and, once a
+    // steer lands, copies it out and exits — a stand-in for a real turn boundary.
+    const provider = createWorktreeCommandProvider({
+      repo,
+      command: [
+        'bash',
+        '-lc',
+        'for i in $(seq 1 200); do if [ -s "$ATRIUM_STEER_INBOX" ]; then cat "$ATRIUM_STEER_INBOX" > steer-seen.txt; exit 0; fi; sleep 0.05; done; exit 3',
+      ],
+    });
+    const c = ctx('steer-me');
+    const workspace = await provider.resolve(c);
+    const runPromise = provider.run(workspace, c);
+
+    // Give the harness a moment to start polling, then deliver. REVERT-REDS: drop
+    // the `appendFile(record.steerInbox, …)` in deliver()'s steer arm and the inbox
+    // stays empty — the harness times out (exit 3) and steer-seen.txt never appears.
+    await new Promise((r) => setTimeout(r, 100));
+    const outcome = await provider.deliver({
+      sessionId: c.sessionId,
+      roomId: c.roomId,
+      kind: 'steer',
+      body: 'tighten the loop',
+    });
+    expect(outcome).toEqual({ kind: 'delivered' });
+
+    const report = await runPromise;
+    expect(report.terminal.ok).toBe(true);
+    const seen = (await readFile(join(workspace.dir, 'steer-seen.txt'), 'utf8')).trim();
+    expect(seen).toBe('tighten the loop');
+
+    await workspace.dispose().catch(() => undefined);
+    await disposeScratchRepo(repo);
+  });
+
+  it('a signal for a session this provider is not running is a safe no-op', async () => {
+    const repo = await createScratchRepo();
+    const provider = createWorktreeCommandProvider({ repo, command: ['true'] });
+    // No resolve for this session.
+    expect(
+      await provider.deliver({ sessionId: 'ghost', roomId: 'r', kind: 'interrupt', body: null }),
+    ).toEqual({ kind: 'ignored', reason: 'not-running' });
+    expect(
+      await provider.deliver({ sessionId: 'ghost', roomId: 'r', kind: 'steer', body: 'x' }),
+    ).toEqual({ kind: 'ignored', reason: 'not-running' });
+    // A resume is the daemon's wake even for a session it IS running — always noop.
+    expect(
+      await provider.deliver({ sessionId: 'ghost', roomId: 'r', kind: 'resume', body: null }),
+    ).toEqual({ kind: 'ignored', reason: 'resume-noop' });
+    await disposeScratchRepo(repo);
+  });
+});

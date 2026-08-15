@@ -133,6 +133,49 @@ export interface Workspace {
 }
 
 /**
+ * AN ALREADY-AUTHORIZED SIGNAL, HANDED TO THE RUNNING HARNESS (#147).
+ *
+ * #127 built `session_signaled {steer|interrupt|resume}` as ledger events with
+ * FULL enforcement at append (open-session-only, interrupt-authz by agent/owner,
+ * resume-as-a-draw). This seam CONSUMES one of those already-durable rows and
+ * delivers it to the process — it does NOT re-authorize, re-check identity, spend,
+ * certify, or land. The row's authority was settled at append; delivery only
+ * makes an already-legal signal REACH the harness it was appended into.
+ *
+ *  - `sessionId`/`roomId` — the running session this signal targets.
+ *  - `kind` — `steer` (guidance, queued to the NEXT turn boundary, never
+ *    mid-token), `interrupt` (terminate the running process promptly), or
+ *    `resume` (a continuation DRAW — see `deliver`'s resume note; the provider
+ *    does NOT wake a run here, that is the daemon's concern, #124/#128).
+ *  - `body` — the steer's words / the interrupt's reason, exactly as the ledger
+ *    row carries it.
+ */
+export interface SignalDelivery {
+  readonly sessionId: string;
+  readonly roomId: string;
+  readonly kind: 'steer' | 'interrupt' | 'resume';
+  readonly body: string | null;
+}
+
+/**
+ * What delivery did — an OBSERVATION, never a ledger act.
+ *
+ *  - `delivered` — a steer was queued for the session's next turn boundary.
+ *  - `interrupted` — the running process was terminated (the whole process GROUP,
+ *    so grandchildren die too); the ordinary run/settle path writes the terminal
+ *    `session_failed` receipt, delivery writes nothing.
+ *  - `ignored` — nothing was delivered. `not-running`: this provider has no
+ *    in-flight execution for the session (another coordinator may run it; the row
+ *    is already durable, so this is a SAFE no-op, never a crash). `resume-noop`: a
+ *    resume is a draw the daemon acts on by OPENING a fresh run, not a delivery
+ *    into an execution already in flight (see `deliver`).
+ */
+export type DeliveryOutcome =
+  | { readonly kind: 'delivered' }
+  | { readonly kind: 'interrupted' }
+  | { readonly kind: 'ignored'; readonly reason: 'not-running' | 'resume-noop' };
+
+/**
  * The seam. One provider per deployment; the deterministic shim is the DEFAULT
  * under test, a real worktree adapter is one real implementation, and a sandbox
  * is a third behind a flag. `kind` names which, for the log and the receipt.
@@ -165,4 +208,38 @@ export interface ExecutionProvider {
    * question, not that every implementation has something to kill.
    */
   cancelAll(): Promise<void>;
+  /**
+   * DELIVER an already-authorized signal to a RUNNING execution (#147).
+   *
+   * The coordinator subscribes to `session_signaled` rows and routes them here
+   * (`coordinator.ts`). This is the one verb that reaches INTO a live run — the
+   * counterpart to `cancelAll`'s shutdown-wide kill, but targeted at one session
+   * and one signal:
+   *
+   *  - `steer` → QUEUE the guidance for the session's next TURN BOUNDARY. Never
+   *    mid-token: the running turn finishes, and the queued steer is consumed
+   *    before the next one begins. The shim makes this observable — a delivered
+   *    steer's text appears in its next-turn artifact — and the worktree provider
+   *    drops it in the harness's steer inbox for a cooperating harness to read.
+   *    Returns `delivered`.
+   *  - `interrupt` → TERMINATE the running process PROMPTLY, killing the whole
+   *    process GROUP (`worktree` reuses the `cancelAll` group-kill, so a `bash -lc`
+   *    and its grandchildren die too — no orphan, the #120/#141 lesson). The run's
+   *    ordinary terminal/settle path then writes `session_failed`. Delivery itself
+   *    writes NOTHING to the ledger — an interrupt cannot land or certify. Returns
+   *    `interrupted`.
+   *  - `resume` → a continuation DRAW (#127), which the daemon (#124/#128) acts on
+   *    by OPENING a fresh run from the matched event, NOT by mutating an execution
+   *    already in flight. So the provider does not "wake" a run here — a session
+   *    that is currently running is not one waiting to be woken, and re-running it
+   *    would duplicate authorized-but-unspent work. Returns `ignored: resume-noop`.
+   *
+   * COVENANT: delivery consumes an already-enforced row and NEVER exceeds its
+   * authorization. It does not re-check identity (that happened at append, #127),
+   * spends nothing (a steer touches no draw), and certifies nothing (an interrupt
+   * only kills; the receipt is the ordinary settle). A signal for a session this
+   * provider is not running is `ignored: not-running` — a safe no-op, because
+   * another coordinator may be running it and the row is already durable.
+   */
+  deliver(delivery: SignalDelivery): Promise<DeliveryOutcome>;
 }

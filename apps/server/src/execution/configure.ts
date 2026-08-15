@@ -433,6 +433,33 @@ export function wireExecutionCoordinator(input: {
           });
         running.add(run);
       }
+
+      // ── ROUTE AN AUTHORIZED SIGNAL TO THE RUNNING HARNESS (#147) ─────────────
+      //
+      // A `signal_session` (steer/interrupt) or `resume_session` that APPENDED
+      // projected a durable `session_signaled` row — #127 already enforced it
+      // (open-session-only, interrupt-authz, resume-as-a-draw). We consume that
+      // authorized row and hand it to the coordinator, which reaches the provider.
+      // Post-commit and fire-and-forget: the signal is durable regardless, and a
+      // delivery fault must not fail the appended command. A refused signal never
+      // appends, so it never reaches here — delivery cannot exceed authorization.
+      if (result.kind === 'appended' && result.event.type === 'session_signaled') {
+        const event = result.event;
+        void coordinator
+          .deliverSignal({
+            sessionId: event.sessionId,
+            roomId: event.roomId,
+            kind: event.kind,
+            body: event.body,
+          })
+          .catch((error: unknown) => {
+            logger.error('routing an authorized signal to the provider failed', {
+              sessionId: event.sessionId,
+              kind: event.kind,
+              error: error instanceof Error ? error.message : String(error),
+            });
+          });
+      }
       return result;
     },
   };

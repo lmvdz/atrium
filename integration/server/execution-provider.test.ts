@@ -5,7 +5,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { promisify } from 'node:util';
 import type { DatabaseHandle } from '@atrium/db';
-import { acceptedObjects, coreEvents, plans, sessions } from '@atrium/db/schema';
+import { acceptedObjects, coreEvents, plans, sessionSignals, sessions } from '@atrium/db/schema';
 import { and, eq, sql } from 'drizzle-orm';
 import { afterAll, afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { type ArtifactVerifier, createCommandService } from '../../apps/server/src/commands.js';
@@ -25,6 +25,7 @@ import {
   disposeScratchRepo,
   listSessionBranches,
   mainCommit,
+  readFileAtBranch,
   removeWorktree,
   type ScratchRepo,
   sessionBranch,
@@ -39,7 +40,9 @@ import type {
 import { reconcileWedgedSessions } from '../../apps/server/src/execution/reconcile.js';
 import {
   createDeterministicShimProvider,
+  EXECUTION_AWAIT_STEER_DIRECTIVE,
   EXECUTION_FAIL_DIRECTIVE,
+  SHIM_ARTIFACT_PATH,
 } from '../../apps/server/src/execution/shim.js';
 import { createWorktreeCommandProvider } from '../../apps/server/src/execution/worktree-provider.js';
 import { createLedger, type Ledger } from '../../apps/server/src/ledger.js';
@@ -1604,6 +1607,7 @@ describe('a garbage provider report still reaches a terminal receipt (#120 r7 F2
         receipt: { exitSummary: 'garbage', spendMicros: -1, contextPct: 2, artifact: null },
       }),
       cancelAll: async () => {},
+      deliver: async () => ({ kind: 'ignored', reason: 'not-running' }),
     };
     const commands = commandService();
     const coord = createExecutionCoordinator({
@@ -1646,3 +1650,192 @@ async function shimResolve(ctx: SessionContext): Promise<Workspace> {
     dispose: () => removeWorktree(checkout),
   };
 }
+
+/**
+ * #147 — DELIVERY of an already-authorized signal to the RUNNING harness, through
+ * the REAL command boundary and the REAL git shim.
+ *
+ * #127 built `session_signaled {steer|interrupt|resume}` as ledger events with full
+ * enforcement, but they did not REACH the running harness. This proves they do now:
+ * a steer's guidance is observable in the session's next-turn artifact, an interrupt
+ * drives the session terminal (`session_failed`, no artifact), a signal for a session
+ * this coordinator is not running is a safe no-op, and an interrupt at an ALREADY
+ * TERMINAL session is refused by the #127 guard and therefore delivers nothing.
+ *
+ * The steered/interrupted runs use the shim's await-steer directive so the run PARKS
+ * at one turn boundary — the deterministic window the coordinator's resolve→run
+ * leaves no room for otherwise. Delivery is retried until the mailbox exists (the
+ * run has resolved its workspace), so there is no wall-clock race.
+ */
+describe('an authorized signal reaches the running shim (#147)', () => {
+  /** Retry delivery until the run has resolved its workspace (mailbox exists). */
+  async function deliverWhenRunning(
+    coord: ReturnType<typeof coordinator>,
+    signal: { sessionId: string; roomId: string; kind: 'steer' | 'interrupt'; body: string | null },
+  ): Promise<void> {
+    const deadline = Date.now() + 5_000;
+    while (Date.now() < deadline) {
+      const outcome = await coord.deliverSignal(signal);
+      if (outcome.kind !== 'ignored' || outcome.reason !== 'not-running') return;
+      await new Promise((r) => setTimeout(r, 20));
+    }
+    throw new Error(`delivery never reached a running session ${signal.sessionId}`);
+  }
+
+  /** Open a granted, provider-mode session and return its id (no run yet). */
+  async function openGranted(commands: ReturnType<typeof commandService>, model: string) {
+    const opened = await commands.execute(agentSession, {
+      name: 'open_session',
+      roomId: room.roomId,
+      planId: await (async () => {
+        const id = await openPlan(commands);
+        await fundPlan(id);
+        return id;
+      })(),
+      harness: 'omp',
+      model,
+      causeMessageId: null,
+    });
+    expect(opened.kind).toBe('appended');
+    if (opened.kind !== 'appended' || opened.draw?.outcome !== 'granted') {
+      throw new Error('open_session was not granted');
+    }
+    return { sessionId: opened.draw.sessionId, planId: '' };
+  }
+
+  it('a steer is delivered at the turn boundary and its text lands in the artifact, then settles', async () => {
+    const commands = commandService();
+    const coord = coordinator(commands);
+    const { sessionId } = await openGranted(commands, EXECUTION_AWAIT_STEER_DIRECTIVE);
+
+    // The run PARKS at its boundary; deliver the steer while parked, then let it run.
+    const runP = coord.runGranted(agentSession, {
+      sessionId,
+      roomId: room.roomId,
+      planId: '',
+      harness: 'omp',
+      model: EXECUTION_AWAIT_STEER_DIRECTIVE,
+    });
+    await deliverWhenRunning(coord, {
+      sessionId,
+      roomId: room.roomId,
+      kind: 'steer',
+      body: 'prefer the smaller diff',
+    });
+    const outcome = await runP;
+
+    expect(outcome.kind).toBe('settled');
+    // The steer's guidance is observable in the next-turn artifact — the whole
+    // point of #147. RED-ON-REVERT: remove the wrapper/coordinator delivery path
+    // (or the shim's steer drain) and the artifact reverts to the unsteered bytes.
+    const body = await readFileAtBranch(repo, sessionBranch(sessionId), SHIM_ARTIFACT_PATH);
+    expect(body).toContain('prefer the smaller diff');
+
+    // The session settled cleanly, and no ~ became a ✓ — a steer cannot certify.
+    const [row] = await handle.db.select().from(sessions).where(eq(sessions.id, sessionId));
+    expect(row?.status).toBe('settled');
+  });
+
+  it('flip-the-input: a different steer changes the delivered/observed guidance', async () => {
+    const commands = commandService();
+    const coord = coordinator(commands);
+    const { sessionId } = await openGranted(commands, EXECUTION_AWAIT_STEER_DIRECTIVE);
+    const runP = coord.runGranted(agentSession, {
+      sessionId,
+      roomId: room.roomId,
+      planId: '',
+      harness: 'omp',
+      model: EXECUTION_AWAIT_STEER_DIRECTIVE,
+    });
+    await deliverWhenRunning(coord, {
+      sessionId,
+      roomId: room.roomId,
+      kind: 'steer',
+      body: 'use the OTHER migration order',
+    });
+    await runP;
+    const body = await readFileAtBranch(repo, sessionBranch(sessionId), SHIM_ARTIFACT_PATH);
+    expect(body).toContain('use the OTHER migration order');
+    expect(body).not.toContain('prefer the smaller diff');
+  });
+
+  it('an interrupt drives the session terminal: session_failed, no artifact', async () => {
+    const commands = commandService();
+    const coord = coordinator(commands);
+    const { sessionId } = await openGranted(commands, EXECUTION_AWAIT_STEER_DIRECTIVE);
+    const runP = coord.runGranted(agentSession, {
+      sessionId,
+      roomId: room.roomId,
+      planId: '',
+      harness: 'omp',
+      model: EXECUTION_AWAIT_STEER_DIRECTIVE,
+    });
+    await deliverWhenRunning(coord, {
+      sessionId,
+      roomId: room.roomId,
+      kind: 'interrupt',
+      body: 'stop, wrong approach',
+    });
+    const outcome = await runP;
+
+    expect(outcome.kind).toBe('failed');
+    const [row] = await handle.db.select().from(sessions).where(eq(sessions.id, sessionId));
+    expect(row?.status).toBe('failed');
+    // The terminal is a FAIL with NO artifact — an interrupt lands and certifies
+    // nothing; the branch never advanced past the seed.
+    expect(await exitArtifact(sessionId, 'session_failed')).toBeNull();
+    expect(await branchCommit(repo, sessionBranch(sessionId))).toBe(repo.seedCommit);
+  });
+
+  it('a signal for a session this coordinator is not running is a safe no-op', async () => {
+    const coord = coordinator();
+    const outcome = await coord.deliverSignal({
+      sessionId: randomUUID(),
+      roomId: room.roomId,
+      kind: 'steer',
+      body: 'nobody home',
+    });
+    expect(outcome).toEqual({ kind: 'ignored', reason: 'not-running' });
+  });
+
+  it('an interrupt at an ALREADY-TERMINAL session is refused (#127) and delivers nothing', async () => {
+    const commands = commandService();
+    // Run a session to a clean settle first (default model, no parking).
+    const outcome = await coordinator(commands).openAndRun(agentSession, {
+      roomId: room.roomId,
+      planId: await (async () => {
+        const id = await openPlan(commands);
+        await fundPlan(id);
+        return id;
+      })(),
+      harness: 'omp',
+      model: 'haiku',
+    });
+    expect(outcome.kind).toBe('settled');
+    if (outcome.kind !== 'settled') return;
+    const sessionId = outcome.sessionId;
+
+    // Appending an interrupt at a SETTLED session is refused at the command — the
+    // #127 guard. Nothing appends, so the wrapper never routes anything to deliver:
+    // a signal cannot exceed its authorization because only an APPENDED, authorized
+    // row is ever delivered.
+    await expect(
+      commands.execute(agentSession, {
+        name: 'signal_session',
+        roomId: room.roomId,
+        sessionId,
+        kind: 'interrupt',
+        body: 'too late',
+        causeMessageId: null,
+        supersedesEventId: null,
+      }),
+    ).rejects.toThrow(/not open/);
+
+    // And no signal row was written for this session — nothing to deliver.
+    const rows = await handle.db
+      .select({ id: sessionSignals.id })
+      .from(sessionSignals)
+      .where(eq(sessionSignals.sessionId, sessionId));
+    expect(rows).toHaveLength(0);
+  });
+});

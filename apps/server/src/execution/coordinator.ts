@@ -4,10 +4,12 @@ import type { Logger } from '../logger.js';
 import { ExecutionArtifact as ExecutionArtifactSchema } from '../room-events.js';
 import type { Session } from '../session.js';
 import type {
+  DeliveryOutcome,
   ExecutionArtifact,
   ExecutionProvider,
   ExecutionReport,
   SessionContext,
+  SignalDelivery,
 } from './provider.js';
 
 /**
@@ -174,6 +176,22 @@ export interface ExecutionCoordinator {
    * open already happened and was granted, so there is no draw to re-check here.
    */
   runGranted(session: Session, granted: GrantedSession): Promise<ExecutionOutcome>;
+  /**
+   * ROUTE AN ALREADY-AUTHORIZED SIGNAL TO THE RUNNING PROVIDER (#147).
+   *
+   * The coordinator subscribes to `session_signaled` rows (via the command-service
+   * wrapper in `configure.ts`, which fires this on every appended signal) and hands
+   * each to the provider's `deliver`. It CONSUMES a row #127 already enforced: no
+   * identity re-check, no draw, no settle, no certify happens here — a steer only
+   * queues, an interrupt only terminates the process (the ordinary run path writes
+   * the `session_failed` receipt), and a resume is the daemon's wake, not a delivery.
+   *
+   * A signal for a session THIS coordinator is not running comes back
+   * `ignored: not-running` from the provider — a safe no-op, never a throw: another
+   * coordinator may be running it and the row is already durable. The outcome is
+   * returned for the caller's log and for tests; it is an observation, not an act.
+   */
+  deliverSignal(signal: SignalDelivery): Promise<DeliveryOutcome>;
 }
 
 export function createExecutionCoordinator(
@@ -476,5 +494,23 @@ export function createExecutionCoordinator(
     });
   }
 
-  return { openAndRun, runGranted };
+  async function deliverSignal(signal: SignalDelivery): Promise<DeliveryOutcome> {
+    // CONSUME AN ALREADY-AUTHORIZED ROW (#147). The signal reached us because #127
+    // appended and enforced it (open-session-only, interrupt-authz by agent/owner,
+    // resume-as-a-draw). Delivery re-checks NONE of that and writes nothing durable:
+    // it hands the row to the provider, which reaches the running harness. A signal
+    // for a session this provider is not running is `not-running` — the safe no-op.
+    const outcome = await provider.deliver(signal);
+    logger.info('routed an authorized signal to the execution provider', {
+      sessionId: signal.sessionId,
+      roomId: signal.roomId,
+      kind: signal.kind,
+      provider: provider.kind,
+      outcome: outcome.kind,
+      ...(outcome.kind === 'ignored' ? { reason: outcome.reason } : {}),
+    });
+    return outcome;
+  }
+
+  return { openAndRun, runGranted, deliverSignal };
 }

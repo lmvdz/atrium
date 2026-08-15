@@ -19,6 +19,7 @@ import type { SessionContext } from '../../src/execution/provider.js';
 import {
   createDeterministicShimProvider,
   deterministicArtifact,
+  EXECUTION_AWAIT_STEER_DIRECTIVE,
   EXECUTION_FAIL_DIRECTIVE,
   EXECUTION_TESTS_FAIL_DIRECTIVE,
   SHIM_ARTIFACT_PATH,
@@ -220,5 +221,182 @@ describe('the deterministic shim produces a real, verifiable artifact', () => {
     // never the adapter.
     expect(await mainCommit(repo)).toBe(before);
     expect(before).toBe(repo.seedCommit);
+  });
+});
+
+/**
+ * Delivery of already-authorized signals into a running shim (#147). The shim is
+ * the deterministic path, so these prove the observable behaviour with no database
+ * and no coordinator in the way: a steer's text lands in the next-turn artifact, an
+ * interrupt makes the run terminal with no artifact, and a signal for a session the
+ * shim is not running is a safe no-op. #127 already authorized every row; delivery
+ * only makes it REACH the harness.
+ */
+describe('the shim delivers already-authorized signals to a running session (#147)', () => {
+  it('queues a steer at the turn boundary and its text lands in the artifact', async () => {
+    const provider = createDeterministicShimProvider({ repo });
+    const c = ctx();
+    const workspace = await provider.resolve(c);
+
+    // The mailbox exists from `resolve`, so a steer delivered before the run reaches
+    // its turn boundary is queued, not dropped.
+    const outcome = await provider.deliver({
+      sessionId: c.sessionId,
+      roomId: c.roomId,
+      kind: 'steer',
+      body: 'prefer the smaller diff',
+    });
+    expect(outcome).toEqual({ kind: 'delivered' });
+
+    const report = await provider.run(workspace, c);
+    await workspace.dispose();
+
+    expect(report.terminal.ok).toBe(true);
+    const body = await readFileAtBranch(repo, sessionBranch(c.sessionId), SHIM_ARTIFACT_PATH);
+    // The steer is observable in the next-turn artifact. RED-ON-REVERT: drop the
+    // `steers` argument from `deterministicArtifact(ctx, steers)` in run() — the
+    // artifact reverts to the unsteered encoding and this line reds.
+    expect(body).toBe(deterministicArtifact(c, ['prefer the smaller diff']));
+    expect(body).toContain('prefer the smaller diff');
+    // The receipt carries it too — the review pane reads the exit summary.
+    expect(report.receipt.exitSummary).toContain('prefer the smaller diff');
+  });
+
+  it('flips the input: a different steer yields a different steered artifact', async () => {
+    const provider = createDeterministicShimProvider({ repo });
+    const a = ctx();
+    const b = ctx();
+    const wa = await provider.resolve(a);
+    const wb = await provider.resolve(b);
+    await provider.deliver({
+      sessionId: a.sessionId,
+      roomId: a.roomId,
+      kind: 'steer',
+      body: 'alpha',
+    });
+    await provider.deliver({
+      sessionId: b.sessionId,
+      roomId: b.roomId,
+      kind: 'steer',
+      body: 'beta',
+    });
+    await provider.run(wa, a);
+    await provider.run(wb, b);
+
+    const bodyA = await readFileAtBranch(repo, sessionBranch(a.sessionId), SHIM_ARTIFACT_PATH);
+    const bodyB = await readFileAtBranch(repo, sessionBranch(b.sessionId), SHIM_ARTIFACT_PATH);
+    // The delivered content DRIVES the output — not a constant, not the other
+    // session's steer. Change the steer, change the artifact.
+    expect(bodyA).toContain('alpha');
+    expect(bodyA).not.toContain('beta');
+    expect(bodyB).toContain('beta');
+    expect(bodyB).not.toContain('alpha');
+  });
+
+  it('delivers a steer to a PARKED run (await directive) and it lands, then settles', async () => {
+    const provider = createDeterministicShimProvider({ repo });
+    const c = ctx({ model: EXECUTION_AWAIT_STEER_DIRECTIVE });
+    const workspace = await provider.resolve(c);
+
+    // Start the run: it PARKS at its open turn boundary until a signal arrives. The
+    // deliver-during-run window the coordinator's resolve→run leaves no room for
+    // otherwise.
+    const runP = provider.run(workspace, c);
+    const outcome = await provider.deliver({
+      sessionId: c.sessionId,
+      roomId: c.roomId,
+      kind: 'steer',
+      body: 'ship it',
+    });
+    expect(outcome).toEqual({ kind: 'delivered' });
+
+    const report = await runP;
+    await workspace.dispose();
+    expect(report.terminal.ok).toBe(true);
+    const body = await readFileAtBranch(repo, sessionBranch(c.sessionId), SHIM_ARTIFACT_PATH);
+    expect(body).toContain('ship it');
+  });
+
+  it('an interrupt terminates the run with a failed terminal and NO artifact', async () => {
+    const provider = createDeterministicShimProvider({ repo });
+    const c = ctx();
+    const workspace = await provider.resolve(c);
+
+    const outcome = await provider.deliver({
+      sessionId: c.sessionId,
+      roomId: c.roomId,
+      kind: 'interrupt',
+      body: 'stop',
+    });
+    expect(outcome).toEqual({ kind: 'interrupted' });
+
+    const report = await provider.run(workspace, c);
+    await workspace.dispose();
+
+    // RED-ON-REVERT: remove the `if (mailbox.interrupted)` early return in run() and
+    // this reds — an interrupted session would settle cleanly WITH an artifact.
+    expect(report.terminal.ok).toBe(false);
+    expect(report.receipt.artifact).toBeNull();
+    // An interrupt certifies nothing: the branch never advanced past trunk.
+    expect(await branchCommit(repo, sessionBranch(c.sessionId))).toBe(repo.seedCommit);
+  });
+
+  it('interrupts a PARKED run promptly (await directive)', async () => {
+    const provider = createDeterministicShimProvider({ repo });
+    const c = ctx({ model: EXECUTION_AWAIT_STEER_DIRECTIVE });
+    const workspace = await provider.resolve(c);
+    const runP = provider.run(workspace, c);
+    await provider.deliver({
+      sessionId: c.sessionId,
+      roomId: c.roomId,
+      kind: 'interrupt',
+      body: null,
+    });
+    const report = await runP;
+    await workspace.dispose();
+    expect(report.terminal.ok).toBe(false);
+    expect(report.receipt.artifact).toBeNull();
+  });
+
+  it('a signal for a session the shim is not running is a safe no-op, never a throw', async () => {
+    const provider = createDeterministicShimProvider({ repo });
+    // No `resolve` for this session — the shim is not running it.
+    const steer = await provider.deliver({
+      sessionId: randomUUID(),
+      roomId: randomUUID(),
+      kind: 'steer',
+      body: 'nobody home',
+    });
+    const interrupt = await provider.deliver({
+      sessionId: randomUUID(),
+      roomId: randomUUID(),
+      kind: 'interrupt',
+      body: null,
+    });
+    // RED-ON-REVERT: drop the `if (!mailbox) return not-running` guard in deliver()
+    // and the steer path throws on `undefined.steers` instead of no-opping.
+    expect(steer).toEqual({ kind: 'ignored', reason: 'not-running' });
+    expect(interrupt).toEqual({ kind: 'ignored', reason: 'not-running' });
+  });
+
+  it('a resume is the daemon’s wake, not a run mutation — an explicit no-op', async () => {
+    const provider = createDeterministicShimProvider({ repo });
+    const c = ctx();
+    const workspace = await provider.resolve(c);
+    // A resume is `ignored: resume-noop` EVEN for a session the shim is running:
+    // waking is opening a fresh run (the daemon's job), not steering this one.
+    const outcome = await provider.deliver({
+      sessionId: c.sessionId,
+      roomId: c.roomId,
+      kind: 'resume',
+      body: null,
+    });
+    expect(outcome).toEqual({ kind: 'ignored', reason: 'resume-noop' });
+
+    // And the run is unaffected — a clean, unsteered artifact.
+    await provider.run(workspace, c);
+    await workspace.dispose();
+    const body = await readFileAtBranch(repo, sessionBranch(c.sessionId), SHIM_ARTIFACT_PATH);
+    expect(body).toBe(deterministicArtifact(c));
   });
 });

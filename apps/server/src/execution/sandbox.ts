@@ -1,4 +1,11 @@
-import type { ExecutionProvider, ExecutionReport, SessionContext, Workspace } from './provider.js';
+import type {
+  DeliveryOutcome,
+  ExecutionProvider,
+  ExecutionReport,
+  SessionContext,
+  SignalDelivery,
+  Workspace,
+} from './provider.js';
 
 /**
  * The sandbox seam (#120) — DEFINED here, not required green.
@@ -59,6 +66,14 @@ export interface SandboxClient {
   createWorkspace(ctx: SessionContext): Promise<SandboxHandle>;
   /** Run the harness in the sandbox and report terminal + the pushed artifact. */
   runHarness(handle: SandboxHandle, ctx: SessionContext): Promise<ExecutionReport>;
+  /**
+   * Deliver an already-authorized signal into the running sandbox (#147):
+   * `steer` queued to the harness's next turn boundary, `interrupt` terminating
+   * the remote run. Optional — a client that predates delivery simply cannot
+   * reach a running signal, and the provider reports `not-running` for it rather
+   * than pretending. #138 (the real sandbox) implements it.
+   */
+  deliver?(handle: SandboxHandle, delivery: SignalDelivery): Promise<DeliveryOutcome>;
 }
 
 export interface SandboxProviderOptions {
@@ -117,6 +132,18 @@ export function createSandboxProvider(options: SandboxProviderOptions = {}): Exe
       const live = [...handles.values()];
       handles.clear();
       await Promise.all(live.map((handle) => handle.destroy().catch(() => undefined)));
+    },
+
+    // DELIVER a signal into a running sandbox (#147). A resume is the daemon's wake,
+    // never a mutation of a run in flight. Otherwise, delegate to the client's
+    // optional `deliver`; a session with no live handle — or a client that does not
+    // implement delivery — is `not-running`, the safe no-op. Delivery writes
+    // nothing durable here either: an interrupt's receipt is the ordinary settle.
+    async deliver(delivery: SignalDelivery): Promise<DeliveryOutcome> {
+      if (delivery.kind === 'resume') return { kind: 'ignored', reason: 'resume-noop' };
+      const handle = handles.get(delivery.sessionId);
+      if (!handle || !client?.deliver) return { kind: 'ignored', reason: 'not-running' };
+      return client.deliver(handle, delivery);
     },
   };
 }

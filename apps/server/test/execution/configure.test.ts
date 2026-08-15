@@ -5,8 +5,17 @@ import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { Command, CommandResult, CommandService } from '../../src/commands.js';
 import type { Env } from '../../src/env.js';
-import { configureExecution, parseArgv } from '../../src/execution/configure.js';
+import {
+  configureExecution,
+  parseArgv,
+  wireExecutionCoordinator,
+} from '../../src/execution/configure.js';
 import type { ExecutionOwnership } from '../../src/execution/coordinator.js';
+import type {
+  DeliveryOutcome,
+  ExecutionProvider,
+  SignalDelivery,
+} from '../../src/execution/provider.js';
 import { createLogger } from '../../src/logger.js';
 import type { Session } from '../../src/session.js';
 
@@ -148,6 +157,109 @@ describe('configureExecution wires the provider to the session lifecycle', () =>
     await new Promise((r) => setTimeout(r, 50));
     expect(settled).toHaveLength(0);
     await configured?.dispose();
+  });
+});
+
+/**
+ * #147 — the command-service WRAPPER routes an appended `session_signaled` to the
+ * coordinator's `deliverSignal`, which reaches the provider. A signal that did NOT
+ * append (a #127 refusal) and a non-signal event are BOTH left alone: delivery can
+ * never exceed authorization because only an appended, authorized row is routed.
+ */
+describe('the wrapper routes appended signals to the provider (#147)', () => {
+  function spyProvider() {
+    const delivered: SignalDelivery[] = [];
+    const provider: ExecutionProvider = {
+      kind: 'spy',
+      resolve: async () => {
+        throw new Error('unused');
+      },
+      run: async () => {
+        throw new Error('unused');
+      },
+      cancelAll: async () => {},
+      deliver: async (signal): Promise<DeliveryOutcome> => {
+        delivered.push(signal);
+        return { kind: 'ignored', reason: 'not-running' };
+      },
+    };
+    return { provider, delivered };
+  }
+
+  /** A fake service whose result event carries `type` — so the wrapper can narrow. */
+  function serviceReturning(event: Record<string, unknown>): CommandService {
+    return {
+      execute: vi.fn(
+        async (_s: Session, command: Command): Promise<CommandResult> => ({
+          kind: 'appended',
+          roomId: command.roomId,
+          seq: 1,
+          roomSeq: 1,
+          actor: { kind: 'agent', userId: agent.userId },
+          event: event as never,
+          issues: [],
+        }),
+      ),
+      requireMembership: vi.fn(async () => ({ seenSeq: 0 })),
+      stillMembers: vi.fn(async () => new Set<string>()),
+    };
+  }
+
+  const roomId = randomUUID();
+  const sessionId = randomUUID();
+  const signalCommand: Command = {
+    name: 'signal_session',
+    roomId,
+    sessionId,
+    kind: 'steer',
+    body: 'prefer the smaller diff',
+    causeMessageId: null,
+    supersedesEventId: null,
+  } as Command;
+
+  it('hands an appended session_signaled to deliver, with the authorized row’s fields', async () => {
+    const { provider, delivered } = spyProvider();
+    const service = serviceReturning({
+      type: 'session_signaled',
+      roomId,
+      sessionId,
+      kind: 'steer',
+      body: 'prefer the smaller diff',
+    });
+    const wired = wireExecutionCoordinator({
+      provider,
+      commands: service,
+      logger,
+      ownership: fakeOwnership,
+    });
+
+    await wired.commands.execute(agent, signalCommand);
+    // The wrapper's delivery is fire-and-forget; let the microtask settle.
+    await new Promise((r) => setTimeout(r, 20));
+
+    // RED-ON-REVERT: remove the `session_signaled` routing block from the wrapper
+    // and this reds — the authorized steer never reaches the provider.
+    expect(delivered).toEqual([
+      { sessionId, roomId, kind: 'steer', body: 'prefer the smaller diff' },
+    ]);
+  });
+
+  it('does NOT route a non-signal event (an ordinary message)', async () => {
+    const { provider, delivered } = spyProvider();
+    const service = serviceReturning({ type: 'message', roomId, id: randomUUID() });
+    const wired = wireExecutionCoordinator({
+      provider,
+      commands: service,
+      logger,
+      ownership: fakeOwnership,
+    });
+
+    await wired.commands.execute(agent, {
+      ...signalCommand,
+      name: 'send_message',
+    } as unknown as Command);
+    await new Promise((r) => setTimeout(r, 20));
+    expect(delivered).toEqual([]);
   });
 });
 

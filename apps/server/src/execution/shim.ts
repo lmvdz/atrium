@@ -13,7 +13,14 @@ import {
   type ScratchRepo,
   type WorktreeCheckout,
 } from './git.js';
-import type { ExecutionProvider, ExecutionReport, SessionContext, Workspace } from './provider.js';
+import type {
+  DeliveryOutcome,
+  ExecutionProvider,
+  ExecutionReport,
+  SessionContext,
+  SignalDelivery,
+  Workspace,
+} from './provider.js';
 
 /**
  * The deterministic shim (#120) — the DEFAULT provider under test.
@@ -56,6 +63,31 @@ export const EXECUTION_FAIL_DIRECTIVE = '__atrium_shim_fail__';
  * pane must show a human BEFORE they certify, not hide.
  */
 export const EXECUTION_TESTS_FAIL_DIRECTIVE = '__atrium_shim_tests_fail__';
+
+/**
+ * The reserved model directive that makes the deterministic harness PARK at one
+ * open turn boundary, awaiting a delivered signal (#147). It models a real harness
+ * that pauses between turns for the next instruction, and it is what makes STEER
+ * and INTERRUPT delivery deterministically testable through the coordinator's
+ * `resolve → run` (which leaves no window to inject a signal otherwise):
+ *
+ *  - a `steer` delivered while parked is queued, incorporated into THIS run's
+ *    artifact, and the run then concludes cleanly — the steer's text is observable
+ *    on the next-turn artifact (and flip-the-input: change the steer, the artifact
+ *    moves);
+ *  - an `interrupt` delivered while parked terminates the run at the boundary with
+ *    a failed terminal and NO artifact.
+ *
+ * A backstop deadline keeps a parked run that is never signalled from hanging
+ * forever (production never sets this directive; tests always deliver well inside
+ * the deadline, so it never gates their timing). The default (no directive) path
+ * is unchanged and immediate: it drains any already-queued steer at its boundary
+ * and concludes, so a steer delivered BEFORE `run` still lands with zero waiting.
+ */
+export const EXECUTION_AWAIT_STEER_DIRECTIVE = '__atrium_shim_await_steer__';
+
+/** How long a parked run waits for a signal before concluding on its own (#147). */
+const AWAIT_STEER_BACKSTOP_MS = 10_000;
 
 /** The file the fake harness writes — the artifact's payload, on the branch. */
 export const SHIM_ARTIFACT_PATH = 'ARTIFACT.json';
@@ -100,6 +132,21 @@ interface ShimWorkspace extends Workspace {
 }
 
 /**
+ * THE PER-SESSION SIGNAL MAILBOX (#147). One per in-flight shim run, created at
+ * `resolve` and removed when `run` returns. `deliver` posts into it; the run
+ * drains it at its turn boundary. It is the whole of what makes a delivered steer
+ * observable and an interrupt promptly terminal in a purely in-process harness.
+ */
+interface ShimMailbox {
+  /** Steer bodies queued for the next turn boundary, in delivery order. */
+  readonly steers: string[];
+  /** Set by a delivered interrupt — checked at every boundary. */
+  interrupted: boolean;
+  /** Armed by a parked run (the await directive); a delivery resolves it. */
+  wake: (() => void) | null;
+}
+
+/**
  * Build the deterministic shim provider over a scratch repo.
  *
  * `resolve` adds a per-session worktree; `run` writes the deterministic artifact
@@ -117,18 +164,46 @@ export function createDeterministicShimProvider(
   // handed a seeded one inherits the obligation.
   assertArtifactRemoteIsNotUpstream(repo, artifactRepo);
 
+  // In-flight mailboxes, keyed by session id (#147). A `deliver` for a session not
+  // in this map is a safe no-op (`not-running`): another coordinator may run it.
+  const mailboxes = new Map<string, ShimMailbox>();
+
+  /**
+   * Park the run at one turn boundary until a signal arrives (the await directive),
+   * or the backstop deadline lapses. Resolves as soon as `deliver` posts — either
+   * a steer (queued in `mailbox.steers`) or an interrupt (`mailbox.interrupted`).
+   */
+  function awaitSignalAtBoundary(mailbox: ShimMailbox): Promise<void> {
+    if (mailbox.interrupted || mailbox.steers.length > 0) return Promise.resolve();
+    return new Promise<void>((resolve) => {
+      const done = () => {
+        mailbox.wake = null;
+        clearTimeout(timer);
+        resolve();
+      };
+      const timer = setTimeout(done, AWAIT_STEER_BACKSTOP_MS);
+      mailbox.wake = done;
+    });
+  }
+
   return {
     kind: 'shim',
 
     async resolve(ctx: SessionContext): Promise<Workspace> {
       const checkout = await addWorktree(repo, ctx.sessionId);
+      // Register the mailbox at resolve, so a steer delivered any time between now
+      // and the run's turn boundary is caught, not dropped as `not-running`.
+      mailboxes.set(ctx.sessionId, { steers: [], interrupted: false, wake: null });
       const workspace: ShimWorkspace = {
         sessionId: ctx.sessionId,
         dir: checkout.dir,
         branch: checkout.branch,
         remote: artifactRepo?.dir ?? repo.dir,
         checkout,
-        dispose: () => removeWorktree(checkout),
+        dispose: async () => {
+          mailboxes.delete(ctx.sessionId);
+          await removeWorktree(checkout);
+        },
       };
       return workspace;
     },
@@ -156,10 +231,39 @@ export function createDeterministicShimProvider(
         };
       }
 
+      // THE TURN BOUNDARY (#147). The mailbox exists (set at resolve). If the await
+      // directive is set, PARK here until a signal is delivered; either way, drain
+      // whatever steers are queued and honour an interrupt. A steer delivered
+      // BEFORE run (the fast path) is already in `steers` and lands with no wait.
+      const mailbox = mailboxes.get(ctx.sessionId) ?? {
+        steers: [],
+        interrupted: false,
+        wake: null,
+      };
+      if (ctx.model === EXECUTION_AWAIT_STEER_DIRECTIVE) {
+        await awaitSignalAtBoundary(mailbox);
+      }
+      if (mailbox.interrupted) {
+        // An interrupt reached the boundary: terminate promptly, no artifact. The
+        // coordinator settles this as `session_failed` — delivery certified nothing.
+        return {
+          terminal: { ok: false, exitCode: null, detail: 'interrupted by a delivered signal' },
+          receipt: {
+            exitSummary: `deterministic shim: session ${ctx.sessionId} interrupted`,
+            spendMicros: 0,
+            contextPct: null,
+            artifact: null,
+          },
+        };
+      }
+      // Consume the queued steers into this turn — they become part of the artifact.
+      const steers = mailbox.steers.splice(0, mailbox.steers.length);
+
       // The clean harness: write the deterministic artifact, commit it onto the
-      // session branch. The content is a pure function of the context, so the
-      // commit is reproducible and flip-the-input visibly changes it.
-      const artifactBody = deterministicArtifact(ctx);
+      // session branch. The content is a pure function of the context (plus any
+      // delivered steers), so the commit is reproducible and flip-the-input — a
+      // different session OR a different steer — visibly changes it.
+      const artifactBody = deterministicArtifact(ctx, steers);
       await writeFile(join(checkout.dir, SHIM_ARTIFACT_PATH), `${artifactBody}\n`);
       const commit = await commitWorktree(
         checkout,
@@ -205,7 +309,12 @@ export function createDeterministicShimProvider(
       return {
         terminal: { ok: true, exitCode: 0 },
         receipt: {
-          exitSummary: `deterministic shim: session ${ctx.sessionId} settled on ${checkout.branch}`,
+          exitSummary:
+            `deterministic shim: session ${ctx.sessionId} settled on ${checkout.branch}` +
+            // Surface delivered steers on the receipt too, not only in the artifact
+            // (#147) — the review pane reads the exit summary, and a steer that
+            // shaped the run is part of what a human sees before certifying.
+            (steers.length > 0 ? ` after steering: ${steers.join(' · ')}` : ''),
           spendMicros: 0,
           contextPct: null,
           artifact: { branch: checkout.branch, commit: durableCommit, remote, diff, tests },
@@ -218,25 +327,50 @@ export function createDeterministicShimProvider(
     // `run` is either not started or already returned. The seam still answers the
     // question, it just has nothing to kill.
     async cancelAll(): Promise<void> {},
+
+    // DELIVER an already-authorized signal to a parked/in-flight run (#147). The
+    // mailbox exists only while a run is resolved-and-not-yet-returned, so a signal
+    // for any other session is `not-running` — the safe no-op. Delivery writes
+    // NOTHING durable: a steer only queues text, an interrupt only flags the run to
+    // terminate (the coordinator writes the `session_failed` receipt), and a resume
+    // is the daemon's wake, not a mutation of a run already in flight.
+    async deliver(delivery: SignalDelivery): Promise<DeliveryOutcome> {
+      if (delivery.kind === 'resume') return { kind: 'ignored', reason: 'resume-noop' };
+      const mailbox = mailboxes.get(delivery.sessionId);
+      if (!mailbox) return { kind: 'ignored', reason: 'not-running' };
+      if (delivery.kind === 'interrupt') {
+        mailbox.interrupted = true;
+        mailbox.wake?.();
+        return { kind: 'interrupted' };
+      }
+      // steer: queue the guidance for the next turn boundary, never mid-token.
+      mailbox.steers.push(delivery.body ?? '');
+      mailbox.wake?.();
+      return { kind: 'delivered' };
+    },
   };
 }
 
 /**
  * The deterministic artifact content — a stable JSON encoding of the session
- * context. Pure in its input, so the commit it becomes is reproducible and a
- * different session yields a different object.
+ * context, plus any steers delivered into the run (#147). Pure in its inputs, so
+ * the commit it becomes is reproducible and a different session — OR a different
+ * steer — yields a different object.
+ *
+ * When no steer was delivered the `steers` key is OMITTED, so the artifact is
+ * byte-identical to the pre-#147 encoding: the default run's object does not move,
+ * and only a genuinely steered run carries the extra field (the flip-the-input
+ * witness — change the steer, the bytes change).
  */
-export function deterministicArtifact(ctx: SessionContext): string {
-  return JSON.stringify(
-    {
-      kind: 'atrium-execution-artifact',
-      sessionId: ctx.sessionId,
-      planId: ctx.planId,
-      roomId: ctx.roomId,
-      harness: ctx.harness,
-      model: ctx.model,
-    },
-    null,
-    2,
-  );
+export function deterministicArtifact(ctx: SessionContext, steers: readonly string[] = []): string {
+  const base = {
+    kind: 'atrium-execution-artifact',
+    sessionId: ctx.sessionId,
+    planId: ctx.planId,
+    roomId: ctx.roomId,
+    harness: ctx.harness,
+    model: ctx.model,
+  };
+  const payload = steers.length > 0 ? { ...base, steers: [...steers] } : base;
+  return JSON.stringify(payload, null, 2);
 }
