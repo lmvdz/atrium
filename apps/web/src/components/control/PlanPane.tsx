@@ -45,6 +45,29 @@ import { formatMicros, planCost, planSettleable, planState } from './state';
 /** The client-side friction on a spend/settle act. Deliberate, not server-timed. */
 const PLAN_ACT_HOLD_MS = 1500;
 
+/**
+ * #146 FIX 1 — read the slice the human typed, honestly, or refuse it.
+ *
+ * The fund input authorizes draws of real spend, so what the command sends MUST
+ * be what the person can read in the field. `parseInt` breaks that contract by
+ * silently truncating: `parseInt('1e2',10)` is 1, `parseInt('3.5',10)` is 3,
+ * `parseInt('-0.5',10)` is 0 — each a DIFFERENT amount than the one displayed,
+ * a spend surface lying about what the hold authorizes. So the input is accepted
+ * ONLY when it is a plain, whole, non-negative decimal. `Number()` gives the
+ * value; the digit-shape check is what rejects exponent notation — `Number('1e2')`
+ * is a valid integer 100, but `'1e2'` is not the integer the human reads, so it is
+ * refused rather than quietly funded at 100. A decimal, a sign, or a blank field
+ * is likewise invalid. When invalid, the fund control disables and says why; it
+ * never coerces.
+ */
+export function parseSliceInput(raw: string): { readonly valid: boolean; readonly value: number } {
+  const trimmed = raw.trim();
+  if (!/^\d+$/.test(trimmed)) return { valid: false, value: Number.NaN };
+  const value = Number(trimmed);
+  if (!Number.isInteger(value) || value < 0) return { valid: false, value: Number.NaN };
+  return { valid: true, value };
+}
+
 export interface PlanPaneProps {
   readonly plan: ControlPlanRow | null;
   readonly agentName: string | null;
@@ -118,6 +141,11 @@ export function PlanPane({ plan, agentName, roomId, viewerId, viewerKind }: Plan
   const viewerIsHuman = viewerKind === 'human';
   const settleable = planSettleable(plan);
   const openChildCount = plan.sessions.filter((session) => session.status === 'open').length;
+
+  /* #146 FIX 1: the single source of truth for whether the typed slice is a value
+     the command may honestly send. Drives BOTH the disabled state of the fund hold
+     and the validation message — so a bad input can never be held-to-authorize. */
+  const sliceParse = parseSliceInput(sliceInput);
 
   const drawsLabel =
     cost.draws.ceiling === null
@@ -216,7 +244,7 @@ export function PlanPane({ plan, agentName, roomId, viewerId, viewerKind }: Plan
       ) : !viewerIsHuman ? (
         <div className={styles.refused} data-fund="refused" data-fund-refused="true">
           {systemText(
-            "funding a plan sets its spend ceiling, and only a person may — the server refuses a non-human identity (human = init). A machine cannot raise its own or any plan's slice, and neither the command path nor the table will let it.",
+            "funding a plan sets its spend ceiling, and only a person may — the server refuses a non-human identity (human = init). set_plan_rlimit is a human-only spend command: the server rejects a non-human before it records anything, so no machine can raise its own or any plan's slice (#115/#118).",
             'PlanPane fund refused',
           )}
         </div>
@@ -241,9 +269,12 @@ export function PlanPane({ plan, agentName, roomId, viewerId, viewerKind }: Plan
               inputMode="numeric"
               min={0}
               onChange={(event) => {
-                setSliceInput(event.target.value);
-                const parsed = Number.parseInt(event.target.value, 10);
-                sliceRef.current = Number.isNaN(parsed) ? Number.NaN : parsed;
+                const next = event.target.value;
+                setSliceInput(next);
+                /* #146 FIX 1: carry the honestly-parsed value (NaN when the input
+                   is not a whole non-negative decimal) so the act reads exactly
+                   what the field shows — never a truncated `parseInt` coercion. */
+                sliceRef.current = parseSliceInput(next).value;
                 if (fund.phase === 'error') setFund({ phase: 'idle' });
               }}
               step={1}
@@ -256,12 +287,22 @@ export function PlanPane({ plan, agentName, roomId, viewerId, viewerKind }: Plan
             actor={viewerId}
             className={styles.fundHold}
             describe={`authorize the plan's slice — ${sliceInput || '0'} draws of spend`}
+            disabled={!sliceParse.valid}
             holdMs={PLAN_ACT_HOLD_MS}
             label="Authorize funding"
             onAct={() => {
               void runFund();
             }}
+            resetOnComplete
           />
+          {!sliceParse.valid ? (
+            <span className={styles.error} data-fund-invalid="true">
+              {systemText(
+                'a slice is a whole, non-negative number of draws — enter one to authorize funding',
+                'PlanPane fund invalid',
+              )}
+            </span>
+          ) : null}
           {fund.phase === 'working' ? (
             <span className={styles.certifyNote} data-fund-working="true">
               recording the funding…
@@ -304,6 +345,7 @@ export function PlanPane({ plan, agentName, roomId, viewerId, viewerKind }: Plan
             onAct={() => {
               void runSettle();
             }}
+            resetOnComplete
           />
           {settle.phase === 'working' ? (
             <span className={styles.certifyNote} data-settle-working="true">

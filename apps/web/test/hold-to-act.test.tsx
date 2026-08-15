@@ -383,3 +383,79 @@ describe('the hold control’s aria ids are unique on the page', () => {
     expect(container.querySelector('[data-hold-action="authorise"]')).not.toBeNull();
   });
 });
+
+/* ---------------------------------------------------------------------------
+ * #146 — THE DISABLED CONTROL, AND THE RESTING PHASE AFTER AN ACT.
+ *
+ * FIX 1 gave the primitive a `disabled` state so the fund pane can shut the door
+ * on a slice the command would coerce, instead of holding-to-authorize a value
+ * the surface would silently change. FIX 3 gave it `resetOnComplete` so a
+ * fire-once act (fund/settle) returns to idle rather than resting at `armed`,
+ * which reads ambiguously on an already-funded plan.
+ * ------------------------------------------------------------------------- */
+describe('a disabled hold begins nothing (#146 FIX 1)', () => {
+  /* CATCHES: a `disabled` prop that renders inert visually but still lets a hold
+     complete and fire the act — the exact failure the fund pane must not have,
+     since a disabled control means "this value may not be authorized". */
+  it('renders disabled and cannot be held to act', () => {
+    const events: string[] = [];
+    render(
+      <HoldToAct
+        actionId="fund"
+        actor="lars"
+        describe="fund it"
+        disabled
+        label="Authorize funding"
+        onAct={() => events.push('act')}
+        onArm={() => events.push('arm')}
+      />,
+    );
+    const button = screen.getByRole('button');
+    expect((button as HTMLButtonElement).disabled).toBe(true);
+    fireEvent.pointerDown(button);
+    fireEvent.keyDown(button, { key: ' ' });
+    advance(5000);
+    expect(events).toEqual([]);
+    expect(button.getAttribute('data-holding')).toBeNull();
+  });
+});
+
+describe('resetOnComplete returns a fire-once act to idle (#146 FIX 3)', () => {
+  /* CATCHES: a fund/settle control resting at `armed` after it fired. The act
+     still fires (arm then act); only the resting phase changes — so the control
+     no longer reads `armed` on a plan whose funding already went through. */
+  it('the act still fires, but the control rests idle, not armed', () => {
+    const order: string[] = [];
+    render(
+      <HoldToAct
+        actionId="fund"
+        actor="lars"
+        describe="fund it"
+        holdMs={1500}
+        label="Authorize funding"
+        onAct={() => order.push('act')}
+        onArm={() => order.push('arm')}
+        resetOnComplete
+      />,
+    );
+    const button = screen.getByRole('button');
+    fireEvent.pointerDown(button);
+    advance(1600);
+    expect(order).toEqual(['arm', 'act']);
+    expect(button.getAttribute('data-armed')).toBeNull();
+    expect(button.textContent).toContain('hold');
+    expect(button.textContent).not.toContain('armed');
+    expect(button.getAttribute('data-hold-progress')).toBe('0.000');
+  });
+
+  /* CATCHES: the default drifting — every OTHER caller (certify, attention)
+     relies on the armed rest, so it must stay the default when the prop is off. */
+  it('without the prop, a completed hold still rests at armed', () => {
+    render(<HoldToAct actionId="drop" actor="lars" describe="drop" holdMs={1500} label="Drop" />);
+    const button = screen.getByRole('button');
+    fireEvent.pointerDown(button);
+    advance(1600);
+    expect(button.getAttribute('data-armed')).toBe('true');
+    expect(button.textContent).toContain('armed');
+  });
+});

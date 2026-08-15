@@ -126,6 +126,25 @@ export interface HoldToActProps {
   readonly onArm?: (arming: Arming) => void;
   readonly onAct?: (arming: Arming) => void;
   readonly className?: string;
+  /**
+   * When true, the control is inert: it renders `disabled` and refuses to begin a
+   * hold, so no act can fire. #146 FIX 1 wires this from the fund pane, which must
+   * disable the affordance when the slice input is not a whole, non-negative
+   * number — a human may not hold-to-authorize a value the command would silently
+   * coerce into a different one. A safety hold over an amount the surface would
+   * change is worse than no hold, so the door is shut rather than the number bent.
+   */
+  readonly disabled?: boolean;
+  /**
+   * When true, a completed hold returns the control to `idle` rather than resting
+   * at `armed`. #146 FIX 3: the fund/settle acts fire once and are done — an act
+   * whose control still reads `armed` on an already-funded plan is ambiguous. The
+   * arm and act still fire exactly as before; re-firing simply needs a fresh full
+   * hold (`startRef` is cleared either way, so this changes only the resting
+   * legibility, never the friction). Certify keeps the default `armed` rest, where
+   * the armed state legitimately mirrors a server arm still awaiting its confirm.
+   */
+  readonly resetOnComplete?: boolean;
 }
 
 type Phase = 'idle' | 'holding' | 'armed';
@@ -141,6 +160,8 @@ export function HoldToAct({
   onArm,
   onAct,
   className,
+  disabled = false,
+  resetOnComplete = false,
 }: HoldToActProps) {
   const [phase, setPhase] = useState<Phase>('idle');
   const buttonRef = useRef<HTMLButtonElement | null>(null);
@@ -187,8 +208,17 @@ export function HoldToAct({
     if (started === null) return;
     const heldMs = Math.round(performance.now() - started);
     stop();
-    paint(1);
-    setPhase('armed');
+    if (resetOnComplete) {
+      /* #146 FIX 3: the fund/settle act fires once and is done. Return to idle so
+         the control does not rest reading `armed` on an already-funded plan. The
+         arm/act below still fire; `stop()` cleared `startRef`, so a re-fire is a
+         fresh full hold, not a second act off the same press. */
+      paint(0);
+      setPhase('idle');
+    } else {
+      paint(1);
+      setPhase('armed');
+    }
     const arming: Arming = {
       actionId,
       actor,
@@ -199,7 +229,7 @@ export function HoldToAct({
        before the irreversible thing happens, not after it succeeded. */
     onArm?.(arming);
     onAct?.(arming);
-  }, [actionId, actor, onAct, onArm, paint, stop]);
+  }, [actionId, actor, onAct, onArm, paint, resetOnComplete, stop]);
 
   const tick = useCallback(() => {
     const started = startRef.current;
@@ -214,6 +244,10 @@ export function HoldToAct({
   }, [complete, holdMs, paint]);
 
   const begin = useCallback(() => {
+    /* #146 FIX 1: a disabled control begins nothing, so no act can fire off it —
+       the guard here backs the `disabled` DOM attribute, since a synthesised
+       pointer/key event can still reach a handler in some engines. */
+    if (disabled) return;
     if (startRef.current !== null) return;
     startRef.current = performance.now();
     setPhase('holding');
@@ -223,7 +257,7 @@ export function HoldToAct({
        server-issued token the matching confirm/disarm carry (round-7 finding 2). */
     onBegin?.();
     frameRef.current = requestAnimationFrame(tick);
-  }, [onBegin, paint, tick]);
+  }, [disabled, onBegin, paint, tick]);
 
   /* DISARM ON UNMOUNT — the mirror of release, for the navigation that never
      released. A hold in progress when the control unmounts (the person left the
@@ -324,6 +358,7 @@ export function HoldToAct({
         data-hold-actor={actor}
         data-hold-progress="0.000"
         data-holding={phase === 'holding' ? 'true' : undefined}
+        disabled={disabled || undefined}
         onBlur={cancel}
         onKeyDown={(event) => {
           if (event.key !== ' ' && event.key !== 'Enter') return;
