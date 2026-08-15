@@ -178,6 +178,81 @@ export interface SignalDelivery {
 export const MAX_QUEUED_STEERS = 64;
 
 /**
+ * The cap on a single session's dedup memory (#147 completing round, FIX C part 2).
+ *
+ * `deliver` records every APPLIED signal id in a per-session `seen` set so #139's
+ * at-least-once dispatch is idempotent (a redelivered id is `duplicate`). Left
+ * unbounded, a long-lived session that drains its steer queue and accepts fresh
+ * steers turn after turn grows `seen` without limit — a slow leak keyed by uptime,
+ * not by anything the covenant bounds. So `seen` is an LRU of the last
+ * `MAX_SEEN_SIGNALS` applied ids: recording a new one past the cap EVICTS the
+ * oldest. The cap is far larger than a burst of at-least-once retries, so dedup
+ * still catches every realistic redelivery; only an id older than the last N
+ * applied signals can slip through, and by then the dispatcher has long stopped
+ * retrying it. `rememberAppliedSignal` is the one writer, so the bound holds on
+ * every path.
+ */
+export const MAX_SEEN_SIGNALS = 1024;
+
+/**
+ * A per-session delivery SERIALIZER (#147 completing round — the structural fix).
+ *
+ * Every residual delivery defect the re-gauntlet executed is a check-then-act race:
+ * a `deliver` reads state (the steer count, the `seen` set, the interrupt latch),
+ * awaits (an `appendFile`), then mutates — and a concurrent `deliver` for the SAME
+ * session interleaves between the read and the mutate. The per-race patch is a
+ * treadmill; the structural answer is to make each session's deliveries ATOMIC with
+ * respect to one another. This is a per-session async mutex: `deliver` chains its
+ * critical section onto the tail of the session's queue, so delivery N runs to
+ * completion — read, await, mutate — before delivery N+1 begins.
+ *
+ * The stored tail is a SETTLED continuation (never rejects), so one failed delivery
+ * never poisons the chain for the next; the caller still receives the real
+ * result/rejection of ITS own critical section.
+ */
+export interface DeliveryQueue {
+  tail: Promise<unknown>;
+}
+
+/** A fresh, idle delivery queue (nothing in flight). */
+export function newDeliveryQueue(): DeliveryQueue {
+  return { tail: Promise.resolve() };
+}
+
+/**
+ * Run `task` once every previously-queued delivery for this session has settled,
+ * and advance the queue so the NEXT delivery waits on this one. Serializes the
+ * whole check-then-await-then-mutate body, closing the concurrent-delivery races
+ * (cap bypass, double-latch, seen/queue-full interleave) as a class.
+ */
+export function serializeDelivery<T>(queue: DeliveryQueue, task: () => Promise<T>): Promise<T> {
+  const result = queue.tail.then(task, task);
+  queue.tail = result.then(
+    () => undefined,
+    () => undefined,
+  );
+  return result;
+}
+
+/**
+ * Record an APPLIED signal id for dedup, bounded to the last `MAX_SEEN_SIGNALS`
+ * (#147 completing round, FIX C part 2). Only call this AFTER the signal was
+ * actually applied — a queue-full or otherwise-dropped signal must NOT be
+ * remembered as `seen`, or a legitimate retry (once the queue drains) reads as a
+ * `duplicate` and is silently lost (FIX C part 1). A `Set` iterates in insertion
+ * order, so the first entry is the oldest; evicting it past the cap is a plain LRU.
+ */
+export function rememberAppliedSignal(seen: Set<string>, signalId: string | undefined): void {
+  if (signalId === undefined) return;
+  seen.add(signalId);
+  while (seen.size > MAX_SEEN_SIGNALS) {
+    const oldest = seen.values().next().value;
+    if (oldest === undefined) break;
+    seen.delete(oldest);
+  }
+}
+
+/**
  * What delivery did — an OBSERVATION, never a ledger act.
  *
  *  - `delivered` — a steer was queued for the session's next turn boundary.

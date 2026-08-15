@@ -7,7 +7,11 @@ import {
   disposeScratchRepo,
   type ScratchRepo,
 } from '../../src/execution/git.js';
-import { MAX_QUEUED_STEERS, type SessionContext } from '../../src/execution/provider.js';
+import {
+  MAX_QUEUED_STEERS,
+  MAX_SEEN_SIGNALS,
+  type SessionContext,
+} from '../../src/execution/provider.js';
 import {
   createWorktreeCommandProvider,
   harnessEnv,
@@ -625,5 +629,188 @@ describe('deliver reaches a running worktree harness (#147)', () => {
     await runPromise.catch(() => undefined);
     await workspace.dispose().catch(() => undefined);
     await disposeScratchRepo(repo);
+  });
+
+  // ── FIX A (#147 completing round): the steer-queue cap holds under CONCURRENT
+  // delivery. The steer path is check-then-await-then-mutate (read `steerCount`,
+  // `await appendFile`, increment); without serialization a concurrent flood all
+  // observe `steerCount < cap` before any increment and every one appends, blowing
+  // past the cap. Serialized, each delivery's check-and-increment is atomic. Driven
+  // with a genuinely concurrent flood; the harness copies the inbox and counts its
+  // lines, so an over-cap append is directly observable. RED-ON-REVERT: route
+  // `deliver` straight to `applyDelivery` (drop the `serializeDelivery` wrapper) and
+  // the inbox carries MORE than the cap and every delivery reads `delivered`.
+  it('holds the queue cap under a concurrent delivery flood (no bypass)', async () => {
+    const repo = await createScratchRepo();
+    const provider = createWorktreeCommandProvider({
+      repo,
+      command: ['bash', '-lc', 'cp "$ATRIUM_STEER_INBOX" seen.txt; wc -l < seen.txt > count.txt'],
+    });
+    const c = ctx('concurrent-cap');
+    const workspace = await provider.resolve(c);
+
+    const N = MAX_QUEUED_STEERS + 8;
+    const flood = await Promise.all(
+      Array.from({ length: N }, (_, i) =>
+        provider.deliver({
+          sessionId: c.sessionId,
+          roomId: c.roomId,
+          kind: 'steer',
+          body: `flood-${i}`,
+          signalId: `conc-${i}`,
+        }),
+      ),
+    );
+    const delivered = flood.filter((o) => o.kind === 'delivered').length;
+    const full = flood.filter((o) => o.kind === 'ignored' && o.reason === 'queue-full').length;
+    expect(delivered).toBe(MAX_QUEUED_STEERS);
+    expect(full).toBe(N - MAX_QUEUED_STEERS);
+
+    // The inbox itself carries EXACTLY the cap — the ground truth the harness reads.
+    await provider.run(workspace, c);
+    const count = Number((await readFile(join(workspace.dir, 'count.txt'), 'utf8')).trim());
+    expect(count).toBe(MAX_QUEUED_STEERS);
+
+    await workspace.dispose().catch(() => undefined);
+    await disposeScratchRepo(repo);
+  });
+
+  // ── FIX B (#147 completing round, grok's exact fix): an interrupt acked in the
+  // window between the pre-spawn latch check and the spawn (during the `harnessEnv`
+  // await) races an instant-exit command — the `onSpawn` group-kill can lose to a
+  // `true` that exits 0 first, so the child reports a CLEAN exit despite the acked
+  // interrupt. An acked interrupt must ALWAYS settle failed, never clean, on EVERY
+  // path. The post-exit latch re-check guarantees it. RED-ON-REVERT: drop the
+  // post-exit `if (postExit?.interrupted) return failed` block in `run` and this
+  // races to a clean settle (or a `killed by SIGKILL` detail) — never the
+  // interrupt-scoped terminal the fix produces.
+  it('an interrupt racing the spawn always settles failed, never clean', async () => {
+    const repo = await createScratchRepo();
+    // `true` WOULD settle clean if allowed; it is the instant-exit that wins the
+    // onSpawn kill race, exposing the need for the post-exit re-check.
+    const provider = createWorktreeCommandProvider({ repo, command: ['true'] });
+    const c = ctx('interrupt-races-spawn');
+    const workspace = await provider.resolve(c);
+
+    // Start run() but DO NOT await: it runs synchronously through the pre-spawn check
+    // (not interrupted) and suspends at the `await harnessEnv(...)` BEFORE spawning.
+    const runPromise = provider.run(workspace, c);
+    // Deliver the interrupt now — inside the pre-spawn/harnessEnv window. There is no
+    // child yet, so it only latches.
+    const outcome = await provider.deliver({
+      sessionId: c.sessionId,
+      roomId: c.roomId,
+      kind: 'interrupt',
+      body: 'stop',
+      signalId: 'race-int',
+    });
+    expect(outcome).toEqual({ kind: 'interrupted' });
+
+    const report = await runPromise;
+    // The acked interrupt produced a FAILED terminal with no artifact, and the detail
+    // names the interrupt — not a clean settle, not a bare `killed by SIGKILL`.
+    expect(report.terminal.ok).toBe(false);
+    expect(report.receipt.artifact).toBeNull();
+    expect(report.terminal.detail ?? '').toMatch(/interrupt/i);
+
+    await workspace.dispose().catch(() => undefined);
+    await disposeScratchRepo(repo);
+  });
+
+  // ── FIX C part 1 (#147 completing round): a steer dropped as `queue-full` is NOT
+  // recorded as `seen`, so a legitimate retry is a fresh `queue-full`, not a phantom
+  // `duplicate` (which would silently lose the retry). RED-ON-REVERT: move
+  // `seen.add(signalId)` back ABOVE the queue-cap check in `applyDelivery` and the
+  // retry returns `duplicate`.
+  it('does not remember a queue-full steer as seen — retry is queue-full, not duplicate', async () => {
+    const repo = await createScratchRepo();
+    const provider = createWorktreeCommandProvider({ repo, command: ['true'] });
+    const c = ctx('worktree-queuefull-seen');
+    await provider.resolve(c);
+    for (let i = 0; i < MAX_QUEUED_STEERS; i += 1) {
+      await provider.deliver({
+        sessionId: c.sessionId,
+        roomId: c.roomId,
+        kind: 'steer',
+        body: `fill-${i}`,
+        signalId: `fill-${i}`,
+      });
+    }
+    const dropped = await provider.deliver({
+      sessionId: c.sessionId,
+      roomId: c.roomId,
+      kind: 'steer',
+      body: 'dropped',
+      signalId: 'retry-me',
+    });
+    expect(dropped).toEqual({ kind: 'ignored', reason: 'queue-full' });
+    const retry = await provider.deliver({
+      sessionId: c.sessionId,
+      roomId: c.roomId,
+      kind: 'steer',
+      body: 'dropped',
+      signalId: 'retry-me',
+    });
+    expect(retry).toEqual({ kind: 'ignored', reason: 'queue-full' });
+    await disposeScratchRepo(repo);
+  });
+
+  // ── FIX C part 2 (#147 completing round): the `seen` set is LRU-bounded at
+  // `MAX_SEEN_SIGNALS`. Applied signals past the cap evict the oldest; interrupts
+  // (not bounded by the steer cap) fill it. RED-ON-REVERT: drop the eviction loop in
+  // `rememberAppliedSignal` and the evicted-oldest id reads as `duplicate`.
+  it('bounds the seen set — the oldest applied id is evicted and re-applies', async () => {
+    const repo = await createScratchRepo();
+    const provider = createWorktreeCommandProvider({ repo, command: ['true'] });
+    const c = ctx('worktree-seen-bound');
+    await provider.resolve(c);
+    for (let i = 0; i <= MAX_SEEN_SIGNALS; i += 1) {
+      await provider.deliver({
+        sessionId: c.sessionId,
+        roomId: c.roomId,
+        kind: 'interrupt',
+        body: null,
+        signalId: `evict-${i}`,
+      });
+    }
+    const evicted = await provider.deliver({
+      sessionId: c.sessionId,
+      roomId: c.roomId,
+      kind: 'interrupt',
+      body: null,
+      signalId: 'evict-0',
+    });
+    expect(evicted).toEqual({ kind: 'interrupted' });
+    const recent = await provider.deliver({
+      sessionId: c.sessionId,
+      roomId: c.roomId,
+      kind: 'interrupt',
+      body: null,
+      signalId: `evict-${MAX_SEEN_SIGNALS}`,
+    });
+    expect(recent).toEqual({ kind: 'ignored', reason: 'duplicate' });
+    await disposeScratchRepo(repo);
+  });
+
+  // ── FIX D (#147 completing round): a `resolve` that THROWS after the record is
+  // registered in its synchronous prefix (FIX 3) must UNREGISTER it — otherwise a
+  // later `deliver` acks into a session that never ran. RED-ON-REVERT: drop the
+  // `try/catch` around the awaited work in `resolve` and the steer below returns
+  // `delivered` (a false ack, buffered into a dead session's `pendingSteers`).
+  it('a resolve that throws unregisters the record — a later signal is not-running', async () => {
+    const deadRepo = await createScratchRepo();
+    const provider = createWorktreeCommandProvider({ repo: deadRepo, command: ['true'] });
+    const c = ctx('worktree-resolve-throw');
+    // Dispose the scratch repo so `addWorktree` inside resolve throws.
+    await disposeScratchRepo(deadRepo);
+    await expect(provider.resolve(c)).rejects.toThrow();
+    const outcome = await provider.deliver({
+      sessionId: c.sessionId,
+      roomId: c.roomId,
+      kind: 'steer',
+      body: 'into-the-void',
+      signalId: 'd1',
+    });
+    expect(outcome).toEqual({ kind: 'ignored', reason: 'not-running' });
   });
 });

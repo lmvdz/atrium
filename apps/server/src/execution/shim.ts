@@ -15,11 +15,15 @@ import {
 } from './git.js';
 import {
   type DeliveryOutcome,
+  type DeliveryQueue,
   type ExecutionProvider,
   type ExecutionReport,
   MAX_QUEUED_STEERS,
+  newDeliveryQueue,
+  rememberAppliedSignal,
   type SessionContext,
   type SignalDelivery,
+  serializeDelivery,
   type Workspace,
 } from './provider.js';
 
@@ -153,11 +157,20 @@ interface ShimMailbox {
   /** Armed by a parked run (the await directive); a delivery resolves it. */
   wake: (() => void) | null;
   /**
-   * Signal ids already delivered to this session (#147 FIX 5). A redelivered id —
-   * #139's at-least-once dispatch retrying — is ignored so a steer queues once and
-   * an interrupt latches once. Ids without a `signalId` are never deduped.
+   * Signal ids already APPLIED to this session (#147 FIX 5 / completing-round FIX C).
+   * A redelivered id — #139's at-least-once dispatch retrying — is ignored so a steer
+   * queues once and an interrupt latches once. Ids without a `signalId` are never
+   * deduped. An id is recorded ONLY after its signal is applied (a queue-full drop is
+   * not remembered, or a legit retry would read as `duplicate` and be lost) and the
+   * set is LRU-bounded (`MAX_SEEN_SIGNALS`) so a long session cannot grow it forever.
    */
   readonly seen: Set<string>;
+  /**
+   * The per-session delivery serializer (#147 completing round). Every `deliver` for
+   * this session runs its check-then-act body to completion before the next begins,
+   * so the dedup / queue-cap reads and writes are atomic under concurrent delivery.
+   */
+  readonly deliveries: DeliveryQueue;
 }
 
 /**
@@ -200,6 +213,38 @@ export function createDeterministicShimProvider(
     });
   }
 
+  /**
+   * The serialized delivery body (#147 completing round). Runs one at a time per
+   * session (via `serializeDelivery`), so the dedup check, the queue-cap check, and
+   * their mutations are atomic against a concurrent delivery.
+   *
+   * FIX C: a signal id is recorded in `seen` ONLY after its signal is actually
+   * applied — a `queue-full` drop is NOT remembered, so a legitimate retry once the
+   * queue drains is applied, not lost as a `duplicate`; and `seen` is LRU-bounded.
+   */
+  function applyDelivery(mailbox: ShimMailbox, delivery: SignalDelivery): DeliveryOutcome {
+    // DEDUP (#147 FIX 5): CHECK ONLY here — do not record until the signal is applied.
+    if (delivery.signalId !== undefined && mailbox.seen.has(delivery.signalId)) {
+      return { kind: 'ignored', reason: 'duplicate' };
+    }
+    if (delivery.kind === 'interrupt') {
+      mailbox.interrupted = true;
+      mailbox.wake?.();
+      rememberAppliedSignal(mailbox.seen, delivery.signalId);
+      return { kind: 'interrupted' };
+    }
+    // steer: queue the guidance for the next turn boundary, never mid-token. BOUND
+    // the queue (#147 FIX 5): at the cap the steer is dropped, not appended. A dropped
+    // steer is NOT recorded as seen (FIX C), so a retry after a drain is not a duplicate.
+    if (mailbox.steers.length >= MAX_QUEUED_STEERS) {
+      return { kind: 'ignored', reason: 'queue-full' };
+    }
+    mailbox.steers.push(delivery.body ?? '');
+    mailbox.wake?.();
+    rememberAppliedSignal(mailbox.seen, delivery.signalId);
+    return { kind: 'delivered' };
+  }
+
   return {
     kind: 'shim',
 
@@ -216,8 +261,20 @@ export function createDeterministicShimProvider(
         interrupted: false,
         wake: null,
         seen: new Set<string>(),
+        deliveries: newDeliveryQueue(),
       });
-      const checkout = await addWorktree(repo, ctx.sessionId);
+      // FIX D (#147 completing round): if resolve THROWS after the mailbox is
+      // registered (e.g. `addWorktree` fails — the scratch repo is gone), the mailbox
+      // must be UNREGISTERED, or a later `deliver` acks into a session that never ran
+      // (a false `delivered`/`interrupted` into a dead session). Unregister on throw,
+      // then rethrow so the coordinator settles the session failed as before.
+      let checkout: WorktreeCheckout;
+      try {
+        checkout = await addWorktree(repo, ctx.sessionId);
+      } catch (error) {
+        mailboxes.delete(ctx.sessionId);
+        throw error;
+      }
       const workspace: ShimWorkspace = {
         sessionId: ctx.sessionId,
         dir: checkout.dir,
@@ -264,6 +321,7 @@ export function createDeterministicShimProvider(
         interrupted: false,
         wake: null,
         seen: new Set<string>(),
+        deliveries: newDeliveryQueue(),
       };
       if (ctx.model === EXECUTION_AWAIT_STEER_DIRECTIVE) {
         await awaitSignalAtBoundary(mailbox);
@@ -363,27 +421,12 @@ export function createDeterministicShimProvider(
       if (delivery.kind === 'resume') return { kind: 'ignored', reason: 'resume-noop' };
       const mailbox = mailboxes.get(delivery.sessionId);
       if (!mailbox) return { kind: 'ignored', reason: 'not-running' };
-      // DEDUP (#147 FIX 5): a redelivered signal id — #139's at-least-once dispatch
-      // retrying — is ignored, so a steer queues once and an interrupt latches once.
-      // Deliveries without a durable id are never deduped (each is distinct).
-      if (delivery.signalId !== undefined) {
-        if (mailbox.seen.has(delivery.signalId)) return { kind: 'ignored', reason: 'duplicate' };
-        mailbox.seen.add(delivery.signalId);
-      }
-      if (delivery.kind === 'interrupt') {
-        mailbox.interrupted = true;
-        mailbox.wake?.();
-        return { kind: 'interrupted' };
-      }
-      // steer: queue the guidance for the next turn boundary, never mid-token. BOUND
-      // the queue (#147 FIX 5): at the cap the steer is dropped, not appended, and
-      // the outcome says so — an unbounded producer cannot grow this array without limit.
-      if (mailbox.steers.length >= MAX_QUEUED_STEERS) {
-        return { kind: 'ignored', reason: 'queue-full' };
-      }
-      mailbox.steers.push(delivery.body ?? '');
-      mailbox.wake?.();
-      return { kind: 'delivered' };
+      // SERIALIZE per session (#147 completing round). Every delivery's check-then-act
+      // body runs atomically with respect to the next, so a concurrent flood cannot
+      // interleave the dedup / queue-cap read and write. Even though the shim's steer
+      // push is synchronous today, routing through the serializer keeps the ordering
+      // deterministic and the `seen`/cap invariants atomic on every path.
+      return serializeDelivery(mailbox.deliveries, async () => applyDelivery(mailbox, delivery));
     },
   };
 }

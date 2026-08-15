@@ -18,11 +18,15 @@ import {
 } from './git.js';
 import {
   type DeliveryOutcome,
+  type DeliveryQueue,
   type ExecutionProvider,
   type ExecutionReport,
   MAX_QUEUED_STEERS,
+  newDeliveryQueue,
+  rememberAppliedSignal,
   type SessionContext,
   type SignalDelivery,
+  serializeDelivery,
   type Workspace,
 } from './provider.js';
 
@@ -342,8 +346,14 @@ export function createWorktreeCommandProvider(options: WorktreeCommandOptions): 
   //  - `pendingSteers` — steers delivered before the inbox file exists (the resolve
   //    window), flushed in order when `resolve` allocates the inbox.
   //  - `steerCount` — how many steers have been queued (buffered + appended), to
-  //    enforce the cap (#147 FIX 5) across both paths.
-  //  - `seen` — signal ids already delivered, for at-least-once dedup (#147 FIX 5).
+  //    enforce the cap (#147 FIX 5) across both paths. Checked-and-incremented
+  //    ATOMICALLY under the delivery serializer, so a concurrent flood cannot all
+  //    observe `< cap` and bypass it (#147 completing round, FIX A).
+  //  - `seen` — signal ids already APPLIED, for at-least-once dedup (#147 FIX 5). Only
+  //    an applied signal is recorded (a queue-full drop is not), and the set is
+  //    LRU-bounded (#147 completing round, FIX C).
+  //  - `deliveries` — the per-session delivery serializer (#147 completing round): a
+  //    check-then-act body runs to completion before the next delivery begins.
   interface InFlight {
     child?: ChildProcess;
     interrupted: boolean;
@@ -352,6 +362,7 @@ export function createWorktreeCommandProvider(options: WorktreeCommandOptions): 
     pendingSteers: string[];
     steerCount: number;
     readonly seen: Set<string>;
+    readonly deliveries: DeliveryQueue;
   }
   const inflight = new Map<string, InFlight>();
 
@@ -370,34 +381,58 @@ export function createWorktreeCommandProvider(options: WorktreeCommandOptions): 
         pendingSteers: [],
         steerCount: 0,
         seen: new Set<string>(),
+        deliveries: newDeliveryQueue(),
       };
       inflight.set(ctx.sessionId, record);
 
-      const checkout = await addWorktree(repo, ctx.sessionId);
-      // Allocate the steer inbox OUTSIDE the checkout (#147), so a delivered steer
-      // never dirties the artifact tree.
-      const inboxDir = await mkdtemp(join(tmpdir(), 'atrium-steer-'));
-      const steerInbox = join(inboxDir, 'steer.inbox');
-      record.inboxDir = inboxDir;
-      record.steerInbox = steerInbox;
-      // Flush any steers buffered during the resolve window into the inbox now, in
-      // delivery order, so a cooperating harness sees them at its first boundary.
-      if (record.pendingSteers.length > 0) {
-        const buffered = record.pendingSteers.splice(0, record.pendingSteers.length);
-        await appendFile(steerInbox, buffered.map((s) => `${s}\n`).join('')).catch(() => {
-          // Inbox unwritable (disposed mid-resolve) — nothing to flush.
+      // FIX D (#147 completing round): resolve's awaited work can THROW — `addWorktree`
+      // fails on a wedged/missing scratch repo, `mkdtemp` fails on a full disk. The
+      // record was registered in the synchronous prefix (FIX 3); if resolve throws now
+      // and leaves it, a later `deliver` acks into a session that never ran (a false
+      // `delivered`/`interrupted` into a dead session). So UNREGISTER the record on any
+      // throw — and reclaim a worktree/inbox that resolve did allocate before it failed
+      // — then rethrow so the coordinator settles the session failed as before.
+      let checkout: WorktreeCheckout | undefined;
+      let inboxDir: string | undefined;
+      try {
+        checkout = await addWorktree(repo, ctx.sessionId);
+        // Allocate the steer inbox OUTSIDE the checkout (#147), so a delivered steer
+        // never dirties the artifact tree.
+        inboxDir = await mkdtemp(join(tmpdir(), 'atrium-steer-'));
+        const steerInbox = join(inboxDir, 'steer.inbox');
+        record.inboxDir = inboxDir;
+        record.steerInbox = steerInbox;
+        // Flush any steers buffered during the resolve window into the inbox now, in
+        // delivery order, so a cooperating harness sees them at its first boundary.
+        // Serialized against `deliver` so a concurrent steer cannot race the flush.
+        await serializeDelivery(record.deliveries, async () => {
+          if (record.pendingSteers.length > 0) {
+            const buffered = record.pendingSteers.splice(0, record.pendingSteers.length);
+            await appendFile(steerInbox, buffered.map((s) => `${s}\n`).join('')).catch(() => {
+              // Inbox unwritable (disposed mid-resolve) — nothing to flush.
+            });
+          }
         });
+      } catch (error) {
+        inflight.delete(ctx.sessionId);
+        if (inboxDir !== undefined) {
+          await rm(inboxDir, { recursive: true, force: true }).catch(() => {});
+        }
+        if (checkout !== undefined) await removeWorktree(checkout).catch(() => {});
+        throw error;
       }
+      const resolvedCheckout = checkout;
+      const resolvedInboxDir = inboxDir;
       const workspace: WorktreeWorkspace = {
         sessionId: ctx.sessionId,
-        dir: checkout.dir,
-        branch: checkout.branch,
+        dir: resolvedCheckout.dir,
+        branch: resolvedCheckout.branch,
         remote: artifactRepo?.dir ?? repo.dir,
-        checkout,
+        checkout: resolvedCheckout,
         dispose: async () => {
           inflight.delete(ctx.sessionId);
-          await rm(inboxDir, { recursive: true, force: true });
-          await removeWorktree(checkout);
+          await rm(resolvedInboxDir, { recursive: true, force: true });
+          await removeWorktree(resolvedCheckout);
         },
       };
       return workspace;
@@ -469,6 +504,34 @@ export function createWorktreeCommandProvider(options: WorktreeCommandOptions): 
           });
         },
       );
+      // POST-EXIT INTERRUPT RE-CHECK (#147 completing round, FIX B — grok's exact fix).
+      // The pre-spawn check (above) and the `onSpawn` group-kill cover an interrupt
+      // acked BEFORE spawn and one acked while the child is live. But an interrupt
+      // acked in the narrow window between the pre-spawn check and the spawn (during
+      // the `harnessEnv` await) has no child to kill yet, and the `onSpawn` kill RACES
+      // an instant-exit command — a `true` can exit 0 before the SIGKILL lands, so the
+      // child reports a CLEAN exit despite the acked interrupt. An acked interrupt must
+      // ALWAYS produce a failed terminal, never a clean settle, on EVERY path. So after
+      // the child exits, re-read the latch: if it is set, this run is `session_failed`,
+      // regardless of the exit code the child happened to report. Revert this and an
+      // interrupt that raced the spawn yields a clean settle — the executed race.
+      const postExit = inflight.get(ctx.sessionId);
+      if (postExit?.interrupted) {
+        return {
+          terminal: {
+            ok: false,
+            exitCode: null,
+            detail: 'interrupted while the harness was starting or running',
+          },
+          receipt: {
+            exitSummary: `worktree harness for session ${ctx.sessionId} interrupted (raced the spawn)`,
+            spendMicros: null,
+            contextPct: null,
+            artifact: null,
+          },
+        };
+      }
+
       const exitCode = outcome.exitCode;
       const detail = outcome.detail;
 
@@ -569,47 +632,74 @@ export function createWorktreeCommandProvider(options: WorktreeCommandOptions): 
       if (delivery.kind === 'resume') return { kind: 'ignored', reason: 'resume-noop' };
       const record = inflight.get(delivery.sessionId);
       if (!record) return { kind: 'ignored', reason: 'not-running' };
-      // DEDUP (#147 FIX 5): a redelivered signal id — #139's at-least-once dispatch
-      // retrying — is ignored, so a steer queues once and an interrupt latches once.
-      if (delivery.signalId !== undefined) {
-        if (record.seen.has(delivery.signalId)) return { kind: 'ignored', reason: 'duplicate' };
-        record.seen.add(delivery.signalId);
-      }
-      if (delivery.kind === 'interrupt') {
-        // LATCH the interrupt (#147 FIX 2). A child racing its own exit (or not yet
-        // spawned) has none to kill, but the record was real and authorized: latch
-        // so `run` will not spawn (or, if it just did, `onSpawn` group-kills), and
-        // report `interrupted` — the session is on its way terminal either way.
-        record.interrupted = true;
-        if (record.child) killGroup(record.child);
-        return { kind: 'interrupted' };
-      }
-      // steer: BOUND the queue (#147 FIX 5). At the cap the steer is dropped and the
-      // outcome says so — an unbounded producer cannot grow the inbox without limit.
-      if (record.steerCount >= MAX_QUEUED_STEERS) {
-        return { kind: 'ignored', reason: 'queue-full' };
-      }
-      const line = (delivery.body ?? '').replace(/\n/g, ' ');
-      // If the inbox file is not allocated yet (a steer in the resolve window),
-      // buffer it in memory; `resolve` flushes the buffer to the file once it exists.
-      if (record.steerInbox === undefined) {
-        record.pendingSteers.push(line);
-        record.steerCount += 1;
-        return { kind: 'delivered' };
-      }
-      // one line per delivery, best-effort. A failed append must not throw into the
-      // coordinator's fire-and-forget delivery — the harness simply does not see this
-      // steer, the same as any dropped turn-boundary message.
-      try {
-        await appendFile(record.steerInbox, `${line}\n`);
-      } catch {
-        // Inbox unwritable (disposed mid-delivery) — nothing was queued.
-        return { kind: 'ignored', reason: 'not-running' };
-      }
-      record.steerCount += 1;
-      return { kind: 'delivered' };
+      // SERIALIZE per session (#147 completing round — the structural fix). The steer
+      // path is CHECK-THEN-AWAIT-THEN-MUTATE (read `steerCount`, `await appendFile`,
+      // increment); under a concurrent flood every delivery observed `steerCount < cap`
+      // before any increment, appending past the cap (FIX A). Running each delivery's
+      // body to completion before the next begins makes the cap check-and-increment,
+      // the dedup check-and-record, and the interrupt latch atomic per session.
+      return serializeDelivery(record.deliveries, () => applyDelivery(record, delivery));
     },
   };
+
+  /**
+   * The serialized delivery body (#147 completing round). One at a time per session
+   * (via `serializeDelivery`), so the whole read → await → mutate sequence is atomic
+   * against a concurrent delivery.
+   *
+   * FIX C: a signal id is recorded in `seen` ONLY after its signal is applied — a
+   * `queue-full` drop or a failed append is NOT remembered, so a legitimate retry
+   * (once the queue drains) is applied, not lost as a `duplicate`; and `seen` is
+   * LRU-bounded so a long session cannot grow it without limit.
+   */
+  async function applyDelivery(
+    record: InFlight,
+    delivery: SignalDelivery,
+  ): Promise<DeliveryOutcome> {
+    // DEDUP (#147 FIX 5): CHECK ONLY here — do not record until the signal is applied.
+    if (delivery.signalId !== undefined && record.seen.has(delivery.signalId)) {
+      return { kind: 'ignored', reason: 'duplicate' };
+    }
+    if (delivery.kind === 'interrupt') {
+      // LATCH the interrupt (#147 FIX 2). A child racing its own exit (or not yet
+      // spawned) has none to kill, but the record was real and authorized: latch
+      // so `run` will not spawn (pre-spawn check), `onSpawn` group-kills a just-spawned
+      // child, and the post-exit re-check (FIX B) refuses a clean settle — the session
+      // is on its way terminal on every path.
+      record.interrupted = true;
+      if (record.child) killGroup(record.child);
+      rememberAppliedSignal(record.seen, delivery.signalId);
+      return { kind: 'interrupted' };
+    }
+    // steer: BOUND the queue (#147 FIX 5). At the cap the steer is dropped and the
+    // outcome says so — an unbounded producer cannot grow the inbox without limit. A
+    // dropped steer is NOT recorded as seen (FIX C), so a retry after a drain applies.
+    if (record.steerCount >= MAX_QUEUED_STEERS) {
+      return { kind: 'ignored', reason: 'queue-full' };
+    }
+    const line = (delivery.body ?? '').replace(/\n/g, ' ');
+    // If the inbox file is not allocated yet (a steer in the resolve window),
+    // buffer it in memory; `resolve` flushes the buffer to the file once it exists.
+    if (record.steerInbox === undefined) {
+      record.pendingSteers.push(line);
+      record.steerCount += 1;
+      rememberAppliedSignal(record.seen, delivery.signalId);
+      return { kind: 'delivered' };
+    }
+    // one line per delivery, best-effort. A failed append must not throw into the
+    // coordinator's fire-and-forget delivery — the harness simply does not see this
+    // steer, the same as any dropped turn-boundary message.
+    try {
+      await appendFile(record.steerInbox, `${line}\n`);
+    } catch {
+      // Inbox unwritable (disposed mid-delivery) — nothing was queued, so it is NOT
+      // recorded as seen: a later retry against a live inbox still applies.
+      return { kind: 'ignored', reason: 'not-running' };
+    }
+    record.steerCount += 1;
+    rememberAppliedSignal(record.seen, delivery.signalId);
+    return { kind: 'delivered' };
+  }
 }
 
 /**

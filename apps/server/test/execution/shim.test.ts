@@ -15,7 +15,11 @@ import {
   type ScratchRepo,
   sessionBranch,
 } from '../../src/execution/git.js';
-import { MAX_QUEUED_STEERS, type SessionContext } from '../../src/execution/provider.js';
+import {
+  MAX_QUEUED_STEERS,
+  MAX_SEEN_SIGNALS,
+  type SessionContext,
+} from '../../src/execution/provider.js';
 import {
   createDeterministicShimProvider,
   deterministicArtifact,
@@ -481,5 +485,161 @@ describe('the shim delivers already-authorized signals to a running session (#14
       signalId: 'flood-overflow',
     });
     expect(overflow).toEqual({ kind: 'ignored', reason: 'queue-full' });
+  });
+
+  // ── FIX C part 1 (#147 completing round): a signal id is recorded in `seen` ONLY
+  // after its signal is APPLIED. A steer dropped as `queue-full` must NOT be
+  // remembered — otherwise a legitimate retry of the SAME id reads as a `duplicate`
+  // (already handled) and is silently lost, when it should still be a fresh, honest
+  // `queue-full` the caller can act on. RED-ON-REVERT: move `seen.add(signalId)` back
+  // ABOVE the queue-cap check in `applyDelivery` and the retry returns `duplicate`.
+  it('does not remember a queue-full steer as seen — a retry is queue-full, not duplicate', async () => {
+    const provider = createDeterministicShimProvider({ repo });
+    const c = ctx();
+    await provider.resolve(c);
+    for (let i = 0; i < MAX_QUEUED_STEERS; i += 1) {
+      await provider.deliver({
+        sessionId: c.sessionId,
+        roomId: c.roomId,
+        kind: 'steer',
+        body: `steer-${i}`,
+        signalId: `fill-${i}`,
+      });
+    }
+    // This id is dropped (queue-full) — it must not be marked seen.
+    const dropped = await provider.deliver({
+      sessionId: c.sessionId,
+      roomId: c.roomId,
+      kind: 'steer',
+      body: 'dropped',
+      signalId: 'retry-me',
+    });
+    expect(dropped).toEqual({ kind: 'ignored', reason: 'queue-full' });
+    // The at-least-once dispatcher retries the SAME id. It is a fresh refusal
+    // (queue-full), NOT a phantom duplicate — the signal was never applied.
+    const retry = await provider.deliver({
+      sessionId: c.sessionId,
+      roomId: c.roomId,
+      kind: 'steer',
+      body: 'dropped',
+      signalId: 'retry-me',
+    });
+    expect(retry).toEqual({ kind: 'ignored', reason: 'queue-full' });
+  });
+
+  // ── FIX C part 2 (#147 completing round): the `seen` dedup set is LRU-BOUNDED at
+  // `MAX_SEEN_SIGNALS`, so a long-lived session cannot grow it without limit. Applied
+  // signals past the cap EVICT the oldest id; a redelivery of an evicted id is no
+  // longer deduped (it re-applies), while a still-recent id is. Interrupts are used
+  // to fill the set because they are not bounded by the steer-queue cap. RED-ON-REVERT:
+  // drop the eviction loop in `rememberAppliedSignal` and the evicted-oldest id reads
+  // as `duplicate` instead of re-applying.
+  it('bounds the seen set — the oldest applied id is evicted and re-applies', async () => {
+    const provider = createDeterministicShimProvider({ repo });
+    const c = ctx();
+    await provider.resolve(c);
+    // Apply MAX_SEEN_SIGNALS + 1 unique-id interrupts: the (cap+1)th evicts the first.
+    for (let i = 0; i <= MAX_SEEN_SIGNALS; i += 1) {
+      await provider.deliver({
+        sessionId: c.sessionId,
+        roomId: c.roomId,
+        kind: 'interrupt',
+        body: null,
+        signalId: `evict-${i}`,
+      });
+    }
+    // The oldest id (`evict-0`) was evicted, so its redelivery is NOT a duplicate —
+    // it re-applies (the LRU forgot it, honestly bounding memory).
+    const evicted = await provider.deliver({
+      sessionId: c.sessionId,
+      roomId: c.roomId,
+      kind: 'interrupt',
+      body: null,
+      signalId: 'evict-0',
+    });
+    expect(evicted).toEqual({ kind: 'interrupted' });
+    // A still-recent id is still remembered — dedup within the window is intact.
+    const recent = await provider.deliver({
+      sessionId: c.sessionId,
+      roomId: c.roomId,
+      kind: 'interrupt',
+      body: null,
+      signalId: `evict-${MAX_SEEN_SIGNALS}`,
+    });
+    expect(recent).toEqual({ kind: 'ignored', reason: 'duplicate' });
+  });
+
+  // ── FIX D (#147 completing round): if `resolve` THROWS after the mailbox is
+  // registered in its synchronous prefix (FIX 3), the mailbox must be UNREGISTERED —
+  // otherwise a later `deliver` acks (`delivered`/`interrupted`) into a session that
+  // never ran. A signal after a failed resolve is `not-running`, an honest no-op.
+  // RED-ON-REVERT: drop the `try/catch` around `addWorktree` in `resolve` and the
+  // steer below returns `delivered` — a false ack into a dead session.
+  it('a resolve that throws unregisters the mailbox — a later signal is not-running', async () => {
+    const deadRepo = await createScratchRepo();
+    const provider = createDeterministicShimProvider({ repo: deadRepo });
+    const c = ctx();
+    // Dispose the scratch repo out from under resolve, so `addWorktree` throws.
+    await disposeScratchRepo(deadRepo);
+    await expect(provider.resolve(c)).rejects.toThrow();
+    // The mailbox from the sync prefix was cleaned up: delivery finds no session.
+    const outcome = await provider.deliver({
+      sessionId: c.sessionId,
+      roomId: c.roomId,
+      kind: 'steer',
+      body: 'into-the-void',
+      signalId: 'd1',
+    });
+    expect(outcome).toEqual({ kind: 'ignored', reason: 'not-running' });
+  });
+
+  // ── SERIALIZATION (#147 completing round): concurrent deliveries for one session
+  // run atomically — a same-id flood delivered concurrently applies EXACTLY ONCE
+  // (one `delivered`, the rest `duplicate`), and a concurrent steer flood past the
+  // cap yields exactly `MAX_QUEUED_STEERS` delivered with no double-apply.
+  it('serializes concurrent deliveries — cap holds and no double-apply', async () => {
+    const provider = createDeterministicShimProvider({ repo });
+    const c = ctx();
+    const ws = await provider.resolve(c);
+    // A same-id pair delivered concurrently applies exactly once.
+    const [a, b] = await Promise.all([
+      provider.deliver({
+        sessionId: c.sessionId,
+        roomId: c.roomId,
+        kind: 'steer',
+        body: 'same',
+        signalId: 'same-id',
+      }),
+      provider.deliver({
+        sessionId: c.sessionId,
+        roomId: c.roomId,
+        kind: 'steer',
+        body: 'same',
+        signalId: 'same-id',
+      }),
+    ]);
+    expect([a, b]).toContainEqual({ kind: 'delivered' });
+    expect([a, b]).toContainEqual({ kind: 'ignored', reason: 'duplicate' });
+
+    // A concurrent flood of DISTINCT ids, cap + 6 (minus the one already queued):
+    // exactly the cap is queued in total, the rest are queue-full — no double-apply.
+    const flood = await Promise.all(
+      Array.from({ length: MAX_QUEUED_STEERS + 6 }, (_, i) =>
+        provider.deliver({
+          sessionId: c.sessionId,
+          roomId: c.roomId,
+          kind: 'steer',
+          body: `c-${i}`,
+          signalId: `conc-${i}`,
+        }),
+      ),
+    );
+    const delivered = flood.filter((o) => o.kind === 'delivered').length;
+    const full = flood.filter((o) => o.kind === 'ignored' && o.reason === 'queue-full').length;
+    // One slot was taken by 'same-id' above, so the flood fills the remaining cap-1.
+    expect(delivered).toBe(MAX_QUEUED_STEERS - 1);
+    expect(full).toBe(7);
+
+    await ws.dispose();
   });
 });
