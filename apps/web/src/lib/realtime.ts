@@ -159,8 +159,21 @@ const Tombstone = z.object({
   reason: z.string().default(''),
 });
 
-/** One wire position: a readable event, or a tombstone for a row that is not (#46). */
-const WireEntry = z.union([Tombstone, Envelope]);
+/**
+ * One wire position: a readable event, or a tombstone for a row that is not (#46).
+ *
+ * **`Envelope` is tried first, and the order is load-bearing (#46 round 4).**
+ * `Tombstone` is not `.strict()` — deliberately, so a newer server may add a
+ * field without a pre-parse failure discarding the journal — which means a valid
+ * envelope carrying a stray top-level `malformed: true` *also* satisfies the
+ * tombstone shape (its `event`/`issues` are simply stripped). With `Tombstone`
+ * first, zod matched that arm, dropped the real event, and skipped the row — a
+ * real event laundered into a tombstone. `Envelope` first makes the discrimination
+ * exclusive in the direction that matters: anything carrying a readable `event` is
+ * an event, full stop; the tombstone arm only ever sees an entry with no `event`
+ * (a genuine tombstone has none, so it still falls through correctly).
+ */
+const WireEntry = z.union([Envelope, Tombstone]);
 
 /**
  * A catch-up page entry this client could not parse at all — skipped, not fatal
@@ -183,10 +196,12 @@ const SKIPPED_CATCHUP_ENTRY = { skipped: true } as const;
 type SkippedCatchupEntry = typeof SKIPPED_CATCHUP_ENTRY;
 // A readable event or tombstone wins; anything this client cannot parse falls
 // through the trailing arm to the skip sentinel (order matters — the `any` arm is
-// last, so it only catches what `Tombstone`/`Envelope` refused).
+// last, so it only catches what `Envelope`/`Tombstone` refused). `Envelope` also
+// precedes `Tombstone` for the exclusivity reason in `WireEntry`'s note (#46 r4):
+// a real event carrying a stray `malformed: true` is an event, not a tombstone.
 const CatchupEntry = z.union([
-  Tombstone,
   Envelope,
+  Tombstone,
   z.any().transform((): SkippedCatchupEntry => SKIPPED_CATCHUP_ENTRY),
 ]);
 
@@ -1135,6 +1150,17 @@ export function createRealtimeClient(options: RealtimeClientOptions): RealtimeCl
   const inFlight = new Map<string, { roomId: string; clientMessageId: string }>();
   /** Consecutive catch-up rounds that asked for a gap and got no closer to it. */
   const stalled = new Map<string, number>();
+  /**
+   * A latched stall (#46 round 4): the `(from -> to)` gap catch-up hit the cap on
+   * and could not cross. `maxStalledCatchups` bounds the client's SELF-scheduled
+   * retries, but the reconciler's ~2s `head` frame re-drives `requestSince`
+   * unconditionally, so an un-crossable hole loops forever at ~0.5 Hz. Once
+   * latched, a head-driven `requestSince` for the identical `since` cursor
+   * (`from === room.lastSeq`) is suppressed — the loud stalled signal already
+   * fired. Cleared the moment the gap actually advances (a later catch-up crosses
+   * it, or `lastSeq` moves), so a recovered room resumes reconciling normally.
+   */
+  const stalledGap = new Map<string, { from: number; to: number }>();
 
   let socket: SocketLike | null = null;
   let status: ConnectionStatus = 'idle';
@@ -1418,7 +1444,24 @@ export function createRealtimeClient(options: RealtimeClientOptions): RealtimeCl
         // behind the head means ask for the gap.
         const room = view(frame.roomId);
         room.head = Math.max(room.head, frame.head);
-        if (room.lastSeq < room.head) requestSince(frame.roomId);
+        if (room.lastSeq < room.head) {
+          // #46 round 4: a latched stall suppresses the identical head-driven
+          // re-request. `maxStalledCatchups` caps the catch-up loop's own
+          // retries, but this ~2s head frame would otherwise re-drive the exact
+          // same `since(lastSeq)` forever on a hole catch-up already gave up on.
+          // The latch is keyed on the `since` cursor (`from`): while `lastSeq`
+          // sits where the stall latched, the request is byte-identical and
+          // futile, so it is suppressed and the loud stalled signal (already
+          // emitted by the catch-up cap) stands. If `lastSeq` has since moved,
+          // the gap advanced — drop the stale latch and reconcile normally.
+          const latch = stalledGap.get(frame.roomId);
+          if (latch && latch.from === room.lastSeq) {
+            // suppressed — do not re-request the identical stalled gap.
+          } else {
+            if (latch) stalledGap.delete(frame.roomId);
+            requestSince(frame.roomId);
+          }
+        }
         // Answered whether or not there was a gap. "I am at 37, you said 40" is
         // as useful to the server as "I have 40": both retire nothing until the
         // cursor reaches the head, and an unanswered frame is the server's cue
@@ -1461,6 +1504,8 @@ export function createRealtimeClient(options: RealtimeClientOptions): RealtimeCl
         // `more: false` while `to < head`, and a client that believed it.
         if (room.lastSeq < room.head || frame.more) {
           const progressed = room.lastSeq > before;
+          // The gap advanced — any latch on the old cursor is obsolete (#46 r4).
+          if (progressed) stalledGap.delete(frame.roomId);
           const rounds = progressed ? 0 : (stalled.get(frame.roomId) ?? 0) + 1;
           stalled.set(frame.roomId, rounds);
           if (rounds >= maxStalledCatchups) {
@@ -1470,11 +1515,16 @@ export function createRealtimeClient(options: RealtimeClientOptions): RealtimeCl
             fail(
               `catch-up for room "${frame.roomId}" stalled at ${room.lastSeq} of ${room.head} after ${rounds} rounds with no progress`,
             );
+            // #46 round 4: latch the un-crossable gap so the reconciler's ~2s
+            // `head` frame stops re-driving the identical `since` at 0.5 Hz.
+            // Cleared when `lastSeq` advances past `from` (head handler / above).
+            stalledGap.set(frame.roomId, { from: room.lastSeq, to: room.head });
           } else {
             requestSince(frame.roomId);
           }
         } else {
           stalled.delete(frame.roomId);
+          stalledGap.delete(frame.roomId);
           // Caught up, and the server is told so. Without this the server would
           // keep repeating `head` every reconciliation pass for a client that
           // has everything — correct, and noisy forever.
@@ -1591,6 +1641,9 @@ export function createRealtimeClient(options: RealtimeClientOptions): RealtimeCl
       room.presence = {};
       room.typing = [];
       stalled.delete(room.roomId);
+      // Drop any latched stall on disconnect (#46 r4): a reconnect re-`subscribe`s
+      // and re-reads from scratch, and the server may have fixed the row meanwhile.
+      stalledGap.delete(room.roomId);
       changed(room.roomId);
     }
   }

@@ -301,8 +301,8 @@ describe('#46 an append after a future-dated malformed row is not bricked', () =
 });
 
 /**
- * #46 round 3 (Minor) — a malformed row at the MAXIMUM legal `at` does not brick
- * the server's own mint.
+ * #46 round 3 (Minor) — the mint CLAMP keeps the server from rejecting its own
+ * mint when the watermark reaches the maximum legal `at`.
  *
  * The mint watermark `lastAtMs` advances past every physical row, malformed
  * included (BLOCKER 2). A malformed row can carry a canonical `occurred_at` right
@@ -310,16 +310,30 @@ describe('#46 an append after a future-dated malformed row is not bricked', () =
  * of `max(now, lastAtMs + 1)` would be `+010000-01-01T…`, an expanded-year form the
  * `RoomEvent` append guard refuses: the server rejecting its OWN mint, on every
  * append, globally (the watermark and the DB order gate are both process- and
- * table-wide). The clamp keeps the mint a legal `Timestamp`; the DB's canonical
- * gate then allows the append on the `id` tie-break at the same instant.
+ * table-wide). The clamp keeps the mint a legal `Timestamp`, and THAT is what this
+ * test pins: the append is not refused by the server's own guard.
  *
- * The malformed row is planted with the minimal event id, so the freshly minted
- * random id always sorts strictly after it on the `(at, id)` plateau and the gate
- * accepts. Against the bug this test fails on the mint: a `nack` naming the
- * `RoomEvent` guard, not an `ack`.
+ * ## What this test does NOT prove — and must not be read as proving (#46 r4)
+ *
+ * The malformed row here is planted with the MINIMAL event id (`MIN_ID`), and that
+ * choice is load-bearing to what the assertion can honestly claim. With a minimal
+ * id, the freshly minted random uuid sorts strictly after the bad row on the
+ * `(at, id)` plateau, so the DB's canonical-order gate accepts on the tie-break and
+ * the append lands. This exercises the ordinary future-timestamp / clamp case only.
+ *
+ * It does NOT show that a malformed row at the MAXIMAL `(at, id)` cursor is
+ * writable — the opposite is true: a row at `MAX_AT` with a maximal `id` clamps
+ * every later mint to `MAX_AT` and then WINS the `(at, id)` tie-break, so the gate
+ * refuses every subsequent append globally and permanently. The clamp cannot solve
+ * that; it is the append canonical-order boundary tracked in **#171**, not #46's
+ * read path. `MIN_ID` is deliberately the case the clamp DOES cover, not a stand-in
+ * for the maximal one. Against the clamp bug this test fails on the mint: a `nack`
+ * naming the `RoomEvent` guard, not an `ack`.
  */
-describe('#46 a malformed row at the max legal timestamp does not brick the mint', () => {
+describe('#46 the mint clamp keeps a max-timestamp row from bricking the server’s own mint', () => {
   const MAX_AT = '9999-12-31T23:59:59.999Z';
+  // Deliberately MINIMAL, not maximal: this pins the clamp/ordinary-future case.
+  // A maximal id here would brick appends forever — that boundary is #171.
   const MIN_ID = '00000000-0000-4000-8000-000000000000';
 
   async function plantMalformedAtMax(): Promise<void> {

@@ -151,6 +151,32 @@ export interface WireTombstone {
  * handshake is negotiated on this socket, so a hard skew guard is not cheap here;
  * the safe degradation above is the rollout contract. Deploy server and client
  * together when you can, but a lagging client is not a correctness hazard.
+ *
+ * ## The tombstone is a forward-compatible-ONLY change (#46 round 4)
+ *
+ * Be precise about which "old client" degrades gracefully. The paragraph above
+ * holds for a round-2-or-later client, whose catch-up schema already parses a
+ * `WireTombstone` in the page. A **pre-#46 client** is different: its catch-up
+ * schema is `entries: z.array(Envelope)` (verified on `origin/main`), which cannot
+ * parse a tombstone at all — the whole `catchup` frame fails at the schema, the
+ * page is dropped, and that client re-requests the identical `since` and stalls on
+ * any room that contains a malformed row, until it upgrades. So the wire tombstone
+ * (both the live `tombstone` frame and the catch-up tombstone entry) is a
+ * FORWARD-COMPATIBLE-ONLY protocol change: new clients read it, pre-deploy clients
+ * cannot, and there is no version handshake on this socket to bridge them.
+ *
+ * That is safe, and strictly better than pre-#46, on three counts:
+ *   1. **Server-first deploy is the correct order and loses nothing.** Before #46,
+ *      one malformed row makes `hydrate` throw and the whole PROCESS exits — a
+ *      total outage for every client in every room. After it, the server stays up;
+ *      rooms with no bad row are fully unaffected.
+ *   2. **Current clients get the full benefit the moment they upgrade** — they
+ *      advance past the malformed row on both the live and catch-up paths.
+ *   3. **The only degradation is a pre-deploy client stalling on the one affected
+ *      room** (not a crash, not data corruption, not other rooms) until it
+ *      upgrades. The contract is graceful-degradation-to-stall, scoped to the room
+ *      that holds the unreadable row — a working→stalled step on one room for old
+ *      clients, never a working→broken regression.
  */
 export type WireEntry = WireEvent | WireTombstone;
 

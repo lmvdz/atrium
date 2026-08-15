@@ -189,9 +189,9 @@
       "id": "client_ignores_the_head_frame",
       "suite": "unit",
       "kind": "file",
-      "why": "Leaves a client that lost one event frame with nothing able to tell it, because its cursor and its stale head agree.",
+      "why": "Leaves a client that lost one event frame with nothing able to tell it, because its cursor and its stale head agree. (#46 r4: re-anchored — the head-driven gap request now lives in the else-branch of the latched-stall guard.)",
       "file": "apps/web/src/lib/realtime.ts",
-      "find": "        if (room.lastSeq < room.head) requestSince(frame.roomId);\n",
+      "find": "            if (latch) stalledGap.delete(frame.roomId);\n            requestSince(frame.roomId);\n",
       "replace": "",
       "catches": ["asks for the gap when told the room is ahead of its cursor"]
     },

@@ -1432,6 +1432,17 @@ export function createLedger({ db, logger, instanceId }: LedgerOptions): Ledger 
             // `Timestamp`; if it can no longer be strictly after the newest row the
             // database's canonical-order gate refuses it as `out_of_order` with the
             // ordinary retry message, not a guard throw.
+            //
+            // Scope, stated plainly (do not read this as more than it is): the clamp
+            // only stops #46's OWN watermark advance from overflowing the legal
+            // timestamp range. It does NOT make a row at the MAXIMAL `(at, id)`
+            // cursor writable — a malformed row at `MAX_AT_MS` with a maximal `id`
+            // clamps every later mint to that same instant, and the DB's `(at, id)`
+            // canonical-order gate then loses the random-uuid tie-break against it,
+            // so appends are refused globally and forever. That is the append
+            // canonical-order boundary the ledger itself calls fatal, not #46's read
+            // path, and it is tracked in #171 — the clamp mitigates the ordinary
+            // future-dated case and leaves the maximal-cursor case to that ticket.
             const atMs = Math.min(MAX_AT_MS, Math.max(Date.now(), stagedAtMs + 1));
             const at = new Date(atMs).toISOString();
             const id = randomUUID();

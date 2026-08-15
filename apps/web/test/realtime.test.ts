@@ -281,6 +281,65 @@ describe('subscribe and catch up', () => {
     expect(errors.some((message) => message.includes('stalled'))).toBe(true);
   });
 
+  /**
+   * #46 round 4 — the latched stall survives the reconciler's `head` frame.
+   *
+   * `maxStalledCatchups` bounds the catch-up loop's OWN retries, but the server's
+   * ~2s `head` frame calls `requestSince` unconditionally when the cursor is
+   * behind the head. The round-3 stall test only pumped `catchup` frames, so it
+   * never saw that a single `head` after the cap re-drives the identical `since`
+   * forever at ~0.5 Hz. This delivers `head` frames after the stall latches and
+   * asserts the client stops re-requesting the identical gap — and that the latch
+   * clears once the gap actually advances, so a recovered room reconciles again.
+   */
+  it('stops re-requesting the identical since when head frames arrive after the stall cap', () => {
+    client.join(ROOM);
+    latest().deliver({ type: 'subscribed', roomId: ROOM, head: 9, seenSeq: 0 });
+    // Drive catch-up to the stall cap on a hole it can never cross.
+    for (let round = 0; round < 10; round += 1) {
+      latest().deliver({
+        type: 'catchup',
+        roomId: ROOM,
+        from: 0,
+        to: 0,
+        head: 9,
+        more: true,
+        entries: [],
+      });
+    }
+    expect(errors.some((message) => message.includes('stalled'))).toBe(true);
+    const afterStall = latest().framesOfType('since').length;
+    const lastSince = latest().framesOfType('since').at(-1);
+    expect(lastSince).toMatchObject({ roomId: ROOM, roomSeq: 0 });
+
+    // The reconciler now repeats `head` — the loop the round-3 test missed. Every
+    // one names a gap (`lastSeq 0 < head 9`), but the `since` it would drive is
+    // byte-identical to the one that already stalled, so the latch suppresses it.
+    for (let round = 0; round < 20; round += 1) {
+      latest().deliver({ type: 'head', roomId: ROOM, head: 9 });
+    }
+    expect(latest().framesOfType('since').length).toBe(afterStall);
+
+    // The latch clears when the gap actually advances: a catch-up that crosses
+    // the hole lets the next `head` reconcile normally again. Without the clear,
+    // a room that recovered would stay silent forever.
+    latest().deliver({
+      type: 'catchup',
+      roomId: ROOM,
+      from: 0,
+      to: 3,
+      head: 9,
+      more: true,
+      entries: [messageEvent(1, 'a'), messageEvent(2, 'b'), messageEvent(3, 'c')],
+    });
+    // This catch-up made progress, so it re-requested on its own; ignore that and
+    // measure the next head, which must drive a fresh `since` (roomSeq now 3).
+    const afterProgress = latest().framesOfType('since').length;
+    latest().deliver({ type: 'head', roomId: ROOM, head: 9 });
+    expect(latest().framesOfType('since').length).toBe(afterProgress + 1);
+    expect(latest().framesOfType('since').at(-1)).toMatchObject({ roomSeq: 3 });
+  });
+
   it('resumes from a durable journal rather than replaying the room', async () => {
     const journal = memoryJournal();
     for (const roomSeq of [1, 2, 3, 4, 5, 6, 7]) {
