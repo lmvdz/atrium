@@ -1595,3 +1595,27 @@ read-only critic's reasoned re-read (the critics couldn't even execute — EROFS
 round); closing on executed reverts + a held pre-commit beats a weaker confirmation pass.
 (5) A residual that is a SCOPING matter (the tail-window interrupt is #139's multi-turn
 concern, breaches nothing) is not a new mechanism — name it and close, don't spiral.
+
+## #148 — the reference channel-loop daemon (closed 2026-08-14, 1 build + 1 round) — THE DOGFOOD IS RUNNABLE
+
+Opus built it; both foreign lineages gauntleted it, EXECUTING the crash-replay. The
+campaign's final piece, and its method landed cleanly: the gauntlet found the covenant
+INTACT on the first pass (the cardinal line — a machine cannot spend or certify — held;
+the daemon's LoopCommand type is a seatbelt, the real enforcement is the server's command
+classes refusing the agent cookie), and enumerated exactly what a durable stateful process
+needs before it drives real work.
+
+Process lessons: (1) for a spend-authorizing agent PROCESS, the type is not the boundary —
+the SERVER's command classes are; a critic must prove the server refuses a FORGED RAW FRAME
+from the agent cookie, not trust the daemon's own type. Both lineages went straight there.
+(2) The #128 server-enforced-idempotency lesson generalized once more: the pre-journal
+open_plan replay gap is a two-generals problem a daemon-side journal CANNOT make
+exactly-once — only a server per-cause claim can (a partial unique index + a legible
+pre-check, both load-bearing). A durable client's idempotency lives on the server, not in
+its own log. (3) A durable process's journal must be versioned, room-bound, and FAIL-CLOSED
+(a forged high-seq record makes it refuse to start, never skip) with crash-safe compaction —
+the robustness a stateful process needs is itself a gauntlet target. (4) The covenant held
+every round of every lane in this arc — enforced structurally (constraints, triggers,
+command classes, envelope identity), so an adversary executing real attacks found reliability
+and honesty gaps, never a way past the rule. That is the campaign's whole thesis, proven at
+the finish line.
