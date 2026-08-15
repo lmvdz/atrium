@@ -5,29 +5,73 @@
    Selecting a node is what molds the center — no mode is typed.
 
    #151 marriage table: NavTree is **keep design CSS, bind shipped data** (#154).
-   The shell is the design's; the `AGENTS` mock behind `treeAgents()` is the seam
-   #154 replaces with `ControlPlaneData` / `ProcessTree` / `state.ts` selectors. */
+   The shell is the design's; the data is the REAL control plane. This component
+   reads `ControlPlaneData` (`lib/control-plane-data.ts`) and derives every cost
+   and glyph through the shipped `control/state.ts` selectors — `planCost`,
+   `formatMicros`, and, for the covenant `✓`, `sessionCertified` — exactly as the
+   plain `ProcessTree.tsx` does. Nothing on this tree is hand-set:
+
+     * the `✓` badge is `sessionCertified(session)` and NOTHING else — a human
+       signature through the one predicate, never a client boolean. Flip a part
+       of the receipt and the tick drops to nothing, which is what makes it
+       derived rather than merely true today.
+     * a session's branch is `session.artifact?.branch` — the branch the work
+       LANDED on. A session with no settled artifact shows NO branch rather than
+       a fabricated one.
+     * `ageMin` is `now − createdAt` (the read model carries no age column).
+     * every string the tree prints is the page's own voice, through
+       `systemText` — the same door `ProcessTree.tsx` routes its rows through, so
+       the printed-strings covenant guard traces the tree's cells to a checked
+       source instead of an untraced mock. */
 
 import { useState } from 'react';
+import type { ControlPlaneData, ControlSessionRow } from '@/lib/control-plane-data';
+import { formatMicros, planCost, sessionCertified } from '@/src/components/control/state';
+import { systemText } from '@/src/components/model/quotation';
 import { IconCheck, IconChevron, IconDot, IconWarn } from './icons';
 import { ProviderMark } from './ProviderMark';
 import styles from './prototype.module.css';
-import { fmtMicros, type StreamState, treeAgents } from './seams';
-import { PHASE_LABEL, type Selection } from './types';
+import type { Selection } from './types';
+
+/* The live session — the one whose diff the (still-mock, #159) stream animates.
+   Keyed by id, the same id the conversation/peripheral seams select against, so
+   binding the tree did not move the live thread. */
+const LIVE_SESSION_ID = 's-live';
+
+/* The branch the work landed on, or null — NEVER fabricated. The read model
+   surfaces a branch only through the settled artifact (`SessionArtifact.branch`,
+   #145), so an open session with no artifact has no branch to show. */
+function branchOf(session: ControlSessionRow): string | null {
+  const branch = session.artifact?.branch;
+  return typeof branch === 'string' && branch.trim().length > 0 ? branch : null;
+}
+
+/* Minutes since the session was opened, against the projection instant — the
+   read model carries no age column, so age is derived, and from a single stable
+   reference (never `Date.now()`, which tears between SSR and hydration). */
+function ageMinOf(session: ControlSessionRow, nowIso: string): number {
+  const created = Date.parse(session.createdAt);
+  const now = Date.parse(nowIso);
+  if (!Number.isFinite(created) || !Number.isFinite(now)) return 0;
+  return Math.max(0, Math.round((now - created) / 60_000));
+}
 
 export function NavTree({
-  stream,
+  data,
   selected,
   onSelect,
   concern,
 }: {
-  stream: StreamState;
+  data: ControlPlaneData;
   selected: Selection;
   onSelect: (s: Selection) => void;
+  /* The live session wears a "needs you" alert when the (still-mock, #159)
+     stream surfaces a concern — derived in the composer and handed down. */
   concern: boolean;
 }) {
-  // SEAM(#154): bind to real source — the ledger's agents/plans/sessions.
-  const AGENTS = treeAgents();
+  const agents = data.agents;
+  const roomName = data.room.name;
+  const now = data.updatedAt;
   const [collapsed, setCollapsed] = useState<ReadonlySet<string>>(() => new Set());
   const toggle = (k: string) =>
     setCollapsed((p) => {
@@ -50,11 +94,11 @@ export function NavTree({
     parentKey: string | null;
   }
   const flat: FlatNode[] = [];
-  for (const agent of AGENTS) {
-    const aKey = `agent:${agent.id}`;
-    const aOpen = !collapsed.has(agent.id);
+  for (const agent of agents) {
+    const aKey = `agent:${agent.userId}`;
+    const aOpen = !collapsed.has(agent.userId);
     flat.push({
-      sel: { kind: 'agent', id: agent.id },
+      sel: { kind: 'agent', id: agent.userId },
       key: aKey,
       hasChildren: agent.plans.length > 0,
       expanded: aOpen,
@@ -131,18 +175,18 @@ export function NavTree({
       tabIndex={0}
       onKeyDown={onKeyDown}
     >
-      {AGENTS.map((agent) => {
-        const aOpen = !collapsed.has(agent.id);
+      {agents.map((agent) => {
+        const aOpen = !collapsed.has(agent.userId);
         const spend = agent.plans.reduce((s, p) => s + p.spentMicros, 0);
         return (
-          <div key={agent.id}>
+          <div key={agent.userId}>
             <div
-              className={`${styles.navRow} ${styles.tAgent} ${on('agent', agent.id) ? styles.navOn : ''}`}
+              className={`${styles.navRow} ${styles.tAgent} ${on('agent', agent.userId) ? styles.navOn : ''}`}
             >
               <button
                 className={styles.twisty}
                 type="button"
-                onClick={() => toggle(agent.id)}
+                onClick={() => toggle(agent.userId)}
                 aria-label={aOpen ? 'collapse' : 'expand'}
               >
                 <IconChevron open={aOpen} />
@@ -150,27 +194,40 @@ export function NavTree({
               <button
                 className={styles.navMain}
                 type="button"
-                onClick={() => onSelect({ kind: 'agent', id: agent.id })}
+                onClick={() => onSelect({ kind: 'agent', id: agent.userId })}
               >
                 <span className={styles.tGlyphAgent}>
-                  <ProviderMark model={agent.model} />
+                  {agent.model !== null ? (
+                    <ProviderMark model={agent.model} />
+                  ) : (
+                    <IconDot size={9} />
+                  )}
                 </span>
-                <span className={styles.tName}>{agent.name}</span>
-                <span className={styles.tHandle}>@{agent.name}</span>
+                <span className={styles.tName}>{systemText(agent.name, 'NavTree agent name')}</span>
+                <span className={styles.tHandle}>
+                  {systemText(`@${agent.name}`, 'NavTree agent handle')}
+                </span>
                 <span className={styles.grow} />
-                <span className={styles.tDim}>{fmtMicros(spend)}</span>
-                <span className={styles.tRoom}>#{agent.room}</span>
+                <span className={styles.tDim}>
+                  {systemText(formatMicros(spend), 'NavTree agent spend')}
+                </span>
+                <span className={styles.tRoom}>#{systemText(roomName, 'NavTree agent room')}</span>
               </button>
             </div>
 
             {aOpen
               ? agent.plans.map((plan) => {
                   const pOpen = !collapsed.has(plan.id);
-                  const unfunded = plan.drawsCeiling === null;
-                  const over = plan.drawsCeiling !== null && plan.drawsUsed > plan.drawsCeiling;
-                  const draws = unfunded
-                    ? `${plan.drawsUsed} draws · unfunded`
-                    : `${plan.drawsUsed}/${plan.drawsCeiling} draws`;
+                  const cost = planCost(plan);
+                  const unfunded = cost.draws.unfunded;
+                  const over = cost.draws.overCeiling;
+                  const drawsLabel = unfunded
+                    ? `${cost.draws.used} draws · unfunded`
+                    : `${cost.draws.used}/${cost.draws.ceiling} draws`;
+                  const costLabel =
+                    cost.dollars.budgetMicros !== null
+                      ? `${formatMicros(cost.dollars.spentMicros)} / ${formatMicros(cost.dollars.budgetMicros)}`
+                      : formatMicros(cost.dollars.spentMicros);
                   return (
                     <div key={plan.id}>
                       <div
@@ -190,16 +247,17 @@ export function NavTree({
                           onClick={() => onSelect({ kind: 'plan', id: plan.id })}
                         >
                           <span className={styles.mark}>~</span>
-                          <span className={styles.tName}>{plan.title}</span>
+                          <span className={styles.tName}>
+                            {systemText(plan.title, 'NavTree plan title')}
+                          </span>
                           <span
                             className={`${styles.chip} ${over || unfunded ? styles.chipWarn : ''}`}
                           >
-                            {draws}
+                            {systemText(drawsLabel, 'NavTree plan draws')}
                           </span>
                           <span className={styles.grow} />
                           <span className={styles.tDim}>
-                            {fmtMicros(plan.spentMicros)}
-                            {plan.budgetMicros !== null ? ` / ${fmtMicros(plan.budgetMicros)}` : ''}
+                            {systemText(costLabel, 'NavTree plan cost')}
                           </span>
                         </button>
                       </div>
@@ -207,12 +265,30 @@ export function NavTree({
                       {pOpen ? (
                         <div className={styles.tSessionGroup}>
                           {plan.sessions.map((session) => {
-                            const liveHexi = session.id === 's-live';
-                            const running = session.status === 'running';
+                            const liveHexi = session.id === LIVE_SESSION_ID;
+                            const running = session.status === 'open';
+                            const certified = sessionCertified(session);
                             const needsYou = liveHexi && concern;
-                            const statusLabel = liveHexi
-                              ? (PHASE_LABEL[stream.phase] ?? stream.phase)
-                              : session.status;
+                            const branch = branchOf(session);
+                            /* The REAL lifecycle status, in the shipped tree's
+                               vocabulary (`ProcessTree.sessionSummary`): an open
+                               session reads "running". The live-activity PHASE
+                               overlay ("writing"/"reading") is the mock stream's
+                               narration and belongs to #159 (out of scope); the
+                               live session's activeness stays legible through the
+                               pulsing run-dot and in-call faces below. */
+                            const statusLabel = running ? 'running' : session.status;
+                            const sub = [
+                              statusLabel,
+                              session.contextPct !== null
+                                ? `ctx ${Math.round(session.contextPct * 100)}%`
+                                : null,
+                              formatMicros(session.spendMicros),
+                              `${ageMinOf(session, now)}m`,
+                              certified ? 'certified' : null,
+                            ]
+                              .filter((part): part is string => part !== null)
+                              .join(' · ');
                             return (
                               <button
                                 key={session.id}
@@ -230,7 +306,7 @@ export function NavTree({
                                     <span className={styles.warnGlyph} aria-hidden>
                                       <IconWarn />
                                     </span>
-                                  ) : session.certified ? (
+                                  ) : certified ? (
                                     <span className={styles.markOk} title="human-certified">
                                       <IconCheck />
                                     </span>
@@ -245,7 +321,11 @@ export function NavTree({
                                       <IconDot size={6} />
                                     </span>
                                   )}
-                                  <span className={styles.branch}>{session.branch}</span>
+                                  {branch !== null ? (
+                                    <span className={styles.branch}>
+                                      {systemText(branch, 'NavTree session branch')}
+                                    </span>
+                                  ) : null}
                                   {liveHexi ? (
                                     <span className={styles.tCall} title="in the call">
                                       {inCall.map((p) => (
@@ -257,12 +337,7 @@ export function NavTree({
                                   ) : null}
                                 </span>
                                 <span className={styles.tSub}>
-                                  {statusLabel}
-                                  {session.ctxPct !== null
-                                    ? ` · ctx ${Math.round(session.ctxPct * 100)}%`
-                                    : ''}
-                                  {` · ${fmtMicros(session.spendMicros)} · ${session.ageMin}m`}
-                                  {session.certified ? ' · certified' : ''}
+                                  {systemText(sub, 'NavTree session summary')}
                                 </span>
                               </button>
                             );
