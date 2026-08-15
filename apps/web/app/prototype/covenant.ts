@@ -33,8 +33,13 @@
  * `roomId`, replace each `inert(...)` body with the real call and return
  * `reached: true` ONLY on the server's `ack` — NEVER short-circuit to a local
  * flag:
- *   certify   → clientRef.correctObject(roomId, objectId, 'amend',
- *                 { patch: { verification: 'verified' } })      (LiveRoomSession:603)
+ *   certify   → certifySessionAction({ sessionId, attemptToken, … }) via the
+ *                 HoldToAct arm→confirm/cancel flow (lib/certify-session.ts;
+ *                 the server times its own arm→confirm hold) — the ArtifactPane
+ *                 hosts a SESSION LANDING, so it certifies the SESSION, not a
+ *                 claim. A semantic-claim certify is the SEPARATE door
+ *                 clientRef.correctObject(roomId, objectId, 'amend',
+ *                 { patch: { verification: 'verified' } }) (LiveRoomSession:603).
  *   fund      → issueRoomCommand({ name: 'set_plan_rlimit', roomId, planId, slice })
  *                                                                (room-command.ts; human-only)
  *   steer     → clientRef.signalSession(roomId, sessionId, 'steer', { body })
@@ -49,6 +54,14 @@
 
 /** The exact server-gated command an affordance routes to. */
 export type CovenantDoor =
+  // A SESSION LANDING is certified through the SQL-timed arm→confirm hold
+  // (`lib/certify-session.ts` `certifySession`, driven by `HoldToAct` via
+  // `certifySessionAction`) — NOT `correctObject`, which certifies a semantic
+  // CLAIM. The ArtifactPane hosts a session landing, so its certify names this.
+  | 'certifySession{arm→confirm}'
+  // A semantic CLAIM (an accepted reading in `LiveRoomSession`) is certified with
+  // `amend {verification:'verified'}`. Named separately so a session-landing
+  // certify can never be mis-wired to a claim door, or the reverse (#157 r1 D2).
   | "correctObject('amend',{verification:'verified'})"
   | 'set_plan_rlimit'
   | 'signal_session{steer}'
@@ -92,8 +105,23 @@ function inert(door: CovenantDoor): CovenantOutcome {
  * is the point — an inert door reads nothing and writes nothing.
  */
 export const covenant = {
-  /** Certify a `~` draft to `✓ verified`. The machine never certifies (#102). */
-  certify: (_objectId: string): CovenantOutcome =>
+  /**
+   * Certify a session LANDING (the ArtifactPane's context: a `~` draft/diff that
+   * a human accepts `✓`). The gated door is the server-timed `certifySession`
+   * arm→confirm hold (`lib/certify-session.ts`, driven by `HoldToAct`) — the
+   * server measures its own arm→confirm interval and writes the human signature
+   * on the session row; the browser clock is never trusted. The machine never
+   * certifies (#102). This is NOT `correctObject('amend',…)`, which certifies a
+   * semantic claim, not a session landing (#157 r1 D2).
+   */
+  certify: (_sessionId: string): CovenantOutcome => inert('certifySession{arm→confirm}'),
+  /**
+   * Certify a semantic CLAIM (an accepted reading in `LiveRoomSession`) to
+   * `✓ verified`. A DIFFERENT door from a session landing: `amend
+   * {verification:'verified'}`. Named separately so neither can be mis-wired to
+   * the other. Not surfaced in the ArtifactPane; here for the seam's completeness.
+   */
+  certifyClaim: (_objectId: string): CovenantOutcome =>
     inert("correctObject('amend',{verification:'verified'})"),
   /** Set/raise a plan's spend slice. Human-only; the server refuses a machine first. */
   fund: (_planId: string, _slice: number): CovenantOutcome => inert('set_plan_rlimit'),

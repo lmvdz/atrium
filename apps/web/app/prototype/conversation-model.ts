@@ -303,19 +303,79 @@ export function conversationModel(selection: Selection): ConversationModel {
 }
 
 /**
- * A locally-sent line (an echo). It is the viewer TYPING, so it is a real typed
- * message on the same register as the rest of the feed — not a second render
- * path. The record and the entry come back together so `ChatBlock` can add both
- * to the ledger and the feed. (SEAM #157: a real send routes through a gated
- * dispatch; until then this is the honest local shape of the viewer's own words.)
+ * How a locally-appended line reached (or did NOT reach) the room.
+ *
+ *  - `said`     — the viewer's own words, honestly typed into the room. A real
+ *                 authored line on the same register as the rest of the feed.
+ *  - `pending`  — a covenant act the operator has BEGUN but which has NOT been
+ *                 delivered to any server (e.g. "@hexi stop" opened the steer
+ *                 composer). Rendered as a NOT-delivered system notice.
+ *  - `refused`  — a covenant act that returned honestly inert: nothing reached
+ *                 the server. Also a NOT-delivered system notice.
+ *
+ * The distinction is the whole point of #157 round-1 D1: a covenant act that
+ * did not reach a durable door must NEVER render as a sent-looking authored
+ * message. Only `said` becomes an authored viewer row; `pending`/`refused`
+ * render as a system notice carrying a ✗ (not-delivered) glyph, so no single
+ * action can show a "sent" stop with no command behind it.
+ */
+export type EchoDelivery = 'said' | 'pending' | 'refused';
+
+/** A locally-appended feed line and how far it actually got. */
+export interface Echo {
+  readonly text: string;
+  readonly delivery: EchoDelivery;
+}
+
+/**
+ * A covenant act that reached no server. `event` + `failed` derives a `✗` (see
+ * `glyphFor`) — the one glyph that reads, unmistakably, "this did NOT happen",
+ * the exact opposite of the sent/`✓` a faked stop would wear. It is NOT owed to
+ * the viewer and NOT a claim, so it carries no attention dot and no dotted
+ * underline: it is a plain, honest "nothing was delivered" notice.
+ */
+const NOT_DELIVERED: EpistemicState = {
+  kind: 'event',
+  verification: 'failed',
+  owedToViewer: false,
+  irreversible: false,
+};
+
+/**
+ * A locally-appended line (an echo), rendered by its delivery.
+ *
+ * A `said` echo is the viewer TYPING — a real typed message on the same
+ * register as the rest of the feed, so its record and entry come back together
+ * for `ChatBlock` to add to both the ledger and the feed. A `pending`/`refused`
+ * echo is a covenant act that reached no durable door: it renders as a SYSTEM
+ * notice with a ✗ (not-delivered) glyph and carries NO `MessageRecord` — it is
+ * structurally not an authored, sent-looking message. (SEAM #157: a real send
+ * routes through a gated dispatch; until then a steer is honestly not delivered,
+ * and it says so on its own row the instant it is begun.)
  */
 export function echoItem(
-  text: string,
+  echo: Echo,
   index: number,
   room: string,
-): { readonly record: MessageRecord; readonly item: ConversationItem } {
+): { readonly record?: MessageRecord; readonly item: ConversationItem } {
   const id = `echo-${index}`;
-  const body = messageBody(text);
+  const excerpt = echo.text.replace(/[`=*]/g, '').trim();
+
+  if (echo.delivery !== 'said') {
+    // A covenant act that did NOT reach a server: a system NOT-delivered notice,
+    // never an authored viewer message. No `MessageRecord` — this line is not the
+    // viewer's speech, it is the surface reporting that nothing was sent.
+    const entry: SystemEntry = {
+      type: 'system',
+      id,
+      at: 'now',
+      statement: systemStatement(echo.text),
+      state: NOT_DELIVERED,
+    };
+    return { item: { kind: 'system', id, mm: { who: 'system', kind: 'system', excerpt }, entry } };
+  }
+
+  const body = messageBody(echo.text);
   const record: MessageRecord = {
     id,
     at: 'now',
@@ -330,7 +390,7 @@ export function echoItem(
     item: {
       kind: 'message',
       id,
-      mm: { who: VIEWER, kind: 'human', excerpt: text.replace(/[`=*]/g, '').trim() },
+      mm: { who: VIEWER, kind: 'human', excerpt },
       entry: messageEntry(record, { state: TALK, body, viewer: VIEWER }),
     },
   };

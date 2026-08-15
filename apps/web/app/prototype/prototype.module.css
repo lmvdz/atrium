@@ -700,8 +700,18 @@
   border: 1px solid var(--grnbd);
   background: var(--grnav);
 }
-.statRun:hover {
+.statRun:not(:disabled):hover {
   background: var(--grnbg);
+}
+/* #157 residual 4: an inert run must LOOK inert, not merely be labelled so. When
+   disabled (no live session to dispatch) it drops the green run affordance and
+   the pointer entirely, so the look matches the behaviour — a control that
+   cannot be pressed does not invite the press. */
+.statRun:disabled {
+  color: var(--tx3);
+  background: var(--bg4);
+  border-color: var(--line);
+  cursor: not-allowed;
 }
 
 /* ---- the log: ambient at rest, receded once the diff takes the floor ---- */

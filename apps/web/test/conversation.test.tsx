@@ -68,8 +68,12 @@ describe('the conversation renders through the shipped stack', () => {
 
   it('mentions ride the shipped body as a typed reference, not a regex over text', () => {
     // A constructed line so the assertion does not depend on fixture prose.
-    const { record, item } = echoItem('ping @hexi about the totals', 0, 'billing-rewrite');
-    if (item.kind !== 'message') throw new Error('unreachable');
+    const { record, item } = echoItem(
+      { delivery: 'said', text: 'ping @hexi about the totals' },
+      0,
+      'billing-rewrite',
+    );
+    if (item.kind !== 'message' || !record) throw new Error('unreachable');
     const { container } = renderRow(item.entry, [record]);
     // The shipped body marks a mention with `data-rich-mention`; the row resolved
     // through the ledger (a real citation) rather than a regex over display text.
@@ -78,14 +82,18 @@ describe('the conversation renders through the shipped stack', () => {
   });
 
   it('FLIP A MESSAGE BODY — the rendered words move with the record', () => {
-    const first = echoItem('the fold is pure', 0, 'billing-rewrite');
-    if (first.item.kind !== 'message') throw new Error('unreachable');
+    const first = echoItem({ delivery: 'said', text: 'the fold is pure' }, 0, 'billing-rewrite');
+    if (first.item.kind !== 'message' || !first.record) throw new Error('unreachable');
     const a = renderRow(first.item.entry, [first.record]);
     expect(a.container.textContent).toContain('the fold is pure');
     cleanup();
 
-    const second = echoItem('the fold is STATEFUL-XYZ', 0, 'billing-rewrite');
-    if (second.item.kind !== 'message') throw new Error('unreachable');
+    const second = echoItem(
+      { delivery: 'said', text: 'the fold is STATEFUL-XYZ' },
+      0,
+      'billing-rewrite',
+    );
+    if (second.item.kind !== 'message' || !second.record) throw new Error('unreachable');
     const b = renderRow(second.item.entry, [second.record]);
     expect(b.container.textContent).toContain('the fold is STATEFUL-XYZ');
     expect(b.container.textContent).not.toContain('the fold is pure');
