@@ -18,17 +18,17 @@
  * with its real source; the component that consumes it never changes shape.
  * ═════════════════════════════════════════════════════════════════════════ */
 
+import type { SessionDiff } from '@atrium/db';
 import type { ControlPlaneData } from '@/lib/control-plane-data';
-import { controlPlaneFixture } from './control-fixture';
 import type {
   MemberChip,
   ParticipantSummary,
   Presence,
   RoomHeadRecord,
 } from '@/src/components/model/records';
+import { controlPlaneFixture } from './control-fixture';
 import {
   type DiffLine,
-  INVOICE_DIFF,
   AGENTS as MOCK_AGENTS,
   type MockAgent,
   type StreamState,
@@ -119,7 +119,7 @@ const CONVO_LIVE: readonly ChatMsg[] = [
         },
         { kind: 'edit', edit: { file: 'src/billing/invoice.ts', lines: EDIT_INVOICE } },
         { kind: 'command', command: '$ pnpm test billing 2>&1 | tail -3' },
-        { kind: 'output', text: '✓ 47 passed · 2 new · 1.2s' },
+        { kind: 'output', text: '47 passed · 2 new · 1.2s' },
       ],
       conclusion: {
         text: 'done — totals stream without a mutable, and ==a repeated fold over unchanged lines is a pure cache hit==. all 47 tests pass, incl. two new ones.',
@@ -155,7 +155,9 @@ const CONVO_SCOUT: readonly ChatMsg[] = [
       },
     },
   },
-  { id: 'sc3', time: '13:41', kind: 'system', text: '✓ settled · certified by you' },
+  /* The tick is DERIVED from `certified` by the conversation model → `SystemRow`
+     `<Glyph>`, never a literal `✓` in this text (the glyph-source covenant). */
+  { id: 'sc3', time: '13:41', kind: 'system', text: 'settled · certified by you', certified: true },
 ];
 const CONVO_RANK: readonly ChatMsg[] = [
   {
@@ -427,7 +429,7 @@ ledger settlement or auth.
 ## sessions
 
 - \`feat/streaming-invoice-totals\` — writing
-- \`scout/invoice-schema\` — settled ✓
+- \`scout/invoice-schema\` — settled · certified
 `;
 
 const NOTE_MD = `# Why streaming totals
@@ -451,7 +453,110 @@ An off-scope edit reached into \`src/auth/session.ts\` to \`elevate\` a session
 of the work was written on top of it.
 `;
 
-/* SEAM(#155): bind to the session's real artifacts. */
+/* SEAM(#155/#159): the SERVER-PRE-STRUCTURED diff (`SessionDiff`, #145) for the
+   session branch — the shape the shipped `ReviewPane` `DiffView` renders. It is a
+   real-typed fixture standing in for the settle-receipt diff (the live source is
+   #159); the values are the exact per-file hunks of the branch the mock stream
+   builds (`mock.ts`'s `INVOICE_DIFF`), pre-structured the way `execution/git.ts`
+   would emit them. The client NEVER parses a `git diff` string — the prototype's
+   hand-rolled `parseDiff` is DELETED (#151: shipped wins on the diff render). The
+   last file is the off-scope drift into auth; the shipped pane renders it as a
+   file like any other (the "concern" is the live stream's job, #159/#153). */
+export function sessionDiffFixture(): SessionDiff {
+  return {
+    fileCount: 3,
+    additions: 14,
+    deletions: 5,
+    truncated: false,
+    files: [
+      {
+        path: 'src/billing/invoice.ts',
+        status: 'modified',
+        additions: 6,
+        deletions: 5,
+        binary: false,
+        hunks: [
+          {
+            header: '@@ -1,6 +1,7 @@',
+            lines: [
+              " import type { Invoice } from './types'",
+              "+import { StreamingTotal } from './streaming-total'",
+              ' ',
+              " /** Sum an invoice's line items, in micros. */",
+              ' export function invoiceTotal(invoice: Invoice): number {',
+              '   const lines = invoice.lines',
+            ],
+          },
+          {
+            header: '@@ -9,8 +10,8 @@ export function invoiceTotal(invoice: Invoice): number {',
+            lines: [
+              '   if (lines.length === 0) return 0',
+              ' ',
+              '-  let total = 0',
+              '-  for (const line of lines) {',
+              '-    total += line.amountMicros',
+              '-  }',
+              '-  return total',
+              '+  const totals = new StreamingTotal()',
+              '+  for (const line of lines) {',
+              '+    totals.add(line.amountMicros)',
+              '+  }',
+              '+  return totals.settle()',
+              ' }',
+            ],
+          },
+        ],
+      },
+      {
+        path: 'src/billing/invoice.test.ts',
+        status: 'modified',
+        additions: 4,
+        deletions: 0,
+        binary: false,
+        hunks: [
+          {
+            header: "@@ -4,3 +4,8 @@ describe('invoiceTotal', () => {",
+            lines: [
+              "   it('sums a single line', () => {",
+              '     expect(invoiceTotal(one)).toBe(100)',
+              '   })',
+              '+',
+              "+  it('accumulates without a running mutable', () => {",
+              '+    expect(streamTotal([100, 250])).toBe(350)',
+              '+  })',
+              ' })',
+            ],
+          },
+        ],
+      },
+      {
+        path: 'src/auth/session.ts',
+        status: 'modified',
+        additions: 4,
+        deletions: 0,
+        binary: false,
+        hunks: [
+          {
+            header: '@@ -20,6 +20,10 @@ export interface Session {',
+            lines: [
+              '   role: Role',
+              ' }',
+              ' ',
+              '+export function elevate(session: Session) {',
+              "+  session.role = 'admin' // to read all invoices",
+              '+  return session',
+              '+}',
+            ],
+          },
+        ],
+      },
+    ],
+  };
+}
+
+/* SEAM(#155): bind to the session's real artifacts. The `~`/`✓` mark is DERIVED
+   from `certified` via the shipped `<Glyph>` — never a literal glyph (glyph-source
+   covenant). Both machine drafts here are `~` (uncertified). */
 export function sessionArtifacts(): readonly Artifact[] {
   return [
     {
@@ -459,15 +564,15 @@ export function sessionArtifacts(): readonly Artifact[] {
       kind: 'diff',
       title: 'feat/streaming-invoice-totals',
       sub: 'PR · billing',
-      mark: '~',
-      diff: INVOICE_DIFF,
+      certified: false,
+      sessionDiff: sessionDiffFixture(),
     },
     {
       id: 'plan-invoice',
       kind: 'plan',
       title: 'streaming invoice totals',
       sub: 'plan',
-      mark: '~',
+      certified: false,
       md: PLAN_MD,
     },
     { id: 'note-streaming', kind: 'doc', title: 'why streaming totals', sub: 'note', md: NOTE_MD },

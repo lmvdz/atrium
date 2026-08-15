@@ -5,6 +5,7 @@
    NOTHING here binds real data — the data itself lives behind the typed seams in
    `seams.ts`. These are the shapes the seams and the panes agree on. */
 
+import type { SessionDiff } from '@atrium/db';
 import type { DiffLine } from './mock';
 
 export type { DiffLine } from './mock';
@@ -24,8 +25,20 @@ export interface Artifact {
   kind: ArtifactKind;
   title: string; // the artifact's own name (a branch, a doc, a plan)
   sub: string; // a short qualifier shown beside the title
-  mark?: '~' | '✓';
-  diff?: string; // a unified git diff, when kind === 'diff'
+  /**
+   * Whether a human has CERTIFIED this artifact's reading. The `~`/`✓` glyph is
+   * DERIVED from this through the shipped `<Glyph>` (never a literal glyph in
+   * mock content — the covenant's glyph-source rule). `undefined`/false ⇒ `~`,
+   * the machine's own draft; a doc note carries no epistemic mark at all.
+   */
+  certified?: boolean;
+  /**
+   * The SERVER-PRE-STRUCTURED diff (#145), when `kind === 'diff'` — the shape the
+   * shipped `ReviewPane` `DiffView` renders. The client never parses a `git diff`
+   * string; the producer already structured it. SEAM(#159): today a real-typed
+   * fixture, tomorrow the session's settle-receipt diff.
+   */
+  sessionDiff?: SessionDiff;
   md?: string; // markdown source, when kind === 'doc' | 'plan'
 }
 
@@ -67,6 +80,13 @@ export interface ChatMsg {
   kind: ChatKind;
   who?: string;
   text?: string;
+  /**
+   * A system line that reports a SETTLED reading a human has certified. The `✓`
+   * is derived from this by the conversation model (`systemSettlementState`) and
+   * rendered by the shipped `SystemRow` `<Glyph>` — the covenant's glyph-source
+   * rule: certification is a STATE, never a literal glyph in the text.
+   */
+  certified?: boolean;
   /** an agent TURN — its whole tool-call history, folded into one accordion */
   turn?: TurnData;
   /** an inline image (screenshot, chart, paste) */

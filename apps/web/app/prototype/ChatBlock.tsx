@@ -3,26 +3,34 @@
 /* CHAT BLOCK — the room's conversation and the ONLY input. `@mention` an agent to
    delegate; when the agent is paused mid-steer, the same input takes the redirect.
  *
- * #151 marriage table, read carefully: the feed is a HYBRID. The conversation
- * *feed rows* are **bind-shipped** to `Timeline`/`TimelineRow` (#155) — but the
- * SAME table keeps `Turn`/`TurnStep` as the **design shell, blocked on the live
- * channel (#159)**, and a turn renders INSIDE this feed. You cannot delete the
- * feed container and keep the turn accordion, so the design feed SHELL stays and
- * hosts both: plain human/agent rows (which #155 swaps to `TimelineRow` once
- * bodies are ledger `MessageRecord`s) and design `Turn` accordions (until #159).
- * The inline body rendering is already bound to the shipped `MessageBody` via
- * `MessageText` (the prototype's `RichText` regex is DELETED). The conversation
- * DATA is the `SEAM(#155)` behind `conversationFor`. */
+ * #155 marriage, THROUGH THE CONVERSATION MODEL (conversation-model.ts):
+ *   - The feed no longer reads `ChatMsg[]`. It reads a `ConversationModel` — real
+ *     ledger `MessageRecord`s and pre-shaped feed `items` — and renders it inside
+ *     an `<AttributionLedger>`, the register the shipped `TimelineRow` resolves
+ *     every citation against. That interface is the Phase-6 swap seam: a
+ *     CRDT-backed impl replaces the model's SOURCE without touching this feed.
+ *   - A plain human/agent line renders through the shipped `TimelineRow` (mentions
+ *     become typed references, the machine voice register is honoured, the body is
+ *     reconciled against the record). A system line renders through `SystemRow`,
+ *     its glyph DERIVED from state. The prototype's hand-rolled `ChatMessage`
+ *     plain-row + `RichText` regex + `parseDiff` are DELETED.
+ *   - A turn stays the design accordion shell (blocked on the live channel #159 —
+ *     the prototype's `Turn`/`TurnStep` has no backend), and an inline image stays
+ *     a design row. Both are hosted INSIDE this feed beside the shipped rows, which
+ *     is why the design feed shell (scroll container, minimap, composer) stays. */
 
-import { useEffect, useRef, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
+import { AttributionLedger } from '@/src/components/model/ledger';
+import { MessageBody } from '@/src/components/primitives/MessageBody';
+import { SystemRow } from '@/src/components/timeline/SystemRow';
+import { TimelineRow } from '@/src/components/timeline/TimelineRow';
 import { ChatTopBar } from './ChatChrome';
+import { type ConversationItem, conversationModel, echoItem } from './conversation-model';
 import { IconChevron, IconDot } from './icons';
 import { MessageText } from './MessageText';
 import styles from './prototype.module.css';
-import { conversationFor } from './seams';
 import {
   type ChatKind,
-  type ChatMsg,
   type CommentDraft,
   type DiffLine,
   MENTION_TARGETS,
@@ -35,7 +43,9 @@ import {
 } from './types';
 
 /* PRIMITIVE: a stream of diff hunks. Rendered identically whether it has the
-   floor or is materialized inside a tree node — that sameness IS the algebra. */
+   floor or is materialized inside a tree node — that sameness IS the algebra.
+   This is the DESIGN TURN's inline edit block (blocked on #159), not the artifact
+   diff — the artifact diff renders through the shipped `DiffView` now. */
 function DiffLines({ lines }: { lines: readonly DiffLine[] }) {
   return (
     <>
@@ -212,75 +222,73 @@ function Avatar({ who, kind }: { who?: string; kind: ChatKind }) {
   );
 }
 
-/* Every chat item is a two-column row: a gutter (avatar/dot) and an indented
-   content column, so what belongs together lines up under one author.
-   SEAM(#155): a plain-message row is swapped to the shipped `TimelineRow` once
-   messages arrive as ledger records; a `turn` row keeps the design `Turn`. */
-function ChatMessage({ msg }: { msg: ChatMsg }) {
-  const mmExcerpt = (
-    msg.text ??
-    msg.turn?.conclusion?.text ??
-    msg.turn?.summary ??
-    (msg.image ? `[image] ${msg.image.alt}` : '')
-  )
-    .replace(/[`=*]/g, '')
-    .trim();
-  if (msg.kind === 'system') {
-    return (
-      <div
-        className={styles.chatRow}
-        data-kind="system"
-        data-mm-id={msg.id}
-        data-mm-kind="system"
-        data-mm-who="system"
-        data-mm-excerpt={mmExcerpt}
-      >
-        <Avatar kind="system" />
-        <div className={styles.chatContent}>
-          <span className={styles.chatSysText}>
-            <span className={styles.chatTime}>{msg.time}</span>{' '}
-            <MessageText text={msg.text ?? ''} />
-          </span>
-        </div>
-      </div>
-    );
-  }
+/* A design TURN row — the agent's turn accordion, under its author gutter. Kept
+   as the design shell (#159); its conclusion prose renders through the shipped
+   `MessageBody` via `MessageText`. */
+function TurnRow({ item }: { item: Extract<ConversationItem, { kind: 'turn' }> }) {
   return (
-    <div
-      className={styles.chatRow}
-      data-kind={msg.kind}
-      data-mm-id={msg.id}
-      data-mm-kind={msg.kind}
-      data-mm-who={msg.who ?? ''}
-      data-mm-excerpt={mmExcerpt}
-    >
-      <Avatar who={msg.who} kind={msg.kind} />
+    <div className={styles.chatRow} data-kind="agent">
+      <Avatar who={item.who} kind="agent" />
       <div className={styles.chatContent}>
         <div className={styles.chatMeta}>
-          <span
-            className={`${styles.chatWho} ${msg.kind === 'human' ? styles.human : styles.agent}`}
-          >
-            {msg.who}
-          </span>
-          <span className={styles.chatTime}>{msg.time}</span>
+          <span className={`${styles.chatWho} ${styles.agent}`}>{item.who}</span>
+          <span className={styles.chatTime}>{item.at}</span>
         </div>
-        {msg.turn ? <Turn turn={msg.turn} /> : null}
-        {msg.text ? (
-          <div className={styles.chatBody}>
-            <MessageText text={msg.text} />
-          </div>
-        ) : null}
-        {msg.image ? (
-          // biome-ignore lint/nursery/noImgElement: inline chat image (mock data URI)
-          <img className={styles.chatImage} src={msg.image.src} alt={msg.image.alt} />
-        ) : null}
-        {msg.reply ? (
-          <div className={styles.threadReply}>
-            <span className={`${styles.logWho} ${styles.human}`}>{msg.reply.who}</span>
-            <span className={styles.threadText}>{msg.reply.text}</span>
-          </div>
-        ) : null}
+        <Turn turn={item.turn} />
       </div>
+    </div>
+  );
+}
+
+/* A design INLINE-IMAGE row (a chart/screenshot the agent posted). Kept as the
+   design shell — real message attachments are a later lane (#156/attachments) —
+   but the prose beside the image renders through the shipped `MessageBody`. */
+function ImageRow({ item }: { item: Extract<ConversationItem, { kind: 'image' }> }) {
+  const kind: ChatKind = item.authorKind === 'agent' ? 'agent' : 'human';
+  return (
+    <div className={styles.chatRow} data-kind={kind}>
+      <Avatar who={item.who} kind={kind} />
+      <div className={styles.chatContent}>
+        <div className={styles.chatMeta}>
+          <span className={`${styles.chatWho} ${kind === 'agent' ? styles.agent : styles.human}`}>
+            {item.who}
+          </span>
+          <span className={styles.chatTime}>{item.at}</span>
+        </div>
+        {item.body.length > 0 ? (
+          <div className={styles.chatBody}>
+            <MessageBody body={item.body} />
+          </div>
+        ) : null}
+        {/* biome-ignore lint/nursery/noImgElement: inline chat image (mock data URI) */}
+        <img className={styles.chatImage} src={item.image.src} alt={item.image.alt} />
+      </div>
+    </div>
+  );
+}
+
+/* ONE FEED ROW. The `message`/`system` kinds render through the SHIPPED grammar;
+   `turn`/`image` are the design shells. Every row is wrapped in a thin element
+   carrying the minimap's `data-mm-*` datum, so the design minimap keeps measuring
+   the feed regardless of which grammar painted the row. */
+function FeedItem({ item }: { item: ConversationItem }) {
+  return (
+    <div
+      className={styles.feedItem}
+      data-mm-id={item.id}
+      data-mm-kind={item.mm.kind}
+      data-mm-who={item.mm.who}
+      data-mm-excerpt={item.mm.excerpt}
+    >
+      {item.kind === 'message' ? (
+        <TimelineRow entry={item.entry} />
+      ) : item.kind === 'system' ? (
+        <SystemRow entry={item.entry} />
+      ) : item.kind === 'turn' ? (
+        <TurnRow item={item} />
+      ) : (
+        <ImageRow item={item} />
+      )}
     </div>
   );
 }
@@ -653,8 +661,20 @@ export function ChatBlock({
     }, 170);
     return () => window.clearTimeout(t);
   }, [selected, shownSel]);
-  // SEAM(#155): bind to the thread's real messages.
-  const convo = conversationFor(shownSel);
+
+  /* SEAM(#155/Phase 6): the conversation, THROUGH the model interface. The feed
+     renders shipped records/entries; a CRDT-backed impl swaps the source without
+     changing anything below. Echoes (locally-sent lines) are the viewer typing —
+     real typed records on the SAME register, so they render as shipped rows too. */
+  const model = useMemo(() => conversationModel(shownSel), [shownSel]);
+  const { records, items } = useMemo(() => {
+    const echoes_ = echoes.map((text, index) => echoItem(text, index, model.room));
+    return {
+      records: [...model.records, ...echoes_.map((e) => e.record)],
+      items: [...model.items, ...echoes_.map((e) => e.item)],
+    };
+  }, [model, echoes]);
+
   /* keep the input focused: clicking anywhere in the thread (that isn't a control
      or a text selection) returns the caret to the composer. */
   const refocus = (e: React.MouseEvent) => {
@@ -670,39 +690,36 @@ export function ChatBlock({
         scrollRef={logRef}
         revision={`${shownSel.kind}:${shownSel.id}|${echoes.length}|${draftComment ? draftComment.text.length : -1}|${fading ? 1 : 0}`}
       />
-      <div className={styles.chatLog} ref={logRef}>
-        <div className={`${styles.chatConvo} ${fading ? styles.chatConvoOut : ''}`}>
-          {convo.map((msg) => (
-            <ChatMessage key={msg.id} msg={msg} />
-          ))}
-        </div>
-        {echoes.map((e, i) => (
-          <ChatMessage
-            // biome-ignore lint/suspicious/noArrayIndexKey: append-only echo list
-            key={`e${i}`}
-            msg={{ id: `e${i}`, time: 'now', kind: 'human', who: 'you', text: e }}
+      {/* The feed renders inside the register every shipped `TimelineRow` resolves
+          its citation against — one ledger for the whole thread. */}
+      <AttributionLedger messages={records} room={model.room}>
+        <div className={styles.chatLog} ref={logRef}>
+          <div className={`${styles.chatConvo} ${fading ? styles.chatConvoOut : ''}`}>
+            {items.map((item) => (
+              <FeedItem key={item.id} item={item} />
+            ))}
+          </div>
+          {/* the comment being composed in the artifact pane, portaled here live */}
+          {draftComment ? <DraftComment draft={draftComment} /> : null}
+          {/* multiplayer: someone else is typing, right above your input */}
+          <TypingRow who="dane" />
+          {/* the input is just the next line of the thread — your avatar + a cursor */}
+          <Composer
+            inputRef={inputRef}
+            steering={steering}
+            value={steering ? redirect : value}
+            onChange={steering ? setRedirect : setValue}
+            onSubmit={() => {
+              if (steering) {
+                if (redirect.trim().length > 0) onSteerSend();
+              } else if (value.trim().length > 0) {
+                onSay(value);
+                setValue('');
+              }
+            }}
           />
-        ))}
-        {/* the comment being composed in the artifact pane, portaled here live */}
-        {draftComment ? <DraftComment draft={draftComment} /> : null}
-        {/* multiplayer: someone else is typing, right above your input */}
-        <TypingRow who="dane" />
-        {/* the input is just the next line of the thread — your avatar + a cursor */}
-        <Composer
-          inputRef={inputRef}
-          steering={steering}
-          value={steering ? redirect : value}
-          onChange={steering ? setRedirect : setValue}
-          onSubmit={() => {
-            if (steering) {
-              if (redirect.trim().length > 0) onSteerSend();
-            } else if (value.trim().length > 0) {
-              onSay(value);
-              setValue('');
-            }
-          }}
-        />
-      </div>
+        </div>
+      </AttributionLedger>
     </section>
   );
 }
