@@ -19,252 +19,21 @@
  *   - The line-anchored comment write is **bind-shipped** to ledger comments
  *     (#156). */
 
-import { Highlight, type PrismTheme } from 'prism-react-renderer';
-import { useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
+import { useEffect, useLayoutEffect, useRef, useState } from 'react';
 import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
-import { ArtifactKindIcon, IconCheck, IconCommentPlus } from './icons';
+/* The DIFF renders through the SHIPPED renderer now (#151/#155: shipped wins on
+   the diff, the prototype's client `parseDiff` is DELETED). `DiffView` is the
+   `ReviewPane` structured-diff view, extracted so both the control plane and this
+   pane render THROUGH it — honest empty/truncated states, a forgery-proof CSS
+   gutter, control-char neutralisation, none of it re-implemented here. */
+import { DiffView } from '@/src/components/control/DiffView';
+import { Glyph } from '@/src/components/primitives/Glyph';
+import { systemSettlementState } from './conversation-model';
+import { ArtifactKindIcon, IconCheck } from './icons';
 import styles from './prototype.module.css';
 import type { Artifact, Comment, CommentDraft } from './types';
 import { NO_AUTOFILL } from './types';
-
-/* A prism theme in the WIRE palette — colours are the design tokens themselves,
-   so the code reads in the same operator surface as everything else. */
-const CODE_THEME: PrismTheme = {
-  plain: { color: 'var(--tx1)', backgroundColor: 'transparent' },
-  styles: [
-    { types: ['comment', 'prolog', 'cdata'], style: { color: 'var(--tx3)', fontStyle: 'italic' } },
-    {
-      types: ['keyword', 'boolean', 'tag', 'operator', 'selector', 'atrule'],
-      style: { color: 'var(--blu2)' },
-    },
-    {
-      types: ['string', 'char', 'attr-value', 'inserted', 'template-string'],
-      style: { color: 'var(--grn2)' },
-    },
-    { types: ['number', 'symbol', 'unit'], style: { color: 'var(--amb2)' } },
-    { types: ['function', 'method', 'function-variable'], style: { color: 'var(--blu2)' } },
-    {
-      types: ['class-name', 'maybe-class-name', 'builtin', 'constant'],
-      style: { color: 'var(--amb2)' },
-    },
-    { types: ['punctuation'], style: { color: 'var(--tx3)' } },
-    { types: ['property', 'attr-name', 'variable', 'parameter'], style: { color: 'var(--tx0)' } },
-  ],
-};
-
-/* one syntax-highlighted line of code (prism), no per-line block wrapper. */
-function CodeLine({ text }: { text: string }) {
-  return (
-    <Highlight code={text} language="tsx" theme={CODE_THEME}>
-      {({ tokens, getTokenProps }) => (
-        <span className={styles.dcode}>
-          {tokens[0]?.map((token, k) => (
-            // biome-ignore lint/suspicious/noArrayIndexKey: single static line, stable order
-            <span key={k} {...getTokenProps({ token })} />
-          ))}
-        </span>
-      )}
-    </Highlight>
-  );
-}
-
-/* ---- a real unified-diff parser: `git diff` text → files → hunks → rows ----
-   SEAM(#155): DELETE this parser and render the shipped `ReviewPane` `DiffView`
-   fed a server pre-structured `SessionDiff` (`packages/db` schema →
-   `lib/control-plane-data.ts`) — the server already parses the diff, so the
-   client never should. Kept here only while the artifact is a mock string. */
-interface DRow {
-  kind: 'ctx' | 'add' | 'del';
-  oldNo: number | null;
-  newNo: number | null;
-  text: string;
-}
-interface DHunk {
-  header: string;
-  rows: DRow[];
-}
-interface DFile {
-  path: string;
-  offScope: boolean;
-  adds: number;
-  dels: number;
-  hunks: DHunk[];
-}
-function parseDiff(src: string): DFile[] {
-  const files: DFile[] = [];
-  let file: DFile | null = null;
-  let hunk: DHunk | null = null;
-  let oldNo = 0;
-  let newNo = 0;
-  for (const raw of src.split('\n')) {
-    if (raw.startsWith('diff --git')) {
-      file = { path: '', offScope: false, adds: 0, dels: 0, hunks: [] };
-      files.push(file);
-      hunk = null;
-      continue;
-    }
-    if (!file) continue;
-    if (raw.startsWith('+++ b/')) {
-      file.path = raw.slice(6);
-      file.offScope = file.path.startsWith('src/auth/');
-      continue;
-    }
-    if (raw.startsWith('--- ') || raw.startsWith('index ') || raw.startsWith('+++ ')) continue;
-    if (raw.startsWith('@@')) {
-      const m = /@@ -(\d+)(?:,\d+)? \+(\d+)(?:,\d+)? @@/.exec(raw);
-      oldNo = m ? Number(m[1]) : 0;
-      newNo = m ? Number(m[2]) : 0;
-      hunk = { header: raw, rows: [] };
-      file.hunks.push(hunk);
-      continue;
-    }
-    if (!hunk) continue;
-    if (raw.startsWith('+')) {
-      hunk.rows.push({ kind: 'add', oldNo: null, newNo, text: raw.slice(1) });
-      newNo += 1;
-      file.adds += 1;
-    } else if (raw.startsWith('-')) {
-      hunk.rows.push({ kind: 'del', oldNo, newNo: null, text: raw.slice(1) });
-      oldNo += 1;
-      file.dels += 1;
-    } else {
-      hunk.rows.push({ kind: 'ctx', oldNo, newNo, text: raw.slice(1) });
-      oldNo += 1;
-      newNo += 1;
-    }
-  }
-  return files;
-}
-
-/* DIFF VIEW — a real diff renderer over `git diff` text: two line-number gutters,
-   per-file counts, syntax highlight, and a line-anchored comment on hover-click
-   (GitHub-style) that threads inline AND lands in the chat.
-   SEAM(#155): replace with the shipped `ReviewPane` `DiffView`. */
-function DiffView({
-  artifact,
-  comments,
-  onComment,
-  onDraft,
-}: {
-  artifact: Artifact;
-  comments: readonly Comment[];
-  onComment: (artifactId: string, anchor: string, quote: string, text: string) => void;
-  onDraft: (d: CommentDraft | null) => void;
-}) {
-  const files = useMemo(() => parseDiff(artifact.diff ?? ''), [artifact.diff]);
-  const [openAt, setOpenAt] = useState<string | null>(null);
-  const [draft, setDraft] = useState('');
-  const totalAdd = files.reduce((n, f) => n + f.adds, 0);
-  const totalDel = files.reduce((n, f) => n + f.dels, 0);
-
-  const open = (anchor: string, quote: string) => {
-    setOpenAt(anchor);
-    setDraft('');
-    onDraft({ quote, text: '' }); // mirror into the chat the moment we start
-  };
-  const close = () => {
-    setOpenAt(null);
-    setDraft('');
-    onDraft(null);
-  };
-  const submit = (anchor: string, quote: string) => {
-    if (draft.trim().length === 0) return;
-    onComment(artifact.id, anchor, quote, draft.trim());
-    setDraft('');
-    setOpenAt(null);
-  };
-
-  return (
-    <div className={styles.diffv}>
-      <div className={styles.diffSummary}>
-        <span>
-          {files.length} file{files.length === 1 ? '' : 's'} changed
-        </span>
-        <span className={styles.statAdd}>+{totalAdd}</span>
-        <span className={styles.statDel}>−{totalDel}</span>
-      </div>
-      {files.map((file) => (
-        <div key={file.path} className={styles.dfile} data-off={file.offScope || undefined}>
-          <div className={styles.dfileHead}>
-            <span className={styles.dpath}>{file.path}</span>
-            {file.offScope ? <span className={styles.doffPill}>off-scope</span> : null}
-            <span className={styles.grow} />
-            <span className={styles.statAdd}>+{file.adds}</span>
-            <span className={styles.statDel}>−{file.dels}</span>
-          </div>
-          {file.hunks.map((h) => (
-            <div key={h.header} className={styles.dhunk}>
-              <div className={styles.dhunkHead}>{h.header}</div>
-              {h.rows.map((row, ri) => {
-                const anchor = `${file.path}:${row.newNo ?? row.oldNo ?? ri}`;
-                const rowComments = comments.filter((c) => c.anchor === anchor);
-                return (
-                  // biome-ignore lint/suspicious/noArrayIndexKey: rows are positional within a static hunk
-                  <div key={ri}>
-                    <div className={styles.drow} data-kind={row.kind}>
-                      <button
-                        type="button"
-                        className={styles.dAdd}
-                        onClick={() => open(anchor, row.text.trim())}
-                        aria-label={`comment on line ${row.newNo ?? row.oldNo}`}
-                        title="comment on this line"
-                      >
-                        <IconCommentPlus size={12} />
-                      </button>
-                      <span className={styles.dnum}>{row.oldNo ?? ''}</span>
-                      <span className={styles.dnum}>{row.newNo ?? ''}</span>
-                      <span className={styles.dsign} aria-hidden>
-                        {row.kind === 'add' ? '+' : row.kind === 'del' ? '−' : ' '}
-                      </span>
-                      <CodeLine text={row.text} />
-                    </div>
-                    {rowComments.map((c) => (
-                      <div key={c.id} className={styles.dthread}>
-                        <span className={`${styles.face} ${styles.faceHuman}`} aria-hidden>
-                          yo
-                        </span>
-                        <span className={styles.dthreadText}>{c.text}</span>
-                      </div>
-                    ))}
-                    {openAt === anchor ? (
-                      <form
-                        className={styles.dcompose}
-                        onSubmit={(e) => {
-                          e.preventDefault();
-                          submit(anchor, row.text.trim());
-                        }}
-                      >
-                        <input
-                          className={styles.commentInput}
-                          // biome-ignore lint/a11y/noAutofocus: focus the line comment the moment it opens
-                          autoFocus
-                          placeholder={`comment on ${anchor}…`}
-                          value={draft}
-                          onChange={(e) => {
-                            setDraft(e.target.value);
-                            onDraft({ quote: row.text.trim(), text: e.target.value });
-                          }}
-                          onKeyDown={(e) => {
-                            if (e.key === 'Escape') close();
-                          }}
-                          {...NO_AUTOFILL}
-                        />
-                        <button type="submit" className={styles.dcomposeSend}>
-                          comment
-                        </button>
-                      </form>
-                    ) : null}
-                  </div>
-                );
-              })}
-            </div>
-          ))}
-        </div>
-      ))}
-    </div>
-  );
-}
 
 /* markdown component overrides → the pane's own type scale (real react-markdown). */
 const MD_COMPONENTS = {
@@ -621,16 +390,23 @@ export function ArtifactPane({
       </div>
       <div className={styles.artBody}>
         {active.kind === 'diff' ? (
-          <DiffView artifact={active} comments={here} onComment={onComment} onDraft={onDraft} />
+          /* The SHIPPED structured-diff view, fed the server-pre-structured
+             `SessionDiff` — no client `parseDiff`, and (per #153, deferred to
+             Phase-6 fog) no line-anchored comments on the diff. */
+          <DiffView artifact={{ diff: active.sessionDiff }} />
         ) : (
           <DocView artifact={active} comments={here} onComment={onComment} onDraft={onDraft} />
         )}
       </div>
       {/* footer status — height-matched to the other bottom bars via --foot-h.
-          SEAM(#157): certify ✓ / "awaiting a human" wire to the human
-          certification gate (`certified_by`) — the machine never certifies. */}
+          SEAM(#157): certify / "awaiting a human" wire to the human certification
+          gate (`certified_by`) — the machine never certifies. The `~`/`✓` is
+          DERIVED from `certified` through the shipped `<Glyph>`, never a literal
+          glyph (the glyph-source covenant); a doc note carries no epistemic mark. */}
       <div className={styles.artFoot}>
-        {active.mark ? <span className={styles.mark}>{active.mark}</span> : null}
+        {active.kind === 'doc' ? null : (
+          <Glyph state={systemSettlementState(active.certified === true)} />
+        )}
         <span className={styles.artFootStatus}>
           {active.kind === 'diff' ? 'proposed' : active.kind} · draft
         </span>

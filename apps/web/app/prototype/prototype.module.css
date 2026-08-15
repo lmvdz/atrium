@@ -3216,6 +3216,12 @@
   gap: 3px;
   transition: opacity 0.17s ease, transform 0.17s ease, filter 0.17s ease;
 }
+/* the thin per-row wrapper that carries the minimap's data-mm-* datum around
+   whichever grammar (shipped TimelineRow/SystemRow, or a design turn/image row)
+   painted the row. It adds no box of its own — just a shrinkable flex item. */
+.feedItem {
+  min-width: 0;
+}
 .chatConvoOut {
   opacity: 0;
   transform: translateY(4px);
