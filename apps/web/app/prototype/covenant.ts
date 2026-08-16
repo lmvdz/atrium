@@ -98,6 +98,31 @@ function inert(door: CovenantDoor): CovenantOutcome {
   return { door, reached: false, inert: AWAITING };
 }
 
+/* ── DOOR NAMES AS CONSTANTS (#168 go-live B1) ─────────────────────────────
+ * A door's NAME is a compile-time constant, readable WITHOUT invoking the act.
+ * This exists to kill a RENDER-TIME LANDMINE: `ThreadStatus` (a component) read
+ * a door name for a label by CALLING `covenant.steer(...)`/`covenant.interrupt(...)`
+ * during render. That is harmless only while the act body is inert — the moment
+ * go-live B2 puts a live durable call in `steer`/`interrupt`, every render would
+ * fire a durable signal. So the label reads THIS constant instead, and a covenant
+ * ACT function is never invoked in render position.
+ *
+ * The act functions below return `inert(DOOR_NAMES.<kind>)`, so this map is the
+ * SINGLE SOURCE OF TRUTH for the door name — a label and the act it names can
+ * never drift. `satisfies` pins every value to a real `CovenantDoor`.
+ */
+export const DOOR_NAMES = {
+  certify: 'certifySession{arm→confirm}',
+  certifyClaim: "correctObject('amend',{verification:'verified'})",
+  fund: 'set_plan_rlimit',
+  steer: 'signal_session{steer}',
+  mediateSteer: 'signal_session{steer}',
+  interrupt: 'signal_session{interrupt}',
+  retract: "correctObject('retract')",
+  supersede: 'supersede_object',
+  run: 'open_session|resume_session',
+} as const satisfies Record<string, CovenantDoor>;
+
 /**
  * Every covenant door the married surface can offer, each honestly inert. The
  * arguments are the ids the live call will need (so the call sites already pass
@@ -114,19 +139,18 @@ export const covenant = {
    * certifies (#102). This is NOT `correctObject('amend',…)`, which certifies a
    * semantic claim, not a session landing (#157 r1 D2).
    */
-  certify: (_sessionId: string): CovenantOutcome => inert('certifySession{arm→confirm}'),
+  certify: (_sessionId: string): CovenantOutcome => inert(DOOR_NAMES.certify),
   /**
    * Certify a semantic CLAIM (an accepted reading in `LiveRoomSession`) to
    * `✓ verified`. A DIFFERENT door from a session landing: `amend
    * {verification:'verified'}`. Named separately so neither can be mis-wired to
    * the other. Not surfaced in the ArtifactPane; here for the seam's completeness.
    */
-  certifyClaim: (_objectId: string): CovenantOutcome =>
-    inert("correctObject('amend',{verification:'verified'})"),
+  certifyClaim: (_objectId: string): CovenantOutcome => inert(DOOR_NAMES.certifyClaim),
   /** Set/raise a plan's spend slice. Human-only; the server refuses a machine first. */
-  fund: (_planId: string, _slice: number): CovenantOutcome => inert('set_plan_rlimit'),
+  fund: (_planId: string, _slice: number): CovenantOutcome => inert(DOOR_NAMES.fund),
   /** Steer an open session — public, receipted, powerless over covenant and purse. */
-  steer: (_sessionId: string, _body: string): CovenantOutcome => inert('signal_session{steer}'),
+  steer: (_sessionId: string, _body: string): CovenantOutcome => inert(DOOR_NAMES.steer),
   /**
    * Mediate an anchored artifact COMMENT into a session steer (#158/#152). This
    * is the comment-to-steer client shape, and it is TWO gated calls in order —
@@ -156,15 +180,14 @@ export const covenant = {
   mediateSteer: (
     _sessionId: string,
     _comment: { readonly anchor: string; readonly quote: string; readonly body: string },
-  ): CovenantOutcome => inert('signal_session{steer}'),
+  ): CovenantOutcome => inert(DOOR_NAMES.mediateSteer),
   /** Interrupt (stop) an open session — the agent principal or its owner only. */
-  interrupt: (_sessionId: string, _body: string): CovenantOutcome =>
-    inert('signal_session{interrupt}'),
+  interrupt: (_sessionId: string, _body: string): CovenantOutcome => inert(DOOR_NAMES.interrupt),
   /** Retract an accepted `~` reading. Human-only; withdrawn, never erased. */
-  retract: (_objectId: string): CovenantOutcome => inert("correctObject('retract')"),
+  retract: (_objectId: string): CovenantOutcome => inert(DOOR_NAMES.retract),
   /** Supersede an object with its forward replacement. */
   supersede: (_retiredObjectId: string, _replacementObjectId: string): CovenantOutcome =>
-    inert('supersede_object'),
+    inert(DOOR_NAMES.supersede),
   /** Dispatch / run a session. */
-  run: (_sessionId: string): CovenantOutcome => inert('open_session|resume_session'),
+  run: (_sessionId: string): CovenantOutcome => inert(DOOR_NAMES.run),
 } as const;

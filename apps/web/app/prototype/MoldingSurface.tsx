@@ -32,7 +32,7 @@ import { covenant } from './covenant';
 import { IconPanel } from './icons';
 import { NavTree } from './NavTree';
 import styles from './prototype.module.css';
-import { sessionArtifacts, sessionFor, treeData, usePRStream } from './seams';
+import { liveArtifactsFor, sessionArtifacts, sessionFor, treeData, usePRStream } from './seams';
 import type { Comment, CommentDraft, Selection } from './types';
 import { UserBar } from './UserBar';
 
@@ -89,7 +89,19 @@ function firstSelection(plane: ControlPlaneData | undefined): Selection {
  * live source lands (#159 / Phase 6 — there is no per-session-thread live read
  * model on this tree to bind them to yet).
  */
-export function MoldingSurface({ tree: liveTree }: { tree?: ControlPlaneData } = {}) {
+export function MoldingSurface({
+  tree: liveTree,
+}: {
+  tree?: ControlPlaneData;
+  /* THE ROOM CONTEXT (#168 go-live B1) — threaded from the real room route so
+     go-live B2 can instantiate a `RealtimeClient` and target the gated command
+     doors (`roomId`) and identify the acting human (`viewerId`). Accepted at the
+     mount here; NOTHING consumes them this lane — no live client, no WebSocket,
+     no durable write. B2 destructures them and wires the doors under the
+     dual-lineage security gauntlet. */
+  roomId?: string;
+  viewerId?: string;
+} = {}) {
   const [echoes, setEchoes] = useState<readonly Echo[]>([]);
   /* WHERE YOU ARE in the tree — which thread the main view shows. */
   const [selected, setSelected] = useState<Selection>(() => firstSelection(liveTree));
@@ -124,9 +136,17 @@ export function MoldingSurface({ tree: liveTree }: { tree?: ControlPlaneData } =
      handed down, so a mutated column moves the rendered cell (nav-tree.test.tsx
      and molding-mount.test.tsx). */
   const tree = useMemo(() => liveTree ?? treeData(), [liveTree]);
-  /* the right split — an artifact host (diff / plan / doc) you comment on. */
-  // SEAM(#155): bind to the session's real artifacts.
-  const artifacts = useMemo(() => sessionArtifacts(), []);
+  /* the right split — an artifact host (diff / plan / doc) you comment on.
+     SEAM(#155/#168 B1): on a LIVE room the pane shows the REAL diff of the
+     currently-selected session (`liveArtifactsFor` maps `session.artifact.diff`
+     onto the pane's `Artifact`, or the shipped honest empty state when there is
+     none). On the `/prototype` fixture route (no live tree) it keeps the
+     `sessionArtifacts()` fixture so that route still renders. Depends on
+     `selected`, so switching sessions moves the rendered diff (flip-the-input). */
+  const artifacts = useMemo(
+    () => (liveTree === undefined ? sessionArtifacts() : liveArtifactsFor(liveTree, selected)),
+    [liveTree, selected],
+  );
   const [artifactOpen, setArtifactOpen] = useState(false);
   const [activeArtifact, setActiveArtifact] = useState<string>(artifacts[0]!.id);
   const [chatFrac, setChatFrac] = useState(0.5);

@@ -53,7 +53,7 @@ export default async function RoomSurfacePage({
 
   return (
     <div className={styles.ground} data-frame="atrium">
-      <MoldingSurface tree={data} />
+      <MoldingSurface tree={data} roomId={room.id} viewerId={session.userId} />
     </div>
   );
 }

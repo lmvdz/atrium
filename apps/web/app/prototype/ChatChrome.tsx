@@ -14,7 +14,7 @@ import { useState } from 'react';
 import { systemText } from '@/src/components/model/quotation';
 import type { ParticipantSummary } from '@/src/components/model/records';
 import { initials } from '@/src/components/model/text';
-import { covenant } from './covenant';
+import { DOOR_NAMES } from './covenant';
 import { IconBase, IconPlay } from './icons';
 import { ProviderMark } from './ProviderMark';
 import styles from './prototype.module.css';
@@ -98,13 +98,13 @@ export function ChatTopBar({ selected }: { selected: Selection }) {
 export function ThreadStatus({ selected, stream }: { selected: Selection; stream: StreamState }) {
   // #156: the branch/base/diff/model/host strip, assembled by a client projection.
   const strip = statusStripFor(selected, stream);
-  // #157 r3: the session this row's covenant controls target. The steer/interrupt
-  // doors are named from the covenant SEAM itself (single source of truth) — the
-  // seam returns `reached:false` and mutates nothing, so reading `.door` here is
-  // side-effect free and cannot fake a signal.
-  const sessionId = selected.kind === 'session' ? selected.id : 's-live';
-  const steerDoor = covenant.steer(sessionId, '').door;
-  const interruptDoor = covenant.interrupt(sessionId, '').door;
+  // #157 r3 / #168 B1: the steer/interrupt door NAMES for the labels, read from
+  // the covenant seam's `DOOR_NAMES` CONSTANTS — NOT by invoking `covenant.steer`/
+  // `covenant.interrupt` in render position. Reading a constant is side-effect
+  // free forever; calling the act would fire a durable signal the moment B2 gives
+  // those functions a live body (the render-time landmine this lane removed).
+  const steerDoor = DOOR_NAMES.steer;
+  const interruptDoor = DOOR_NAMES.interrupt;
   return (
     <footer className={styles.status}>
       <span className={styles.statItem}>
