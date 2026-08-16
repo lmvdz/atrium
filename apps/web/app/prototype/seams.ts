@@ -19,7 +19,8 @@
  * ═════════════════════════════════════════════════════════════════════════ */
 
 import type { SessionDiff } from '@atrium/db';
-import type { ControlPlaneData } from '@/lib/control-plane-data';
+import type { ControlPlaneData, ControlSessionRow } from '@/lib/control-plane-data';
+import { sessionCertified } from '@/src/components/control/state';
 import type {
   MemberChip,
   ParticipantSummary,
@@ -576,5 +577,75 @@ export function sessionArtifacts(): readonly Artifact[] {
       md: PLAN_MD,
     },
     { id: 'note-streaming', kind: 'doc', title: 'why streaming totals', sub: 'note', md: NOTE_MD },
+  ];
+}
+
+/* ── the LIVE artifact adapter (#168 go-live B1) ───────────────────────────
+   The `/prototype` route runs on `sessionArtifacts()` above (a fixture); the
+   real room route (`app/[workspace]/[room]/surface/page.tsx`) hands a live
+   `ControlPlaneData` in, and THIS adapter maps the CURRENTLY-SELECTED session's
+   real `SessionArtifact` (`lib/control-plane-data.ts`, populated by
+   `loadControlPlane`) onto the pane's `Artifact` shape — no mock, no fabricated
+   diff.
+
+   HONESTY BOUNDARY: only `kind:'diff'` maps losslessly. `SessionArtifact`
+   carries `diff?: SessionDiff` — the SAME type the pane's `Artifact.sessionDiff`
+   holds and the shipped `DiffView` renders — but it carries NO markdown, so no
+   live doc/plan artifact exists to bind; those fixtures are omitted on the live
+   route rather than faked. When the selected session has no artifact, or its
+   artifact carries no `.diff`, `sessionDiff` is left `undefined` and the shipped
+   `DiffView` renders its own HONEST absent state ("no file changes reported")
+   — never a mock diff. Flip the input: a different selected session's
+   `artifact.diff` moves the rendered diff; a null artifact shows the empty
+   state. */
+
+/** The live `ControlSessionRow` the current selection resolves to, or undefined.
+    A session selection matches by id; a plan resolves to its first session; an
+    agent (keyed by `userId`, as `firstSelection` opens it) to its first plan's
+    first session. Pure — reads only the passed plane. */
+export function liveSessionFor(
+  plane: ControlPlaneData,
+  sel: Selection,
+): ControlSessionRow | undefined {
+  if (sel.kind === 'session') {
+    for (const agent of plane.agents) {
+      for (const plan of agent.plans) {
+        for (const session of plan.sessions) {
+          if (session.id === sel.id) return session;
+        }
+      }
+    }
+    return undefined;
+  }
+  if (sel.kind === 'plan') {
+    for (const agent of plane.agents) {
+      for (const plan of agent.plans) {
+        if (plan.id === sel.id) return plan.sessions[0];
+      }
+    }
+    return undefined;
+  }
+  return plane.agents.find((agent) => agent.userId === sel.id)?.plans[0]?.sessions[0];
+}
+
+/** The live artifacts for the selected session — a single `diff` artifact bound
+    to the session's real `SessionArtifact.diff` (or the shipped absent state when
+    there is none). Always returns exactly one element, so the pane's active-id
+    fallback (`artifacts[0]`) always has a target and the diff follows selection. */
+export function liveArtifactsFor(plane: ControlPlaneData, sel: Selection): readonly Artifact[] {
+  const session = liveSessionFor(plane, sel);
+  const artifact = session?.artifact ?? null;
+  return [
+    {
+      id: session?.id ?? 'no-live-session',
+      kind: 'diff',
+      title: artifact?.branch ?? '(working tree)',
+      sub: artifact?.commit ? artifact.commit.slice(0, 7) : 'session diff',
+      // DERIVED through the shipped human-signature predicate — never hand-set.
+      certified: session ? sessionCertified(session) : false,
+      // undefined when the session has no artifact or no diff → the shipped
+      // `DiffView` renders its honest absent state, not a mock.
+      sessionDiff: artifact?.diff,
+    },
   ];
 }
