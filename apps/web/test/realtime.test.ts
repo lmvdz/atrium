@@ -7,6 +7,7 @@ import {
   type RealtimeClientOptions,
   type RoomEventEnvelope,
   type RoomJournal,
+  type RoomTombstone,
   type ServerFrame,
   type SocketLike,
 } from '../src/lib/realtime.js';
@@ -117,6 +118,14 @@ function latest(): FakeSocket {
   const socket = sockets.at(-1);
   if (!socket) throw new Error('no socket was created');
   return socket;
+}
+
+/**
+ * A #46 wire tombstone: a durable position the server could not read back as an
+ * event. It advances the client's cursor and renders nothing.
+ */
+function tombstone(roomSeq: number, reason = 'payload: body: too small'): RoomTombstone {
+  return { roomId: ROOM, roomSeq, seq: roomSeq, malformed: true, reason };
 }
 
 /** A second client over the same fake-socket registry, connected and open. */
@@ -272,6 +281,97 @@ describe('subscribe and catch up', () => {
     expect(errors.some((message) => message.includes('stalled'))).toBe(true);
   });
 
+  /**
+   * #46 round 5 — the latched stall re-probes on a bounded backoff and recovers
+   * a hole that becomes serveable later, WITHOUT a reconnect.
+   *
+   * `maxStalledCatchups` bounds the catch-up loop's OWN retries, but the server's
+   * ~2s `head` frame calls `requestSince` unconditionally when the cursor is
+   * behind the head, so an un-crossable gap re-drives the identical `since`
+   * forever at ~0.5 Hz. Round 4 latched that re-drive off — but *permanently*, so
+   * a hole an operator later repairs (a bad row fixed by SQL) was never
+   * rediscovered until reconnect. Round 5 replaces the permanent suppression with
+   * a decaying re-probe:
+   *
+   *   (a) INSIDE the backoff window, repeated `head` frames drive no `since` — the
+   *       0.5 Hz hammer stays stopped.
+   *   (b) once the injected clock passes the window, exactly one `head` re-probes
+   *       (a fresh `since` at the same stalled cursor), and the window doubles.
+   *   (c) that re-probe's `catchup` — the ONLY way a `catchup` reaches the client
+   *       in production, as the answer to a `since` — now carries the repaired
+   *       row, so crossing the hole clears the latch and lands the room.
+   *
+   * The round-4 test cleared the latch with an *unsolicited* `catchup` that can't
+   * occur in production (a `catchup` only answers a `since`), so its clear path
+   * was unreachable; this drives the real production path with an injected clock.
+   */
+  it('re-probes a latched stall on a bounded backoff and recovers when the hole becomes serveable', async () => {
+    let clock = 0;
+    const client = await clientWith({ now: () => clock });
+    client.join(ROOM);
+    latest().deliver({ type: 'subscribed', roomId: ROOM, head: 9, seenSeq: 0 });
+    // Drive catch-up to the stall cap on a hole it can never cross.
+    for (let round = 0; round < 10; round += 1) {
+      latest().deliver({
+        type: 'catchup',
+        roomId: ROOM,
+        from: 0,
+        to: 0,
+        head: 9,
+        more: true,
+        entries: [],
+      });
+    }
+    expect(errors.some((message) => message.includes('stalled'))).toBe(true);
+    const afterStall = latest().framesOfType('since').length;
+    expect(latest().framesOfType('since').at(-1)).toMatchObject({ roomId: ROOM, roomSeq: 0 });
+
+    // (a) The reconciler now repeats `head` at ~0.5 Hz. The clock has not moved,
+    // so every one falls INSIDE the backoff window and drives no `since` — the
+    // hammer round 4 stopped stays stopped.
+    for (let round = 0; round < 20; round += 1) {
+      latest().deliver({ type: 'head', roomId: ROOM, head: 9 });
+    }
+    expect(latest().framesOfType('since').length).toBe(afterStall);
+
+    // (b) Advance the clock past the backoff window. The NEXT head re-probes:
+    // exactly one fresh `since`, byte-identical at the stalled cursor (roomSeq
+    // 0). This is the recovery round 4 lacked — no reconnect, no live event.
+    clock += 4_000;
+    latest().deliver({ type: 'head', roomId: ROOM, head: 9 });
+    expect(latest().framesOfType('since').length).toBe(afterStall + 1);
+    expect(latest().framesOfType('since').at(-1)).toMatchObject({ roomId: ROOM, roomSeq: 0 });
+
+    // …and the window GREW (doubled): heads at the same clock stay throttled, so
+    // the re-probe rate decays rather than resuming the 0.5 Hz hammer.
+    const afterReprobe = latest().framesOfType('since').length;
+    for (let round = 0; round < 5; round += 1) {
+      latest().deliver({ type: 'head', roomId: ROOM, head: 9 });
+    }
+    expect(latest().framesOfType('since').length).toBe(afterReprobe);
+
+    // (c) The re-probe's `catchup` — its answer, the only way a `catchup` reaches
+    // the client in production — now carries the repaired rows. Crossing the hole
+    // clears the latch and lands the room.
+    latest().deliver({
+      type: 'catchup',
+      roomId: ROOM,
+      from: 0,
+      to: 9,
+      head: 9,
+      more: false,
+      entries: Array.from({ length: 9 }, (_, i) => messageEvent(i + 1, `m${i + 1}`)),
+    });
+    expect(client.lastSeq(ROOM)).toBe(9);
+    expect(client.room(ROOM).events.map((e) => e.roomSeq)).toEqual([1, 2, 3, 4, 5, 6, 7, 8, 9]);
+    // Latch cleared: the room is caught up, so a further head asks for nothing —
+    // and had a new gap opened, it would reconcile at once rather than wait a
+    // window, because the stale latch is gone.
+    const afterLand = latest().framesOfType('since').length;
+    latest().deliver({ type: 'head', roomId: ROOM, head: 9 });
+    expect(latest().framesOfType('since').length).toBe(afterLand);
+  });
+
   it('resumes from a durable journal rather than replaying the room', async () => {
     const journal = memoryJournal();
     for (const roomSeq of [1, 2, 3, 4, 5, 6, 7]) {
@@ -393,6 +493,246 @@ describe('subscribe and catch up', () => {
     // enough to produce a second page — which is exactly how multi-page catch-up
     // went unexercised against a real database (r2 delta, major 2).
     expect(latest().framesOfType('since').at(-1)).toMatchObject({ roomSeq: 0, limit: 5 });
+  });
+});
+
+/**
+ * #46, BLOCKER 1 — a malformed row on the wire is a tombstone, and the client
+ * walks its cursor past it.
+ *
+ * Before this, the server filtered the malformed marker off the wire, so a
+ * catch-up page skipped that `room_seq`. The client's `applyEntry` accepts only
+ * `lastSeq + 1`, so it saw a hole, re-requested the gap, and got the same holed
+ * page back forever — the server's in-process "cursor advances past it" undone
+ * one layer down. The tombstone is the fix: a position with no event that the
+ * client applies to advance its cursor, so the valid rows after it land. It
+ * renders nothing and fabricates nothing.
+ *
+ * The three positions the gauntlet named — HEAD, MID, TAIL — each get a test,
+ * because each exercises a different arm of the gap arithmetic.
+ */
+describe('a malformed position on the wire advances the cursor, renders nothing', () => {
+  it('walks past a tombstone at the HEAD of a catch-up page', () => {
+    client.join(ROOM);
+    latest().deliver({ type: 'subscribed', roomId: ROOM, head: 3, seenSeq: 0 });
+    const sinceBefore = latest().framesOfType('since').length;
+    latest().deliver({
+      type: 'catchup',
+      roomId: ROOM,
+      from: 0,
+      to: 3,
+      head: 3,
+      more: false,
+      entries: [tombstone(1), messageEvent(2, 'b'), messageEvent(3, 'c')],
+    });
+    // The cursor advanced to the head, and the rows after the tombstone landed.
+    expect(client.lastSeq(ROOM)).toBe(3);
+    // The tombstone is not in the timeline: it is a position, not an event.
+    expect(client.room(ROOM).events.map((e) => e.roomSeq)).toEqual([2, 3]);
+    // No stall: the client did not re-request the gap it could not previously
+    // cross. (Under the old filtered-page behaviour it would ask again here.)
+    expect(latest().framesOfType('since').length).toBe(sinceBefore);
+  });
+
+  it('walks past a tombstone in the MIDDLE of a catch-up page', () => {
+    client.join(ROOM);
+    latest().deliver({ type: 'subscribed', roomId: ROOM, head: 3, seenSeq: 0 });
+    const sinceBefore = latest().framesOfType('since').length;
+    latest().deliver({
+      type: 'catchup',
+      roomId: ROOM,
+      from: 0,
+      to: 3,
+      head: 3,
+      more: false,
+      entries: [messageEvent(1, 'a'), tombstone(2), messageEvent(3, 'c')],
+    });
+    expect(client.lastSeq(ROOM)).toBe(3);
+    expect(client.room(ROOM).events.map((e) => e.roomSeq)).toEqual([1, 3]);
+    expect(latest().framesOfType('since').length).toBe(sinceBefore);
+  });
+
+  it('walks past a tombstone at the TAIL of a catch-up page', () => {
+    client.join(ROOM);
+    latest().deliver({ type: 'subscribed', roomId: ROOM, head: 3, seenSeq: 0 });
+    const sinceBefore = latest().framesOfType('since').length;
+    latest().deliver({
+      type: 'catchup',
+      roomId: ROOM,
+      from: 0,
+      to: 3,
+      head: 3,
+      more: false,
+      entries: [messageEvent(1, 'a'), messageEvent(2, 'b'), tombstone(3)],
+    });
+    // Reached the head over a malformed tail — the client is not left one short,
+    // asking for a gap the server can only ever answer with the same tombstone.
+    expect(client.lastSeq(ROOM)).toBe(3);
+    expect(client.room(ROOM).events.map((e) => e.roomSeq)).toEqual([1, 2]);
+    expect(latest().framesOfType('since').length).toBe(sinceBefore);
+  });
+
+  it('journals the tombstone so a resumed client does not re-fetch or render it', () => {
+    const journal = memoryJournal();
+    const first = createRealtimeClient({
+      userId: ME,
+      url: 'ws://test/ws',
+      reconnect: false,
+      journal,
+      socketFactory: (url) => {
+        const socket = new FakeSocket(url);
+        sockets.push(socket);
+        return socket;
+      },
+      onError: (message) => errors.push(message),
+    });
+    return (async () => {
+      await first.connect();
+      latest().open();
+      first.join(ROOM);
+      latest().deliver({ type: 'subscribed', roomId: ROOM, head: 3, seenSeq: 0 });
+      latest().deliver({
+        type: 'catchup',
+        roomId: ROOM,
+        from: 0,
+        to: 3,
+        head: 3,
+        more: false,
+        entries: [messageEvent(1, 'a'), tombstone(2), messageEvent(3, 'c')],
+      });
+      expect(first.lastSeq(ROOM)).toBe(3);
+
+      // The journal holds the tombstone (so room_seq stays gap-free and the
+      // durable cursor names the last position held), and the cursor is 3.
+      const held = journal.load(ROOM);
+      expect(held.lastSeq).toBe(3);
+      expect(held.events.map((e) => e.roomSeq)).toEqual([1, 2, 3]);
+
+      // A fresh client resuming from the same journal renders the events only —
+      // the tombstone is filtered — and resumes at the cursor past it.
+      const resumed = createRealtimeClient({
+        userId: ME,
+        url: 'ws://test/ws',
+        reconnect: false,
+        journal,
+        socketFactory: (url) => {
+          const socket = new FakeSocket(url);
+          sockets.push(socket);
+          return socket;
+        },
+        onError: (message) => errors.push(message),
+      });
+      await resumed.connect();
+      latest().open();
+      expect(resumed.lastSeq(ROOM)).toBe(3);
+      expect(resumed.room(ROOM).events.map((e) => e.roomSeq)).toEqual([1, 3]);
+    })();
+  });
+});
+
+/**
+ * #46 round 3 — the tombstone now rides the LIVE `event` frame, not only catch-up.
+ *
+ * Round 2 filtered the marker off the live fan-out, so a client live-at-head in a
+ * quiet room only recovered when the reconciler's next `head` frame drove a
+ * `since` — one reconcile interval late, and not at all if that frame was lost.
+ * These assert a live-at-head client crosses a live tombstone immediately, with no
+ * `since` round-trip and no dependence on a `head` frame arriving.
+ */
+describe('a malformed position arrives live, not only in catch-up (#46 round 3)', () => {
+  it('advances a live-at-head client past a live tombstone and lands the next valid row', () => {
+    client.join(ROOM);
+    latest().deliver({ type: 'subscribed', roomId: ROOM, head: 1, seenSeq: 0 });
+    // Live-at-head: a first live event puts the client at the head with no gap.
+    latest().deliver({ type: 'event', entry: messageEvent(1, 'a') });
+    expect(client.lastSeq(ROOM)).toBe(1);
+
+    // A malformed row is appended while this client is subscribed and live-at-head.
+    // It rides the live path under its own `tombstone` discriminant.
+    const sinceBefore = latest().framesOfType('since').length;
+    latest().deliver({ type: 'tombstone', entry: tombstone(2) });
+
+    // Advanced the instant the row was fanned out — no `head` frame, no `since`.
+    expect(client.lastSeq(ROOM)).toBe(2);
+    expect(latest().framesOfType('since').length).toBe(sinceBefore);
+
+    // The next valid live row lands with no gap, precisely because the cursor
+    // crossed the tombstone rather than stalling one short behind it.
+    latest().deliver({ type: 'event', entry: messageEvent(3, 'c') });
+    expect(client.lastSeq(ROOM)).toBe(3);
+    expect(client.room(ROOM).events.map((e) => e.roomSeq)).toEqual([1, 3]);
+    // The tombstone itself rendered nothing and triggered no gap recovery.
+    expect(latest().framesOfType('since').length).toBe(sinceBefore);
+  });
+
+  it('renders nothing and confirms no pending echo for a live tombstone', () => {
+    client.join(ROOM);
+    latest().deliver({ type: 'subscribed', roomId: ROOM, head: 0, seenSeq: 0 });
+    latest().deliver({ type: 'tombstone', entry: tombstone(1) });
+    expect(client.lastSeq(ROOM)).toBe(1);
+    expect(client.room(ROOM).events).toEqual([]);
+    expect(client.room(ROOM).pending).toEqual([]);
+  });
+});
+
+/**
+ * #46 round 3 — one unreadable catch-up entry is skipped, not fatal to the page.
+ *
+ * Round 2 parsed the page with `z.array(WireEntry)`, so a single entry this client
+ * could not read failed the WHOLE `catchup` frame at `ServerFrame.safeParse`: the
+ * page was dropped, the stall counter never ran, and the client re-requested the
+ * same page on every `head` — an infinite silent `since`. The page is per-entry
+ * tolerant now: the good entries apply, the bad one is skipped and reported, and
+ * the hole it leaves is what makes `maxStalledCatchups` fire so the retry is
+ * bounded rather than forever.
+ */
+describe('one unreadable catch-up entry is skipped, not fatal to the page (#46 round 3)', () => {
+  // Neither a valid `Envelope` (no `at`/`type`, no `actor`) nor a `Tombstone` (no
+  // `malformed: true`) — the exact shape the union cannot classify.
+  const unreadable = { roomId: ROOM, roomSeq: 2, seq: 2, event: { id: 'e2' } };
+  function deliverRaw(frame: unknown): void {
+    latest().onmessage?.({ data: JSON.stringify(frame) });
+  }
+
+  it('applies the good entries and reports the bad one instead of dropping the whole page', () => {
+    client.join(ROOM);
+    latest().deliver({ type: 'subscribed', roomId: ROOM, head: 3, seenSeq: 0 });
+    deliverRaw({
+      type: 'catchup',
+      roomId: ROOM,
+      from: 0,
+      to: 3,
+      head: 3,
+      more: false,
+      entries: [messageEvent(1, 'a'), unreadable, messageEvent(3, 'c')],
+    });
+    // Round 2 dropped all three (whole-frame parse failure); now the good leading
+    // entry applied and the cursor advanced onto it.
+    expect(client.lastSeq(ROOM)).toBe(1);
+    expect(client.room(ROOM).events.map((e) => e.roomSeq)).toEqual([1]);
+    // The skip was surfaced, not swallowed.
+    expect(errors.some((message) => message.includes('could not read'))).toBe(true);
+  });
+
+  it('bounds the retry with maxStalledCatchups instead of hammering since forever', async () => {
+    const bounded = await clientWith({ maxStalledCatchups: 3 });
+    bounded.join(ROOM);
+    latest().deliver({ type: 'subscribed', roomId: ROOM, head: 3, seenSeq: 0 });
+    // The unreadable entry at seq 2 carries no room_seq to advance past, so the
+    // client can never cross it. Without the stall guard this is an infinite loop.
+    for (let round = 0; round < 20; round += 1) {
+      deliverRaw({
+        type: 'catchup',
+        roomId: ROOM,
+        from: 0,
+        to: 1,
+        head: 3,
+        more: true,
+        entries: [messageEvent(1, 'a'), unreadable],
+      });
+    }
+    expect(latest().framesOfType('since').length).toBeLessThanOrEqual(6);
+    expect(errors.some((message) => message.includes('stalled'))).toBe(true);
   });
 });
 
@@ -1214,7 +1554,12 @@ describe('a frame the client cannot read is refused, not written', () => {
     expect(errors.at(-1)).toContain('cannot read');
   });
 
-  it('refuses a catch-up page carrying one unreadable entry, and keeps the socket', () => {
+  it('skips one unreadable catch-up entry rather than sinking the page, and keeps the socket', () => {
+    // #46 round 3 changed this contract. Round 2 dropped the WHOLE page on any
+    // unreadable entry — which, for an entry that can never be crossed, was an
+    // infinite silent `since`. A page is per-entry tolerant now: the readable
+    // prefix applies, the bad entry is skipped and reported, and the hole it leaves
+    // is what the stall guard turns into a bounded failure (covered separately).
     raw({
       type: 'catchup',
       roomId: ROOM,
@@ -1224,21 +1569,21 @@ describe('a frame the client cannot read is refused, not written', () => {
       more: false,
       entries: [messageEvent(1, 'one'), { ...messageEvent(2, 'two'), roomSeq: -2 }],
     });
-    // The whole page, not the readable prefix: a page is one statement about a
-    // range, and applying half of it would move the cursor to a position the
-    // server never described.
-    expect(client.lastSeq(ROOM)).toBe(0);
-    expect(client.room(ROOM).events).toEqual([]);
+    // The good leading entry applied; the unreadable one (negative `roomSeq`, so
+    // neither a valid envelope nor a tombstone) was skipped, not applied.
+    expect(client.lastSeq(ROOM)).toBe(1);
+    expect(client.room(ROOM).events.map((e) => e.roomSeq)).toEqual([1]);
+    expect(errors.some((message) => message.includes('could not read'))).toBe(true);
 
-    // The socket is still live — one bad frame is not a reason to stop reading.
+    // The socket is still live — one bad entry is not a reason to stop reading.
     latest().deliver({
       type: 'catchup',
       roomId: ROOM,
-      from: 0,
+      from: 1,
       to: 2,
       head: 2,
       more: false,
-      entries: [messageEvent(1, 'one'), messageEvent(2, 'two')],
+      entries: [messageEvent(2, 'two')],
     });
     expect(client.lastSeq(ROOM)).toBe(2);
   });
@@ -1782,6 +2127,62 @@ describe('optimism is limited to your own message row', () => {
     // The collision is possible because the key is client-chosen; dropping the
     // row here would delete a message the person can still see they sent.
     expect(client.room(ROOM).pending).toHaveLength(1);
+  });
+
+  /**
+   * #46 round 3 — a message you sent whose durable row becomes malformed.
+   *
+   * The confirming `event` that `reconcilePending` waits on to retire the echo is
+   * never coming: the durable row could not be read back, so a tombstone lands at
+   * its position instead — and a tombstone carries no `clientMessageId` to match.
+   * Left as-is the echo spins `pending` forever. Matched by the `room_seq` the ack
+   * recorded, it is retired failed (not retryable — a resend would dedup onto the
+   * same malformed row).
+   */
+  it('retires a sent message whose durable row is malformed rather than leaving it pending', () => {
+    const clientMessageId = client.sendMessage(ROOM, 'this row will not read back');
+    const commandId = latest().sent.find((f) => f.type === 'command')?.commandId as string;
+    // Accepted and assigned room_seq 1 — the ack records the position.
+    latest().deliver({
+      type: 'ack',
+      commandId,
+      roomId: ROOM,
+      seq: 1,
+      roomSeq: 1,
+      eventId: 'e1',
+      issues: [],
+    });
+    expect(client.room(ROOM).pending[0]).toMatchObject({ clientMessageId, status: 'pending' });
+
+    // The durable row could not be read back: a tombstone lands at position 1.
+    latest().deliver({ type: 'tombstone', entry: tombstone(1) });
+
+    // The cursor crossed it, nothing rendered, and the echo is resolved failed.
+    expect(client.lastSeq(ROOM)).toBe(1);
+    expect(client.room(ROOM).events).toHaveLength(0);
+    const [pending] = client.room(ROOM).pending;
+    expect(pending).toMatchObject({ status: 'failed', retryable: false });
+    expect(pending?.error).toMatch(/malformed|could not be read/);
+  });
+
+  it('leaves a pending echo at another position untouched when a tombstone lands elsewhere', () => {
+    const keepId = client.sendMessage(ROOM, 'mine, at position 2');
+    const commandId = latest().sent.find((f) => f.type === 'command')?.commandId as string;
+    latest().deliver({
+      type: 'ack',
+      commandId,
+      roomId: ROOM,
+      seq: 2,
+      roomSeq: 2,
+      eventId: 'e2',
+      issues: [],
+    });
+    // A tombstone at position 1 — not this echo's assigned position (2).
+    latest().deliver({ type: 'tombstone', entry: tombstone(1) });
+    expect(client.room(ROOM).pending[0]).toMatchObject({
+      clientMessageId: keepId,
+      status: 'pending',
+    });
   });
 
   it('marks a rejected send failed and keeps the text', () => {

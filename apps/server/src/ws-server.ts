@@ -8,9 +8,21 @@ import type { CommandService, PresenceState } from './commands.js';
 import type { EventBus } from './event-bus.js';
 import { createHeadAcks } from './head-acks.js';
 import { createHub, type Hub } from './hub.js';
-import { CommandError, type Ledger, type LedgerEntry } from './ledger.js';
+import {
+  CommandError,
+  type FoldedLedgerEntry,
+  isMalformedEntry,
+  type Ledger,
+  type LedgerEntry,
+} from './ledger.js';
 import type { Logger } from './logger.js';
-import { ClientFrame, type EphemeralFrame, type ServerFrame, type WireEvent } from './protocol.js';
+import {
+  ClientFrame,
+  type EphemeralFrame,
+  type ServerFrame,
+  type WireEntry,
+  type WireEvent,
+} from './protocol.js';
 import { createReconciler, DEFAULT_RECONCILE_INTERVAL_MS, type Reconciler } from './reconciler.js';
 import {
   type MembershipPair,
@@ -780,7 +792,13 @@ export function createRealtimeServer(options: RealtimeOptions): RealtimeServer {
          * everything.
          */
         more: page.more,
-        entries: page.entries.map(toWire),
+        // #46 (BLOCKER 1): a malformed row rides the wire as a tombstone, not
+        // filtered off it. Filtering left a hole at that `room_seq`, and the
+        // client's `applyEntry` accepts only `lastSeq + 1`, so it re-requested the
+        // gap and stalled forever — the server outage moved to the client. The
+        // tombstone carries the position with no event, so the client advances its
+        // cursor past the bad row and the valid rows after it land.
+        entries: page.entries.map(toWireEntry),
       });
     } catch (error) {
       send(socket, { type: 'error', message: describe(error) });
@@ -928,10 +946,21 @@ export function createRealtimeServer(options: RealtimeOptions): RealtimeServer {
    */
   function fanOut(entries: LedgerEntry[]): void {
     for (const entry of entries) {
-      hub.broadcast(entry.roomId, {
-        type: 'event',
-        entry: toWire(entry),
-      });
+      // #46 round 3: a malformed row rides the LIVE path too, as its own `tombstone`
+      // frame, not filtered off it. Filtering was round 2's design and it left a
+      // live-at-head client in a quiet room stranded — the row advanced no live
+      // frame, so the client only recovered on the reconciler's next `head`→`since`,
+      // one whole reconcile interval later, and not at all if that frame was lost.
+      // `toWireEntry` emits a `WireEvent` for a folded row and a `WireTombstone` for
+      // a marker; the tombstone travels under its own discriminant so a live `event`
+      // frame stays a readable event, and `applyEntry` on the client renders the
+      // tombstone as nothing and only advances the cursor. The ledger already logged
+      // and counted the row.
+      const wire = toWireEntry(entry);
+      hub.broadcast(
+        entry.roomId,
+        'malformed' in wire ? { type: 'tombstone', entry: wire } : { type: 'event', entry: wire },
+      );
     }
   }
 
@@ -1202,7 +1231,7 @@ export function createRealtimeServer(options: RealtimeOptions): RealtimeServer {
  * for a field to be forgotten, and `issues` is exactly the field it would have
  * been forgotten in (#22 r10, D4).
  */
-function toWire(entry: LedgerEntry): WireEvent {
+function toWire(entry: FoldedLedgerEntry): WireEvent {
   return {
     roomId: entry.roomId,
     roomSeq: entry.roomSeq,
@@ -1211,6 +1240,30 @@ function toWire(entry: LedgerEntry): WireEvent {
     event: entry.event,
     issues: [...entry.issues],
   };
+}
+
+/**
+ * A ledger row as the wire carries it, tombstone included (#46, BLOCKER 1).
+ *
+ * A folded entry becomes a `WireEvent`; a malformed row becomes a `WireTombstone`
+ * — a position with no event, no actor, no issues — so the client can advance its
+ * cursor past the bad row without an event being fabricated for it. This is the
+ * only place a malformed row is turned into something the wire can carry, and since
+ * round 3 it is used on both the live (`fanOut`) and catch-up (`handleSince`)
+ * paths — the live path used to filter the marker off entirely, which the comment
+ * here once wrongly claimed it did not.
+ */
+function toWireEntry(entry: LedgerEntry): WireEntry {
+  if (isMalformedEntry(entry)) {
+    return {
+      roomId: entry.roomId,
+      roomSeq: entry.roomSeq,
+      seq: entry.seq,
+      malformed: true,
+      reason: entry.reason,
+    };
+  }
+  return toWire(entry);
 }
 
 function describe(error: unknown): string {

@@ -1570,7 +1570,10 @@ export function createCommandService({
           });
           const entry = batch.entries[0];
           if (!entry) throw new Error('send_message batch committed without an entry');
-          return { kind: 'appended', ...entry, issues: [...entry.issues] };
+          // `...entry` after the discriminant would overwrite it with the
+          // ledger entry's own `kind: 'event'` (#46); spread first so the
+          // command-result `kind` wins.
+          return { ...entry, kind: 'appended' as const, issues: [...entry.issues] };
         }
         const batch = await ledger.appendBatch({
           roomId: command.roomId,

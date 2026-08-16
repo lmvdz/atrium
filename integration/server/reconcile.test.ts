@@ -1,6 +1,7 @@
 import type { DatabaseHandle } from '@atrium/db';
 import { sql } from 'drizzle-orm';
 import { afterAll, afterEach, beforeEach, describe, expect, it } from 'vitest';
+import { isFoldedEntry } from '../../apps/server/src/ledger.js';
 import type { ServerFrame } from '../../apps/server/src/protocol.js';
 import { createRealtimeClient, type RealtimeClient } from '../../apps/web/src/lib/realtime.js';
 import {
@@ -184,7 +185,7 @@ describe('a lost doorbell costs latency, never delivery', () => {
 
     // Byte-identical history, not a count: the recovery has to be the same rows
     // in the same order, which is what a client renders.
-    const entries = await a.server.ledger.since(room.roomId, 0);
+    const entries = (await a.server.ledger.since(room.roomId, 0)).filter(isFoldedEntry);
     expect(
       JSON.stringify(
         reader.room(room.roomId).events.map((e) => ({ roomSeq: e.roomSeq, event: e.event })),
@@ -412,7 +413,7 @@ describe('a lost doorbell costs latency, never delivery', () => {
     // Byte-identical history, not a count. The recovery has to be the same rows
     // in the same order — what a UI renders — and it arrived entirely through
     // catch-up, because no `event` frame ever reached this client.
-    const entries = await a.server.ledger.since(room.roomId, 0);
+    const entries = (await a.server.ledger.since(room.roomId, 0)).filter(isFoldedEntry);
     expect(
       JSON.stringify(
         reader.room(room.roomId).events.map((e) => ({ roomSeq: e.roomSeq, event: e.event })),

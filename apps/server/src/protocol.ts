@@ -93,12 +93,107 @@ export interface WireEvent {
   issues: string[];
 }
 
+/**
+ * A durable ledger *position* that carries no event — the #46 wire tombstone.
+ *
+ * A row whose payload cannot be read back as a `RoomEvent` (a bad migration, a
+ * manual fix, a future non-participant writer — SQL runs no zod) is still a real
+ * row: it holds a `room_seq`, and `room_seq` is the client's only cursor.
+ * Filtering it off the wire — which is what this server did before — leaves a
+ * hole in the catch-up page, and the client's `applyEntry` accepts only
+ * `lastSeq + 1`, so it re-requests the gap and stalls after the
+ * max-stalled-catchups guard. The server outage #46 closed on the read path
+ * became a client outage one layer down.
+ *
+ * The tombstone is how the position travels without an event: the client applies
+ * it to advance its cursor **past** the bad row, so the valid rows after it land,
+ * and it renders nothing. It fabricates no event — there is no `event`, no
+ * `actor`, no `issues` — which is the covenant #46 keeps: nothing is invented to
+ * paper over a row that cannot be read. It is the wire twin of the ledger's
+ * `MalformedLedgerEntry`, and the client applies it exactly as it applies a
+ * refused row (`applied_with_issue`): journalled so `room_seq` stays gap-free,
+ * never shown because there is nothing that happened to show.
+ */
+export interface WireTombstone {
+  roomId: string;
+  /** Per-room position — real; this is the cursor the client advances past. */
+  roomSeq: number;
+  /** Global position. Diagnostics; not a client cursor. */
+  seq: number;
+  /** Discriminant: this position holds a row that could not be read as an event. */
+  malformed: true;
+  /** Why the row could not be read. Advisory, for an operator; never rendered. */
+  reason: string;
+}
+
+/**
+ * One position as a `catchup` page carries it: a readable event, or a tombstone
+ * for a row that is not (#46).
+ *
+ * The catch-up page carries the union. On the LIVE path the two travel as separate
+ * frames — a readable row as `event` (a `WireEvent`), a malformed row as `tombstone`
+ * (a `WireTombstone`) — rather than one widened `event` frame. Round 2 skipped the
+ * marker on the live fan-out entirely, on the theory that the reconciler's
+ * `head`→`since` would close the gap; it does, but a whole reconcile interval late,
+ * and not at all if that one frame is lost. Round 3 carries it live so a subscriber
+ * advances the instant the row is folded. The distinct discriminant — rather than
+ * teaching every reader of `event.entry.event` to narrow on `malformed` — keeps a
+ * live `event` frame exactly what it always was.
+ *
+ * ## Rollout / old-client compatibility
+ *
+ * The live `tombstone` frame is new. A client from before round 3 has no `tombstone`
+ * case in its `ServerFrame` union, so it rejects the frame at parse and drops it —
+ * which corrupts nothing (a dropped frame advances no cursor) and recovers through
+ * the same `head`→`since` path round 2 relied on, where the catch-up page has
+ * carried the tombstone since round 2. So the change degrades safely: upgraded
+ * clients advance immediately, older ones fall back to the reconciler. No version
+ * handshake is negotiated on this socket, so a hard skew guard is not cheap here;
+ * the safe degradation above is the rollout contract. Deploy server and client
+ * together when you can, but a lagging client is not a correctness hazard.
+ *
+ * ## The tombstone is a forward-compatible-ONLY change (#46 round 4)
+ *
+ * Be precise about which "old client" degrades gracefully. The paragraph above
+ * holds for a round-2-or-later client, whose catch-up schema already parses a
+ * `WireTombstone` in the page. A **pre-#46 client** is different: its catch-up
+ * schema is `entries: z.array(Envelope)` (verified on `origin/main`), which cannot
+ * parse a tombstone at all — the whole `catchup` frame fails at the schema, the
+ * page is dropped, and that client re-requests the identical `since` and stalls on
+ * any room that contains a malformed row, until it upgrades. So the wire tombstone
+ * (both the live `tombstone` frame and the catch-up tombstone entry) is a
+ * FORWARD-COMPATIBLE-ONLY protocol change: new clients read it, pre-deploy clients
+ * cannot, and there is no version handshake on this socket to bridge them.
+ *
+ * That is safe, and strictly better than pre-#46, on three counts:
+ *   1. **Server-first deploy is the correct order and loses nothing.** Before #46,
+ *      one malformed row makes `hydrate` throw and the whole PROCESS exits — a
+ *      total outage for every client in every room. After it, the server stays up;
+ *      rooms with no bad row are fully unaffected.
+ *   2. **Current clients get the full benefit the moment they upgrade** — they
+ *      advance past the malformed row on both the live and catch-up paths.
+ *   3. **The only degradation is a pre-deploy client stalling on the one affected
+ *      room** (not a crash, not data corruption, not other rooms) until it
+ *      upgrades. The contract is graceful-degradation-to-stall, scoped to the room
+ *      that holds the unreadable row — a working→stalled step on one room for old
+ *      clients, never a working→broken regression.
+ */
+export type WireEntry = WireEvent | WireTombstone;
+
 export type ServerFrame =
   | { type: 'welcome'; connectionId: string; userId: string; heartbeatIntervalMs: number }
   | { type: 'pong'; at: string }
   | { type: 'subscribed'; roomId: string; head: number; seenSeq: number }
   | { type: 'unsubscribed'; roomId: string }
   | { type: 'event'; entry: WireEvent }
+  /**
+   * A malformed row on the LIVE path (#46 round 3). Its own frame rather than a
+   * widened `event`, so a live `event` frame stays a readable event and the
+   * subscriber advances its cursor past the bad position immediately — instead of
+   * only recovering on the reconciler's next `head`→`since`. The client renders it
+   * as nothing; it exists to carry the cursor forward.
+   */
+  | { type: 'tombstone'; entry: WireTombstone }
   /**
    * "This room is at `head`." Unsolicited, from the reconciler.
    *
@@ -127,7 +222,7 @@ export type ServerFrame =
       to: number;
       head: number;
       more: boolean;
-      entries: WireEvent[];
+      entries: WireEntry[];
     }
   /**
    * The command succeeded. The three positional fields are `null` exactly when

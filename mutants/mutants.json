@@ -181,7 +181,7 @@
       "kind": "file",
       "why": "Round 2's `WatermarkStore` by construction: the cursor is durable and the events are not, so a reload is a room that believes it is up to date and holds nothing.",
       "file": "apps/web/src/lib/realtime.ts",
-      "find": "        events: held.events.filter((entry) => entry.issues.length === 0),",
+      "find": "        events: held.events.filter(\n          (entry): entry is RoomEventEnvelope => !isTombstone(entry) && entry.issues.length === 0,\n        ),",
       "replace": "        events: [],",
       "catches": ["resumes from a durable journal rather than replaying the room"]
     },
@@ -189,9 +189,9 @@
       "id": "client_ignores_the_head_frame",
       "suite": "unit",
       "kind": "file",
-      "why": "Leaves a client that lost one event frame with nothing able to tell it, because its cursor and its stale head agree.",
+      "why": "Leaves a client that lost one event frame with nothing able to tell it, because its cursor and its stale head agree. (#46 r4: re-anchored — the head-driven gap request now lives in the else-branch of the latched-stall guard.)",
       "file": "apps/web/src/lib/realtime.ts",
-      "find": "        if (room.lastSeq < room.head) requestSince(frame.roomId);\n",
+      "find": "            if (latch) stalledGap.delete(frame.roomId);\n            requestSince(frame.roomId);\n",
       "replace": "",
       "catches": ["asks for the gap when told the room is ahead of its cursor"]
     },
@@ -857,7 +857,7 @@
       "replace": "const parsed = { success: true as const, data: json as ServerFrame } as ReturnType<\n        typeof ServerFrame.safeParse\n      >;",
       "catches": [
         "does not move the cursor for an event whose envelope does not parse",
-        "refuses a catch-up page carrying one unreadable entry, and keeps the socket"
+        "skips one unreadable catch-up entry rather than sinking the page, and keeps the socket"
       ]
     },
     {
@@ -896,8 +896,8 @@
       "kind": "file",
       "why": "The client stops requiring a catch-up page entries to name the page room. handleFrame does its arithmetic against view(frame.roomId) while applyEntry files each entry under entry.roomId, so a page whose entries name another room moves one room journal on another room cursor. The same cross-check exists on the bus (EphemeralNote) and was missing on the socket — an asymmetry inside r7 own fix, found by a second lineage.",
       "file": "apps/web/src/lib/realtime.ts",
-      "find": "    .refine((frame) => frame.entries.every((entry) => entry.roomId === frame.roomId), {",
-      "replace": "    .refine(() => true, {",
+      "find": "        frame.entries.every((entry) => isSkippedEntry(entry) || entry.roomId === frame.roomId),",
+      "replace": "        frame.entries.every((entry) => isSkippedEntry(entry) || true),",
       "catches": ["refuses a catch-up page whose entries name a different room"]
     },
     {

@@ -3,6 +3,7 @@ import { coreEvents } from '@atrium/db/schema';
 import { count, eq } from 'drizzle-orm';
 import { afterAll, afterEach, beforeEach, describe, expect, it } from 'vitest';
 import type { WebSocket } from 'ws';
+import { isFoldedEntry } from '../../apps/server/src/ledger.js';
 import { createRealtimeClient, type RealtimeClient } from '../../apps/web/src/lib/realtime.js';
 import {
   nodeSocketFactory,
@@ -69,7 +70,7 @@ afterAll(async () => {
 
 /** The ledger's own view of a room, as canonical JSON — the reference history. */
 async function ledgerHistory(roomId: string): Promise<string> {
-  const entries = await server.ledger.since(roomId, 0);
+  const entries = (await server.ledger.since(roomId, 0)).filter(isFoldedEntry);
   return JSON.stringify(entries.map((entry) => ({ roomSeq: entry.roomSeq, event: entry.event })));
 }
 
@@ -243,7 +244,7 @@ describe('per-room seq under concurrent posts', () => {
     expect(assigned).toEqual(Array.from({ length: total }, (_, i) => i + 1));
 
     // And the ledger agrees, which is the half a constraint can enforce.
-    const entries = await server.ledger.since(room.roomId, 0);
+    const entries = (await server.ledger.since(room.roomId, 0)).filter(isFoldedEntry);
     expect(entries.map((entry) => entry.roomSeq)).toEqual(
       Array.from({ length: total }, (_, i) => i + 1),
     );
