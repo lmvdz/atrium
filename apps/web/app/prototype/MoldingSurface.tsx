@@ -23,6 +23,7 @@
  * ------------------------------------------------------------------------- */
 
 import { useEffect, useMemo, useState } from 'react';
+import type { ControlPlaneData } from '@/lib/control-plane-data';
 import { ArtifactPane } from './ArtifactPane';
 import { ChatBlock } from './ChatBlock';
 import { ThreadStatus } from './ChatChrome';
@@ -49,10 +50,49 @@ import { UserBar } from './UserBar';
    session (ThreadStatus's steer/interrupt buttons), an honest inert seam here
    naming `signal_session{steer|interrupt}` for go-live (#168) — never guessed. */
 
-export function MoldingSurface() {
+/* The node the surface opens on. When a LIVE control plane is mounted (the real
+   room route, #168 go-live A), the tree carries real ids that the mock `s-live`
+   is not among, so opening on it would leave nothing selected — open on the
+   plane's first session (then plan, then agent) instead. On the `/prototype`
+   fixture route no live plane is passed, and the surface opens on the mock live
+   session exactly as before. */
+function firstSelection(plane: ControlPlaneData | undefined): Selection {
+  if (plane === undefined) return { kind: 'session', id: 's-live' };
+  for (const agent of plane.agents) {
+    for (const plan of agent.plans) {
+      const session = plan.sessions[0];
+      if (session !== undefined) return { kind: 'session', id: session.id };
+    }
+  }
+  const firstPlan = plane.agents.flatMap((agent) => agent.plans)[0];
+  if (firstPlan !== undefined) return { kind: 'plan', id: firstPlan.id };
+  const firstAgent = plane.agents[0];
+  if (firstAgent !== undefined) return { kind: 'agent', id: firstAgent.userId };
+  return { kind: 'session', id: 's-live' };
+}
+
+/**
+ * The married surface.
+ *
+ * `tree` is the LIVE control-plane projection (`ControlPlaneData`) when the
+ * surface is mounted on a real room route (#168 go-live A): the server component
+ * loads it through `loadControlPlane` (server-only) and hands it down here, so the
+ * process tree renders REAL agents/plans/sessions and a live column change moves
+ * the rendered cell. When omitted (the `/prototype` fixture route) the tree falls
+ * back to the seeded `treeData()` fixture. The type is imported `import type`, so
+ * this client component never pulls the server-only module into the browser bundle.
+ *
+ * ONLY the READ-ONLY process tree is live in this lane. The conversation feed,
+ * the thread roster and the covenant ACTION doors are unchanged: the doors stay
+ * honestly inert (`{reached:false}`, wired under go-live B's security gauntlet),
+ * and the per-session conversation/roster remain the design shell until their
+ * live source lands (#159 / Phase 6 — there is no per-session-thread live read
+ * model on this tree to bind them to yet).
+ */
+export function MoldingSurface({ tree: liveTree }: { tree?: ControlPlaneData } = {}) {
   const [echoes, setEchoes] = useState<readonly Echo[]>([]);
   /* WHERE YOU ARE in the tree — which thread the main view shows. */
-  const [selected, setSelected] = useState<Selection>({ kind: 'session', id: 's-live' });
+  const [selected, setSelected] = useState<Selection>(() => firstSelection(liveTree));
   /* the tree is a collapsible, resizable left pane — its width is remembered. */
   const [sideCollapsed, setSideCollapsed] = useState(false);
   const [sideW, setSideW] = useState(300);
@@ -75,12 +115,15 @@ export function MoldingSurface() {
     window.addEventListener('pointermove', move);
     window.addEventListener('pointerup', up);
   };
-  /* SEAM(#154) — BOUND. The process tree reads the real control-plane shape
-     (`ControlPlaneData`), derived through the shipped `control/state.ts`
-     selectors. The seam is called at the composition root and handed down, so a
-     test can render `NavTree` against a seeded plane and assert a mutated cost
-     moves the rendered cell. */
-  const tree = useMemo(() => treeData(), []);
+  /* SEAM(#154) — BOUND, and LIVE on a real room (#168 go-live A). The process
+     tree reads the real control-plane shape (`ControlPlaneData`), derived through
+     the shipped `control/state.ts` selectors. When the surface is mounted on a
+     real room route the projection is the LIVE `loadControlPlane` read, handed in
+     as `liveTree`; on the `/prototype` route it falls back to the seeded
+     `treeData()`. Either way the seam is resolved at the composition root and
+     handed down, so a mutated column moves the rendered cell (nav-tree.test.tsx
+     and molding-mount.test.tsx). */
+  const tree = useMemo(() => liveTree ?? treeData(), [liveTree]);
   /* the right split — an artifact host (diff / plan / doc) you comment on. */
   // SEAM(#155): bind to the session's real artifacts.
   const artifacts = useMemo(() => sessionArtifacts(), []);
