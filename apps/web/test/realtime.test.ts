@@ -282,17 +282,32 @@ describe('subscribe and catch up', () => {
   });
 
   /**
-   * #46 round 4 — the latched stall survives the reconciler's `head` frame.
+   * #46 round 5 — the latched stall re-probes on a bounded backoff and recovers
+   * a hole that becomes serveable later, WITHOUT a reconnect.
    *
    * `maxStalledCatchups` bounds the catch-up loop's OWN retries, but the server's
    * ~2s `head` frame calls `requestSince` unconditionally when the cursor is
-   * behind the head. The round-3 stall test only pumped `catchup` frames, so it
-   * never saw that a single `head` after the cap re-drives the identical `since`
-   * forever at ~0.5 Hz. This delivers `head` frames after the stall latches and
-   * asserts the client stops re-requesting the identical gap — and that the latch
-   * clears once the gap actually advances, so a recovered room reconciles again.
+   * behind the head, so an un-crossable gap re-drives the identical `since`
+   * forever at ~0.5 Hz. Round 4 latched that re-drive off — but *permanently*, so
+   * a hole an operator later repairs (a bad row fixed by SQL) was never
+   * rediscovered until reconnect. Round 5 replaces the permanent suppression with
+   * a decaying re-probe:
+   *
+   *   (a) INSIDE the backoff window, repeated `head` frames drive no `since` — the
+   *       0.5 Hz hammer stays stopped.
+   *   (b) once the injected clock passes the window, exactly one `head` re-probes
+   *       (a fresh `since` at the same stalled cursor), and the window doubles.
+   *   (c) that re-probe's `catchup` — the ONLY way a `catchup` reaches the client
+   *       in production, as the answer to a `since` — now carries the repaired
+   *       row, so crossing the hole clears the latch and lands the room.
+   *
+   * The round-4 test cleared the latch with an *unsolicited* `catchup` that can't
+   * occur in production (a `catchup` only answers a `since`), so its clear path
+   * was unreachable; this drives the real production path with an injected clock.
    */
-  it('stops re-requesting the identical since when head frames arrive after the stall cap', () => {
+  it('re-probes a latched stall on a bounded backoff and recovers when the hole becomes serveable', async () => {
+    let clock = 0;
+    const client = await clientWith({ now: () => clock });
     client.join(ROOM);
     latest().deliver({ type: 'subscribed', roomId: ROOM, head: 9, seenSeq: 0 });
     // Drive catch-up to the stall cap on a hole it can never cross.
@@ -309,35 +324,52 @@ describe('subscribe and catch up', () => {
     }
     expect(errors.some((message) => message.includes('stalled'))).toBe(true);
     const afterStall = latest().framesOfType('since').length;
-    const lastSince = latest().framesOfType('since').at(-1);
-    expect(lastSince).toMatchObject({ roomId: ROOM, roomSeq: 0 });
+    expect(latest().framesOfType('since').at(-1)).toMatchObject({ roomId: ROOM, roomSeq: 0 });
 
-    // The reconciler now repeats `head` — the loop the round-3 test missed. Every
-    // one names a gap (`lastSeq 0 < head 9`), but the `since` it would drive is
-    // byte-identical to the one that already stalled, so the latch suppresses it.
+    // (a) The reconciler now repeats `head` at ~0.5 Hz. The clock has not moved,
+    // so every one falls INSIDE the backoff window and drives no `since` — the
+    // hammer round 4 stopped stays stopped.
     for (let round = 0; round < 20; round += 1) {
       latest().deliver({ type: 'head', roomId: ROOM, head: 9 });
     }
     expect(latest().framesOfType('since').length).toBe(afterStall);
 
-    // The latch clears when the gap actually advances: a catch-up that crosses
-    // the hole lets the next `head` reconcile normally again. Without the clear,
-    // a room that recovered would stay silent forever.
+    // (b) Advance the clock past the backoff window. The NEXT head re-probes:
+    // exactly one fresh `since`, byte-identical at the stalled cursor (roomSeq
+    // 0). This is the recovery round 4 lacked — no reconnect, no live event.
+    clock += 4_000;
+    latest().deliver({ type: 'head', roomId: ROOM, head: 9 });
+    expect(latest().framesOfType('since').length).toBe(afterStall + 1);
+    expect(latest().framesOfType('since').at(-1)).toMatchObject({ roomId: ROOM, roomSeq: 0 });
+
+    // …and the window GREW (doubled): heads at the same clock stay throttled, so
+    // the re-probe rate decays rather than resuming the 0.5 Hz hammer.
+    const afterReprobe = latest().framesOfType('since').length;
+    for (let round = 0; round < 5; round += 1) {
+      latest().deliver({ type: 'head', roomId: ROOM, head: 9 });
+    }
+    expect(latest().framesOfType('since').length).toBe(afterReprobe);
+
+    // (c) The re-probe's `catchup` — its answer, the only way a `catchup` reaches
+    // the client in production — now carries the repaired rows. Crossing the hole
+    // clears the latch and lands the room.
     latest().deliver({
       type: 'catchup',
       roomId: ROOM,
       from: 0,
-      to: 3,
+      to: 9,
       head: 9,
-      more: true,
-      entries: [messageEvent(1, 'a'), messageEvent(2, 'b'), messageEvent(3, 'c')],
+      more: false,
+      entries: Array.from({ length: 9 }, (_, i) => messageEvent(i + 1, `m${i + 1}`)),
     });
-    // This catch-up made progress, so it re-requested on its own; ignore that and
-    // measure the next head, which must drive a fresh `since` (roomSeq now 3).
-    const afterProgress = latest().framesOfType('since').length;
+    expect(client.lastSeq(ROOM)).toBe(9);
+    expect(client.room(ROOM).events.map((e) => e.roomSeq)).toEqual([1, 2, 3, 4, 5, 6, 7, 8, 9]);
+    // Latch cleared: the room is caught up, so a further head asks for nothing —
+    // and had a new gap opened, it would reconcile at once rather than wait a
+    // window, because the stale latch is gone.
+    const afterLand = latest().framesOfType('since').length;
     latest().deliver({ type: 'head', roomId: ROOM, head: 9 });
-    expect(latest().framesOfType('since').length).toBe(afterProgress + 1);
-    expect(latest().framesOfType('since').at(-1)).toMatchObject({ roomSeq: 3 });
+    expect(latest().framesOfType('since').length).toBe(afterLand);
   });
 
   it('resumes from a durable journal rather than replaying the room', async () => {

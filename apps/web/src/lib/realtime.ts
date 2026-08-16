@@ -1128,6 +1128,21 @@ export interface RealtimeClient {
 const DEFAULT_RECONNECT = { initialDelayMs: 300, maxDelayMs: 10_000, factor: 2 };
 const DEFAULT_MAX_STALLED_CATCHUPS = 8;
 
+/**
+ * Bounded-backoff re-probe for a latched stall (#46 round 5).
+ *
+ * When a catch-up gap can't be crossed, round 4 latched it so the reconciler's
+ * ~2s `head` frame stopped re-driving the identical `since` at ~0.5 Hz. But it
+ * suppressed that re-drive *forever* — so a hole an operator later repairs was
+ * never rediscovered until reconnect. The fix keeps the hammer suppressed while
+ * still re-probing on a decaying schedule: the FIRST re-probe fires one
+ * reconcile interval past the latch, and each subsequent window doubles up to a
+ * ceiling, so a now-serveable row recovers within a few minutes without a
+ * reconnect while the steady-state request rate decays toward the cap.
+ */
+const STALL_REPROBE_BASE_MS = 4_000; // ≈ two ~2s reconcile intervals
+const STALL_REPROBE_CAP_MS = 180_000; // 3 minutes
+
 export function createRealtimeClient(options: RealtimeClientOptions): RealtimeClient {
   const now = options.now ?? (() => Date.now());
   const schedule = options.setTimeoutImpl ?? ((fn, ms) => setTimeout(fn, ms));
@@ -1151,16 +1166,23 @@ export function createRealtimeClient(options: RealtimeClientOptions): RealtimeCl
   /** Consecutive catch-up rounds that asked for a gap and got no closer to it. */
   const stalled = new Map<string, number>();
   /**
-   * A latched stall (#46 round 4): the `(from -> to)` gap catch-up hit the cap on
-   * and could not cross. `maxStalledCatchups` bounds the client's SELF-scheduled
-   * retries, but the reconciler's ~2s `head` frame re-drives `requestSince`
-   * unconditionally, so an un-crossable hole loops forever at ~0.5 Hz. Once
-   * latched, a head-driven `requestSince` for the identical `since` cursor
-   * (`from === room.lastSeq`) is suppressed — the loud stalled signal already
-   * fired. Cleared the moment the gap actually advances (a later catch-up crosses
-   * it, or `lastSeq` moves), so a recovered room resumes reconciling normally.
+   * A latched stall (#46 round 4, re-shaped round 5): the `(from -> to)` gap
+   * catch-up hit the cap on and could not cross. `maxStalledCatchups` bounds the
+   * client's SELF-scheduled retries, but the reconciler's ~2s `head` frame
+   * re-drives `requestSince` unconditionally, so an un-crossable hole loops
+   * forever at ~0.5 Hz. Once latched, a head-driven `requestSince` for the
+   * identical `since` cursor (`from === room.lastSeq`) is suppressed while inside
+   * the current backoff window (`now() < nextProbeAt`); when the window elapses,
+   * exactly one re-probe is allowed and `interval` doubles toward the cap, so a
+   * hole that becomes serveable later (an operator repairs the row) is
+   * rediscovered WITHOUT a reconnect, and the loud stalled signal already fired.
+   * Cleared the moment the gap actually advances (a later catch-up crosses it, or
+   * `lastSeq` moves), on caught-up, on disconnect, and on `leave()`.
    */
-  const stalledGap = new Map<string, { from: number; to: number }>();
+  const stalledGap = new Map<
+    string,
+    { from: number; to: number; interval: number; nextProbeAt: number }
+  >();
 
   let socket: SocketLike | null = null;
   let status: ConnectionStatus = 'idle';
@@ -1445,18 +1467,28 @@ export function createRealtimeClient(options: RealtimeClientOptions): RealtimeCl
         const room = view(frame.roomId);
         room.head = Math.max(room.head, frame.head);
         if (room.lastSeq < room.head) {
-          // #46 round 4: a latched stall suppresses the identical head-driven
+          // #46 round 4/5: a latched stall throttles the identical head-driven
           // re-request. `maxStalledCatchups` caps the catch-up loop's own
           // retries, but this ~2s head frame would otherwise re-drive the exact
           // same `since(lastSeq)` forever on a hole catch-up already gave up on.
           // The latch is keyed on the `since` cursor (`from`): while `lastSeq`
-          // sits where the stall latched, the request is byte-identical and
-          // futile, so it is suppressed and the loud stalled signal (already
-          // emitted by the catch-up cap) stands. If `lastSeq` has since moved,
-          // the gap advanced — drop the stale latch and reconcile normally.
+          // sits where the stall latched, the request is byte-identical.
           const latch = stalledGap.get(frame.roomId);
           if (latch && latch.from === room.lastSeq) {
-            // suppressed — do not re-request the identical stalled gap.
+            // Round 5: NOT a permanent suppression. Round 4 muted this re-drive
+            // forever, so a hole an operator later repairs was never rediscovered
+            // until reconnect. Instead, suppress only INSIDE the current backoff
+            // window; once it elapses, allow exactly one re-probe and grow the
+            // window (doubling, capped) so a now-serveable row recovers without a
+            // reconnect while the steady-state rate decays toward the cap. The
+            // loud stalled signal already fired at the cap; this stays quiet.
+            if (now() < latch.nextProbeAt) {
+              // throttled — inside the current backoff window, stay silent.
+            } else {
+              const interval = Math.min(latch.interval * 2, STALL_REPROBE_CAP_MS);
+              stalledGap.set(frame.roomId, { ...latch, interval, nextProbeAt: now() + interval });
+              requestSince(frame.roomId);
+            }
           } else {
             if (latch) stalledGap.delete(frame.roomId);
             requestSince(frame.roomId);
@@ -1509,16 +1541,30 @@ export function createRealtimeClient(options: RealtimeClientOptions): RealtimeCl
           const rounds = progressed ? 0 : (stalled.get(frame.roomId) ?? 0) + 1;
           stalled.set(frame.roomId, rounds);
           if (rounds >= maxStalledCatchups) {
-            // The server keeps naming a head it will not send. Stop asking and
-            // say so: an unbounded loop here would be a client hammering a room
-            // it can never finish, in silence.
-            fail(
-              `catch-up for room "${frame.roomId}" stalled at ${room.lastSeq} of ${room.head} after ${rounds} rounds with no progress`,
-            );
-            // #46 round 4: latch the un-crossable gap so the reconciler's ~2s
-            // `head` frame stops re-driving the identical `since` at 0.5 Hz.
-            // Cleared when `lastSeq` advances past `from` (head handler / above).
-            stalledGap.set(frame.roomId, { from: room.lastSeq, to: room.head });
+            // #46 round 4/5: latch the un-crossable gap so the reconciler's ~2s
+            // `head` frame stops re-driving the identical `since` at 0.5 Hz —
+            // but on a bounded backoff (head handler / above), not forever.
+            //
+            // Only the FIRST latch on this cursor opens the window and emits the
+            // loud stalled signal. A re-probe answer that still can't cross
+            // re-enters here with the same `from` — it must NOT reset the window
+            // the head handler is growing (that would pin the re-probe at the
+            // base interval and re-hammer), nor re-spam the error every ~2s.
+            const existing = stalledGap.get(frame.roomId);
+            if (!existing || existing.from !== room.lastSeq) {
+              // The server keeps naming a head it will not send. Stop asking on
+              // the tight loop and say so: an unbounded loop here would be a
+              // client hammering a room it can never finish, in silence.
+              fail(
+                `catch-up for room "${frame.roomId}" stalled at ${room.lastSeq} of ${room.head} after ${rounds} rounds with no progress`,
+              );
+              stalledGap.set(frame.roomId, {
+                from: room.lastSeq,
+                to: room.head,
+                interval: STALL_REPROBE_BASE_MS,
+                nextProbeAt: now() + STALL_REPROBE_BASE_MS,
+              });
+            }
           } else {
             requestSince(frame.roomId);
           }
@@ -1745,6 +1791,11 @@ export function createRealtimeClient(options: RealtimeClientOptions): RealtimeCl
     leave: (roomId) => {
       send({ type: 'unsubscribe', roomId });
       rooms.delete(roomId);
+      // #46 round 5: drop this room's per-room reconciler bookkeeping too, or a
+      // rejoin inherits a stale latch/counter keyed on a cursor it no longer has.
+      // (The shipped disconnect path clears these; an explicit `leave()` didn't.)
+      stalled.delete(roomId);
+      stalledGap.delete(roomId);
     },
     room: (roomId) => view(roomId),
     rooms: () => [...rooms.keys()],
