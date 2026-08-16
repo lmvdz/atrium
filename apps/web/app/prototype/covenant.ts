@@ -1,5 +1,9 @@
 'use client';
 
+import type { ArmOutcome, CertifyOutcome, DisarmOutcome } from '@/lib/certify-session';
+import type { RoomCommand, RoomCommandOutcome } from '@/lib/room-command';
+import type { RealtimeClient } from '@/src/lib/realtime';
+
 /* ═══════════════════════════════════════════════════════════════════════════
  * THE COVENANT SEAM (#157) — every covenant ACTION the married surface offers,
  * as ONE honestly-inert door apiece, each naming the server-gated command it
@@ -191,3 +195,239 @@ export const covenant = {
   /** Dispatch / run a session. */
   run: (_sessionId: string): CovenantOutcome => inert(DOOR_NAMES.run),
 } as const;
+
+/* ═══════════════════════════════════════════════════════════════════════════
+ * GO-LIVE B2 (#168) — THE LIVE, GATED DOORS.
+ *
+ * `covenant` above is the honestly-inert NAME REGISTRY (kept, so the render-time
+ * landmine guard and the `/prototype` fixture route keep the exact inert
+ * behaviour they assert). `makeCovenant` is the LIVE half: bound to a real
+ * `RealtimeClient`, the certify Server Actions, and the funding command socket,
+ * it returns doors that perform the REAL durable mutation — and ONLY inside a
+ * human gesture handler, NEVER on render (the factory only CONSTRUCTS bindings;
+ * a door fires nothing until called).
+ *
+ * TWO ACK MODELS, both honest, neither a local flag:
+ *
+ *  1. THE RESERVED HUMAN-ONLY GATES — certify (a forged `✓`) and fund (a forged
+ *     spend). These reach the server through an ACK-RESOLVING transport (a Server
+ *     Action / the command socket), so `reached` is the server's AWAITED `ok` and
+ *     nothing else. A refusal comes back `reached:false` carrying the server's own
+ *     sentence. The server reducer (`apps/server/src/commands.ts` ~:1767,
+ *     `certificationClassOf`) refuses a non-human at BOTH before the append; this
+ *     seam wires the client affordance to that existing gate and never reimplements
+ *     or weakens it.
+ *
+ *  2. THE JOURNALED REALTIME DOORS — steer / interrupt / retract / supersede /
+ *     certifyClaim. The `RealtimeClient` has NO synchronous per-command ack: it
+ *     durably JOURNALS the command and sends it (retried across reconnects, refused
+ *     server-side as a `nack` if the covenant forbids). So the honest report is
+ *     `dispatched` — a REAL durable command left the authenticated client, keyed by
+ *     its ack/nack `commandId` — NOT a `reached:true` that claims the server
+ *     confirmed. When the live client is not yet connected (`client()` is null) the
+ *     door is inert: nothing is sent and `dispatched:false`.
+ * ═════════════════════════════════════════════════════════════════════════ */
+
+/** The reserved human-only gate outcome (certify, fund). `reached` is the
+    server's awaited `ok` — never a local flag. `refusal` carries the server's own
+    machine reason when it refused (e.g. `not_human`, `stale_review`, the spend
+    refusal), surfaced to the operator and never swallowed as success. */
+export interface GateOutcome {
+  readonly door: CovenantDoor;
+  readonly reached: boolean;
+  readonly refusal?: string;
+}
+
+/** The journaled realtime-door outcome. `dispatched` = the durable command left
+    the authenticated, journaled client; `commandId` is its ack/nack correlation
+    id. `inert` is set (and `dispatched:false`) when nothing was sent because no
+    live client is connected yet — honestly inert, never a faked delivery. */
+export interface DispatchOutcome {
+  readonly door: CovenantDoor;
+  readonly dispatched: boolean;
+  readonly commandId: string | null;
+  readonly inert?: string;
+}
+
+/** The transports the live doors bind to. Structural so the factory is decoupled
+    from the RSC/server modules and trivially mockable in a flip-input test: the
+    component wires the real client ref, the certify Server Actions, and
+    `issueRoomCommand`; a test wires spies. */
+export interface CovenantDeps {
+  readonly roomId: string;
+  readonly workspaceSlug: string;
+  readonly roomSlug: string;
+  /** The persistent client, or null until it connects. Read fresh on each call
+      (a getter, never a captured snapshot) so a door dispatched after connect
+      sees the live client, and one fired before it stays honestly inert. */
+  readonly client: () => Pick<
+    RealtimeClient,
+    'signalSession' | 'correctObject' | 'supersedeObject'
+  > | null;
+  readonly armCertify: (input: {
+    sessionId: string;
+    workspaceSlug: string;
+    roomSlug: string;
+    reviewedDigest: string;
+  }) => Promise<ArmOutcome>;
+  readonly confirmCertify: (input: {
+    sessionId: string;
+    workspaceSlug: string;
+    roomSlug: string;
+    attemptToken: string;
+  }) => Promise<CertifyOutcome>;
+  readonly disarmCertify: (input: {
+    sessionId: string;
+    attemptToken: string;
+  }) => Promise<DisarmOutcome>;
+  readonly issueRoomCommand: (command: RoomCommand) => Promise<RoomCommandOutcome>;
+}
+
+/** The live covenant — bound doors returning REAL outcomes. certify is the
+    arm→confirm/disarm lifecycle `HoldToAct` drives; the rest are single calls. */
+export interface LiveCovenant {
+  /** STEP ONE of the session-landing certify: fire the server arm on hold-BEGIN.
+      Binds the signature to `reviewedDigest` (the session's real `artifactDigest`
+      — you certify the reading you were shown). Stores the arm's attempt-token
+      promise, keyed by session, for the confirm/disarm to thread back. */
+  certifyArm(sessionId: string, reviewedDigest: string): void;
+  /** STEP TWO: fire the server confirm on hold-COMPLETE. Awaits the arm's token
+      and, only if one was minted, calls `certifySession`. `reached` is that
+      server `ok` — a forged `✓` is impossible because nothing here paints one. */
+  certifyConfirm(sessionId: string): Promise<GateOutcome>;
+  /** CANCELLATION: release-before-complete cancels the exact arm it belongs to. */
+  certifyDisarm(sessionId: string): void;
+  /** THE SPEND GATE: set/raise a plan's rlimit slice over the command socket, the
+      ONE path the server's human-only spend gate lives on. `reached` is the
+      server `ok`; a machine is refused there before any append. */
+  fund(planId: string, slice: number): Promise<GateOutcome>;
+  /** Certify a semantic CLAIM to `✓ verified` — the `amend {verification}` door,
+      distinct from the session-landing certify. */
+  certifyClaim(objectId: string): DispatchOutcome;
+  steer(sessionId: string, body: string): DispatchOutcome;
+  interrupt(sessionId: string, body: string): DispatchOutcome;
+  retract(objectId: string): DispatchOutcome;
+  supersede(retiredObjectId: string, replacementObjectId: string): DispatchOutcome;
+  /** Mediate an anchored comment into a session steer. HONESTLY INERT: both wire
+      gaps the seam names are still open — `MessageReference.kind`
+      (`typed-references.ts`) has no `message`/`quotation` variant, and
+      `sendMessage` does not forward `causeMessageId` — so the quotation-anchored
+      durable message→steer link is not representable on the wire yet. Nothing is
+      sent; `reached:false`. */
+  mediateSteer(
+    sessionId: string,
+    comment: { readonly anchor: string; readonly quote: string; readonly body: string },
+  ): CovenantOutcome;
+  /** Dispatch / run a session. HONESTLY INERT: the persistent `RealtimeClient`
+      exposes no `open_session`/`resume_session` verb, and this surface offers no
+      run gesture, so there is nothing to fire. Named for the seam's completeness. */
+  run(sessionId: string): CovenantOutcome;
+}
+
+const NO_CLIENT =
+  'the live realtime client is not connected yet, so nothing was sent — the durable command was not dispatched';
+
+export function makeCovenant(deps: CovenantDeps): LiveCovenant {
+  // The arm's attempt-token, keyed by session, as the PROMISE of the token so a
+  // confirm/disarm that outruns its arm still threads the exact attempt (the
+  // ControlPlane pattern). `null` means the arm was refused or skipped — the
+  // confirm then sends nothing, so a stale/absent digest can never certify.
+  const armTokens = new Map<string, Promise<string | null>>();
+
+  /** Run a journaled realtime door: inert when no client, else dispatch and
+      report the durable command's `commandId`. `send` returns that id. */
+  const dispatch = (
+    door: CovenantDoor,
+    send: (client: NonNullable<ReturnType<CovenantDeps['client']>>) => string,
+  ): DispatchOutcome => {
+    const client = deps.client();
+    if (client === null) return { door, dispatched: false, commandId: null, inert: NO_CLIENT };
+    return { door, dispatched: true, commandId: send(client) };
+  };
+
+  return {
+    certifyArm: (sessionId, reviewedDigest) => {
+      if (reviewedDigest.length === 0) {
+        // No reviewed digest ⇒ there is no reading to bind a signature to. Store a
+        // resolved-null token so the confirm sends nothing rather than arming over
+        // whatever is current (the round-6 stale-review hole, closed here too).
+        armTokens.set(sessionId, Promise.resolve(null));
+        return;
+      }
+      const armPromise = deps
+        .armCertify({
+          sessionId,
+          workspaceSlug: deps.workspaceSlug,
+          roomSlug: deps.roomSlug,
+          reviewedDigest,
+        })
+        .then((outcome) => (outcome.ok ? outcome.attemptToken : null));
+      armTokens.set(sessionId, armPromise);
+      void armPromise;
+    },
+    certifyConfirm: async (sessionId) => {
+      const pending = armTokens.get(sessionId) ?? Promise.resolve(null);
+      const attemptToken = await pending;
+      if (attemptToken === null) {
+        return { door: DOOR_NAMES.certify, reached: false, refusal: 'not_armed' };
+      }
+      const outcome = await deps.confirmCertify({
+        sessionId,
+        workspaceSlug: deps.workspaceSlug,
+        roomSlug: deps.roomSlug,
+        attemptToken,
+      });
+      return outcome.ok
+        ? { door: DOOR_NAMES.certify, reached: true }
+        : { door: DOOR_NAMES.certify, reached: false, refusal: outcome.reason };
+    },
+    certifyDisarm: (sessionId) => {
+      const pending = armTokens.get(sessionId);
+      if (pending === undefined) return;
+      armTokens.delete(sessionId);
+      void pending.then((attemptToken) => {
+        if (attemptToken === null) return;
+        void deps.disarmCertify({ sessionId, attemptToken });
+      });
+    },
+    fund: async (planId, slice) => {
+      const outcome = await deps.issueRoomCommand({
+        name: 'set_plan_rlimit',
+        roomId: deps.roomId,
+        planId,
+        slice,
+      });
+      return outcome.ok
+        ? { door: DOOR_NAMES.fund, reached: true }
+        : { door: DOOR_NAMES.fund, reached: false, refusal: outcome.message };
+    },
+    certifyClaim: (objectId) =>
+      dispatch(DOOR_NAMES.certifyClaim, (client) =>
+        client.correctObject(deps.roomId, objectId, 'amend', {
+          patch: { verification: 'verified' },
+        }),
+      ),
+    steer: (sessionId, body) =>
+      dispatch(DOOR_NAMES.steer, (client) =>
+        client.signalSession(deps.roomId, sessionId, 'steer', { body }),
+      ),
+    interrupt: (sessionId, body) =>
+      dispatch(DOOR_NAMES.interrupt, (client) =>
+        client.signalSession(deps.roomId, sessionId, 'interrupt', { body }),
+      ),
+    retract: (objectId) =>
+      dispatch(DOOR_NAMES.retract, (client) =>
+        client.correctObject(deps.roomId, objectId, 'retract'),
+      ),
+    supersede: (retiredObjectId, replacementObjectId) =>
+      dispatch(
+        DOOR_NAMES.supersede,
+        (client) =>
+          client.supersedeObject(deps.roomId, replacementObjectId, retiredObjectId).commandId,
+      ),
+    // Honestly inert — both wire gaps confirmed still open at go-live (#168).
+    mediateSteer: (_sessionId, _comment) => inert(DOOR_NAMES.mediateSteer),
+    // Honestly inert — no client verb, no surface gesture.
+    run: (_sessionId) => inert(DOOR_NAMES.run),
+  };
+}
