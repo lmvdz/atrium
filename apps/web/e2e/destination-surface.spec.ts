@@ -648,11 +648,25 @@ test.describe
         expect(certifierKind, 'the certifier of record must be a human').toBe('human');
 
         // the married surface itself states, in words, that the human signature
-        // landed (the derived footer text on the server's awaited ok — never a
-        // local flag that fakes it).
-        await expect(ada.getByText('certified', { exact: true }).first()).toBeVisible({
-          timeout: 15_000,
-        });
+        // landed — asserted on the DURABLE tree-row certified state, which the tree
+        // DERIVES from live server state through `sessionCertified` (the full hold
+        // receipt cohering: a present human armer = the human certifier, held past
+        // the gate, and the two stamps agreeing) — never a local flag that fakes it.
+        //
+        // This is a STRONGER covenant proof than the CertifyControl's transient
+        // "certified" ok-span the earlier draft asserted on, and it is not flaky:
+        // that ok-span paints correctly on the server's awaited `result.reached`,
+        // but the ArtifactPane footer correctly UNMOUNTS the whole CertifyControl
+        // the instant the live projection reflects the certification (an already-
+        // certified landing offers no certify affordance — the footer falls to its
+        // "awaiting a human" shell and the derived `<Glyph>` carries the mark), so
+        // the transient span is inherently racy to catch. The tree row updates from
+        // the very server fold this test just proved in `certState()` above, and it
+        // reads `✓` only when `sessionCertified` accepts the entire receipt.
+        await expect(sessionRow.first()).toContainText('certified', { timeout: 15_000 });
+        // the human-signature mark itself (rendered ONLY when `sessionCertified` is
+        // true) — the surface's own `✓` on the row, not just the word.
+        await expect(sessionRow.first().locator('[title="human-certified"]')).toBeVisible();
 
         // ── CLAUSE: the certification is IMMUTABLE — it cannot be un-made ────────
         // A held human signature is part of the receipt; drizzle/0033 refuses a
