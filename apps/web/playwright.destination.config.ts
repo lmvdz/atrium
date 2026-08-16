@@ -80,7 +80,10 @@ const FRAME_FLOOR = { width: 1280, height: 900 } as const;
 
 export default defineConfig({
   testDir: './e2e',
-  testMatch: /destination-scenario\.spec\.ts/,
+  // Both destination-posture capstones: the humans-and-agents-as-peers scenario
+  // (#89) and the married-surface session-artifact covenant (#160). A `--grep` or
+  // a positional filter still narrows a run to one of them.
+  testMatch: /destination-.*\.spec\.ts/,
   fullyParallel: true,
   // The map's gate is 4 workers, never 8 (8 oversubscribes this machine and its
   // only-at-8 failures are not product defects — HANDOFF.md). Pinned here so the
