@@ -22,17 +22,31 @@
  *   behind the typed seams in seams.ts; the covenant invariants are unchanged.
  * ------------------------------------------------------------------------- */
 
-import { useEffect, useMemo, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
+import {
+  armSessionCertificationAction,
+  certifySessionAction,
+  disarmSessionCertificationAction,
+} from '@/app/app/[workspace]/[room]/control/actions';
 import type { ControlPlaneData } from '@/lib/control-plane-data';
+import { issueRoomCommand } from '@/lib/room-command';
+import { createRealtimeClient, localStorageJournal, type RealtimeClient } from '@/src/lib/realtime';
 import { ArtifactPane } from './ArtifactPane';
 import { ChatBlock } from './ChatBlock';
 import { ThreadStatus } from './ChatChrome';
-import type { Echo } from './conversation-model';
-import { covenant } from './covenant';
+import { commentEcho, type Echo } from './conversation-model';
+import { covenant, type LiveCovenant, makeCovenant } from './covenant';
 import { IconPanel } from './icons';
 import { NavTree } from './NavTree';
 import styles from './prototype.module.css';
-import { liveArtifactsFor, sessionArtifacts, sessionFor, treeData, usePRStream } from './seams';
+import {
+  liveArtifactsFor,
+  liveSessionFor,
+  sessionArtifacts,
+  sessionFor,
+  treeData,
+  usePRStream,
+} from './seams';
 import type { Comment, CommentDraft, Selection } from './types';
 import { UserBar } from './UserBar';
 
@@ -91,17 +105,72 @@ function firstSelection(plane: ControlPlaneData | undefined): Selection {
  */
 export function MoldingSurface({
   tree: liveTree,
+  roomId,
+  viewerId,
+  workspaceSlug,
+  roomSlug,
 }: {
   tree?: ControlPlaneData;
-  /* THE ROOM CONTEXT (#168 go-live B1) — threaded from the real room route so
-     go-live B2 can instantiate a `RealtimeClient` and target the gated command
-     doors (`roomId`) and identify the acting human (`viewerId`). Accepted at the
-     mount here; NOTHING consumes them this lane — no live client, no WebSocket,
-     no durable write. B2 destructures them and wires the doors under the
-     dual-lineage security gauntlet. */
+  /* THE ROOM CONTEXT (#168 go-live B2 — NOW LIVE). Threaded from the real room
+     route so this mount instantiates a persistent `RealtimeClient` bound to
+     `roomId`, identifies the acting human (`viewerId`), and targets the certify
+     Server Actions (which need the room's slugs). When these are absent (the
+     `/prototype` fixture route) no client is created and every covenant door is
+     honestly inert — nothing is sent. */
   roomId?: string;
   viewerId?: string;
+  workspaceSlug?: string;
+  roomSlug?: string;
 } = {}) {
+  /* THE PERSISTENT REALTIME CLIENT (#168 B2). Created client-side, bound to the
+     room, torn down on unmount — the same create/teardown shape `LiveRoomSession`
+     uses. It exists ONLY on the live room route (a real `roomId` + `viewerId`);
+     on the fixture route it stays null and the covenant doors are inert. The
+     covenant doors read it through a getter (`clientRef.current`), never a
+     captured snapshot, so a door dispatched after connect sees the live client. */
+  const clientRef = useRef<RealtimeClient | null>(null);
+  useEffect(() => {
+    if (roomId === undefined || viewerId === undefined) return;
+    const client = createRealtimeClient({
+      userId: viewerId,
+      journal: localStorageJournal(viewerId),
+    });
+    clientRef.current = client;
+    void client.connect();
+    return () => {
+      client.setPresence(roomId, 'offline');
+      client.leave(roomId);
+      client.close();
+      clientRef.current = null;
+    };
+  }, [roomId, viewerId]);
+
+  /* THE LIVE COVENANT (#168 B2). Bound once per room to the real transports: the
+     persistent client (steer/interrupt/retract/supersede/certifyClaim), the
+     certify Server Actions (the session-landing arm→confirm hold), and the
+     command socket (`issueRoomCommand`, the human-only spend gate). Constructed
+     here, invoked ONLY inside gesture handlers downstream — never on render.
+     Undefined on the fixture route, where the doors stay the inert design shell. */
+  const live = useMemo<LiveCovenant | undefined>(() => {
+    if (
+      roomId === undefined ||
+      viewerId === undefined ||
+      workspaceSlug === undefined ||
+      roomSlug === undefined
+    ) {
+      return undefined;
+    }
+    return makeCovenant({
+      roomId,
+      workspaceSlug,
+      roomSlug,
+      client: () => clientRef.current,
+      armCertify: (input) => armSessionCertificationAction(input),
+      confirmCertify: (input) => certifySessionAction(input),
+      disarmCertify: (input) => disarmSessionCertificationAction(input),
+      issueRoomCommand,
+    });
+  }, [roomId, viewerId, workspaceSlug, roomSlug]);
   const [echoes, setEchoes] = useState<readonly Echo[]>([]);
   /* WHERE YOU ARE in the tree — which thread the main view shows. */
   const [selected, setSelected] = useState<Selection>(() => firstSelection(liveTree));
@@ -147,6 +216,42 @@ export function MoldingSurface({
     () => (liveTree === undefined ? sessionArtifacts() : liveArtifactsFor(liveTree, selected)),
     [liveTree, selected],
   );
+  /* THE LIVE SESSION the selection resolves to on a real room — the row the
+     covenant gestures act ON: certify binds to its `id` + real `artifactDigest`
+     (you certify the reading you are shown), steer/interrupt target its `id`, and
+     both are only offered when it is genuinely running/settled. Undefined on the
+     fixture route (no gesture is wired there). */
+  const liveSession = useMemo(
+    () => (liveTree === undefined ? undefined : liveSessionFor(liveTree, selected)),
+    [liveTree, selected],
+  );
+  /* The certify door bundle for the ArtifactPane, present only when a live
+     covenant, a live session, and its reviewed digest all exist — you cannot
+     certify a reading the server never structured. */
+  const certifyBinding =
+    live !== undefined && liveSession?.artifactDigest != null && viewerId !== undefined
+      ? {
+          covenant: live,
+          sessionId: liveSession.id,
+          artifactDigest: liveSession.artifactDigest,
+          viewerId,
+        }
+      : undefined;
+  /* The steer/interrupt door bundle for the status strip, present only when a
+     live covenant and a live session exist. `running` gates steer/interrupt to a
+     session that can actually receive them: an OPEN session is live and steerable;
+     a settled/failed one cannot be signalled, so the controls stay disabled and
+     the server (which refuses a signal to a non-open session) never sees a doomed
+     command. */
+  const signalBinding =
+    live !== undefined && liveSession !== undefined && viewerId !== undefined
+      ? {
+          covenant: live,
+          sessionId: liveSession.id,
+          running: liveSession.status === 'open',
+          viewerId,
+        }
+      : undefined;
   const [artifactOpen, setArtifactOpen] = useState(false);
   const [activeArtifact, setActiveArtifact] = useState<string>(artifacts[0]!.id);
   const [chatFrac, setChatFrac] = useState(0.5);
@@ -197,10 +302,14 @@ export function MoldingSurface({
      SEAM(#156): write the comment to the ledger, anchored (`path:line` or quote). */
   const addComment = (artifactId: string, anchor: string, quote: string, text: string) => {
     setComments((c) => [...c, { id: c.length + 1, artifactId, anchor, quote, text }]);
-    const q = quote.length > 46 ? `${quote.slice(0, 46)}…` : quote;
-    // The viewer's own note, honestly authored on the room's register (a `said`
-    // echo) — a comment is the operator speaking, not a covenant act.
-    setEchoes((e) => [...e, { delivery: 'said', text: `💬 ${anchor} · “${q}” — ${text}` }]);
+    /* HONEST COMMENT STATUS (#168 B2 fix1, F3). On the `/prototype` FIXTURE route a
+       comment is the design shell's `said` echo — a local demo line, unchanged. On
+       a LIVE mount (a real `roomId`) this path is STILL local-only `setState`: the
+       durable comment write (SEAM #156 → a real `sendMessage` on the room register)
+       is not wired yet, so claiming it was "authored on the room's register" would
+       be exactly the fake-delivery this covenant forbids. `commentEcho` routes the
+       live case to a NOT-delivered notice; the fixture case is unchanged. */
+    setEchoes((e) => [...e, commentEcho(roomId !== undefined, anchor, quote, text)]);
     setDraftComment(null); // the live draft becomes a permanent line
 
     /* COMMENT-TO-STEER (#158/#152). An anchored comment is, in the client shape,
@@ -296,8 +405,20 @@ export function MoldingSurface({
               onSay={say}
             />
             {/* the status strip is the CHAT's footer — contained to this column,
-                it stops at the split rather than running under the artifact. */}
-            <ThreadStatus selected={selected} stream={stream} />
+                it stops at the split rather than running under the artifact.
+                KEYED BY THE SELECTED NODE (#168 B2 fix1, F2): the strip holds the
+                steer/interrupt composer's transient `composing`/`body`/`note`
+                state. Unkeyed, that state — including a "steer sent · <commandId>"
+                note bound to session A — survives a switch to session B and reads
+                as B's. Keying by `selected.id` remounts the strip on every
+                selection change, so a half-typed steer and its dispatch note are
+                born fresh per session and can never migrate onto another one. */}
+            <ThreadStatus
+              key={selected.id}
+              selected={selected}
+              stream={stream}
+              signal={signalBinding}
+            />
           </div>
           {artifactOpen ? (
             <>
@@ -316,6 +437,7 @@ export function MoldingSurface({
                   comments={comments}
                   onComment={addComment}
                   onDraft={setDraftComment}
+                  certify={certifyBinding}
                 />
               </div>
             </>

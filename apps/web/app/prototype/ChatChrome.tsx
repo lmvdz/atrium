@@ -14,13 +14,13 @@ import { useState } from 'react';
 import { systemText } from '@/src/components/model/quotation';
 import type { ParticipantSummary } from '@/src/components/model/records';
 import { initials } from '@/src/components/model/text';
-import { DOOR_NAMES } from './covenant';
+import { DOOR_NAMES, type LiveCovenant } from './covenant';
 import { IconBase, IconPlay } from './icons';
 import { ProviderMark } from './ProviderMark';
 import styles from './prototype.module.css';
 import { SharePopover } from './SharePopover';
 import { participantsFor, type StreamState, statusStripFor, threadHeadFor } from './seams';
-import type { Selection } from './types';
+import { NO_AUTOFILL, type Selection } from './types';
 
 /* THE FACES ROW — a `ParticipantSummary` per member, kind-aware and presence-
    carrying, following the shipped `frame/RoomHead`/`Rail` grammar: the monogram
@@ -93,9 +93,27 @@ export function ChatTopBar({ selected }: { selected: Selection }) {
   );
 }
 
+/* THE STEER/INTERRUPT BINDING (#168 B2) — a live covenant, the session the strip
+   is on, and whether it is running. Present only on a real room route; absent on
+   the fixture route, where steer/interrupt stay disabled. */
+export interface SignalBinding {
+  readonly covenant: LiveCovenant;
+  readonly sessionId: string;
+  readonly running: boolean;
+  readonly viewerId: string;
+}
+
 /* THREAD STATUS BAR — the bottom strip: branch · base · diff · model · host · run.
    Sits inside the thread, so it shares the chat's L/R gutters. */
-export function ThreadStatus({ selected, stream }: { selected: Selection; stream: StreamState }) {
+export function ThreadStatus({
+  selected,
+  stream,
+  signal,
+}: {
+  selected: Selection;
+  stream: StreamState;
+  signal?: SignalBinding;
+}) {
   // #156: the branch/base/diff/model/host strip, assembled by a client projection.
   const strip = statusStripFor(selected, stream);
   // #157 r3 / #168 B1: the steer/interrupt door NAMES for the labels, read from
@@ -105,6 +123,43 @@ export function ThreadStatus({ selected, stream }: { selected: Selection; stream
   // those functions a live body (the render-time landmine this lane removed).
   const steerDoor = DOOR_NAMES.steer;
   const interruptDoor = DOOR_NAMES.interrupt;
+  // #168 B2: steer/interrupt go LIVE when a covenant + a RUNNING session are
+  // bound. A running session can receive a signal; a settled/absent one cannot,
+  // so the controls stay disabled (a disabled control cannot fake a stop). The
+  // click opens an inline composer; ONLY its submit — a human gesture — fires the
+  // real `signal_session` command. Nothing here runs in render.
+  const canSignal = signal?.running === true;
+  const [composing, setComposing] = useState<null | 'steer' | 'interrupt'>(null);
+  const [body, setBody] = useState('');
+  const [note, setNote] = useState<string | null>(null);
+  const openComposer = (which: 'steer' | 'interrupt') => {
+    setComposing(which);
+    setBody('');
+    setNote(null);
+  };
+  const cancelComposer = () => {
+    setComposing(null);
+    setBody('');
+  };
+  const submitSignal = () => {
+    if (signal === undefined || composing === null) return;
+    const text = body.trim();
+    if (text.length === 0) return;
+    // The REAL gated door — a durable `signal_session` command leaves the
+    // authenticated client. `dispatched` is honest: the command was journaled and
+    // sent (the server receipts or refuses it), never a local flag faking a stop.
+    const outcome =
+      composing === 'steer'
+        ? signal.covenant.steer(signal.sessionId, text)
+        : signal.covenant.interrupt(signal.sessionId, text);
+    setNote(
+      outcome.dispatched
+        ? `${composing} sent to the room — it will be receipted or refused · ${outcome.commandId}`
+        : `${composing} not sent — ${outcome.inert ?? 'no live client'}`,
+    );
+    setComposing(null);
+    setBody('');
+  };
   return (
     <footer className={styles.status}>
       <span className={styles.statItem}>
@@ -146,34 +201,89 @@ export function ThreadStatus({ selected, stream }: { selected: Selection; stream
         </svg>
         {systemText(strip.host, 'ThreadStatus host')}
       </span>
-      {/* SEAM(#157 r3): steer / interrupt are STRUCTURED covenant controls on the
-          running session — a discrete affordance, NOT a phrase inferred from chat
-          prose. Rounds 1–2 guessed the act from composer text; that mechanism both
-          let cues bypass and swallowed ordinary speech, so it is gone. These are
-          the explicit doors: steer (`signal_session{steer}`, public/receipted, any
-          member) and interrupt (`signal_session{interrupt}`, the agent principal or
-          its owner). Honestly INERT here — this route holds no live session, so both
-          are DISABLED: no onClick, no mutation, and they NEVER emit a
-          `session_signaled`. Wired via `covenant.steer` / `covenant.interrupt` when
-          a live client lands (#168). */}
-      <button
-        className={styles.statCovenant}
-        type="button"
-        title={`steer — awaiting a human and the live session (#157 → ${steerDoor})`}
-        aria-label="steer (awaiting the live session)"
-        disabled
-      >
-        steer
-      </button>
-      <button
-        className={styles.statCovenant}
-        type="button"
-        title={`interrupt — awaiting a human and the live session (#157 → ${interruptDoor})`}
-        aria-label="interrupt (awaiting the live session)"
-        disabled
-      >
-        interrupt
-      </button>
+      {/* SEAM(#157 r3 → #168 B2 LIVE): steer / interrupt are STRUCTURED covenant
+          controls on the running session — a discrete affordance, NOT a phrase
+          inferred from chat prose. The explicit doors: steer
+          (`signal_session{steer}`, public/receipted, any member) and interrupt
+          (`signal_session{interrupt}`, the agent principal or its owner). When a
+          live covenant + a RUNNING session are bound (`canSignal`) a click opens
+          the inline composer and its submit fires the REAL gated command; on the
+          fixture route (or a settled session) they stay DISABLED — no onClick, no
+          mutation, and a disabled control cannot fake a stop. */}
+      {composing !== null ? (
+        <form
+          className={styles.statSignalForm}
+          onSubmit={(e) => {
+            e.preventDefault();
+            submitSignal();
+          }}
+        >
+          <input
+            className={styles.statSignalInput}
+            // biome-ignore lint/a11y/noAutofocus: focus the composer the moment it opens
+            autoFocus
+            value={body}
+            onChange={(e) => setBody(e.target.value)}
+            onKeyDown={(e) => {
+              if (e.key === 'Escape') cancelComposer();
+            }}
+            placeholder={composing === 'steer' ? 'steer the session…' : 'reason to interrupt…'}
+            aria-label={composing === 'steer' ? 'steer message' : 'interrupt reason'}
+            {...NO_AUTOFILL}
+          />
+          <button
+            className={styles.statSignalSend}
+            type="submit"
+            disabled={body.trim().length === 0}
+          >
+            {composing === 'steer' ? 'steer' : 'interrupt'}
+          </button>
+          <button className={styles.statSignalCancel} type="button" onClick={cancelComposer}>
+            cancel
+          </button>
+        </form>
+      ) : (
+        <>
+          <button
+            className={`${styles.statCovenant} ${canSignal ? styles.statCovenantLive : ''}`}
+            type="button"
+            title={
+              canSignal
+                ? `steer this session — appends ${steerDoor}`
+                : `steer — awaiting a running live session (#157 → ${steerDoor})`
+            }
+            aria-label={canSignal ? 'steer this session' : 'steer (awaiting the live session)'}
+            onClick={canSignal ? () => openComposer('steer') : undefined}
+            disabled={!canSignal}
+          >
+            steer
+          </button>
+          <button
+            className={`${styles.statCovenant} ${canSignal ? styles.statCovenantLive : ''}`}
+            type="button"
+            title={
+              canSignal
+                ? `interrupt this session — appends ${interruptDoor}`
+                : `interrupt — awaiting a running live session (#157 → ${interruptDoor})`
+            }
+            aria-label={
+              canSignal ? 'interrupt this session' : 'interrupt (awaiting the live session)'
+            }
+            onClick={canSignal ? () => openComposer('interrupt') : undefined}
+            disabled={!canSignal}
+          >
+            interrupt
+          </button>
+        </>
+      )}
+      {note !== null ? (
+        <span
+          className={styles.statSignalNote}
+          title={systemText(note, 'ThreadStatus signal note')}
+        >
+          {systemText(note, 'ThreadStatus signal note')}
+        </span>
+      ) : null}
       {/* SEAM(#157): run ▶ dispatches a session through the gated door
           (open_session / resume_session — a resume is a DRAW, gated by the plan's
           slice). Honestly INERT until app-integration: this route holds no live

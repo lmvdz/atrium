@@ -20,6 +20,7 @@
  *     (#156). */
 
 import { useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
+import { CERTIFY_HOLD_MS } from '@/lib/certify-hold';
 import { MessageBody, RichMessageBody } from '@/src/components';
 /* The DIFF renders through the SHIPPED renderer now (#151/#155: shipped wins on
    the diff, the prototype's client `parseDiff` is DELETED). `DiffView` is the
@@ -28,17 +29,89 @@ import { MessageBody, RichMessageBody } from '@/src/components';
    gutter, control-char neutralisation, none of it re-implemented here. */
 import { DiffView } from '@/src/components/control/DiffView';
 import { AttributionLedger, fileText, offeredText } from '@/src/components/model';
+import { systemText } from '@/src/components/model/quotation';
 import { Glyph } from '@/src/components/primitives/Glyph';
+import { HoldToAct } from '@/src/components/primitives/HoldToAct';
 import {
   ARTIFACT_DOC_ROOM,
   artifactDocModel,
   messageBody,
   systemSettlementState,
 } from './conversation-model';
+import type { GateOutcome, LiveCovenant } from './covenant';
 import { ArtifactKindIcon, IconCheck } from './icons';
 import styles from './prototype.module.css';
 import type { Artifact, Comment, CommentDraft } from './types';
 import { NO_AUTOFILL } from './types';
+
+/* THE CERTIFY BINDING (#168 B2) — the live covenant, the SESSION the pane's
+   landing belongs to, and the REAL `artifactDigest` of the reading being shown.
+   Present only on a real room route with a settled/reviewable session; absent on
+   the fixture route, where certify stays the inert "awaiting a human" hint. */
+export interface CertifyBinding {
+  readonly covenant: LiveCovenant;
+  readonly sessionId: string;
+  /** The server's `md5(artifact::text)` for the reading on screen — the signature
+      binds to THIS, so you certify the reading you were shown, never a stale one. */
+  readonly artifactDigest: string;
+  readonly viewerId: string;
+}
+
+/* THE LIVE CERTIFY CONTROL — the session-landing arm→confirm hold. Drives
+   `primitives/HoldToAct` exactly as `ReviewPane` does: `onBegin` fires the server
+   ARM (binding the signature to `artifactDigest`), `onAct` fires the CONFIRM on a
+   completed hold, `onCancel` DISARMS a released one. `reached:true` is painted
+   ONLY on the server's awaited `ok` — never a local flag. The machine never
+   certifies; the server refuses a non-human before any append (`commands.ts`). */
+function CertifyControl({ certify }: { certify: CertifyBinding }) {
+  const [result, setResult] = useState<GateOutcome | null>(null);
+  const [working, setWorking] = useState(false);
+  return (
+    <span className={styles.artCertify}>
+      <HoldToAct
+        actionId={`certify-${certify.sessionId}`}
+        actor={certify.viewerId}
+        describe="put a human signature on this session's landing"
+        holdMs={CERTIFY_HOLD_MS}
+        label="Certify this session"
+        onBegin={() => {
+          setResult(null);
+          setWorking(true);
+          certify.covenant.certifyArm(certify.sessionId, certify.artifactDigest);
+        }}
+        onAct={() => {
+          void certify.covenant.certifyConfirm(certify.sessionId).then((outcome) => {
+            setWorking(false);
+            setResult(outcome);
+          });
+        }}
+        onCancel={() => {
+          setWorking(false);
+          certify.covenant.certifyDisarm(certify.sessionId);
+        }}
+        resetOnComplete
+      />
+      {working ? (
+        <span className={styles.artCertifyNote}>certifying…</span>
+      ) : result === null ? null : result.reached ? (
+        // The `✓` is a STATE, never a literal glyph in copy (the glyph-source
+        // covenant) — the footer's derived `<Glyph>` already carries the mark; this
+        // line only states, in words, that the human signature landed.
+        <span className={styles.artCertifyOk}>certified</span>
+      ) : (
+        // The server's own refusal, in the page's system voice (the reason is a
+        // closed `CertifyRefusal` code, never somebody's words) — through the
+        // `systemText` door, the same check every stated string on the page takes.
+        <span
+          className={styles.artCertifyRefused}
+          title={systemText(result.refusal ?? 'the server refused it', 'certify refusal')}
+        >
+          not certified — {systemText(result.refusal ?? 'the server refused it', 'certify refusal')}
+        </span>
+      )}
+    </span>
+  );
+}
 
 /* find the text caret (node + offset) under a viewport point — the boundary the
    dragged selection handle should snap to. Chromium exposes caretRangeFromPoint. */
@@ -381,6 +454,7 @@ export function ArtifactPane({
   comments,
   onComment,
   onDraft,
+  certify,
 }: {
   artifacts: readonly Artifact[];
   activeId: string;
@@ -388,6 +462,9 @@ export function ArtifactPane({
   comments: readonly Comment[];
   onComment: (artifactId: string, anchor: string, quote: string, text: string) => void;
   onDraft: (d: CommentDraft | null) => void;
+  /* #168 B2: the live session-landing certify binding. Present only on a real
+     room route (with a reviewable session); absent on the fixture route. */
+  certify?: CertifyBinding;
 }) {
   const active = artifacts.find((a) => a.id === activeId) ?? artifacts[0]!;
   const here = comments.filter((c) => c.artifactId === active.id);
@@ -450,13 +527,31 @@ export function ArtifactPane({
           {active.kind === 'diff' ? 'proposed' : active.kind} · draft
         </span>
         <span className={styles.grow} />
-        <span
-          className={styles.artFootHint}
-          title="certification is a human act, gated by the server (certifySession: a timed arm→confirm hold on the session landing); not reachable from this surface yet (#157)"
-        >
-          awaiting a human
-          <IconCheck size={11} />
-        </span>
+        {/* #168 B2: the LIVE certify control — the session-landing arm→confirm hold
+            — is offered ONLY when a live binding exists, the pane hosts a landing
+            (a diff), and the reading is not already certified. Otherwise (the
+            fixture route, a doc note, or an already-certified landing) the footer
+            states it is awaiting a human — the inert design shell, unchanged. */}
+        {certify !== undefined && active.kind === 'diff' && active.certified !== true ? (
+          /* KEYED BY SESSION (#168 B2 fix1, F2). Without the key this one control
+             instance survives a session switch and its local `result` ("certified")
+             migrates onto the newly-selected, uncertified session. Keying by
+             `sessionId` REMOUNTS it on every session change, so its transient
+             arm/confirm state is born fresh for each landing and an in-flight
+             confirm for session A that resolves after the switch resolves into an
+             UNMOUNTED A control (its `setResult` is dropped), never painting
+             "certified" next to B. The authoritative `<Glyph sessionCertified>`
+             above stays derived from `active.certified`, so it is always correct. */
+          <CertifyControl key={certify.sessionId} certify={certify} />
+        ) : (
+          <span
+            className={styles.artFootHint}
+            title="certification is a human act, gated by the server (certifySession: a timed arm→confirm hold on the session landing); the server refuses a machine before any append"
+          >
+            awaiting a human
+            <IconCheck size={11} />
+          </span>
+        )}
       </div>
     </section>
   );

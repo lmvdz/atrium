@@ -24,13 +24,14 @@ export const dynamic = 'force-dynamic';
  * shipped `control/state.ts` selectors the same way `ControlPlane`/`ProcessTree`
  * derive theirs.
  *
- * SCOPE, honestly bounded: only the tree is live in this lane. The conversation
- * feed and the thread roster remain the design shell — there is no per-session
- * live conversation read model to bind them to until #159 / Phase 6 — and every
- * covenant ACTION door stays inert (`{reached:false}`), wired separately under
- * go-live B's dual-lineage security gauntlet. The server-only `control-plane-data`
- * module is imported ONLY here (a server component); the client surface receives
- * plain data, never the module.
+ * SCOPE, honestly bounded: the tree is live (go-live A) and the covenant ACTION
+ * doors are now LIVE too (go-live B2) — certify (the session-landing arm→confirm
+ * hold), steer and interrupt fire real gated commands on a human gesture,
+ * bound to `roomId`/`viewerId` and the room's slugs here. The conversation feed
+ * and the thread roster remain the design shell — there is no per-session live
+ * conversation read model to bind them to until #159 / Phase 6. The server-only
+ * `control-plane-data` module is imported ONLY here (a server component); the
+ * client surface receives plain data, never the module.
  */
 export default async function RoomSurfacePage({
   params,
@@ -53,7 +54,13 @@ export default async function RoomSurfacePage({
 
   return (
     <div className={styles.ground} data-frame="atrium">
-      <MoldingSurface tree={data} roomId={room.id} viewerId={session.userId} />
+      <MoldingSurface
+        tree={data}
+        roomId={room.id}
+        viewerId={session.userId}
+        workspaceSlug={workspaceSlug}
+        roomSlug={roomSlug}
+      />
     </div>
   );
 }
