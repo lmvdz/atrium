@@ -34,7 +34,7 @@ import { createRealtimeClient, localStorageJournal, type RealtimeClient } from '
 import { ArtifactPane } from './ArtifactPane';
 import { ChatBlock } from './ChatBlock';
 import { ThreadStatus } from './ChatChrome';
-import type { Echo } from './conversation-model';
+import { commentEcho, type Echo } from './conversation-model';
 import { covenant, type LiveCovenant, makeCovenant } from './covenant';
 import { IconPanel } from './icons';
 import { NavTree } from './NavTree';
@@ -302,10 +302,14 @@ export function MoldingSurface({
      SEAM(#156): write the comment to the ledger, anchored (`path:line` or quote). */
   const addComment = (artifactId: string, anchor: string, quote: string, text: string) => {
     setComments((c) => [...c, { id: c.length + 1, artifactId, anchor, quote, text }]);
-    const q = quote.length > 46 ? `${quote.slice(0, 46)}…` : quote;
-    // The viewer's own note, honestly authored on the room's register (a `said`
-    // echo) — a comment is the operator speaking, not a covenant act.
-    setEchoes((e) => [...e, { delivery: 'said', text: `💬 ${anchor} · “${q}” — ${text}` }]);
+    /* HONEST COMMENT STATUS (#168 B2 fix1, F3). On the `/prototype` FIXTURE route a
+       comment is the design shell's `said` echo — a local demo line, unchanged. On
+       a LIVE mount (a real `roomId`) this path is STILL local-only `setState`: the
+       durable comment write (SEAM #156 → a real `sendMessage` on the room register)
+       is not wired yet, so claiming it was "authored on the room's register" would
+       be exactly the fake-delivery this covenant forbids. `commentEcho` routes the
+       live case to a NOT-delivered notice; the fixture case is unchanged. */
+    setEchoes((e) => [...e, commentEcho(roomId !== undefined, anchor, quote, text)]);
     setDraftComment(null); // the live draft becomes a permanent line
 
     /* COMMENT-TO-STEER (#158/#152). An anchored comment is, in the client shape,
@@ -401,8 +405,20 @@ export function MoldingSurface({
               onSay={say}
             />
             {/* the status strip is the CHAT's footer — contained to this column,
-                it stops at the split rather than running under the artifact. */}
-            <ThreadStatus selected={selected} stream={stream} signal={signalBinding} />
+                it stops at the split rather than running under the artifact.
+                KEYED BY THE SELECTED NODE (#168 B2 fix1, F2): the strip holds the
+                steer/interrupt composer's transient `composing`/`body`/`note`
+                state. Unkeyed, that state — including a "steer sent · <commandId>"
+                note bound to session A — survives a switch to session B and reads
+                as B's. Keying by `selected.id` remounts the strip on every
+                selection change, so a half-typed steer and its dispatch note are
+                born fresh per session and can never migrate onto another one. */}
+            <ThreadStatus
+              key={selected.id}
+              selected={selected}
+              stream={stream}
+              signal={signalBinding}
+            />
           </div>
           {artifactOpen ? (
             <>

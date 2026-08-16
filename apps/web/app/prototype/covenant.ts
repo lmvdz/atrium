@@ -218,14 +218,19 @@ export const covenant = {
  *     seam wires the client affordance to that existing gate and never reimplements
  *     or weakens it.
  *
- *  2. THE JOURNALED REALTIME DOORS — steer / interrupt / retract / supersede /
- *     certifyClaim. The `RealtimeClient` has NO synchronous per-command ack: it
- *     durably JOURNALS the command and sends it (retried across reconnects, refused
- *     server-side as a `nack` if the covenant forbids). So the honest report is
- *     `dispatched` — a REAL durable command left the authenticated client, keyed by
- *     its ack/nack `commandId` — NOT a `reached:true` that claims the server
- *     confirmed. When the live client is not yet connected (`client()` is null) the
- *     door is inert: nothing is sent and `dispatched:false`.
+ *  2. THE FIRE-AND-FORGET REALTIME DOORS — steer / interrupt / retract /
+ *     supersede / certifyClaim. The `RealtimeClient` has NO synchronous per-command
+ *     ack and — the honesty correction #168 go-live B2 fix1 forced — NO outbound
+ *     command journal either: `command` sends the frame over the socket and mints a
+ *     `commandId`, and `send` SILENTLY DROPS the frame when the socket is not OPEN
+ *     (there is no retry-across-reconnect for outbound commands; only INBOUND events
+ *     are journaled). So a `commandId` alone is not proof the command left. The
+ *     honest report is `dispatched` — gated on `client().isConnected()`, i.e. the
+ *     frame actually left the OPEN socket — keyed by the ack/nack `commandId` the
+ *     server will receipt or `nack`, NOT a `reached:true` that claims the server
+ *     confirmed. When there is no live client (`client()` is null) OR the socket is
+ *     not yet OPEN (mid-(re)connect), the door is inert: nothing is sent, no fake
+ *     `commandId`, and `dispatched:false`.
  * ═════════════════════════════════════════════════════════════════════════ */
 
 /** The reserved human-only gate outcome (certify, fund). `reached` is the
@@ -238,10 +243,13 @@ export interface GateOutcome {
   readonly refusal?: string;
 }
 
-/** The journaled realtime-door outcome. `dispatched` = the durable command left
-    the authenticated, journaled client; `commandId` is its ack/nack correlation
-    id. `inert` is set (and `dispatched:false`) when nothing was sent because no
-    live client is connected yet — honestly inert, never a faked delivery. */
+/** The fire-and-forget realtime-door outcome. `dispatched` = the durable command
+    actually left the authenticated client over an OPEN socket (there is no
+    outbound command journal — `send` drops a frame on a non-OPEN socket, so this
+    is gated on `isConnected()`, never on the minted `commandId` alone). `commandId`
+    is its ack/nack correlation id. `inert` is set (and `dispatched:false`) when
+    nothing was sent because no live client is connected yet — honestly inert,
+    never a faked delivery. */
 export interface DispatchOutcome {
   readonly door: CovenantDoor;
   readonly dispatched: boolean;
@@ -262,7 +270,7 @@ export interface CovenantDeps {
       sees the live client, and one fired before it stays honestly inert. */
   readonly client: () => Pick<
     RealtimeClient,
-    'signalSession' | 'correctObject' | 'supersedeObject'
+    'signalSession' | 'correctObject' | 'supersedeObject' | 'isConnected'
   > | null;
   readonly armCertify: (input: {
     sessionId: string;
@@ -334,14 +342,21 @@ export function makeCovenant(deps: CovenantDeps): LiveCovenant {
   // confirm then sends nothing, so a stale/absent digest can never certify.
   const armTokens = new Map<string, Promise<string | null>>();
 
-  /** Run a journaled realtime door: inert when no client, else dispatch and
-      report the durable command's `commandId`. `send` returns that id. */
+  /** Run a realtime door HONESTLY: report `dispatched:true` ONLY when the frame
+      actually left the socket. Inert when there is no client at all AND when a
+      client exists but its socket is not OPEN — because `RealtimeClient.send`
+      silently DROPS a frame whose `socket.readyState !== OPEN` while `command`
+      still mints a `commandId`, so the id alone would be a fake ack. The
+      `isConnected()` read and the synchronous `send(client)` below share one tick
+      with no await between them, so a door told OPEN here cannot be dropped there.
+      `send` returns the durable command's id. */
   const dispatch = (
     door: CovenantDoor,
     send: (client: NonNullable<ReturnType<CovenantDeps['client']>>) => string,
   ): DispatchOutcome => {
     const client = deps.client();
-    if (client === null) return { door, dispatched: false, commandId: null, inert: NO_CLIENT };
+    if (client === null || !client.isConnected())
+      return { door, dispatched: false, commandId: null, inert: NO_CLIENT };
     return { door, dispatched: true, commandId: send(client) };
   };
 

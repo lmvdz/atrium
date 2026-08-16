@@ -533,7 +533,16 @@ export function ArtifactPane({
             fixture route, a doc note, or an already-certified landing) the footer
             states it is awaiting a human — the inert design shell, unchanged. */}
         {certify !== undefined && active.kind === 'diff' && active.certified !== true ? (
-          <CertifyControl certify={certify} />
+          /* KEYED BY SESSION (#168 B2 fix1, F2). Without the key this one control
+             instance survives a session switch and its local `result` ("certified")
+             migrates onto the newly-selected, uncertified session. Keying by
+             `sessionId` REMOUNTS it on every session change, so its transient
+             arm/confirm state is born fresh for each landing and an in-flight
+             confirm for session A that resolves after the switch resolves into an
+             UNMOUNTED A control (its `setResult` is dropped), never painting
+             "certified" next to B. The authoritative `<Glyph sessionCertified>`
+             above stays derived from `active.certified`, so it is always correct. */
+          <CertifyControl key={certify.sessionId} certify={certify} />
         ) : (
           <span
             className={styles.artFootHint}

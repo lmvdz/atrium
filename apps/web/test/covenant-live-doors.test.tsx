@@ -36,13 +36,16 @@ afterEach(() => {
   vi.restoreAllMocks();
 });
 
-/** A fake realtime client — only the three verbs the covenant doors call, each a
-    spy returning a stable command id so `dispatched`/`commandId` can be asserted. */
-function fakeClient() {
+/** A fake realtime client — the three verbs the covenant doors call plus
+    `isConnected` (the honesty gate #168 B2 fix1 added), each a spy. `isConnected`
+    defaults to `true` (an OPEN socket) so the dispatch doors report `dispatched`;
+    a test flips it to `false` to prove a door on a non-OPEN socket sends nothing. */
+function fakeClient(connected = true) {
   return {
     signalSession: vi.fn(() => 'cmd-signal'),
     correctObject: vi.fn(() => 'cmd-correct'),
     supersedeObject: vi.fn(() => ({ commandId: 'cmd-supersede', clientSupersessionId: 'sup-1' })),
+    isConnected: vi.fn(() => connected),
   };
 }
 
@@ -118,6 +121,38 @@ describe('the journaled realtime doors emit the exact durable command', () => {
     expect(outcome.dispatched).toBe(false);
     expect(outcome.commandId).toBeNull();
     expect(outcome.inert).toContain('not connected');
+  });
+
+  /* #168 B2 fix1, F1 — the CRITICAL honesty hole both lineages found: a NON-null
+     client whose socket is not OPEN. `RealtimeClient.send` drops the frame in that
+     state while `command` still mints a `commandId`, so a door that trusted the id
+     would report a durable steer/interrupt that never left the client — and the UI
+     would paint "sent to the room". The door MUST gate on `isConnected()`. */
+  it('a connected-but-not-OPEN client (send would drop) → dispatched:false, no fake id', () => {
+    const client = fakeClient(false); // socket not OPEN
+    const covenant = makeCovenant(deps({ client: () => client }));
+    const steer = covenant.steer('sess-1', 'stop — off scope');
+    expect(steer.dispatched).toBe(false);
+    expect(steer.commandId).toBeNull();
+    expect(steer.inert).toContain('not connected');
+    // and the frame was NEVER handed to the client — nothing left, not even dropped.
+    expect(client.signalSession).not.toHaveBeenCalled();
+    // the same holds for interrupt (the "@hexi stop" path) and the object doors.
+    expect(covenant.interrupt('sess-1', 'stop').dispatched).toBe(false);
+    expect(covenant.retract('obj-1').dispatched).toBe(false);
+    expect(covenant.supersede('a', 'b').dispatched).toBe(false);
+    expect(covenant.certifyClaim('c-1').dispatched).toBe(false);
+    expect(client.correctObject).not.toHaveBeenCalled();
+    expect(client.supersedeObject).not.toHaveBeenCalled();
+  });
+
+  it('a connected OPEN client dispatches for real (the honest positive case)', () => {
+    const client = fakeClient(true);
+    const covenant = makeCovenant(deps({ client: () => client }));
+    const outcome = covenant.steer('sess-1', 'keep it in billing');
+    expect(outcome.dispatched).toBe(true);
+    expect(outcome.commandId).toBe('cmd-signal');
+    expect(client.signalSession).toHaveBeenCalledTimes(1);
   });
 });
 

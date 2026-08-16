@@ -431,3 +431,30 @@ export function echoItem(
     },
   };
 }
+
+/**
+ * The feed echo for an anchored artifact COMMENT, honest about durability
+ * (#168 go-live B2 fix1, F3).
+ *
+ * On the `/prototype` FIXTURE route (`liveMount` false) a comment is the design
+ * shell's own local demo line: a `said` echo, the operator speaking on the feed,
+ * unchanged.
+ *
+ * On a LIVE mount (`liveMount` true) this same client path is STILL local-only
+ * `setState`: the durable comment write (SEAM #156 → a real `sendMessage` on the
+ * room register) is not wired yet. So the echo must NOT read as authored-on-the-
+ * room's-register — that would be the fake-delivery this covenant forbids. It is a
+ * `refused` echo instead: `echoItem` renders it as a NOT-delivered system notice
+ * (a ✗, no `MessageRecord`, structurally not a sent-looking authored message),
+ * stating verbatim that the comment is a local draft not yet on the room ledger.
+ * This mirrors the steer-mediation path, which already reports "not delivered".
+ */
+export function commentEcho(liveMount: boolean, anchor: string, quote: string, text: string): Echo {
+  const q = quote.length > 46 ? `${quote.slice(0, 46)}…` : quote;
+  return liveMount
+    ? {
+        delivery: 'refused',
+        text: `comment not delivered — a local draft, not yet written to the room ledger (no durable comment write is wired on this surface yet) · ${anchor} · “${q}” — ${text}`,
+      }
+    : { delivery: 'said', text: `💬 ${anchor} · “${q}” — ${text}` };
+}

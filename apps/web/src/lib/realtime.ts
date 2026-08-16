@@ -1006,6 +1006,15 @@ export interface RealtimeClient {
   connect: () => Promise<void>;
   close: () => void;
   status: () => ConnectionStatus;
+  /**
+   * True only when the socket is OPEN so a frame sent right now would actually
+   * leave the client — the SAME readiness `send` gates on. A covenant door reads
+   * this before it reports `dispatched:true`, so it never claims a durable
+   * command left the client while the socket is still (re)connecting and `send`
+   * would silently drop the frame. `command` mints a `commandId` regardless of
+   * whether the frame left, so the id alone is NOT proof of dispatch — this is.
+   */
+  isConnected: () => boolean;
   /** Join a room: subscribe, then close any gap since `lastSeq`. */
   join: (roomId: string) => void;
   leave: (roomId: string) => void;
@@ -1791,6 +1800,10 @@ export function createRealtimeClient(options: RealtimeClientOptions): RealtimeCl
       setStatus('closed');
     },
     status: () => status,
+    // The honest "will a frame leave right now" signal — the exact readiness
+    // `send` checks (`socket?.readyState === OPEN`), so a door that guards on this
+    // and then dispatches synchronously can never be told OPEN and then dropped.
+    isConnected: () => socket?.readyState === OPEN,
     join: (roomId) => {
       view(roomId);
       send({ type: 'subscribe', roomId });
