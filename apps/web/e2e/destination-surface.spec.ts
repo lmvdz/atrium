@@ -79,15 +79,25 @@ import { requireBrowser, uniqueEmail } from './support/flows';
  *     married surface's real `HoldToAct` certify control (`ArtifactPane`
  *     `CertifyControl` → `armSessionCertificationAction` / `certifySessionAction`).
  *
- * The machine is refused at BOTH reserved doors:
- *   - a certification of the SESSION LANDING can never carry a machine's name — the
- *     DB triggers (drizzle/0032/0033) refuse a non-human `certified_by`/
- *     `certify_armed_by` outright, proven here by attempting the write and asserting
- *     it throws (`certifySession` has no socket door — it is a Server Action gated by
+ * The machine is refused at BOTH reserved doors, and every refusal here is
+ * LOAD-BEARING — it isolates the ONE gate it targets, so removing that gate turns
+ * this test red rather than leaving it green on an unrelated failure:
+ *   - a certification of the SESSION LANDING can never carry a machine's name. The
+ *     receipt written to attempt it is COMPLETE and INTERNALLY CONSISTENT (armer =
+ *     certifier = the machine, a real over-gate arm→signature interval, an agreeing
+ *     `certified_held_ms`, a reviewable artifact) so 0034/0035/0036/0038 are all
+ *     satisfied and the SOLE defect is the non-human certifier — the write is refused
+ *     by `sessions_certified_by_is_human` (0032) SPECIFICALLY, asserted by constraint
+ *     name. The machine ARM is flip-tested the same way against 0033, the sub-2000ms
+ *     hold against 0035's floor, and the reviewed-digest bind by driving the real
+ *     arm→confirm control and moving the artifact between the two (`artifact_changed`).
+ *     (`certifySession` has no socket door — it is a Server Action gated by
  *     `requireSession` + `principal_kind`, backstopped by those triggers; the table
- *     itself is the last, hardest refusal, which is what this asserts);
+ *     itself is the last, hardest refusal, which is what these assert.);
  *   - a `set_plan_rlimit` from the agent's OWN authenticated socket is refused with a
- *     `nack` before any append, so no machine raises a ceiling.
+ *     `nack` before any append — proven not only by the nack and an unchanged ceiling
+ *     but by asserting ZERO events reached the room ledger, so no machine raises a
+ *     ceiling and none even writes a row trying.
  *
  * ## DISINTEREST
  *
@@ -295,6 +305,30 @@ async function holdPast(page: Page, selector: string, ms: number): Promise<void>
   await page.mouse.up();
 }
 
+/**
+ * The structured Postgres error a raw write RAISED, or `null` if the write did NOT
+ * raise. The negative covenant clauses assert the SPECIFIC constraint the table
+ * refused on (`constraint_name`), not merely that "something threw" — a broad
+ * `catch {}` cannot tell the human-only trigger apart from an unrelated
+ * receipt-completeness failure, so a broken gate would still read green. postgres-js
+ * surfaces the trigger's `USING CONSTRAINT = …` verbatim on `.constraint_name`.
+ */
+async function raisedBy(
+  write: Promise<unknown>,
+): Promise<{ constraint: string | undefined; code: string | undefined; message: string } | null> {
+  try {
+    await write;
+    return null;
+  } catch (err) {
+    const e = err as { constraint_name?: string; code?: string; message?: string };
+    return {
+      constraint: e.constraint_name,
+      code: e.code,
+      message: e.message ?? String(err),
+    };
+  }
+}
+
 test.describe
   .serial('the destination: a real ticket supervised through the married surface', () => {
     requireBrowser();
@@ -444,6 +478,68 @@ test.describe
       if (!session) throw new Error('session insert returned nothing');
       const sessionId = session.id;
 
+      // A SECOND settled session under the same plan, carrying its own REVIEWABLE
+      // artifact on a distinct branch. It exists ONLY to host the two negative
+      // covenant flip-tests that must not touch the sound happy path:
+      //   - the SERVER HOLD FLOOR (a sub-2000ms receipt, refused at the table);
+      //   - the DIGEST BIND (arm over the reviewed revision, mutate it, confirm
+      //     refused `artifact_changed`).
+      // Both leave THIS row uncertified and never touch `sessionId`, so the happy
+      // path still funds, reviews and certifies session #1 over a matching digest.
+      // Its `createdAt` is pinned strictly LATER than session #1 so the projection's
+      // `asc(createdAt)` (control-plane-data.ts) keeps session #1 the `firstSelection`
+      // the review clause opens on; session #2 is reached by clicking its own row.
+      const branch2 = `probe/stale-digest-${runId}`;
+      const diffFilePath2 = `src/billing/refund-${runId}.ts`;
+      const artifact2: SessionArtifact = {
+        branch: branch2,
+        commit: 'dec0de2',
+        diff: {
+          fileCount: 1,
+          additions: 2,
+          deletions: 0,
+          truncated: false,
+          files: [
+            {
+              path: diffFilePath2,
+              status: 'modified',
+              additions: 2,
+              deletions: 0,
+              binary: false,
+              hunks: [
+                {
+                  header: '@@ -1,2 +1,4 @@',
+                  lines: [
+                    " import type { Refund } from './types'",
+                    '+  const refunds = new StreamingTotal()',
+                    '+  return refunds.settle()',
+                  ],
+                },
+              ],
+            },
+          ],
+        },
+        tests: { passed: 4, failed: 0, failures: [], failuresTruncated: false, command: 'pnpm test' },
+        summary: 'a second landing, held for the negative covenant proofs',
+      };
+      const [session2] = await db
+        .insert(sessions)
+        .values({
+          roomId,
+          planId,
+          harness: 'claude-code',
+          model: 'opus · diff',
+          status: 'settled',
+          contextPct: 0.4,
+          spendMicros: 800_000,
+          exitSummary: 'A second settled landing for the negative proofs.',
+          artifact: artifact2,
+          createdAt: new Date(Date.now() + 60_000),
+        })
+        .returning({ id: sessions.id });
+      if (!session2) throw new Error('second session insert returned nothing');
+      const session2Id = session2.id;
+
       try {
         const ada = (await seat(browser, await mintHumanSession(adaId))).page;
         contexts.push(ada.context());
@@ -516,6 +612,22 @@ test.describe
         // person's to set (human = init), and a machine may never.
         await hexiSeat.page.goto('/app');
         await openScenarioSocket(hexiSeat.page, roomId);
+        // FLIP-TEST of the pre-append spend gate (server `certificationClassOf` /
+        // `nonHumanSpendAuthorizationRefusal`): count the room's ledger BEFORE the
+        // machine attempt so we can prove NOTHING was appended. A nack + an unchanged
+        // ceiling alone would still read green if a machine `plan_rlimit_set` were
+        // appended and then failed to move the slice; the refusal must land BEFORE
+        // any row reaches the log. If that gate were removed, an agent fund would
+        // append an event here and this count would rise — turning the test red.
+        const roomEvents = async () =>
+          Number(
+            (
+              await sql<{ n: number }[]>`
+                SELECT count(*)::int AS n FROM core_events WHERE room_id=${roomId}::uuid
+              `
+            )[0]?.n ?? 0,
+          );
+        const eventsBeforeMachineSpend = await roomEvents();
         const spendRefusal = await scenarioAttempt(hexiSeat.page, {
           name: 'set_plan_rlimit',
           roomId,
@@ -538,6 +650,13 @@ test.describe
           ),
           'the agent must not have moved the ceiling',
         ).toBe(RAISED_SLICE);
+        // the harder fold: the refusal appended ZERO events to the room's ledger —
+        // the machine spend was refused before ANY row was written, not logged then
+        // ignored.
+        expect(
+          await roomEvents(),
+          'a refused machine spend must append no events to the room ledger',
+        ).toBe(eventsBeforeMachineSpend);
 
         // ── CLAUSE: REVIEW — the honest ~ diff renders in the married ArtifactPane ─
         // Open the artifact pane (the right split). The session is already the
@@ -586,26 +705,79 @@ test.describe
         // ── CLAUSE: a machine can never certify a SESSION LANDING ────────────────
         // `certifySession` is a Server Action gated by `requireSession` +
         // `principal_kind`; there is no socket door for it. The table itself is the
-        // last, hardest refusal: drizzle/0032 refuses a non-human `certified_by`
-        // outright. Attempt the write as the agent and assert the DB throws — the
-        // machine's name cannot reach the signature column, however the write is
-        // shaped.
-        let machineCertifyRefused = false;
-        try {
-          await db
-            .update(sessions)
-            .set({ certifiedBy: hexi.userId })
-            .where(eq(sessions.id, sessionId));
-        } catch {
-          machineCertifyRefused = true;
-        }
+        // last, hardest refusal: drizzle/0032's `sessions_certified_by_is_human`
+        // refuses a non-human `certified_by` outright.
+        //
+        // FLIP-TEST of drizzle/0032 SPECIFICALLY. The earlier draft wrote only
+        // `certified_by = hexi` with the whole hold receipt null — which the table
+        // ALSO refuses on drizzle/0035 (receipt-incomplete), so deleting the
+        // human-only trigger would NOT have turned this red: the write threw either
+        // way (a blind gauntlet's finding). So the machine receipt built here is
+        // COMPLETE and INTERNALLY CONSISTENT — armer = certifier = hexi, a real
+        // arm→signature interval past the 2000ms gate, `certified_held_ms` that
+        // agrees with it, a reviewable artifact — so 0034/0035/0036/0038 are all
+        // SATISFIED and the ONLY thing wrong with the row is that its certifier is a
+        // machine. The triggers fire alphabetically, so `sessions_certified_by_is_human`
+        // (0032) raises FIRST; we assert on THAT constraint by name. Remove 0032 and
+        // the same row is refused by `sessions_certify_armed_by_is_human` (0033) with
+        // a DIFFERENT name — the name assertion fails and the test goes red, which is
+        // exactly the load-bearing property the earlier draft lacked.
+        const machineCertify = await raisedBy(
+          sql`
+            UPDATE sessions SET
+              certify_armed_by = ${hexi.userId}::uuid,
+              certify_armed_at = clock_timestamp() - interval '3 seconds',
+              certify_arm_nonce = gen_random_uuid(),
+              certify_armed_artifact_digest = md5(artifact::text),
+              certified_by = ${hexi.userId}::uuid,
+              certified_at = clock_timestamp(),
+              certified_held_ms = 3000,
+              updated_at = now()
+            WHERE id = ${sessionId}::uuid
+          `,
+        );
         expect(
-          machineCertifyRefused,
-          'the DB must refuse a non-human session certifier outright',
-        ).toBe(true);
+          machineCertify,
+          'a complete, consistent machine receipt must still be refused by the table',
+        ).not.toBeNull();
+        expect(
+          machineCertify?.constraint,
+          'the refusal must be the HUMAN-CERTIFIER trigger (0032), not a receipt-shape error',
+        ).toBe('sessions_certified_by_is_human');
         expect(
           (await certState())?.certifiedBy,
           'the machine certify attempt must have appended nothing',
+        ).toBeNull();
+
+        // ── CLAUSE: a machine can never ARM a certification either ────────────────
+        // Arming is HALF of the human-only act (a machine that could arm would be
+        // performing the very hold whose duration is the confirmation). drizzle/0033's
+        // `sessions_certify_armed_by_is_human` refuses a non-human `certify_armed_by`.
+        //
+        // FLIP-TEST of drizzle/0033. `certified_by` is left NULL, so the receipt
+        // triggers (0035/0036) and the humanity-of-certifier trigger (0032) all pass
+        // by their own null guards — the ONLY thing this write does is name a machine
+        // as the ARMER, so 0033 is the sole trigger that can refuse it. Remove 0033
+        // and this write SUCCEEDS (no throw) and the test goes red.
+        const machineArm = await raisedBy(
+          sql`
+            UPDATE sessions SET
+              certify_armed_by = ${hexi.userId}::uuid,
+              certify_armed_at = clock_timestamp(),
+              certify_arm_nonce = gen_random_uuid(),
+              certify_armed_artifact_digest = md5(artifact::text),
+              updated_at = now()
+            WHERE id = ${sessionId}::uuid
+          `,
+        );
+        expect(machineArm, 'a machine arm must be refused by the table').not.toBeNull();
+        expect(
+          machineArm?.constraint,
+          'the refusal must be the HUMAN-ARMER trigger (0033)',
+        ).toBe('sessions_certify_armed_by_is_human');
+        expect(
+          (await certState())?.certifiedBy,
+          'the machine arm attempt must have left the session uncertified',
         ).toBeNull();
 
         // ── CLAUSE: the human CERTIFIES the session ✓ on the married surface ─────
@@ -679,6 +851,123 @@ test.describe
         }
         expect(unlandRefused, 'a landed certification must be immutable').toBe(true);
         expect((await certState())?.certifiedBy, 'the human signature still stands').toBe(adaId);
+
+        // ── CLAUSE: the SERVER HOLD FLOOR is a TABLE fact, not the browser clock ──
+        // The happy path proved an OVER-floor hold lands. This proves the floor is
+        // enforced server-side even against a caller that BYPASSES the browser
+        // entirely — which is the only way to attempt an under-floor confirm at all,
+        // since the live `HoldToAct` control cannot fire its confirm before its own
+        // 2400ms ask (> the 2000ms gate). On the SECOND session (so session #1's real
+        // over-floor certify is untouched), write a COMPLETE, CONSISTENT receipt whose
+        // only defect is a sub-2000ms hold: human armer=certifier=Ada, a reviewable
+        // artifact, `certified_at − certify_armed_at ≈ 900ms` and `certified_held_ms`
+        // that agrees with it. 0032/0033/0034/0038 all pass; the table refuses on
+        // drizzle/0035's floor clause (`certified_held_ms < 2000`).
+        //
+        // FLIP-TEST of the drizzle/0035 floor. Remove that clause and the same row is
+        // refused instead by drizzle/0036 (`interval < gate`) with a DIFFERENT
+        // constraint name — the name assertion fails and the test goes red; remove
+        // BOTH server floors and the sub-floor certification LANDS, so the
+        // still-uncertified assertion goes red. The browser clock is nowhere in this
+        // proof.
+        const underFloor = await raisedBy(
+          sql`
+            UPDATE sessions SET
+              certify_armed_by = ${adaId}::uuid,
+              certify_armed_at = clock_timestamp() - interval '900 milliseconds',
+              certify_arm_nonce = gen_random_uuid(),
+              certify_armed_artifact_digest = md5(artifact::text),
+              certified_by = ${adaId}::uuid,
+              certified_at = clock_timestamp(),
+              certified_held_ms = 900,
+              updated_at = now()
+            WHERE id = ${session2Id}::uuid
+          `,
+        );
+        expect(underFloor, 'a sub-floor hold must be refused by the table').not.toBeNull();
+        expect(
+          underFloor?.constraint,
+          'the refusal must be the RECEIPT-COMPLETE floor (0035) — the server-measured 2000ms gate',
+        ).toBe('sessions_certify_receipt_complete');
+        expect(
+          (
+            await sql<{ c: string | null }[]>`
+              SELECT certified_by::text AS c FROM sessions WHERE id=${session2Id}::uuid
+            `
+          )[0]?.c ?? null,
+          'the sub-floor attempt must not have landed a certification',
+        ).toBeNull();
+
+        // ── CLAUSE: CERTIFY BINDS THE REVIEWED DIGEST (the real arm→confirm door) ──
+        // The happy path certified session #1 over an artifact that never moved. This
+        // proves the OTHER half of that guarantee — that the signature is bound to the
+        // revision that was on screen — by driving the REAL `HoldToAct` certify control
+        // for session #2 and mutating its artifact BETWEEN the server arm and the
+        // server confirm. `certifySession` stamped `certify_armed_artifact_digest =
+        // md5(artifact)` at arm; at confirm it recomputes the digest and refuses
+        // `artifact_changed` because the artifact moved underneath the hold. The `✓`
+        // never lands, so drizzle/0034 never freezes a revision the person did not
+        // review under a human signature.
+        //
+        // FLIP-TEST of the confirm-time digest bind (`certifySession`'s
+        // `artifactChanged` guard). Remove it and the confirm certifies session #2 over
+        // the mutated artifact — `certified_by` becomes Ada and the "still uncertified"
+        // assertion below goes red.
+        const session2Row = tree.getByRole('button').filter({ hasText: branch2 });
+        await expect(session2Row.first()).toBeVisible({ timeout: 20_000 });
+        await session2Row.first().click();
+        const certify2Selector = `[data-hold-action="certify-${session2Id}"]`;
+        await expect(ada.locator(certify2Selector)).toBeVisible({ timeout: 20_000 });
+
+        // Arm on hold-BEGIN, wait for the server arm to land (it binds the digest of
+        // the artifact as it is NOW — the original), then move the artifact underneath
+        // the pending hold, then complete the hold so the CONFIRM measures a changed
+        // artifact. Holding the mouse down across the mutation is the whole point: the
+        // arm digested revision A, the confirm sees revision B.
+        const mutatedArtifact2: SessionArtifact = {
+          ...artifact2,
+          summary: 'the artifact MOVED underneath the pending hold — the confirm must refuse it',
+        };
+        const box2 = await ada.locator(certify2Selector).boundingBox();
+        if (!box2) throw new Error('the session-2 certify control had no box');
+        await ada.mouse.move(box2.x + box2.width / 2, box2.y + box2.height / 2);
+        const holdBegan = Date.now();
+        await ada.mouse.down();
+        // the server arm has landed on the row (bound to the original digest).
+        await eventually(
+          async () =>
+            (
+              await sql<{ a: string | null }[]>`
+                SELECT certify_armed_by::text AS a FROM sessions WHERE id=${session2Id}::uuid
+              `
+            )[0]?.a ?? null,
+          (armer) => armer === adaId,
+          'the session-2 certification arm to land server-side',
+        );
+        // MOVE the artifact underneath the hold — the reviewed digest no longer matches.
+        await db
+          .update(sessions)
+          .set({ artifact: mutatedArtifact2 })
+          .where(eq(sessions.id, session2Id));
+        // finish the hold past the control's 2400ms ask, then release → the CONFIRM
+        // fires and the server refuses `artifact_changed`.
+        const heldFor = Date.now() - holdBegan;
+        if (heldFor < 3200) await ada.waitForTimeout(3200 - heldFor);
+        await ada.mouse.up();
+
+        // the control paints the server's own refusal, in words, and NOTHING certifies:
+        // the signature never bound to the revision the person did not review.
+        await expect(ada.getByText(/not certified/i).first()).toBeVisible({ timeout: 15_000 });
+        await eventually(
+          async () =>
+            (
+              await sql<{ c: string | null }[]>`
+                SELECT certified_by::text AS c FROM sessions WHERE id=${session2Id}::uuid
+              `
+            )[0]?.c ?? null,
+          (certifiedBy) => certifiedBy === null,
+          'the stale-digest confirm to leave session #2 uncertified',
+        );
       } finally {
         await Promise.all(contexts.map((c) => c.close().catch(() => {})));
         // Teardown: the workspace cascade takes the room, memberships, plan and
