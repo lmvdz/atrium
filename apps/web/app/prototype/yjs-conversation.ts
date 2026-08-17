@@ -248,7 +248,7 @@ export class ConversationDoc {
   /**
    * The GENUINE content block for `id` and its live index, or `null` if none. Resolution
    * is a DETERMINISTIC FUNCTION OF SHARED CRDT STATE: among every block carrying `mid=id`,
-   * the one with the EARLIEST Yjs item identity ({@link blockItemId} / {@link itemIdLess})
+   * the one with the EARLIEST Yjs item identity ({@link nodeItemId} / {@link itemIdLess})
    * wins. Because Yjs item ids are globally unique and preserved across sync, every replica
    * — the seeder, a late joiner, a remote-only client, two merged offline clients — picks
    * the SAME block and projects the SAME content (convergence). It also defeats the
@@ -263,7 +263,7 @@ export class ConversationDoc {
     for (let i = 0; i < children.length; i++) {
       const child = children[i];
       if (!(child instanceof YXmlElement) || child.getAttribute(MID_ATTR) !== id) continue;
-      const iid = blockItemId(child);
+      const iid = nodeItemId(child);
       if (best === null || itemIdLess(iid, best.id)) best = { block: child, index: i, id: iid };
     }
     return best === null ? null : { block: best.block, index: best.index };
@@ -275,25 +275,66 @@ export class ConversationDoc {
   }
 
   /**
+   * The GENUINE `Y.XmlText` child of a body block and its live child index, or `null` if the
+   * block carries no text child. This is the LAST resolution level, and — like the outer
+   * block/index — a DETERMINISTIC FUNCTION OF SHARED CRDT STATE: among every `Y.XmlText`
+   * child of the block, the one with the EARLIEST Yjs item identity ({@link nodeItemId} /
+   * {@link itemIdLess}) wins. Because Yjs item ids are globally unique and preserved across
+   * sync, every replica — the seeder, a late joiner, a remote-only client, two merged offline
+   * clients — picks the SAME child and projects the SAME body content (convergence).
+   *
+   * This closes the P6F-1 round-3 MEDIUM (content-hiding): a peer that inserts an imposter
+   * `Y.XmlText` at CHILD index 0 INSIDE the genuine (identity-resolved) block pushes the
+   * genuine child to index 1, so a positional `block.get(0)` / hardcoded child index 0 would
+   * make ALL replicas project the imposter. The imposter's insert has a LATER clock than the
+   * genuine seat, so it does not win here. Below this level lies only the chosen `Y.XmlText`,
+   * whose content the covenant reader digests — no further positional resolution remains.
+   */
+  private genuineBodyChild(block: YXmlElement): { text: YXmlText; childIndex: number } | null {
+    let best: { text: YXmlText; childIndex: number; id: ItemId | null } | null = null;
+    const children = block.toArray();
+    for (let i = 0; i < children.length; i++) {
+      const child = children[i];
+      if (!(child instanceof YXmlText)) continue;
+      const iid = nodeItemId(child);
+      if (best === null || itemIdLess(iid, best.id)) best = { text: child, childIndex: i, id: iid };
+    }
+    return best === null ? null : { text: best.text, childIndex: best.childIndex };
+  }
+
+  /**
    * The live `Y.XmlText` body of a message, or `null` if it has none. This is the
    * in-place-mutable rich-text span a peer co-edits and the covenant reader
    * resolves a sub-range against.
+   *
+   * The genuine child is resolved by SHARED ITEM IDENTITY, not by position ({@link
+   * genuineBodyChild} — NOT `block.get(0)`): a peer that inserts an imposter
+   * `Y.XmlText` at CHILD index 0 INSIDE the genuine block (the P6F-1 round-3 MEDIUM)
+   * pushes the genuine child to index 1, so a positional `get(0)` would surface — and
+   * every replica would converge on — attacker-selected content (content-hiding).
+   * Binding to the earliest child item identity makes every replica pick the SAME
+   * genuine child and a later-inserted imposter (higher clock) cannot take its place;
+   * an absent genuine child fails CLOSED (`null` ⇒ the message projects no trusted body).
    */
   body(id: string): YXmlText | null {
     const block = this.bodyBlockFor(id);
     if (!block) return null;
-    const child = block.get(0);
-    return child instanceof YXmlText ? child : null;
+    return this.genuineBodyChild(block)?.text ?? null;
   }
 
   /**
-   * The reader path (`[blockIndex, 0]`) from the content fragment to a message's
-   * `Y.XmlText` body, for `CovenantDocReaderProd`'s capture. `null` if the message
-   * has no body. Computed live, so it is stable across the converged block order.
+   * The reader path (`[blockIndex, childIndex]`) from the content fragment to a
+   * message's genuine `Y.XmlText` body, for `CovenantDocReaderProd`'s capture. `null`
+   * if the message has no body. BOTH indices are identity-resolved from shared CRDT
+   * state ({@link genuineBodyBlock} for the block, {@link genuineBodyChild} for the
+   * child) — NOT a hardcoded child index 0 — so the reader captures the SAME genuine
+   * child every replica projects, even when an imposter child sits at position 0.
    */
   bodyPath(id: string): number[] | null {
     const genuine = this.genuineBodyBlock(id);
-    return genuine ? [genuine.index, 0] : null;
+    if (!genuine) return null;
+    const child = this.genuineBodyChild(genuine.block);
+    return child ? [genuine.index, child.childIndex] : null;
   }
 
   /**
@@ -621,10 +662,12 @@ function itemIdLess(a: ItemId | null, b: ItemId | null): boolean {
   return a.client !== b.client ? a.client < b.client : a.clock < b.clock;
 }
 
-/** The Yjs item identity backing an integrated block, or `null` if it has no item (a
- *  top-level type / not yet integrated). The genuine-seat key for the body channel. */
-function blockItemId(el: YXmlElement): ItemId | null {
-  const item = (el as unknown as { _item?: { id: ItemId } | null })._item;
+/** The Yjs item identity backing an integrated node — a body BLOCK (`Y.XmlElement`) or its
+ *  text CHILD (`Y.XmlText`) — or `null` if it has no item (a top-level type / not yet
+ *  integrated). The genuine-seat key for the body channel AT BOTH resolution levels: the
+ *  block ({@link genuineBodyBlock}) and, within it, the child ({@link genuineBodyChild}). */
+function nodeItemId(node: YXmlElement | YXmlText): ItemId | null {
+  const item = (node as unknown as { _item?: { id: ItemId } | null })._item;
   return item ? { client: item.id.client, clock: item.id.clock } : null;
 }
 

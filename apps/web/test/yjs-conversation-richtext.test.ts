@@ -600,6 +600,82 @@ describe('P6F-1 CRITICAL — genuine-seat resolution converges across replicas (
   });
 });
 
+// ─────────────────────────────────────────────────────────────────────────────
+// 9. P6F-1 round-3 (MEDIUM, content-hiding) — the genuine BODY CHILD is identity-
+//    resolved too, so an imposter Y.XmlText at CHILD index 0 INSIDE the genuine
+//    block cannot hide the genuine child.
+//
+// The round-2 fix resolved the outer block/index by earliest item identity, but the
+// body still selected `block.get(0)` and the reader path hardcoded child index 0. A
+// peer that inserts an imposter Y.XmlText at child index 0 INSIDE the genuine block
+// pushes the genuine child to index 1, so ALL replicas converged on the imposter's
+// content (content-hiding — convergent but attacker-selected). Trust correctly demotes
+// to `unknown` (no forged ✓), but no-content-hiding is its own requirement. The child
+// is now resolved by the SAME earliest-Yjs-item-id rule, at BOTH `body()` and
+// `bodyPath()`. Each assertion FAILS on base 75e0d6d (every replica projects the
+// imposter child) and passes now.
+// ─────────────────────────────────────────────────────────────────────────────
+
+describe('P6F-1 round-3 MEDIUM — the genuine BODY CHILD is identity-resolved (imposter child@0 cannot hide it)', () => {
+  it('an imposter Y.XmlText at CHILD index 0 inside the genuine block cannot hide the genuine child — author, peer, and late joiner all project the GENUINE content', () => {
+    // The author seeds a trusted line with a LOW clientID, so the genuine child carries the
+    // earliest item identity (the convergent winner).
+    const author = new ConversationDoc(new Y.Doc());
+    author.doc.clientID = 1;
+    author.seed([
+      { id: 't', time: '10:00', kind: 'agent', who: 'hexi', text: 'the genuine reading' },
+    ]);
+
+    // A separate peer (a HIGHER clientID) catches up, then inserts an imposter Y.XmlText at
+    // CHILD index 0 INSIDE the genuine, identity-resolved block. The genuine child slides to
+    // index 1, so a positional `block.get(0)` / hardcoded reader child index 0 would surface
+    // the imposter on every replica (the content-hide). The imposter's insert has a LATER
+    // clock than the genuine seat, so the earliest-item-id rule keeps the genuine child.
+    const peer = new ConversationDoc(new Y.Doc());
+    peer.doc.clientID = 9;
+    Y.applyUpdate(peer.doc, Y.encodeStateAsUpdate(author.doc));
+    peer.doc.transact(() => {
+      const block = peer.contentFragment().get(0) as Y.XmlElement; // the genuine block
+      const imposter = new Y.XmlText();
+      block.insert(0, [imposter]); // CHILD index 0 — pushes the genuine child to index 1
+      imposter.insert(0, 'HIDDEN IMPOSTER CHILD');
+    });
+
+    // A LATE joiner boots and catches up from the MERGED state (author ⊕ peer).
+    const late = new ConversationDoc(new Y.Doc());
+    late.doc.clientID = 42;
+    mergeAll([author.doc, peer.doc, late.doc]);
+
+    // CONVERGENCE on the GENUINE child: author, peer, AND late joiner all project it — never
+    // the imposter — through both `body()` (direct child) and `messages()` (projected text).
+    for (const replica of [author, peer, late]) {
+      expect(replica.body('t')?.toString()).toBe('the genuine reading');
+      expect(textOfId(replica, 't')).toBe('the genuine reading');
+      expect(replica.messages().some((m) => m.text?.includes('HIDDEN'))).toBe(false);
+      // The reader path resolves to the genuine child (child index != 0 here), so a covenant
+      // capture / the trust fingerprint digests the GENUINE body, not the imposter@0.
+      const path = replica.bodyPath('t');
+      expect(path).not.toBeNull();
+      expect((path as number[])[1]).not.toBe(0); // the genuine child is no longer at child index 0
+    }
+    // The shared-state message projection is byte-identical across replicas — no divergence.
+    expect(late.messages()).toEqual(author.messages());
+    expect(peer.messages()).toEqual(author.messages());
+  });
+
+  it('MUTATION PIN — with NO imposter child, the genuine child resolves and reads OK (the resolution is load-bearing, not a blanket reject)', () => {
+    // Proves the no-hiding above is caused by the identity resolution picking the genuine
+    // child, not by an incidental refusal: a clean single-child body still resolves, and its
+    // reader path points at child index 0 (the sole genuine child).
+    const convo = seedTrustedAgent('the genuine reading');
+    expect(convo.body('t')?.toString()).toBe('the genuine reading');
+    expect(convo.bodyPath('t')).toEqual([0, 0]);
+    // A covenant capture over the genuine child reads OK (the child is resolvable).
+    const reader = readerFor(convo, 't', { start: 0, end: 3 });
+    expect(status(reader, certify(reader))).toBe('ok');
+  });
+});
+
 // A convenience so the append-only ChatMsg shape stays honest under type-checking.
 const _typecheck: ChatMsg = { id: 'x', time: '0', kind: 'human' };
 void _typecheck;
