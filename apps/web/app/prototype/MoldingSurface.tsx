@@ -28,12 +28,15 @@ import {
   certifySessionAction,
   disarmSessionCertificationAction,
 } from '@/app/app/[workspace]/[room]/control/actions';
+import { certifyObjectSpanAction } from '@/app/app/[workspace]/[room]/control/covenant-actions';
 import type { ControlPlaneData } from '@/lib/control-plane-data';
 import { issueRoomCommand } from '@/lib/room-command';
 import { createRealtimeClient, localStorageJournal, type RealtimeClient } from '@/src/lib/realtime';
 import { ArtifactPane } from './ArtifactPane';
-import { ChatBlock } from './ChatBlock';
+import type { CertifyOutcome } from './CertifyPassage';
+import { type CertifyConfig, ChatBlock } from './ChatBlock';
 import { ThreadStatus } from './ChatChrome';
+import type { ObjectSpanRequest } from './certify-span';
 import { commentEcho, type Echo } from './conversation-model';
 import { covenant, type LiveCovenant, makeCovenant } from './covenant';
 import { IconPanel } from './icons';
@@ -103,6 +106,15 @@ function firstSelection(plane: ControlPlaneData | undefined): Selection {
  * live source lands (#159 / Phase 6 — there is no per-session-thread live read
  * model on this tree to bind them to yet).
  */
+/* FIXTURE-ROUTE demo context for the range-select certify affordance (E8). The
+   `/prototype` route has no authenticated session and no room, so these stand in
+   for the slugs/object the live route supplies — enough to exercise the gesture
+   and meet the honest "not wired" refusal, never enough to certify (nothing is
+   sent on that path). A valid uuid so the request shape is real. */
+const DEMO_WORKSPACE_SLUG = 'prototype';
+const DEMO_ROOM_SLUG = 'demo';
+const DEMO_SPAN_OBJECT_ID = '00000000-0000-4000-8000-000000000000';
+
 export function MoldingSurface({
   tree: liveTree,
   roomId,
@@ -243,6 +255,35 @@ export function MoldingSurface({
           viewerId,
         }
       : undefined;
+  /* RANGE-SELECT CERTIFY (E8 / #197) — the conversation-body span certify
+     affordance. The reserved ✓ act binds to the SAME certify Server Action the
+     covenant path uses (`certifyObjectSpanAction`). No message→object binding
+     lives on this surface yet (that data is another lane's), so on the LIVE route
+     the object id stays null and the ✓ is disabled (honest — nothing to certify
+     against); on the FIXTURE demo route a stable demo object id lets a human
+     exercise the whole gesture and meet the honest "not wired" refusal — nothing
+     is sent, and it says so (the `covenant.ts` inert discipline). The
+     selection→{objectId,bodyPath,start,end} mapping is live on both routes. */
+  const spanCertify = useMemo<CertifyConfig>(() => {
+    const liveWiring =
+      workspaceSlug !== undefined && roomSlug !== undefined && roomId !== undefined;
+    return {
+      workspaceSlug: workspaceSlug ?? DEMO_WORKSPACE_SLUG,
+      roomSlug: roomSlug ?? DEMO_ROOM_SLUG,
+      actor: viewerId ?? 'you',
+      objectIdFor: () => (liveWiring ? null : DEMO_SPAN_OBJECT_ID),
+      onCertifySpan: liveWiring
+        ? async (request: ObjectSpanRequest): Promise<CertifyOutcome> => {
+            const outcome = await certifyObjectSpanAction(request);
+            return outcome.ok
+              ? { ok: true, anchorId: outcome.anchorId }
+              : { ok: false, reason: outcome.reason };
+          }
+        : // Honest inert: no session/room on the fixture route, so nothing is sent
+          // and the refusal says exactly that — never a faked ✓ (#157 discipline).
+          async (): Promise<CertifyOutcome> => ({ ok: false, reason: 'derive_failed' }),
+    };
+  }, [workspaceSlug, roomSlug, roomId, viewerId]);
   /* The steer/interrupt door bundle for the status strip, present only when a
      live covenant and a live session exist. `running` gates steer/interrupt to a
      session that can actually receive them: an OPEN session is live and steerable;
@@ -426,6 +467,7 @@ export function MoldingSurface({
               draftComment={draftComment}
               onSay={say}
               liveMount={liveMount}
+              certify={spanCertify}
             />
             {/* the status strip is the CHAT's footer — contained to this column,
                 it stops at the split rather than running under the artifact.

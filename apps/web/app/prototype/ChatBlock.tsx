@@ -21,13 +21,15 @@
  *     a design row. Both are hosted INSIDE this feed beside the shipped rows, which
  *     is why the design feed shell (scroll container, minimap, composer) stays. */
 
-import { useEffect, useMemo, useRef, useState } from 'react';
+import { Fragment, useEffect, useMemo, useRef, useState } from 'react';
 import { type EpistemicState, fileText, systemStatement } from '@/src/components/model';
 import { AttributionLedger } from '@/src/components/model/ledger';
 import { MessageBody } from '@/src/components/primitives/MessageBody';
 import { SystemRow } from '@/src/components/timeline/SystemRow';
 import { TimelineRow } from '@/src/components/timeline/TimelineRow';
+import { type CertifyOutcome, CertifyPassage } from './CertifyPassage';
 import { ChatTopBar } from './ChatChrome';
+import type { ObjectSpanRequest } from './certify-span';
 import { type ConversationItem, type Echo, echoItem, messageBody } from './conversation-model';
 import type { ConversationTransport } from './conversation-transport';
 import { IconChevron, IconDot } from './icons';
@@ -46,6 +48,7 @@ import {
   type TurnStep,
 } from './types';
 import { useConversationModel } from './use-conversation-model';
+import type { ConversationDoc } from './yjs-conversation';
 
 /* The honest "conversation not wired" notice's state — a routine `·` system
    notice (a status fact, not a failed action), used when a live room mounts with
@@ -649,6 +652,71 @@ function TypingRow({ who }: { who: string }) {
   );
 }
 
+/* ── RANGE-SELECT CERTIFY (E8 / #197) ────────────────────────────────────────
+ * The opt-in configuration that lets a human certify a SPAN of a message body.
+ * Absent (every existing call site) ⇒ the feed renders exactly as before, no
+ * affordance. Present ⇒ each message row gains a ✓ toggle that opens the
+ * certify-passage surface; the reserved ✓ act is driven through
+ * {@link onCertifySpan} (wired to `certifyObjectSpanAction`). The machine never
+ * certifies — the hold is the human's act, and the server answer is the only
+ * thing the glyph reflects. */
+export interface CertifyConfig {
+  readonly workspaceSlug: string;
+  readonly roomSlug: string;
+  /** Who is pressing (the authenticated human). */
+  readonly actor: string;
+  /**
+   * The accepted covenant OBJECT a message's body maps to, or `null` when the
+   * surface has none bound (the fixture route). `null` keeps the ✓ disabled — the
+   * span still maps and shows, but there is nothing to certify against.
+   */
+  readonly objectIdFor: (messageId: string) => string | null;
+  /** Drives the reserved certify ACT — wired by the caller to `certifyObjectSpanAction`. */
+  readonly onCertifySpan: (request: ObjectSpanRequest) => Promise<CertifyOutcome>;
+}
+
+/* One message row's certify affordance: a ✓ toggle that reveals the certify
+   passage below the row. Kept beside `FeedItem` (a Fragment sibling, no wrapper
+   node) so the feed's `[data-mm-id]` structure the minimap measures is unchanged. */
+function MessageCertify({
+  doc,
+  messageId,
+  config,
+  open,
+  onToggle,
+}: {
+  doc: ConversationDoc;
+  messageId: string;
+  config: CertifyConfig;
+  open: boolean;
+  onToggle: () => void;
+}) {
+  return (
+    <div className={styles.certifyRowWrap}>
+      <button
+        type="button"
+        className={styles.certifyToggle}
+        data-open={open ? 'true' : undefined}
+        aria-expanded={open}
+        onClick={onToggle}
+      >
+        certify a passage
+      </button>
+      {open ? (
+        <CertifyPassage
+          doc={doc}
+          messageId={messageId}
+          objectId={config.objectIdFor(messageId)}
+          workspaceSlug={config.workspaceSlug}
+          roomSlug={config.roomSlug}
+          actor={config.actor}
+          onCertify={config.onCertifySpan}
+        />
+      ) : null}
+    </div>
+  );
+}
+
 export function ChatBlock({
   selected,
   echoes,
@@ -656,6 +724,7 @@ export function ChatBlock({
   onSay,
   transport,
   liveMount = false,
+  certify,
 }: {
   selected: Selection;
   echoes: readonly Echo[];
@@ -678,6 +747,13 @@ export function ChatBlock({
    * shipped-surface + Electric wiring is the filed follow-up.
    */
   liveMount?: boolean;
+  /**
+   * Opt-in range-select certify (E8 / #197). When provided, each message row can
+   * be expanded into a certify-passage surface where a human selects a span and
+   * holds ✓ to drive `certifyObjectSpanAction`. Omitted ⇒ no affordance (the feed
+   * is unchanged), which is every current call site.
+   */
+  certify?: CertifyConfig;
 }) {
   // A live room whose conversation source is not wired: no transport, but not the
   // fixture demo either. The feed is honestly empty + a notice, never mock seed.
@@ -707,10 +783,13 @@ export function ChatBlock({
      is byte-identical to the prior `conversationModel(shownSel)`. Echoes
      (locally-sent lines) are the viewer typing — real typed records on the SAME
      register, so they render as shipped rows too. */
-  const { model, version, say } = useConversationModel(shownSel, transport, {
+  const { model, doc, version, say } = useConversationModel(shownSel, transport, {
     // Live room without a transport ⇒ do NOT seed the mock fixture (honest empty).
     seedFixture: !liveMount,
   });
+  /* Which message's certify-passage is open (E8). At most one at a time — the
+     certify surface is a focused act, not a per-row toggle grid. */
+  const [certifyOpenId, setCertifyOpenId] = useState<string | null>(null);
   const { records, items } = useMemo(() => {
     const echoes_ = echoes.map((echo, index) => echoItem(echo, index, model.room));
     return {
@@ -744,9 +823,24 @@ export function ChatBlock({
       <AttributionLedger messages={records} room={model.room}>
         <div className={styles.chatLog} ref={logRef}>
           <div className={`${styles.chatConvo} ${fading ? styles.chatConvoOut : ''}`}>
-            {items.map((item) => (
-              <FeedItem key={item.id} item={item} />
-            ))}
+            {items.map((item) =>
+              certify && item.kind === 'message' ? (
+                <Fragment key={item.id}>
+                  <FeedItem item={item} />
+                  <MessageCertify
+                    doc={doc}
+                    messageId={item.id}
+                    config={certify}
+                    open={certifyOpenId === item.id}
+                    onToggle={() =>
+                      setCertifyOpenId((current) => (current === item.id ? null : item.id))
+                    }
+                  />
+                </Fragment>
+              ) : (
+                <FeedItem key={item.id} item={item} />
+              ),
+            )}
             {/* HONEST UNWIRED STATE (#183 round-2 SHIP-BLOCKER #3). On a live room
                 with no conversation transport wired, the feed does not fabricate a
                 converging conversation from mock seed — it says, plainly, that the

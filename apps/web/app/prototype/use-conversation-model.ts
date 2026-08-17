@@ -46,6 +46,15 @@ import { conversationDocFor, conversationModelFromDoc } from './yjs-conversation
 export interface ConversationHandle {
   /** The current projected model — recomputed on every convergence. */
   readonly model: ConversationModel;
+  /**
+   * The live Yjs-backed conversation doc — the source of `body(id)` /
+   * `bodyPath(id)` the range-select certify affordance (E8 / #197) maps a
+   * selection against. Exposed read-only for that mapping; the feed still reads
+   * everything through {@link model}. This is the ONLY client-side handle on the
+   * `Y.XmlText` bodies (a live room has no client doc — its glyphs are precomputed
+   * server reads), so it is where a client selection→span mapping can run.
+   */
+  readonly doc: ConversationDoc;
   /** Bumps on every convergence (local append or remote update) — the remeasure signal. */
   readonly version: number;
   /**
@@ -184,5 +193,5 @@ export function useConversationModel(
   // biome-ignore lint/correctness/useExhaustiveDependencies: version is the convergence trigger; selection identity is captured by doc
   const model = useMemo(() => conversationModelFromDoc(doc, selection), [doc, version]);
 
-  return { model, version, say };
+  return { model, doc, version, say };
 }

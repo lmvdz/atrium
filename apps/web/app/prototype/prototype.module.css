@@ -3468,3 +3468,128 @@
   color: var(--tx3);
   font-size: 9px;
 }
+
+/* ── CERTIFY A PASSAGE (E8 / #197) ───────────────────────────────────────────
+   The range-select certify surface. The body renders the message's exact
+   Y.XmlText 1:1 (white-space:pre-wrap keeps newlines as real characters, one
+   index unit each) so what the human selects IS the covenant span. The ✓ is a
+   reserved human act (HoldToAct); the machine never mints one, so no colour here
+   claims a ✓ until the server acks it. */
+.certifyPanel {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 10px 12px;
+  background: var(--bg1);
+  border: 1px solid var(--line);
+  border-radius: 4px;
+}
+.certifyHead {
+  display: flex;
+  align-items: baseline;
+  gap: 10px;
+  min-width: 0;
+}
+.certifyTitle {
+  color: var(--tx1);
+  font-weight: 600;
+  letter-spacing: 0.02em;
+}
+.certifyHint {
+  color: var(--tx3);
+  font-size: 9.5px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.certifyBody {
+  color: var(--tx1);
+  background: var(--bg0);
+  border: 1px solid var(--line);
+  border-radius: 3px;
+  padding: 8px 10px;
+  /* verbatim text: newlines are real characters (one unit), never collapsed or <br>'d */
+  white-space: pre-wrap;
+  word-break: break-word;
+  /* selecting IS the affordance — make the selection unmistakable */
+  cursor: text;
+  user-select: text;
+}
+.certifyBody::selection,
+.certifyBody *::selection {
+  background: color-mix(in srgb, var(--grnbg) 90%, transparent);
+  color: var(--grn2);
+}
+/* an inline mark (bold/link/…) — emphasised, but adds NO index units */
+.certifyMark {
+  color: var(--amb2);
+  font-weight: 600;
+}
+/* an embed — one atom, one index unit, never split by a selection */
+.certifyEmbed {
+  color: var(--tx2);
+  background: var(--bg2);
+  border: 1px solid var(--line);
+  border-radius: 2px;
+  padding: 0 3px;
+  margin: 0 1px;
+  font-size: 9.5px;
+  user-select: all;
+  white-space: nowrap;
+}
+.certifyControls {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+.certifyHold {
+  align-self: flex-start;
+}
+.certifyOk {
+  color: var(--grn2);
+  font-weight: 600;
+}
+.certifyGlyph {
+  color: var(--grn2);
+  font-weight: 700;
+}
+.certifyRefused {
+  color: var(--amb2);
+}
+.certifyPending {
+  color: var(--tx3);
+  font-style: italic;
+}
+/* the per-message toggle that opens the certify passage — quiet until hovered,
+   so certify is an available act, not clutter on every line */
+.certifyRowWrap {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  margin: 2px 0 8px 0;
+  padding-left: 34px; /* align under the message body, past the avatar gutter */
+}
+.certifyToggle {
+  align-self: flex-start;
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  padding: 2px 7px;
+  border: 1px solid var(--line);
+  border-radius: 3px;
+  background: transparent;
+  color: var(--tx3);
+  font: inherit;
+  font-size: 9.5px;
+  cursor: pointer;
+  opacity: 0.55;
+  transition: opacity 120ms ease, color 120ms ease, border-color 120ms ease;
+}
+.certifyToggle:hover,
+.certifyToggle:focus-visible,
+.certifyToggle[data-open='true'] {
+  opacity: 1;
+  color: var(--grn2);
+  border-color: var(--grnbd);
+}
