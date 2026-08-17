@@ -59,8 +59,7 @@ import { CovenantDocReaderProd } from '@/lib/covenant-reader';
 import type { ParticipantSummary } from '@/src/components/model';
 import { buildConversationModel, type ConversationModel } from './conversation-model';
 import type { ConversationTransport } from './conversation-transport';
-import { conversationFor, participantsFor, sessionFor } from './seams';
-import type { ChatMsg, Selection } from './types';
+import type { ChatMsg } from './types';
 
 /** The Yjs array key the message-INDEX metadata lives under, within the doc. */
 const MESSAGES_KEY = 'messages';
@@ -338,6 +337,34 @@ export class ConversationDoc {
   }
 
   /**
+   * The Yjs item identity (`{client, clock}`) backing the GENUINE body child — the
+   * `Y.XmlText` the covenant reader digests — for a message id, or `null` if the
+   * message has no resolvable body. This is the CONTENT SEAT: the single item whose
+   * authenticated-writer attribution decides authorship of the certified content
+   * (P6F-2, #196). It is resolved by the SAME earliest-item-identity rule as
+   * {@link body} / {@link bodyPath} ({@link genuineBodyBlock} then
+   * {@link genuineBodyChild}), so every replica names the SAME seat and a
+   * later-inserted imposter (higher clock) can never take its place.
+   *
+   * NOTE ON THE SECURITY BOUNDARY — this returns the CRDT item identity, which is
+   * CONVERGENT, not an authorship proof: the `client` field is peer-craftable. It is
+   * NOT the authorship answer on its own. The authenticated-writer binding lives one
+   * layer up ({@link ServerRoomReplica.authenticatedAuthorOf} in
+   * `lib/server-room-replica.ts`), which looks this seat up in a ledger keyed by
+   * WHICH authenticated connection first introduced the item — so a crafted `client`
+   * cannot inherit another writer's authorship. This method only NAMES the seat; it
+   * does not vouch for who authored it.
+   */
+  genuineBodySeat(id: string): { client: number; clock: number } | null {
+    const block = this.bodyBlockFor(id);
+    if (!block) return null;
+    const child = this.genuineBodyChild(block);
+    if (!child) return null;
+    const iid = nodeItemId(child.text);
+    return iid ? { client: iid.client, clock: iid.clock } : null;
+  }
+
+  /**
    * The current messages, in the index's converged order (never carrying
    * authority). Every metadata element is VALIDATED and QUARANTINED: a peer-inserted
    * raw object, malformed JSON, a shape-invalid element, or one with an EMPTY id is
@@ -366,7 +393,8 @@ export class ConversationDoc {
       const meta = metas[i];
       if (meta == null) continue;
       const cur = winner.get(meta.id);
-      if (cur === undefined || itemIdLess(keys[i] ?? null, keys[cur] ?? null)) winner.set(meta.id, i);
+      if (cur === undefined || itemIdLess(keys[i] ?? null, keys[cur] ?? null))
+        winner.set(meta.id, i);
     }
     const out: ChatMsg[] = [];
     for (let i = 0; i < metas.length; i++) {
@@ -543,39 +571,15 @@ export function conversationContentRoot(doc: YDoc): YXmlFragment | null {
   return frag.length > 0 ? frag : null;
 }
 
-/**
- * A `ConversationDoc` seeded from the selection's mock conversation — the
- * drop-in the surface can render off TODAY, on the fixture route, with no
- * Electric infrastructure. Its `model(...)` output equals `conversationModel`'s
- * for the same selection (proven in the test), so wiring the feed through it
- * changes the substrate without changing a pixel. In production the same doc is
- * caught up from Electric instead of seeded from the mock.
- */
-export function conversationDocFor(selection: Selection): ConversationDoc {
-  return new ConversationDoc().seed(conversationFor(selection));
-}
-
-/** The `room` a selection's conversation belongs to — the model's room field. */
-export function roomFor(selection: Selection): string {
-  return sessionFor(selection).agent.room;
-}
-
-/** The participants a selection's conversation carries — the model's roster. */
-export function participantsForSelection(selection: Selection): readonly ParticipantSummary[] {
-  return participantsFor(selection);
-}
-
-/**
- * Project a `ConversationDoc` to the surface's model for a given selection. The
- * room and roster come from the selection seam; the messages come live from the
- * doc. This is the exact call the feed makes.
- */
-export function conversationModelFromDoc(
-  doc: ConversationDoc,
-  selection: Selection,
-): ConversationModel {
-  return doc.model(roomFor(selection), participantsForSelection(selection));
-}
+/* The selection-bound FIXTURE helpers (`conversationDocFor`, `roomFor`,
+   `participantsForSelection`, `conversationModelFromDoc`) moved to
+   `yjs-conversation-fixtures.ts` (P6F-2): they depend on the `'use client'`
+   `seams` module, and keeping them here dragged that client module into the
+   SERVER certify path (`lib/live-covenant-doc.ts` → `lib/server-room-replica.ts`
+   → this file). This module is now server-safe — only Yjs, the covenant reader,
+   and the pure model transform — so the server-authoritative replica can reuse
+   `ConversationDoc` without pulling client code into the Server Action bundle.
+   The fixture route + tests import the helpers from the new file. */
 
 /* ── the durable codec ──────────────────────────────────────────────────────
    A message's METADATA is stored as a canonical JSON string of its

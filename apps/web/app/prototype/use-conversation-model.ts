@@ -39,7 +39,8 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import type { ConversationModel } from './conversation-model';
 import type { ConversationTransport } from './conversation-transport';
 import type { ChatMsg, Selection } from './types';
-import { ConversationDoc, conversationDocFor, conversationModelFromDoc } from './yjs-conversation';
+import { ConversationDoc } from './yjs-conversation';
+import { conversationDocFor, conversationModelFromDoc } from './yjs-conversation-fixtures';
 
 /** What `ChatBlock` reads and writes the conversation through. */
 export interface ConversationHandle {

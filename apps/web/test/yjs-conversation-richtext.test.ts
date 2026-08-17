@@ -10,10 +10,12 @@ import { conversationModel } from '../app/prototype/conversation-model';
 import { InMemoryConversationHub } from '../app/prototype/conversation-transport';
 import type { ChatMsg, Selection } from '../app/prototype/types';
 import {
-  ConversationDoc,
-  conversationContentRoot,
   conversationDocFor,
   conversationModelFromDoc,
+} from '../app/prototype/yjs-conversation-fixtures';
+import {
+  ConversationDoc,
+  conversationContentRoot,
 } from '../app/prototype/yjs-conversation';
 import { glyphFor } from '../src/components/model/glyph';
 import { messageLedger } from '../src/components/model/quotation';

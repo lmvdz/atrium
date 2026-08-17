@@ -4,12 +4,12 @@ import { conversationModel } from '../app/prototype/conversation-model';
 import { InMemoryConversationHub } from '../app/prototype/conversation-transport';
 import type { ChatMsg, Selection } from '../app/prototype/types';
 import {
-  ConversationDoc,
   conversationDocFor,
   conversationModelFromDoc,
   participantsForSelection,
   roomFor,
-} from '../app/prototype/yjs-conversation';
+} from '../app/prototype/yjs-conversation-fixtures';
+import { ConversationDoc } from '../app/prototype/yjs-conversation';
 import { glyphFor } from '../src/components/model/glyph';
 import { messageLedger } from '../src/components/model/quotation';
 
