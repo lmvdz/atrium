@@ -1,12 +1,12 @@
 'use server';
 
-import { z } from 'zod';
 import { type CertifyAnchorOutcome, certifyObjectSpan } from '@/lib/certify-anchor';
 import { type BodyPath, readerForLiveDoc } from '@/lib/covenant-reader';
 import { db } from '@/lib/db';
 import { liveCovenantDoc } from '@/lib/live-covenant-doc';
 import { requireSession } from '@/lib/session';
 import { loadRoom, loadWorkspace } from '@/lib/workspaces';
+import { CertifyObjectSpanInput } from './covenant-actions-input';
 
 /**
  * CERTIFY AN OBJECT/SPAN — the human-only gesture that mints a covenant anchor
@@ -40,18 +40,13 @@ import { loadRoom, loadWorkspace } from '@/lib/workspaces';
  * and this action fails CLOSED (`derive_failed`) — it never certifies against an
  * empty plant. The gate, the session→certifier binding and the derive-and-sign are
  * all live now; only the doc handle is pending, and it is a one-function change.
+ *
+ * The request schema is {@link CertifyObjectSpanInput} (its own module — a
+ * `'use server'` file may export only async functions). It is `.strict()`: a
+ * request that attempts to supply a resolution-bearing field (`renderedDigest`,
+ * `stateVector`, `relStart`, …) is REFUSED, not silently stripped — the covenant
+ * launders nothing.
  */
-const CertifyObjectSpanInput = z.object({
-  workspaceSlug: z.string().min(1).max(200),
-  roomSlug: z.string().min(1).max(200),
-  /** The accepted object whose span is being certified. */
-  objectId: z.uuid(),
-  /** The path of child indices from the content root to the span's `Y.XmlText` body. */
-  bodyPath: z.array(z.number().int().nonnegative()).max(64),
-  /** The selected character range within that body — the human's gesture, not context. */
-  start: z.number().int().nonnegative(),
-  end: z.number().int().nonnegative(),
-});
 
 /**
  * Fired when a human confirms certifying a span. Resolves the authenticated

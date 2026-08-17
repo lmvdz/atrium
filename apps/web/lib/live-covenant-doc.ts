@@ -20,12 +20,24 @@ import { serverReplicaFor } from './server-room-replica';
  * comes from the client.
  *
  * FAIL-CLOSED, twice. When no replica is registered for the room (torn down,
- * catching up, or never joined), `provider` is permanently `null`. When a replica
+ * catching up, or never joined), the provider resolves `null`. When a replica
  * exists but its `conversation-content` share is absent/empty,
  * `authoritativeDoc()` returns `null` and — belt and suspenders — `resolveRoot`
  * (`conversationContentRoot`) returns `null` too. Either way the reader captures
  * nothing and the gate refuses `derive_failed`: the covenant never vouches for an
  * empty or planted document.
+ *
+ * RESOLVES THE CURRENT REPLICA, NEVER A STALE ONE (P6F-2 gauntlet HIGH). The
+ * provider re-reads the registry (`serverReplicaFor(roomId)`) on EVERY call rather
+ * than capturing the replica object once at construction. The certify path may
+ * hold a `LiveCovenantDoc` handle across an await (membership loads, lock
+ * acquisition) during which the room's replica is REPLACED (a fresh catch-up) or
+ * UNREGISTERED (teardown). A captured handle would keep resolving the torn-down or
+ * superseded doc — vouching against a document that is no longer authoritative.
+ * Re-fetching binds each resolution to whatever replica is authoritative AT
+ * RESOLUTION TIME: a removed room fails closed (`null` ⇒ `derive_failed`), a
+ * replaced room resolves the NEW doc. The registry is the single source of truth,
+ * and this provider never outruns it.
  * ------------------------------------------------------------------------- */
 
 export interface LiveCovenantDoc {
@@ -45,17 +57,17 @@ export interface LiveCovenantDoc {
 }
 
 /**
- * Acquire the live covenant document for a room. Looks up the room's
- * server-authoritative replica and hands the certify path its `Y.Doc` and the
- * `conversation-content` root. An unregistered room ⇒ a permanently-`null`
- * provider (fail-closed), so the certify path refuses `derive_failed` rather than
- * certifying against nothing.
+ * Acquire the live covenant document for a room. Hands the certify path a provider
+ * that resolves the room's CURRENT server-authoritative replica's `Y.Doc` (and the
+ * `conversation-content` root). The provider re-reads the registry on every call
+ * ({@link serverReplicaFor}), so a room that is unregistered or replaced AFTER this
+ * handle is acquired fails closed / re-targets rather than resolving a stale doc —
+ * the certify path refuses `derive_failed` rather than certifying against nothing
+ * or against a superseded document.
  */
 export function liveCovenantDoc(roomId: string): LiveCovenantDoc {
-  const replica = serverReplicaFor(roomId);
-  if (!replica) return { provider: () => null };
   return {
-    provider: () => replica.authoritativeDoc(),
+    provider: () => serverReplicaFor(roomId)?.authoritativeDoc() ?? null,
     options: { resolveRoot: conversationContentRoot },
   };
 }

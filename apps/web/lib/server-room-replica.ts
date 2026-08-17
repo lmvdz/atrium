@@ -40,8 +40,12 @@ import { ConversationDoc } from '@/app/prototype/yjs-conversation';
  *     AUTHENTICATED connection (the ws server's `AtriumSession`, adjacent to
  *     #187) and records, in a ledger keyed by the item's `(client, clock)`, WHICH
  *     authenticated writer's connection introduced it. Authorship of a message's
- *     content is then {@link authenticatedAuthorOf}: resolve the genuine content
- *     seat ({@link ConversationDoc.genuineBodySeat}) and read the ledger.
+ *     content is then {@link authenticatedAuthorOf}: enumerate the CURRENT content
+ *     items the reader renders inside the genuine body child ({@link
+ *     ConversationDoc.genuineBodyContentItemIds}) and read the ledger over THOSE —
+ *     not the body's container seat, which a peer can keep while replacing every
+ *     character inside it. A mixed or unattributed body is unverified, never the
+ *     victim.
  *
  * ## Why a peer cannot inherit another writer's authorship
  *
@@ -233,17 +237,48 @@ export class ServerRoomReplica {
 
   /**
    * The AUTHENTICATED author of a message's certified content, or `null`
-   * (fail-closed ⇒ unknown) when the content seat is unresolved OR was never
-   * written over an authenticated connection. Resolves the genuine content seat by
-   * the shared-state earliest-item-identity rule ({@link
-   * ConversationDoc.genuineBodySeat}) and reads the ledger — so authorship follows
-   * the authenticated writer who supplied THAT item, never a crafted `client`, a
-   * replay, or a positional insert.
+   * (fail-closed ⇒ unknown/contested) when the body is unresolved, empty, carries
+   * ANY unattributed content, or was co-written by MORE THAN ONE authenticated
+   * writer.
+   *
+   * Authorship is derived from the authenticated writers of the CURRENT CONTENT the
+   * reader renders — the text runs / embeds / marks INSIDE the genuine body child
+   * ({@link ConversationDoc.genuineBodyContentItemIds}) — NOT from the body's
+   * container seat. That distinction is the whole security property (P6F-2 HIGH):
+   * a peer can catch up, DELETE a victim's text, and INSERT forged content INTO the
+   * victim's OWN `Y.XmlText` container. The container item stays the victim's, but
+   * every rendered character is now the peer's — carried by NEW content items under
+   * the PEER's authenticated clocks. Reading the ledger over those content items
+   * attributes the body to the PEER (the forger), never the victim:
+   *
+   *   - a body whose CURRENT content was all supplied by ONE authenticated writer ⇒
+   *     that writer;
+   *   - a body whose content a DIFFERENT authenticated writer edited/replaced ⇒ THAT
+   *     writer (the forger authors its own forgery, never inherits the victim's);
+   *   - a body MIXING two authenticated writers' content ⇒ `null` (contested,
+   *     fail-closed — never silently one of them, never the victim);
+   *   - a body with ANY content from unauthenticated `catchUp()` ⇒ `null` (unknown);
+   *   - an unresolved or empty body ⇒ `null`.
+   *
+   * The item identity a content run carries is CONVERGENT, not an authorship proof
+   * on its own — a crafted `client` decides nothing here, because the ledger is keyed
+   * by WHICH authenticated connection DELIVERED the item, not by the item's `client`
+   * field ({@link WriterLedger}).
    */
   authenticatedAuthorOf(messageId: string): WriterIdentity | null {
-    const seat = this.convo.genuineBodySeat(messageId);
-    if (!seat) return null;
-    return this.ledger.writerAt(seat.client, seat.clock);
+    const contentItems = this.convo.genuineBodyContentItemIds(messageId);
+    if (contentItems === null || contentItems.length === 0) return null;
+    let author: WriterIdentity | null = null;
+    for (const item of contentItems) {
+      const writer = this.ledger.writerAt(item.client, item.clock);
+      if (writer === null) return null; // any unattributed run ⇒ unknown, fail-closed
+      if (author === null) {
+        author = writer;
+      } else if (author.userId !== writer.userId || author.principalKind !== writer.principalKind) {
+        return null; // content co-written by >1 authenticated writer ⇒ contested, fail-closed
+      }
+    }
+    return author;
   }
 
   /** Tear the replica down (drops its doc; `authoritativeDoc` then fails closed). */

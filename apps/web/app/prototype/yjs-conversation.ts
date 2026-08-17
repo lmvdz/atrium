@@ -365,6 +365,33 @@ export class ConversationDoc {
   }
 
   /**
+   * The Yjs item identities backing the CURRENT (non-deleted) content runs of a
+   * message's GENUINE body child — the text runs, embeds, and inline-format markers
+   * the covenant reader actually renders and digests — or `null` if the message has
+   * no resolvable body. An empty body yields `[]`.
+   *
+   * WHY THIS EXISTS, SEPARATELY FROM {@link genuineBodySeat} (P6F-2 authorship HIGH).
+   * `genuineBodySeat` names the item of the `Y.XmlText` CONTAINER. That container's
+   * item identity is STABLE under an in-place edit: a peer can catch up, DELETE
+   * every character the original writer inserted, and INSERT its own content INTO the
+   * SAME container — the rendered text is now the peer's, but the container item is
+   * still the original writer's. Attributing authorship from the container therefore
+   * lets a peer's forged content INHERIT the victim's authorship. The content is
+   * carried by the container's CHILD ITEMS (each `insert` is one Yjs item with its
+   * own `{client, clock}`), and a peer's in-place edit produces NEW child items under
+   * the peer's clocks while the victim's are tombstoned. So authorship must be derived
+   * from these content items — the ones the reader renders — not the container. The
+   * caller ({@link ServerRoomReplica.authenticatedAuthorOf}) reads each item's
+   * authenticated writer from the ledger and refuses to vouch for a body whose content
+   * mixes writers or carries any unattributed run.
+   */
+  genuineBodyContentItemIds(id: string): { client: number; clock: number }[] | null {
+    const body = this.body(id);
+    if (!body) return null;
+    return textContentItemIds(body);
+  }
+
+  /**
    * The current messages, in the index's converged order (never carrying
    * authority). Every metadata element is VALIDATED and QUARANTINED: a peer-inserted
    * raw object, malformed JSON, a shape-invalid element, or one with an EMPTY id is
@@ -673,6 +700,28 @@ function itemIdLess(a: ItemId | null, b: ItemId | null): boolean {
 function nodeItemId(node: YXmlElement | YXmlText): ItemId | null {
   const item = (node as unknown as { _item?: { id: ItemId } | null })._item;
   return item ? { client: item.id.client, clock: item.id.clock } : null;
+}
+
+/**
+ * The Yjs item identities backing the CURRENT (non-deleted) content items of a `Y.XmlText`
+ * body — each text run, embed, or inline-format marker, in document order. Walks the text's
+ * `_start` item list (the same internal surface {@link arrayItemIds} walks for a `Y.Array`),
+ * skipping tombstoned (deleted) items so only content the reader RENDERS is returned. Each
+ * `insert` is one item under its writer's `{client, clock}`, so a peer's in-place edit of a
+ * victim's body surfaces here as items under the PEER's clocks while the victim's are gone —
+ * which is exactly what lets P6F-2 attribute authorship to the writers of the CURRENT content
+ * rather than to the (stable) container item. A run-length item is named by its base clock;
+ * the ledger's `writerAt` resolves any clock within the run to the same recorded writer.
+ */
+function textContentItemIds(text: YXmlText): ItemId[] {
+  type YItem = { id: ItemId; deleted: boolean; right: YItem | null };
+  const out: ItemId[] = [];
+  let item = (text as unknown as { _start?: YItem | null })._start ?? null;
+  while (item) {
+    if (!item.deleted) out.push({ client: item.id.client, clock: item.id.clock });
+    item = item.right;
+  }
+  return out;
 }
 
 /**

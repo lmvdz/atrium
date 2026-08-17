@@ -7,6 +7,7 @@ import {
   clearServerReplicas,
   registerServerReplica,
   ServerRoomReplica,
+  unregisterServerReplica,
   type WriterIdentity,
 } from '@/lib/server-room-replica';
 import { InMemoryConversationHub } from '../app/prototype/conversation-transport';
@@ -356,5 +357,107 @@ describe('the authenticated writer determines authorship (a peer cannot inherit 
     hexi.append({ id: 'a1', time: '10:00', kind: 'agent', who: 'hexi', text: 'the reading' });
     replica.applyAuthenticatedUpdate(clientDiff(hexi.doc, replica), HEXI);
     expect(replica.authenticatedAuthorOf('a1')).toEqual(HEXI);
+  });
+
+  // ── HIGH (P6F-2 gauntlet): in-place body edit must not inherit the victim's authorship ──
+
+  it('IN-PLACE BODY EDIT: Mallory DELETES Alice’s text and inserts forged content INSIDE Alice’s OWN Y.XmlText container — authorship is MALLORY, never Alice', () => {
+    const replica = new ServerRoomReplica();
+    // Alice writes m1; her authenticated content seats the body.
+    const alice = new ConversationDoc();
+    alice.append(msg('m1', 'the original reading'));
+    replica.applyAuthenticatedUpdate(clientDiff(alice.doc, replica), ALICE);
+    expect(replica.authenticatedAuthorOf('m1')?.userId).toBe('u_alice');
+
+    // Mallory catches up, then edits IN PLACE: delete the whole body text and insert
+    // 'forged' into Alice's EXISTING container (mid stays m1, the container item stays
+    // Alice's). The rendered content is now entirely Mallory's.
+    const mallory = new ConversationDoc();
+    Y.applyUpdate(mallory.doc, Y.encodeStateAsUpdate(replica.doc));
+    const body = mallory.body('m1');
+    expect(body).not.toBeNull();
+    mallory.doc.transact(() => {
+      (body as NonNullable<typeof body>).delete(0, (body as NonNullable<typeof body>).length);
+      (body as NonNullable<typeof body>).insert(0, 'forged');
+    });
+    replica.applyAuthenticatedUpdate(clientDiff(mallory.doc, replica), MALLORY);
+
+    // The API MUST NOT lie: the content the reader renders is Mallory's, so authorship
+    // follows Mallory, not the untouched container's original writer.
+    expect(replica.conversation.body('m1')?.toString()).toBe('forged');
+    const author = replica.authenticatedAuthorOf('m1');
+    // FLIP: derived from the container seat, this would still read 'u_alice' — the forgery.
+    expect(author?.userId).not.toBe('u_alice');
+    expect(author?.userId).toBe('u_mallory');
+  });
+
+  it('MIXED body: Mallory inserts into Alice’s body WITHOUT deleting hers — the body is contested, authorship unverified (never Alice)', () => {
+    const replica = new ServerRoomReplica();
+    const alice = new ConversationDoc();
+    alice.append(msg('m1', 'the original reading'));
+    replica.applyAuthenticatedUpdate(clientDiff(alice.doc, replica), ALICE);
+
+    const mallory = new ConversationDoc();
+    Y.applyUpdate(mallory.doc, Y.encodeStateAsUpdate(replica.doc));
+    mallory.body('m1')?.insert(4, 'FORGED ');
+    replica.applyAuthenticatedUpdate(clientDiff(mallory.doc, replica), MALLORY);
+
+    // Two authenticated writers' content in one body ⇒ contested ⇒ fail-closed to unknown.
+    expect(replica.authenticatedAuthorOf('m1')).toBeNull();
+  });
+
+  it('a body ALICE alone wrote (even across two authenticated updates) still attributes to Alice — the fix does not over-demote', () => {
+    const replica = new ServerRoomReplica();
+    const alice = new ConversationDoc();
+    alice.append(msg('m1', 'the original reading'));
+    replica.applyAuthenticatedUpdate(clientDiff(alice.doc, replica), ALICE);
+
+    // Alice edits her OWN body in a LATER authenticated update (a different clientID,
+    // still the ALICE identity). All CURRENT content is hers → still Alice.
+    const alice2 = new ConversationDoc();
+    Y.applyUpdate(alice2.doc, Y.encodeStateAsUpdate(replica.doc));
+    alice2.body('m1')?.insert(0, 'Yes — ');
+    replica.applyAuthenticatedUpdate(clientDiff(alice2.doc, replica), ALICE);
+
+    expect(replica.conversation.body('m1')?.toString()).toBe('Yes — the original reading');
+    expect(replica.authenticatedAuthorOf('m1')?.userId).toBe('u_alice');
+  });
+});
+
+// ─────────────────────────────────────────────────────────────────────────────
+// 6. THE LIVE PROVIDER RE-RESOLVES THE CURRENT REPLICA — never a stale one (HIGH).
+// ─────────────────────────────────────────────────────────────────────────────
+
+describe('the live provider resolves the CURRENT registered replica, never a stale captured one', () => {
+  it('REPLACING the room’s replica makes an already-acquired handle resolve the NEW doc, not the stale one', () => {
+    const stale = new ServerRoomReplica().seedAuthored([msg('m1', 'stale body')], ALICE);
+    registerServerReplica(ROOM, stale);
+
+    // Acquire the handle BEFORE the replacement (the certify path holds it across awaits).
+    const live = liveCovenantDoc(ROOM);
+    expect(live.provider()).toBe(stale.doc);
+
+    // A fresh catch-up replaces the room's replica in the registry.
+    const fresh = new ServerRoomReplica().seedAuthored([msg('m1', 'fresh body')], ALICE);
+    registerServerReplica(ROOM, fresh);
+
+    // The SAME handle now resolves the FRESH doc — it re-reads the registry, never
+    // vouching against the superseded replica.
+    expect(live.provider()).toBe(fresh.doc);
+    expect(live.provider()).not.toBe(stale.doc);
+  });
+
+  it('UNREGISTERING the room after the handle is acquired fails the provider CLOSED (null), not against the torn-down doc', () => {
+    const replica = new ServerRoomReplica().seedAuthored([msg('m1', 'a body')], ALICE);
+    registerServerReplica(ROOM, replica);
+
+    const live = liveCovenantDoc(ROOM);
+    expect(live.provider()).not.toBeNull();
+
+    unregisterServerReplica(ROOM);
+    // Fail-closed: the removed room resolves null ⇒ the gate returns derive_failed.
+    expect(live.provider()).toBeNull();
+    const reader = actionReader(ROOM, [0, 0], { start: 0, end: 4 });
+    expect(deriveAnchor(reader)).toBeNull();
   });
 });
