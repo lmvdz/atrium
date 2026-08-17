@@ -260,6 +260,24 @@ function authorKindOf(kind: ChatKind): ParticipantKind {
   return kind === 'agent' ? 'agent' : 'human';
 }
 
+/** The default certification authority — nothing is certified (every line `~`). */
+const EMPTY_AUTHORITY: ReadonlySet<string> = new Set();
+
+/**
+ * The certified-message ids in a TRUSTED message list — the non-CRDT authority a
+ * caller hands {@link buildConversationModel}. Read off `certified` here, at the
+ * seam that owns the trusted source (the mock fixture, or #181's gated read), and
+ * NEVER off a message that came from the peer-writable Yjs doc (#183 F1). The doc
+ * strips `certified` entirely, so it cannot supply this even if asked.
+ */
+export function certifiedIdsOf(messages: readonly ChatMsg[]): ReadonlySet<string> {
+  const ids = new Set<string>();
+  for (const message of messages) {
+    if (message.certified === true) ids.add(message.id);
+  }
+  return ids;
+}
+
 /**
  * THE PURE PROJECTION — a list of `ChatMsg`es + the room + the participants → the
  * `ConversationModel` the surface renders. This is the one transform both sources
@@ -274,6 +292,7 @@ export function buildConversationModel(
   messages: readonly ChatMsg[],
   room: string,
   participants: readonly ParticipantSummary[],
+  certifiedIds: ReadonlySet<string> = EMPTY_AUTHORITY,
 ): ConversationModel {
   const records: MessageRecord[] = [];
   const items: ConversationItem[] = [];
@@ -287,8 +306,11 @@ export function buildConversationModel(
         id: message.id,
         at: message.time,
         statement: systemStatement((message.text ?? '').trim()),
-        // The tick is DERIVED from the certification field, never a glyph in text.
-        state: message.certified === true ? SYSTEM_CERTIFIED : SYSTEM_ROUTINE,
+        // The tick is DERIVED from the NON-CRDT certification authority keyed by
+        // id (#183 F1), NEVER from a `certified` field on the message — that field
+        // is peer-writable and forgeable, so it must not source a `✓`. A message
+        // whose id is not in the gated authority set is `~`/routine.
+        state: certifiedIds.has(message.id) ? SYSTEM_CERTIFIED : SYSTEM_ROUTINE,
       };
       items.push({ kind: 'system', id: message.id, mm, entry });
       continue;
@@ -355,10 +377,15 @@ export function buildConversationModel(
  * Yjs-backed model is proven equal to.
  */
 export function conversationModel(selection: Selection): ConversationModel {
+  const messages = conversationFor(selection);
   return buildConversationModel(
-    conversationFor(selection),
+    messages,
     sessionFor(selection).agent.room,
     participantsFor(selection),
+    // The mock seam IS the trusted source on the fixture route, so its `certified`
+    // fields are the certification authority — read here, off the fixture, not off
+    // the doc. This keeps the seam's `✓` while the durable path forges none.
+    certifiedIdsOf(messages),
   );
 }
 

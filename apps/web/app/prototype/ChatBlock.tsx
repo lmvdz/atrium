@@ -29,6 +29,7 @@ import { SystemRow } from '@/src/components/timeline/SystemRow';
 import { TimelineRow } from '@/src/components/timeline/TimelineRow';
 import { ChatTopBar } from './ChatChrome';
 import { type ConversationItem, type Echo, echoItem, messageBody } from './conversation-model';
+import type { ConversationTransport } from './conversation-transport';
 import { IconChevron, IconDot } from './icons';
 import { MessageText } from './MessageText';
 import styles from './prototype.module.css';
@@ -643,11 +644,20 @@ export function ChatBlock({
   echoes,
   draftComment,
   onSay,
+  transport,
 }: {
   selected: Selection;
   echoes: readonly Echo[];
   draftComment: CommentDraft | null;
   onSay: (text: string) => void;
+  /**
+   * The replication fabric this room's doc joins (#183 F4). When present, the
+   * conversation is LIVE: the doc catches up from the stream, and a typed line is
+   * appended straight into the converging doc (so a peer sees it and it survives
+   * reload) instead of becoming a local `echo`. Omitted on the `/prototype`
+   * fixture route, where the composer keeps the local echo behaviour.
+   */
+  transport?: ConversationTransport;
 }) {
   const [value, setValue] = useState('');
   const inputRef = useRef<HTMLTextAreaElement>(null);
@@ -674,7 +684,7 @@ export function ChatBlock({
      is byte-identical to the prior `conversationModel(shownSel)`. Echoes
      (locally-sent lines) are the viewer typing — real typed records on the SAME
      register, so they render as shipped rows too. */
-  const model = useConversationModel(shownSel);
+  const { model, version, say } = useConversationModel(shownSel, transport);
   const { records, items } = useMemo(() => {
     const echoes_ = echoes.map((echo, index) => echoItem(echo, index, model.room));
     return {
@@ -698,7 +708,10 @@ export function ChatBlock({
       <ChatTopBar selected={selected} />
       <ChatMinimap
         scrollRef={logRef}
-        revision={`${shownSel.kind}:${shownSel.id}|${echoes.length}|${draftComment ? draftComment.text.length : -1}|${fading ? 1 : 0}`}
+        // `version` bumps whenever the live doc converges (a remote line arrives),
+        // so the minimap remeasures the feed then too, not only on local changes
+        // (#183 secondary: minimap re-measure on live model version bump).
+        revision={`${shownSel.kind}:${shownSel.id}|${echoes.length}|${draftComment ? draftComment.text.length : -1}|${fading ? 1 : 0}|v${version}`}
       />
       {/* The feed renders inside the register every shipped `TimelineRow` resolves
           its citation against — one ledger for the whole thread. */}
@@ -720,7 +733,11 @@ export function ChatBlock({
             onChange={setValue}
             onSubmit={() => {
               if (value.trim().length > 0) {
-                onSay(value);
+                // LIVE: the typed line enters the converging doc, so a peer sees
+                // it and it survives reload (#183 F4). FIXTURE: the local echo
+                // path, unchanged (the `/prototype` design demo).
+                if (transport) say(value);
+                else onSay(value);
                 setValue('');
               }
             }}

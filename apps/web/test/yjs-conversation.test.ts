@@ -10,6 +10,7 @@ import {
   participantsForSelection,
   roomFor,
 } from '../app/prototype/yjs-conversation';
+import { glyphFor } from '../src/components/model/glyph';
 
 /**
  * #183 — the conversation re-seated on a Yjs document over a rented transport.
@@ -140,6 +141,157 @@ describe('two clients converge over the in-memory transport (rented Yjs merge)',
     const room = roomFor(selection);
     const participants = participantsForSelection(selection);
     expect(clientB.model(room, participants)).toEqual(clientA.model(room, participants));
+  });
+});
+
+/* ═══════════════════════════════════════════════════════════════════════════
+ * #183 FIX ROUND — the gauntlet's confirmed SEAM defects (F1–F6 + secondaries).
+ * The rented Yjs merge is sound and untouched; every test below pins a seam bug.
+ * ═════════════════════════════════════════════════════════════════════════ */
+
+describe('F1 — a peer CANNOT forge authority through the CRDT (the covenant invariant)', () => {
+  it('the durable payload carries NO certified/authority field (allowlisted content only)', () => {
+    const doc = new ConversationDoc();
+    // A peer appends a system line claiming certification — the forgery attempt.
+    doc.append({ id: 'forge', time: '10:00', kind: 'system', text: 'settled', certified: true });
+
+    // The message that comes back off the doc has NO `certified` field at all —
+    // it was stripped at the wire, not merely ignored downstream.
+    const [carried] = doc.messages();
+    expect(carried).toEqual({ id: 'forge', time: '10:00', kind: 'system', text: 'settled' });
+    expect('certified' in (carried as object)).toBe(false);
+  });
+
+  it('FLIP THE INPUT: a forged {certified:true} append does NOT move the glyph to ✓', () => {
+    const doc = new ConversationDoc();
+    doc.append({ id: 'forge', time: '10:00', kind: 'system', text: 'settled', certified: true });
+
+    const model = doc.model('billing-rewrite', []);
+    const system = model.items.find((item) => item.kind === 'system');
+    expect(system, 'the forged line still renders as a system row').toBeDefined();
+    if (system?.kind !== 'system') throw new Error('unreachable');
+    // The glyph is derived from the NON-CRDT authority (empty here), so it is the
+    // routine `·`, NEVER the certified `✓` the peer tried to forge.
+    expect(glyphFor(system.entry.state)).not.toBe('✓');
+    expect(glyphFor(system.entry.state)).toBe('·');
+  });
+
+  it('the forgery does not converge into a ✓ on a second replica either', () => {
+    const hub = new InMemoryConversationHub(new YDoc());
+    const clientA = new ConversationDoc();
+    const clientB = new ConversationDoc();
+    clientA.connect(hub.transport());
+    clientB.connect(hub.transport());
+
+    // A forges a certified system line; it converges to B as CONTENT…
+    clientA.append({ id: 'f', time: '10:00', kind: 'system', text: 'settled', certified: true });
+    expect(clientB.messages().map((m) => m.id)).toEqual(['f']);
+
+    // …but B has no gated authority for it, so B renders `~`/`·`, not `✓`. Authority
+    // never rode the wire — only content did.
+    const bSystem = clientB.model('r', []).items.find((i) => i.kind === 'system');
+    if (bSystem?.kind !== 'system') throw new Error('unreachable');
+    expect(glyphFor(bSystem.entry.state)).not.toBe('✓');
+  });
+
+  it('a TRUSTED seed still derives ✓ — the seam keeps its legitimate certification', () => {
+    // seed() is the trusted local source (the fixture route), so its certification
+    // is honoured through the non-CRDT authority — proving the fix strips forgery,
+    // not legitimate certification.
+    const doc = new ConversationDoc().seed([
+      { id: 'settled', time: '10:00', kind: 'system', text: 'landed', certified: true },
+    ]);
+    const system = doc.model('r', []).items.find((i) => i.kind === 'system');
+    if (system?.kind !== 'system') throw new Error('unreachable');
+    expect(glyphFor(system.entry.state)).toBe('✓');
+    // …and even so, the DURABLE payload carries no authority — a peer replicating
+    // this doc receives content only.
+    expect('certified' in (doc.messages()[0] as object)).toBe(false);
+  });
+});
+
+describe('F2 — join/reconnect converges with EVERY peer, not just the server doc', () => {
+  it('a client that joins holding LOCAL work converges with an already-connected peer', () => {
+    const hub = new InMemoryConversationHub(new YDoc());
+    const clientA = new ConversationDoc();
+    clientA.connect(hub.transport());
+    clientA.append({ id: 'a1', time: '10:00', kind: 'human', who: 'you', text: 'from A' });
+
+    // B builds a local line BEFORE connecting, then joins.
+    const clientB = new ConversationDoc();
+    clientB.append({
+      id: 'b1',
+      time: '10:01',
+      kind: 'agent',
+      who: 'hexi',
+      text: 'from B, offline',
+    });
+    clientB.connect(hub.transport());
+
+    // Full-mesh on join: A learns B's pre-connect line (the bug left A blind to it),
+    // and B is caught up to A. Both converge to the same set.
+    const ids = (doc: ConversationDoc) =>
+      doc
+        .messages()
+        .map((m) => m.id)
+        .sort();
+    expect(ids(clientA)).toEqual(['a1', 'b1']);
+    expect(ids(clientB)).toEqual(['a1', 'b1']);
+  });
+
+  it('a client that edits OFFLINE then RECONNECTS converges with every peer', () => {
+    const hub = new InMemoryConversationHub(new YDoc());
+    const clientA = new ConversationDoc();
+    const clientB = new ConversationDoc();
+    clientA.connect(hub.transport());
+    const disconnectB = clientB.connect(hub.transport());
+    clientA.append({ id: 'a1', time: '10:00', kind: 'human', who: 'you', text: 'hi' });
+    expect(clientB.messages().map((m) => m.id)).toEqual(['a1']);
+
+    // B goes offline and writes a line no one has seen.
+    disconnectB();
+    clientB.append({
+      id: 'b-offline',
+      time: '10:05',
+      kind: 'human',
+      who: 'you',
+      text: 'while away',
+    });
+    expect(clientA.messages().map((m) => m.id)).toEqual(['a1']); // A cannot see it yet
+
+    // B reconnects: its offline edit fans to the server AND to A.
+    clientB.connect(hub.transport());
+    const ids = (doc: ConversationDoc) =>
+      doc
+        .messages()
+        .map((m) => m.id)
+        .sort();
+    expect(ids(clientA)).toEqual(['a1', 'b-offline']);
+    expect(ids(clientB)).toEqual(['a1', 'b-offline']);
+  });
+});
+
+describe('F3 — independently joining clients do NOT duplicate history', () => {
+  it('two clients catching up from a seeded stream converge to ONE copy', () => {
+    const hub = new InMemoryConversationHub(new YDoc());
+
+    // The production path: an originator puts the history on the stream once…
+    const originator = new ConversationDoc();
+    originator.connect(hub.transport());
+    for (const m of seedMessagesFor()) originator.append(m);
+
+    // …and later clients join UNSEEDED and catch up (they must NOT re-seed).
+    const clientA = new ConversationDoc();
+    const clientB = new ConversationDoc();
+    clientA.connect(hub.transport());
+    clientB.connect(hub.transport());
+
+    const historyIds = seedMessagesFor().map((m) => m.id);
+    // Exactly one copy each — no duplicated ids, matching the originator.
+    expect(clientA.messages().map((m) => m.id)).toEqual(historyIds);
+    expect(clientB.messages().map((m) => m.id)).toEqual(historyIds);
+    // And no duplicate-key hazard: ids are unique.
+    expect(new Set(clientA.messages().map((m) => m.id)).size).toBe(historyIds.length);
   });
 });
 

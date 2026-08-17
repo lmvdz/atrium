@@ -51,6 +51,18 @@ const MESSAGES_KEY = 'messages';
 export class ConversationDoc {
   readonly doc: YDoc;
 
+  /**
+   * THE NON-CRDT AUTHORITY SOURCE (#183 F1). Which message ids carry a certified
+   * `✓`, keyed by id — held OUTSIDE the `Y.Doc`, so it never rides the
+   * peer-writable wire and a peer can never forge a settlement. A message that is
+   * not in this set projects `~`/routine, never `✓`. It is populated ONLY from a
+   * trusted local source ({@link seed} on the fixture route, or #181's gated read
+   * authority in production), never from an inbound CRDT update. Until #181 lands
+   * the production default is empty — every live line is `~` until a gated door
+   * says otherwise, which is the covenant-correct default.
+   */
+  private readonly certifiedIds = new Set<string>();
+
   constructor(doc: YDoc = new YDoc()) {
     this.doc = doc;
   }
@@ -63,16 +75,32 @@ export class ConversationDoc {
    * Seed the doc with an initial conversation. A no-op if the doc already
    * carries messages (e.g. it was caught up from a durable stream first), so a
    * client that connects before seeding never doubles the history.
+   *
+   * The fixture is a TRUSTED local source (the `/prototype` design route, not a
+   * peer over the wire), so its `certified` fields are recorded into the non-CRDT
+   * {@link certifiedIds} authority — this is the ONE place a `✓` originates on the
+   * fixture route. The durable payload itself still carries zero authority
+   * ({@link encodeMessage} strips it): the authority lives beside the doc, never
+   * inside it.
    */
   seed(messages: readonly ChatMsg[]): this {
     if (this.array.length > 0) return this;
+    for (const message of messages) {
+      if (message.certified === true) this.certifiedIds.add(message.id);
+    }
     this.doc.transact(() => {
       this.array.push(messages.map((message) => encodeMessage(message)));
     });
     return this;
   }
 
-  /** Append one message as an atomic, mergeable array element. */
+  /**
+   * Append one message as an atomic, mergeable array element. This is the
+   * PEER-WRITABLE path: whatever authority field the caller sets is STRIPPED by
+   * {@link encodeMessage} and is NOT recorded into {@link certifiedIds}, so an
+   * appended line — local or arriving over a transport — can never forge a `✓`.
+   * Certification only ever comes from the gated non-CRDT source.
+   */
   append(message: ChatMsg): this {
     this.doc.transact(() => {
       this.array.push([encodeMessage(message)]);
@@ -80,19 +108,25 @@ export class ConversationDoc {
     return this;
   }
 
-  /** The current messages, in the doc's converged order. */
+  /** The current messages, in the doc's converged order (never carrying authority). */
   messages(): ChatMsg[] {
     return this.array.toArray().map((element) => decodeMessage(element));
+  }
+
+  /** Whether this doc is torn down — guards the hook against reusing a dead instance. */
+  isDestroyed(): boolean {
+    return this.doc.isDestroyed;
   }
 
   /**
    * Project the doc to the `ConversationModel` the surface renders — the SAME
    * transform the mock path uses. `room` and `participants` are the selection's
    * projection (the covenant/registry concerns that are not conversation content
-   * and so are not in the doc); the messages come live from the CRDT.
+   * and so are not in the doc); the messages come live from the CRDT; the `✓`/`~`
+   * glyph comes from the non-CRDT {@link certifiedIds} authority, NEVER the doc.
    */
   model(room: string, participants: readonly ParticipantSummary[]): ConversationModel {
-    return buildConversationModel(this.messages(), room, participants);
+    return buildConversationModel(this.messages(), room, participants, this.certifiedIds);
   }
 
   /**
@@ -151,15 +185,37 @@ export function conversationModelFromDoc(
 }
 
 /* ── the durable element codec ─────────────────────────────────────────────
-   A message is stored as a canonical JSON string: `JSON.stringify` drops
-   `undefined` fields (so the round-trip carries exactly the defined shape the
-   builder reads) and gives each message a single opaque array element that Yjs
-   merges as a whole. This is the ONLY place `ChatMsg` meets the substrate. */
+   A message is stored as a canonical JSON string of its CONVERSATION-CONTENT
+   fields ONLY. This is an ALLOWLIST, not a denylist (#183 F1): the durable
+   payload is built by picking the known content fields, so any authority /
+   epistemic / settlement field — `certified` today, anything added tomorrow — is
+   structurally absent from the peer-writable doc and cannot be forged over the
+   wire. `JSON.stringify` drops `undefined` fields, so the round-trip carries
+   exactly the defined content shape the builder reads. This is the ONLY place
+   `ChatMsg` meets the substrate.
+
+   Why allowlist and not `delete message.certified`: a denylist fails open the
+   moment a second authority field is added and nobody remembers to add it here;
+   an allowlist fails closed — a new field is absent from the wire until it is
+   deliberately added to `DURABLE_FIELDS`, which is a diff a reviewer sees. */
+
+/** The conversation-content fields that are allowed onto the peer-writable doc. */
+const DURABLE_FIELDS = ['id', 'time', 'kind', 'who', 'text', 'turn', 'image', 'reply'] as const;
+
+/** The content-only projection of a `ChatMsg` — carries zero authority state. */
+type DurableMessage = Pick<ChatMsg, (typeof DURABLE_FIELDS)[number]>;
 
 function encodeMessage(message: ChatMsg): string {
-  return JSON.stringify(message);
+  const durable: DurableMessage = { id: message.id, time: message.time, kind: message.kind };
+  for (const field of DURABLE_FIELDS) {
+    const value = message[field];
+    if (value !== undefined) (durable as Record<string, unknown>)[field] = value;
+  }
+  return JSON.stringify(durable);
 }
 
 function decodeMessage(element: string): ChatMsg {
+  // The decoded message carries only content fields — `certified` is absent by
+  // construction, so a projection reading it off the doc gets `undefined`.
   return JSON.parse(element) as ChatMsg;
 }

@@ -33,9 +33,20 @@
  * ═════════════════════════════════════════════════════════════════════════ */
 
 import type { Row } from '@electric-sql/client';
-import { ElectricProvider, parseToDecoder } from '@electric-sql/y-electric';
-import type { Doc as YDoc } from 'yjs';
+import { ElectricProvider, parseToDecoder, type ResumeState } from '@electric-sql/y-electric';
+import { encodeStateVector, Doc as YDoc } from 'yjs';
 import type { ConversationTransport } from './conversation-transport';
+
+/**
+ * The state vector of an EMPTY doc — "the stream has nothing of mine yet". Handed
+ * to the provider as the resume baseline when the caller gives none, so
+ * `Y.encodeStateAsUpdate(doc, thisVector)` is the doc's WHOLE current state and
+ * the provider uploads it on connect (#183 F5). Without it the provider seeds no
+ * `pendingChanges` and only ever ships updates made AFTER construction, so a
+ * client that edited offline/pre-connect never gets those edits onto the stream.
+ * Computed once — an empty vector is a constant.
+ */
+const EMPTY_STATE_VECTOR: Uint8Array = encodeStateVector(new YDoc());
 
 /**
  * The decoder type `parseToDecoder` yields for a `bytea` column — derived from
@@ -60,7 +71,7 @@ export interface ElectricTransportConfig {
   /** The app's write endpoint that appends an `op` bytea row for this room. */
   readonly sendUrl: string;
   /** Optional resume state, so a reconnect does not retransmit the whole doc. */
-  readonly resumeState?: ConstructorParameters<typeof ElectricProvider>[0]['resumeState'];
+  readonly resumeState?: ResumeState;
 }
 
 /**
@@ -81,8 +92,14 @@ export function electricConversationTransport(
             url: config.shapeUrl,
             params: {
               table: 'ydoc_updates',
-              // One room's stream — the durable filter Electric pushes down.
-              where: `room = '${config.room}'`,
+              // One room's stream — the durable filter Electric pushes down. The
+              // room is a POSITIONAL parameter (`$1`), never interpolated into the
+              // SQL string (#183 secondary): Electric binds it server-side, so a
+              // room slug carrying a quote or `OR 1=1` can never break out of the
+              // predicate. `where` + `params` is the parameterised form the client
+              // documents (index.d.ts: `where: "id = $1", params: { "1": … }`).
+              where: 'room = $1',
+              params: { '1': config.room },
             },
             parser: parseToDecoder,
           },
@@ -90,7 +107,11 @@ export function electricConversationTransport(
           // y-electric's documented column: the update bytea lives in `op`.
           getUpdateFromRow: (row) => row.op,
         },
-        resumeState: config.resumeState,
+        // Upload the doc's pre-connect state by default (#183 F5): a caller-supplied
+        // resumeState wins (a real reconnect resumes from its own baseline), but
+        // when none is given we baseline against an EMPTY vector so the provider
+        // seeds `pendingChanges` with the doc's whole current state and ships it.
+        resumeState: config.resumeState ?? { stableStateVector: EMPTY_STATE_VECTOR },
       });
       return () => provider.destroy();
     },

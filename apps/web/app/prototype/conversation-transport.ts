@@ -85,10 +85,22 @@ export class InMemoryConversationHub {
     const origin = Symbol('conversation-transport');
     this.origins.set(doc, origin);
 
-    // Catch the joiner up to the shared stream, and seed the stream with
-    // anything the joiner already holds — both directions, both opaque updates.
+    // 1. Catch the joiner up to the shared stream.
     applyUpdate(doc, encodeStateAsUpdate(this.server), origin);
-    applyUpdate(this.server, encodeStateAsUpdate(doc));
+
+    // 2. FULL-MESH SYNC ON JOIN (#183 F2). The joiner may hold local work it made
+    //    before connecting (a fresh client with unsent edits, or one that edited
+    //    OFFLINE and is now reconnecting). Folding that only into the private
+    //    `server` doc leaves every already-connected member permanently diverged,
+    //    because those edits predate this doc's `update` subscription and so never
+    //    fire an event. So fan the joiner's full state to the server AND to every
+    //    existing member. Yjs dedupes, and each peer is written under ITS OWN
+    //    origin so the write does not echo back out through that peer's handler.
+    const joinerState = encodeStateAsUpdate(doc);
+    applyUpdate(this.server, joinerState);
+    for (const peer of this.members) {
+      applyUpdate(peer, joinerState, this.origins.get(peer));
+    }
 
     const onUpdate = (update: Uint8Array, updateOrigin: unknown) => {
       // Ignore echoes of updates WE just applied to this doc.
