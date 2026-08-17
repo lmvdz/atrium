@@ -5,6 +5,7 @@ import { ConversationDoc } from '@/app/prototype/yjs-conversation';
 import {
   CovenantDocReaderProd,
   canonicalizeLeafValue,
+  type DocSource,
   readerForLiveDoc,
 } from '@/lib/covenant-reader';
 import { NaiveCovenantDocReader } from './support/naive-covenant-reader';
@@ -713,6 +714,90 @@ describe('HARDENING (c): a genuinely async, cancellable, monotonic deadline → 
 });
 
 // ═════════════════════════════════════════════════════════════════════════════
+// ASYNC round-3 (the round-2 gauntlet's async findings): the deadline no longer
+// LEAKS abort listeners, PASSES the signal INTO poll (cancellable acquisition), and
+// RE-CHECKS the monotonic clock AND the signal AFTER poll returns (codex's 10.001ms
+// window — a slow poll that itself crosses the deadline must not be accepted).
+// ═════════════════════════════════════════════════════════════════════════════
+describe('ASYNC round-3: no listener leak, signal into poll, post-poll recheck', () => {
+  const neverReady = (): DocSource => ({ poll: () => null });
+
+  it('the AbortSignal is passed INTO poll (cancellable acquisition, not merely ignored)', async () => {
+    const anchor = certify(capturingReader(makeDoc().doc));
+    let received: AbortSignal | undefined | 'unset' = 'unset';
+    const source: DocSource = {
+      poll: (sig?: AbortSignal) => {
+        received = sig;
+        return null;
+      },
+    };
+    const reader = new CovenantDocReaderProd(source, undefined, { deadlineMs: 5 });
+    const ac = new AbortController();
+    await reader.resolveSpanAsync(anchor, ac.signal);
+    // Base calls `poll()` with no argument (received === undefined); the fix threads
+    // the signal through so an acquisition can cancel its own in-flight work.
+    expect(received).toBe(ac.signal);
+  });
+
+  it('a poll that itself crosses the deadline → the doc is REFUSED (codex 10.001ms window)', async () => {
+    const { doc } = makeDoc();
+    const anchor = certify(capturingReader(doc));
+    let t = 0;
+    const monotonicNow = () => t;
+    // The poll advances the monotonic clock PAST the deadline before returning the doc.
+    const source: DocSource = {
+      poll: () => {
+        t += 100;
+        return doc;
+      },
+    };
+    const reader = new CovenantDocReaderProd(source, undefined, { deadlineMs: 50, monotonicNow });
+    // Deadline checked BEFORE poll: 0 < 50 ⇒ poll runs, advancing t to 100; the fix
+    // RE-CHECKS after poll (100 ≥ 50) ⇒ null. Base returned the late doc (no recheck).
+    expect(await reader.resolveSpanAsync(anchor)).toBeNull();
+  });
+
+  it('an abort DURING poll → the returned doc is REFUSED (post-poll signal recheck)', async () => {
+    const { doc } = makeDoc();
+    const anchor = certify(capturingReader(doc));
+    const ac = new AbortController();
+    const source: DocSource = {
+      poll: () => {
+        ac.abort(); // the source's own acquisition observed the cancellation
+        return doc;
+      },
+    };
+    const reader = new CovenantDocReaderProd(source, undefined, { deadlineMs: 1000 });
+    expect(await reader.resolveSpanAsync(anchor, ac.signal)).toBeNull();
+  });
+
+  it('a stalled acquire does NOT leak abort listeners (~250-callback leak closed)', async () => {
+    const anchor = certify(capturingReader(makeDoc().doc));
+    const ac = new AbortController();
+    let added = 0;
+    let removed = 0;
+    const origAdd = ac.signal.addEventListener.bind(ac.signal);
+    const origRemove = ac.signal.removeEventListener.bind(ac.signal);
+    ac.signal.addEventListener = ((type: string, ...rest: unknown[]) => {
+      if (type === 'abort') added++;
+      return (origAdd as (t: string, ...r: unknown[]) => void)(type, ...rest);
+    }) as typeof ac.signal.addEventListener;
+    ac.signal.removeEventListener = ((type: string, ...rest: unknown[]) => {
+      if (type === 'abort') removed++;
+      return (origRemove as (t: string, ...r: unknown[]) => void)(type, ...rest);
+    }) as typeof ac.signal.removeEventListener;
+
+    const reader = new CovenantDocReaderProd(neverReady(), undefined, { deadlineMs: 60 });
+    expect(await reader.resolveSpanAsync(anchor, ac.signal)).toBeNull();
+    // Base registers one abort listener PER poll and removes NONE on normal completion
+    // (~60 accrue on this stalled acquire); the fix removes each on its timer, so the
+    // net registered-and-not-removed count never accumulates.
+    expect(added).toBeGreaterThan(3); // many polls actually happened
+    expect(added - removed).toBeLessThanOrEqual(1);
+  });
+});
+
+// ═════════════════════════════════════════════════════════════════════════════
 // INJECTIVITY (#189 CRITICAL) — distinct content ⇒ DISTINCT digest, no false ✓.
 // Each collision the gauntlet named is closed: the digest MOVES for it on the
 // production reader, where the base (String(obj) / docDigest-shadow / untyped)
@@ -724,30 +809,56 @@ describe('INJECTIVITY: the leaf encoder is injective across the gauntlet collisi
   it('scalar "x" ≠ object { value: "x" }', () => {
     expect(enc('x')).not.toBe(enc({ value: 'x' }));
   });
-  it('null ≠ NaN ≠ Infinity (a bare JSON.stringify folds all three toward "null")', () => {
-    expect(new Set([enc(null), enc(Number.NaN), enc(Number.POSITIVE_INFINITY)]).size).toBe(3);
-    expect(enc(Number.NEGATIVE_INFINITY)).not.toBe(enc(Number.POSITIVE_INFINITY));
+  it('null encodes; NaN / ±Infinity are NON-FINITE ⇒ fail closed (allowlist, round-3)', () => {
+    // Round-1 TAGGED NaN/Infinity to keep them distinct; round-3 CLOSES the allowlist
+    // to FINITE numbers only, so a non-finite value fails closed (throw ⇒ DRIFT)
+    // rather than being carried at all — there is no `JSON.stringify`-to-`null` fold
+    // to hide in, and no unbounded set of exotic numbers to keep tagging.
+    expect(enc(null)).toBe('z:null');
+    expect(() => enc(Number.NaN)).toThrow(/non-compliant value shape/);
+    expect(() => enc(Number.POSITIVE_INFINITY)).toThrow(/non-compliant value shape/);
+    expect(() => enc(Number.NEGATIVE_INFINITY)).toThrow(/non-compliant value shape/);
   });
-  it('bigint 1n ≠ the string "bigint:1"', () => {
+  it('bigint 1n ≠ the string "bigint:1" (a dedicated unambiguous `i:` tag)', () => {
     expect(enc(1n)).not.toBe(enc('bigint:1'));
   });
   it('number 1 ≠ string "1" (type is content)', () => {
     expect(enc(1)).not.toBe(enc('1'));
   });
-  it('Date / Map / Set do NOT collapse to {} (nor to each other)', () => {
-    const shapes = [enc(new Date(0)), enc(new Map([['a', 1]])), enc(new Set([1])), enc({})];
-    expect(new Set(shapes).size).toBe(4);
-    expect(enc(new Date(0))).not.toBe(enc(new Date(1)));
-    expect(enc(new Map([['a', 1]]))).not.toBe(enc(new Map([['a', 2]])));
-    expect(enc(new Set([1]))).not.toBe(enc(new Set([2])));
+  it('Date / Map / Set / typed arrays are NON-PLAIN ⇒ fail closed (round-3 allowlist)', () => {
+    // Round-1 tagged Date/Map/Set to avoid collapsing them to `{}`; round-3 REJECTS
+    // them (and every non-plain prototype) — a `Uint8Array` must never be coerced to
+    // `o:{"0":…}` and shadow a real index object, so it fails closed, not collapses.
+    expect(() => enc(new Date(0))).toThrow(/non-compliant value shape/);
+    expect(() => enc(new Map([['a', 1]]))).toThrow(/non-compliant value shape/);
+    expect(() => enc(new Set([1]))).toThrow(/non-compliant value shape/);
+    expect(() => enc(new Uint8Array([1]))).toThrow(/non-compliant value shape/);
+    expect(enc({})).toBe('o:{}'); // a genuine plain object still encodes
   });
   it('keys are NFC-normalized BEFORE sorting (composed vs decomposed key → SAME encoding)', () => {
-    // 'café' composed (U+00E9) vs decomposed (e + U+0301) as a KEY must fold.
-    expect(enc({ café: 1 })).toBe(enc({ café: 1 }));
+    // GENUINELY DISTINCT raw keys that normalize equal — composed U+00E9 vs decomposed
+    // e + U+0301 — built with escapes so the two objects are byte-different pre-NFC (the
+    // old form compared a source-identical key to itself: tautological, green even for a
+    // reader that never normalized). A single such key must fold to one encoding.
+    const composedKey = 'caf\u00e9'; // composed U+00E9
+    const decomposedKey = 'cafe\u0301'; // decomposed e + U+0301
+    expect(composedKey).not.toBe(decomposedKey); // guard: distinct raw bytes
+    expect(enc({ [composedKey]: 1 })).toBe(enc({ [decomposedKey]: 1 }));
   });
-  it('an unsupported value (function) FAILS CLOSED — throws, never a shared token', () => {
-    expect(() => enc(() => 0)).toThrow(/unsupported leaf value/);
-    expect(() => enc(Symbol('x'))).toThrow(/unsupported leaf value/);
+  it('two DISTINCT raw keys that normalize EQUAL in one object ⇒ fail closed (NFC-dup)', () => {
+    // Two keys, one NFC identity. Last-wins would silently drop a value; emitting both is
+    // an ambiguous duplicate slot. Neither is injective, so the allowlist REFUSES it (throw
+    // ⇒ DRIFT) rather than the base encoder's ambiguous `o:{...,...}` that core's key-NFC
+    // pass then collapses.
+    const dup: Record<string, unknown> = {};
+    dup['caf\u00e9'] = 1;
+    dup['cafe\u0301'] = 2;
+    expect(Object.keys(dup).length).toBe(2); // guard: genuinely two raw keys
+    expect(() => enc(dup)).toThrow(/non-compliant value shape/);
+  });
+  it('an unsupported value (function / symbol) FAILS CLOSED — throws, never a shared token', () => {
+    expect(() => enc(() => 0)).toThrow(/non-compliant value shape/);
+    expect(() => enc(Symbol('x'))).toThrow(/non-compliant value shape/);
   });
 });
 

@@ -73,13 +73,15 @@ import * as Y from 'yjs';
 // ─────────────────────────────────────────────────────────────────────────────
 
 /**
- * A source of the live `Y.Doc`, polled non-blockingly. `poll()` returns the doc
- * when it is ready, or `null` while it is pending / unavailable / torn down. A
- * source that is permanently `null` is the "stalled stream" case the deadline
- * turns into DRIFT.
+ * A source of the live `Y.Doc`, polled non-blockingly. `poll(signal)` returns the
+ * doc when it is ready, or `null` while it is pending / unavailable / torn down. The
+ * async deadline passes its `AbortSignal` INTO `poll` (#189 round-2) so a source
+ * whose own acquisition is cancellable can abandon in-flight work at once, rather
+ * than the deadline loop merely ignoring a doc it eventually returns. A source that
+ * is permanently `null` is the "stalled stream" case the deadline turns into DRIFT.
  */
 export interface DocSource {
-  poll(): Y.Doc | null;
+  poll(signal?: AbortSignal): Y.Doc | null;
 }
 
 /** Wrap a plain (already-resolved) doc — or `null` — as an immediate source. */
@@ -152,6 +154,12 @@ function defaultMonotonicNow(): number {
  * deadline loop yields the event loop between polls (never a busy-spin) and is
  * cancellable. A zero/negative `ms` still yields one macrotask, so a never-ready
  * source cannot starve the loop.
+ *
+ * The abort listener is REMOVED on normal (timer) completion (#189 round-2 finding):
+ * a stalled acquire polls hundreds of times, and a listener left registered on each
+ * pass accumulates (~250 callbacks) on a long-lived signal — a real leak. Registering
+ * a NAMED listener and removing it in BOTH the timer and abort paths keeps at most one
+ * live at a time.
  */
 function delay(ms: number, signal?: AbortSignal): Promise<void> {
   return new Promise((resolve) => {
@@ -159,15 +167,18 @@ function delay(ms: number, signal?: AbortSignal): Promise<void> {
       resolve();
       return;
     }
-    const timer = setTimeout(resolve, Math.max(0, ms));
-    signal?.addEventListener(
-      'abort',
+    const onAbort = () => {
+      clearTimeout(timer);
+      resolve();
+    };
+    const timer = setTimeout(
       () => {
-        clearTimeout(timer);
+        signal?.removeEventListener('abort', onAbort); // normal completion — drop the listener
         resolve();
       },
-      { once: true },
+      Math.max(0, ms),
     );
+    signal?.addEventListener('abort', onAbort, { once: true });
   });
 }
 
@@ -194,20 +205,40 @@ function base64ToBytes(b64: string): Uint8Array {
 type DeltaOp = { insert: string | Record<string, unknown>; attributes?: Record<string, unknown> };
 
 // ─────────────────────────────────────────────────────────────────────────────
-// INJECTIVE, type-tagged, NFC-normalized serialization of an arbitrary leaf value
-// — the discipline `@atrium/core`'s `canonical()` uses on the fragment itself,
-// hardened for the covenant's INJECTIVITY requirement (#189 CRITICAL): DISTINCT
-// content MUST serialize to a DISTINCT string (no false `✓`). Every branch carries
-// a TYPE TAG, so a scalar `"x"` (`s:"x"`) ≠ an object `{value:"x"}` (`o:{…}`);
-// `null` (`z:null`) ≠ `NaN` (`n:NaN`) ≠ `Infinity` (`n:Infinity`) — where a bare
-// `JSON.stringify` folds `NaN`/`Infinity` to `null`; a bigint `1n` (`i:1`) ≠ the
-// string `"bigint:1"` (`s:"bigint:1"`); and `Date`/`Map`/`Set` keep their own tag
-// and structure instead of collapsing to `{}` (their `Object.keys` is empty). A
-// nested object is serialized field-by-field with keys NFC-normalized BEFORE they
-// are sorted (sort-before-normalize false-STALES a composed vs decomposed key). A
-// value with NO injective rendering (a function / symbol) THROWS — fail-CLOSED to
-// DRIFT — rather than collapsing onto a token two distinct values would share.
+// ALLOWLIST-THE-COMPLIANT-FORM serialization of a leaf value (#189 round-3, the
+// class-closer). The round-2 gauntlet proved a TAG-EVERYTHING encoder can never be
+// injective — every new exotic shape (`Uint8Array` ≡ `{0:1}`, a sparse hole ≡ `[]`,
+// NFC-duplicate keys last-wins) is another collision. So instead of adding tags, we
+// injectively encode a CLOSED ALLOWLIST of compliant forms and FAIL CLOSED — THROW,
+// which `resolveCovenant` turns into DRIFT / a refused anchor at certify — on
+// EVERYTHING else. A throw is never a shared token two distinct values collapse onto.
+//
+//   LEAF allowlist   — `string`, FINITE `number`, `boolean`, `null`, plus a
+//                      dedicated `undefined` tag and a dedicated `bigint` tag (each
+//                      an unambiguous, injective form). `NaN`/`±Infinity` are NOT
+//                      finite ⇒ THROW (no `JSON.stringify`-to-`null` fold to hide in).
+//   STRUCTURED allow — (a) a PLAIN object (own-enumerable keys, `Object.prototype`
+//                      or null-proto ONLY) whose keys' NFC forms are UNIQUE; two raw
+//                      keys that normalize equal ⇒ THROW (never last-wins-overwrite).
+//                      (b) a DENSE array; a hole (`new Array(1)`, sparse) ⇒ THROW.
+//                      The length is encoded (`a:${len}:[…]`) so `[undefined]` (len 1)
+//                      can never equal `[]` (len 0).
+//   REJECT ⇒ DRIFT   — typed arrays (`Uint8Array` …), sparse arrays, `Date`/`Map`/
+//                      `Set`, functions, symbols, class instances / any unrecognized
+//                      prototype. `Uint8Array([1])` MUST NOT share `{0:1}`'s encoding,
+//                      so it is refused, not coerced to `o:{"0":n:1}`.
+//
+// Keys are NFC-normalized BEFORE they are sorted (sort-before-normalize false-STALES
+// a composed vs decomposed key). Every branch carries a TYPE TAG, so a scalar `"x"`
+// (`s:"x"`) is distinct from an object `{value:"x"}` (`o:{…}`) and a bigint `1n`
+// (`i:1`) from the string `"bigint:1"` (`s:"bigint:1"`).
 // ─────────────────────────────────────────────────────────────────────────────
+
+function reject(what: string): never {
+  // Fail CLOSED: the throw becomes DRIFT in resolveCovenant / a refused anchor at
+  // certify, NEVER a shared token two distinct non-compliant values collapse onto.
+  throw new Error(`covenant reader: non-compliant value shape (${what}) — failing closed to DRIFT`);
+}
 
 export function canonicalizeLeafValue(value: unknown): string {
   if (value === null) return 'z:null';
@@ -217,45 +248,54 @@ export function canonicalizeLeafValue(value: unknown): string {
   if (t === 'boolean') return `b:${value ? 'true' : 'false'}`;
   if (t === 'number') {
     const n = value as number;
-    if (Number.isNaN(n)) return 'n:NaN';
-    if (n === Number.POSITIVE_INFINITY) return 'n:Infinity';
-    if (n === Number.NEGATIVE_INFINITY) return 'n:-Infinity';
-    if (Object.is(n, -0)) return 'n:-0'; // -0 and +0 are distinct writes
+    // Allowlist: FINITE numbers only. NaN/±Infinity are not compliant leaf content
+    // and have no place in a rendered span → fail closed (never fold to `null`).
+    if (!Number.isFinite(n)) reject(`non-finite number ${String(n)}`);
+    if (Object.is(n, -0)) return 'n:-0'; // -0 and +0 are distinct finite writes
     return `n:${JSON.stringify(n)}`;
   }
   if (t === 'bigint') return `i:${(value as bigint).toString()}`;
-  if (t === 'function' || t === 'symbol') {
-    // No rendered meaning and no injective serialization — fail CLOSED (the throw
-    // becomes DRIFT in resolveCovenant / a refused anchor at certify), NEVER a
-    // shared token two distinct unsupported values would collapse onto.
-    throw new Error(`covenant reader: unsupported leaf value of type ${t}`);
+  // Functions / symbols: no injective serialization → reject.
+  if (t !== 'object') reject(`type ${t}`);
+
+  if (Array.isArray(value)) {
+    // DENSE arrays only. A hole (`new Array(1)`, a sparse deletion) is NOT `[]`, and
+    // `.map`/`.join` silently skip holes — so reject any hole outright, and encode
+    // the length so `[undefined]` (len 1) can never collapse onto `[]` (len 0).
+    const len = value.length;
+    const parts: string[] = [];
+    for (let i = 0; i < len; i++) {
+      if (!(i in value)) reject('sparse array (hole)');
+      parts.push(canonicalizeLeafValue(value[i]));
+    }
+    return `a:${len}:[${parts.join(',')}]`;
   }
-  if (Array.isArray(value)) return `a:[${value.map(canonicalizeLeafValue).join(',')}]`;
-  if (value instanceof Date) {
-    const ms = value.getTime();
-    return `d:${Number.isNaN(ms) ? 'NaN' : String(ms)}`;
+
+  // PLAIN objects only. `Date`/`Map`/`Set`/typed arrays/class instances all have a
+  // non-`Object.prototype` prototype and are refused here — they must NOT be coerced
+  // to `o:{…}` (a `Uint8Array` would become `{0:…}` and shadow a real index object).
+  const proto = Object.getPrototypeOf(value as object);
+  if (proto !== Object.prototype && proto !== null) reject('non-plain prototype');
+  // A symbol-keyed object would silently drop those keys from `Object.keys` (two
+  // distinct symbol-keyed objects collapsing) — refuse it.
+  if (Object.getOwnPropertySymbols(value as object).length > 0) reject('symbol-keyed object');
+
+  const obj = value as Record<string, unknown>;
+  const seen = new Set<string>();
+  const entries: Array<readonly [string, unknown]> = [];
+  for (const rawKey of Object.keys(obj)) {
+    const key = rawKey.normalize('NFC');
+    // Two raw keys whose NFC forms are equal are ambiguous: keeping both would emit a
+    // duplicate key slot, and merging them last-wins would silently drop a value.
+    // Neither is injective → fail closed.
+    if (seen.has(key)) reject('NFC-duplicate object keys');
+    seen.add(key);
+    entries.push([key, obj[rawKey]] as const);
   }
-  if (value instanceof Map) {
-    const parts = [...(value as Map<unknown, unknown>).entries()]
-      .map(([k, v]) => `${canonicalizeLeafValue(k)}=>${canonicalizeLeafValue(v)}`)
-      .sort();
-    return `m:{${parts.join(',')}}`;
-  }
-  if (value instanceof Set) {
-    const parts = [...(value as Set<unknown>).values()].map(canonicalizeLeafValue).sort();
-    return `t:[${parts.join(',')}]`;
-  }
-  if (t === 'object') {
-    const obj = value as Record<string, unknown>;
-    // NFC-normalize each key BEFORE sorting, then tag it so no key can collide with
-    // a positional token.
-    const entries = Object.keys(obj).map((k) => [k.normalize('NFC'), obj[k]] as const);
-    entries.sort((x, y) => (x[0] < y[0] ? -1 : x[0] > y[0] ? 1 : 0));
-    return `o:{${entries
-      .map(([k, v]) => `${JSON.stringify(k)}:${canonicalizeLeafValue(v)}`)
-      .join(',')}}`;
-  }
-  throw new Error(`covenant reader: unsupported leaf value of type ${t}`);
+  entries.sort((x, y) => (x[0] < y[0] ? -1 : x[0] > y[0] ? 1 : 0));
+  return `o:{${entries
+    .map(([k, v]) => `${JSON.stringify(k)}:${canonicalizeLeafValue(v)}`)
+    .join(',')}}`;
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -348,8 +388,17 @@ export class CovenantDocReaderProd implements CovenantDocReader {
       // Deadline FIRST: a doc that only just became ready AT/AFTER the deadline is
       // a late arrival and must NOT be accepted (the false-`ok` codex found).
       if (this.deadlineEnabled && elapsed >= this.deadlineMs) return null;
-      const doc = this.source.poll();
-      if (doc) return doc;
+      // The signal flows INTO poll so a cancellable source abandons in-flight work.
+      const doc = this.source.poll(signal);
+      if (doc) {
+        // RE-CHECK after poll returns (#189 round-2, codex's 10.001ms window): a
+        // slow poll can itself straddle the deadline or an abort, so re-sample the
+        // monotonic clock AND the signal before ACCEPTING the doc. Without this, a
+        // poll that returned a doc just past the deadline would still be accepted.
+        if (signal?.aborted) return null;
+        if (this.deadlineEnabled && this.monotonicNow() - start >= this.deadlineMs) return null;
+        return doc;
+      }
       const remaining = this.deadlineEnabled ? this.deadlineMs - elapsed : pollEveryMs;
       await delay(Math.min(pollEveryMs, Math.max(0, remaining)), signal);
     }
@@ -374,18 +423,21 @@ export class CovenantDocReaderProd implements CovenantDocReader {
   // ── rendering ───────────────────────────────────────────────────────────────
 
   /**
-   * The marks a text OR embed op carries, INJECTIVELY (hardening a + the #189
-   * injectivity CRITICAL). The mark's payload SHAPE is encoded so no two distinct
-   * payloads collapse to one `attrs` map:
+   * The marks a text OR embed op carries, INJECTIVELY (the #189 injectivity
+   * CRITICAL, closed by ALLOWLIST in round-3). The mark's payload runs through the
+   * single allowlist encoder ({@link canonicalizeLeaf}), so an exotic payload — a
+   * `Uint8Array`, a sparse array, an NFC-duplicate-keyed object — FAILS CLOSED
+   * (throws ⇒ DRIFT) instead of collapsing onto a compliant object's encoding (a
+   * `Uint8Array` mark once shared `{0:…}`'s `f:0` map). The payload SHAPE is still
+   * tagged so no two shapes collapse to one `attrs` map:
    *
-   *   - an OBJECT payload (`{ link: { href, meta:{…} } }`) → each field under a
-   *     reserved `f:` namespace, plus a `#shape:object` tag, so a field literally
-   *     named `value`/`scalar` can never masquerade as the scalar/flag branch, and
-   *     an empty object `{}` (`{#shape:object}`) never equals a boolean flag;
+   *   - an OBJECT payload (`{ link: { href } }`) → one `#object` key carrying the
+   *     allowlist encoding of the whole object, so a field literally named
+   *     `value`/`scalar` can never masquerade as the scalar/flag branch;
    *   - a FLAG payload (`bold:true` / `null` / `undefined` / `false`) → `#flag`
    *     carrying the tagged value, so `true` ≠ `false` ≠ `null` ≠ `undefined`;
-   *   - a SCALAR / array / Date / Map / Set payload → a single tagged `#scalar`, so
-   *     a scalar `"x"` (`s:"x"`) is DISTINCT from the object `{value:"x"}` above.
+   *   - a SCALAR / dense-array payload → a single tagged `#scalar`, so a scalar
+   *     `"x"` (`s:"x"`) is DISTINCT from the object `{value:"x"}` above.
    */
   private marksOf(attributes: Record<string, unknown> | undefined): Mark[] {
     if (!attributes) return [];
@@ -402,15 +454,14 @@ export class CovenantDocReaderProd implements CovenantDocReader {
           !(raw instanceof Set);
         let attrs: Record<string, string>;
         if (isPlainObject) {
-          attrs = { '#shape': 'object' };
-          for (const [k, v] of Object.entries(raw as Record<string, unknown>)) {
-            attrs[`f:${k}`] = this.canonicalizeLeaf(v);
-          }
+          // The WHOLE object through the allowlist encoder — a non-plain / typed-array
+          // / NFC-dup payload throws here (fail-closed), never a coerced `f:` map.
+          attrs = { '#object': this.canonicalizeLeaf(raw) };
         } else if (raw === true || raw === false || raw === null || raw === undefined) {
           attrs = { '#flag': this.canonicalizeLeaf(raw) }; // true ≠ false ≠ null ≠ undefined
         } else {
-          // A scalar / array / Date / Map / Set payload — a single tagged value; the
-          // tag encodes the TYPE, so a scalar can never collide with an object field.
+          // A scalar / dense-array payload — a single tagged value; the tag encodes the
+          // TYPE, so a scalar can never collide with an object field.
           attrs = { '#scalar': this.canonicalizeLeaf(raw) };
         }
         return { type, attrs, straddles: 'none' as const };
@@ -437,15 +488,27 @@ export class CovenantDocReaderProd implements CovenantDocReader {
     embedType: string;
     identity: Record<string, string>;
   } {
-    const rawType = embed.embedType ?? embed.type ?? 'embed';
-    // A string type is used verbatim (NFC); a non-string type is canonicalized
-    // injectively (still a non-empty string, so `RenderedNode.embedType` is valid)
-    // rather than `String(obj)`-collapsed — an unsupported shape throws (fail-closed).
+    // The embed's TYPE lives in a DEDICATED TAGGED CHANNEL that a string value can
+    // never impersonate (grok's round-2 finding 1): a string type becomes `s:…`, a
+    // non-string type its allowlist encoding (`o:{…}` / `n:…`), so a caller-supplied
+    // string `"o:{}"` can never collide with a non-string type that canonicalizes to
+    // `o:{}`. `embedType` is preferred over `type` as the channel source; when BOTH
+    // are present, `type` is NOT dropped — it flows through as a normal `a:type`
+    // passthrough (grok's finding 2), so two embeds differing only in `type` differ.
+    const hasEmbedType = 'embedType' in embed;
+    const rawType: unknown = hasEmbedType ? embed.embedType : (embed.type ?? 'embed');
     const embedType =
-      typeof rawType === 'string' ? rawType.normalize('NFC') : this.canonicalizeLeaf(rawType);
+      typeof rawType === 'string'
+        ? `s:${rawType.normalize('NFC')}`
+        : this.canonicalizeLeaf(rawType);
+
     const identity: Record<string, string> = {};
+    const seenKeys = new Set<string>();
     for (const [k, v] of Object.entries(embed)) {
-      if (k === 'embedType' || k === 'type') continue;
+      // Consume ONLY the field used as the type channel — never both. If `embedType`
+      // is present it is consumed and `type` passes through; otherwise `type` is the
+      // channel and is consumed.
+      if (hasEmbedType ? k === 'embedType' : k === 'type') continue;
       if (k === 'child' || k === 'children') {
         // Reader-OWNED reserved key, computed from the CHILD `v` (never a sibling).
         // Every passthrough attr is `a:`-namespaced, so nothing a peer writes can
@@ -453,10 +516,14 @@ export class CovenantDocReaderProd implements CovenantDocReader {
         identity[k === 'children' ? '#children' : '#child'] = sha256Hex(this.canonicalizeLeaf(v));
         continue;
       }
-      // Every OTHER field under the `a:` passthrough namespace, serialized
-      // injectively — a scalar keeps its type, a nested object is field-by-field,
-      // NEVER coerced to "[object Object]".
-      identity[`a:${k}`] = this.canonicalizeLeaf(v);
+      // Every OTHER field under the `a:` passthrough namespace, its key NFC-normalized
+      // and deduplicated (two keys normalizing equal would else last-wins-overwrite a
+      // distinct value → fail closed), its value serialized through the allowlist —
+      // a scalar keeps its type, a nested object is field-by-field, an exotic throws.
+      const key = `a:${k.normalize('NFC')}`;
+      if (seenKeys.has(key)) reject('NFC-duplicate embed field keys');
+      seenKeys.add(key);
+      identity[key] = this.canonicalizeLeaf(v);
     }
     return { embedType, identity };
   }
@@ -495,12 +562,19 @@ export class CovenantDocReaderProd implements CovenantDocReader {
     let parent: Y.AbstractType<unknown> | null = body.parent;
     while (parent && parent instanceof Y.XmlElement) {
       const attrs: Record<string, string> = {};
+      const seenKeys = new Set<string>();
       // An ancestor attribute value (y-prosemirror stores a node's `attrs` here) can
       // be a nested OBJECT — `setAttribute('meta', { v: 2 })`. `String(v)` collapsed
       // every such object to "[object Object]", so `{v:2}` and `{v:1}` shared a digest
-      // (#189 CRITICAL). Serialize it INJECTIVELY, exactly as an embed/mark field.
-      for (const [k, v] of Object.entries(parent.getAttributes()))
-        attrs[k] = this.canonicalizeLeaf(v);
+      // (#189 CRITICAL). Serialize it through the ALLOWLIST — a nested object goes
+      // field-by-field, an exotic (typed array / Date …) fails closed — and NFC-dedup
+      // the attribute keys so two normalizing-equal keys cannot last-wins-overwrite.
+      for (const [k, v] of Object.entries(parent.getAttributes())) {
+        const key = k.normalize('NFC');
+        if (seenKeys.has(key)) reject('NFC-duplicate ancestor attribute keys');
+        seenKeys.add(key);
+        attrs[key] = this.canonicalizeLeaf(v);
+      }
       chain.push({ type: parent.nodeName, attrs });
       parent = parent.parent;
     }

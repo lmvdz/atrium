@@ -67,74 +67,115 @@ function base64ToBytes(b64: string): Uint8Array {
 
 type DeltaOp = { insert: string | Record<string, unknown>; attributes?: Record<string, unknown> };
 
-/** The marks a text op carries, with string-valued payloads PRESERVED (not `{}`). */
-function marksOf(attributes: Record<string, unknown> | undefined): Mark[] {
-  if (!attributes) return [];
-  return Object.keys(attributes).map((type) => {
-    const raw = attributes[type];
-    // A string-valued mark ({highlight:'yellow'}) is kept as {value:'yellow'} so
-    // yellow→red is a rendered change; an object-valued mark ({link:{href}}) keeps
-    // its fields. The round-1 reader flattened BOTH to {} — that is the hole.
-    let attrs: Record<string, string>;
-    if (raw && typeof raw === 'object') {
-      attrs = Object.fromEntries(Object.entries(raw).map(([k, v]) => [k, String(v)]));
-    } else if (raw === true || raw === null || raw === undefined) {
-      attrs = {}; // a boolean mark (bold:true) has no payload
-    } else {
-      attrs = { value: String(raw) }; // a scalar payload IS rendered meaning
-    }
-    return { type, attrs, straddles: 'none' as const };
-  });
+// ─────────────────────────────────────────────────────────────────────────────
+// ALLOWLIST-THE-COMPLIANT-FORM leaf serialization (#189 round-3). Kept BYTE-FOR-BYTE
+// in step with the production reader's `canonicalizeLeafValue`
+// (`apps/web/lib/covenant-reader.ts`): the shared conformance harness runs its
+// injective-encoding collision cases (typed-array-vs-object, sparse-vs-empty,
+// NFC-duplicate-keys, embedType-impersonation, dropped-`type`) against BOTH readers,
+// so BOTH must injectively encode a CLOSED allowlist and FAIL CLOSED (throw ⇒ DRIFT)
+// on everything else. See that file for the full rationale.
+// ─────────────────────────────────────────────────────────────────────────────
+
+function reject(what: string): never {
+  throw new Error(`covenant reader: non-compliant value shape (${what}) — failing closed to DRIFT`);
 }
 
-/**
- * A stable, insertion-order-independent, NFC-normalized JSON string. Two concerns:
- *
- *  - `JSON.stringify` serializes object keys in insertion order, so the SAME child
- *    built in a different key order would hash differently — a false-stale. Sort
- *    keys at every depth (the same key-sort discipline `@atrium/core`'s
- *    `canonical()` uses on the fragment itself).
- *  - The nested child is hashed to a hex `docDigest`, and core's NFC pass then runs
- *    on that HEX — a no-op. So NFC must be applied to the child's STRING LEAVES here,
- *    before hashing, or `{title:'café'}` composed vs decomposed digests differently
- *    → a false-STALE (round-3). Normalize every string key and value to NFC, exactly
- *    as core does for a fragment's strings, so canonical equivalence folds identically
- *    inside a nested child.
- */
-function stableStringify(value: unknown): string {
-  if (typeof value === 'string') return JSON.stringify(value.normalize('NFC'));
-  if (value === null || typeof value !== 'object') return JSON.stringify(value) ?? 'null';
-  if (Array.isArray(value)) return `[${value.map(stableStringify).join(',')}]`;
+function canonicalizeLeafValue(value: unknown): string {
+  if (value === null) return 'z:null';
+  if (value === undefined) return 'z:undefined';
+  const t = typeof value;
+  if (t === 'string') return `s:${JSON.stringify((value as string).normalize('NFC'))}`;
+  if (t === 'boolean') return `b:${value ? 'true' : 'false'}`;
+  if (t === 'number') {
+    const n = value as number;
+    if (!Number.isFinite(n)) reject(`non-finite number ${String(n)}`);
+    if (Object.is(n, -0)) return 'n:-0';
+    return `n:${JSON.stringify(n)}`;
+  }
+  if (t === 'bigint') return `i:${(value as bigint).toString()}`;
+  if (t !== 'object') reject(`type ${t}`);
+
+  if (Array.isArray(value)) {
+    const len = value.length;
+    const parts: string[] = [];
+    for (let i = 0; i < len; i++) {
+      if (!(i in value)) reject('sparse array (hole)');
+      parts.push(canonicalizeLeafValue(value[i]));
+    }
+    return `a:${len}:[${parts.join(',')}]`;
+  }
+
+  const proto = Object.getPrototypeOf(value as object);
+  if (proto !== Object.prototype && proto !== null) reject('non-plain prototype');
+  if (Object.getOwnPropertySymbols(value as object).length > 0) reject('symbol-keyed object');
+
   const obj = value as Record<string, unknown>;
-  return `{${Object.keys(obj)
-    .sort()
-    .map((k) => `${JSON.stringify(k.normalize('NFC'))}:${stableStringify(obj[k])}`)
+  const seen = new Set<string>();
+  const entries: Array<readonly [string, unknown]> = [];
+  for (const rawKey of Object.keys(obj)) {
+    const key = rawKey.normalize('NFC');
+    if (seen.has(key)) reject('NFC-duplicate object keys');
+    seen.add(key);
+    entries.push([key, obj[rawKey]] as const);
+  }
+  entries.sort((x, y) => (x[0] < y[0] ? -1 : x[0] > y[0] ? 1 : 0));
+  return `o:{${entries
+    .map(([k, v]) => `${JSON.stringify(k)}:${canonicalizeLeafValue(v)}`)
     .join(',')}}`;
 }
 
-/** The identity of an embed — every field stringified, plus a digest of any child content. */
+/** The marks a text op carries, INJECTIVELY (allowlist-encoded; exotic ⇒ fail closed). */
+function marksOf(attributes: Record<string, unknown> | undefined): Mark[] {
+  if (!attributes) return [];
+  return Object.keys(attributes)
+    .sort()
+    .map((type) => {
+      const raw = attributes[type];
+      const isPlainObject =
+        raw !== null &&
+        typeof raw === 'object' &&
+        !Array.isArray(raw) &&
+        !(raw instanceof Date) &&
+        !(raw instanceof Map) &&
+        !(raw instanceof Set);
+      let attrs: Record<string, string>;
+      if (isPlainObject) {
+        attrs = { '#object': canonicalizeLeafValue(raw) };
+      } else if (raw === true || raw === false || raw === null || raw === undefined) {
+        attrs = { '#flag': canonicalizeLeafValue(raw) };
+      } else {
+        attrs = { '#scalar': canonicalizeLeafValue(raw) };
+      }
+      return { type, attrs, straddles: 'none' as const };
+    });
+}
+
+/** The identity of an embed — allowlist-encoded fields + a reserved child digest. */
 function embedIdentity(embed: Record<string, unknown>): {
   embedType: string;
   identity: Record<string, string>;
 } {
-  const embedType = String(embed.embedType ?? embed.type ?? 'embed');
+  // The type in a DEDICATED TAGGED CHANNEL a string value cannot impersonate; `type`
+  // is NOT dropped when `embedType` is present (it flows through as `a:type`).
+  const hasEmbedType = 'embedType' in embed;
+  const rawType: unknown = hasEmbedType ? embed.embedType : (embed.type ?? 'embed');
+  const embedType =
+    typeof rawType === 'string' ? `s:${rawType.normalize('NFC')}` : canonicalizeLeafValue(rawType);
+
   const identity: Record<string, string> = {};
+  const seenKeys = new Set<string>();
   for (const [k, v] of Object.entries(embed)) {
-    if (k === 'embedType' || k === 'type') continue;
+    if (hasEmbedType ? k === 'embedType' : k === 'type') continue;
     if (k === 'child' || k === 'children') {
-      // A nested-doc / mention-label body is CHILD content: digest it so a change
-      // inside the child (not just a top-level attr) is drift (class A / #163). A
-      // string child is hashed as-is; an OBJECT child is canonicalized first
-      // (sorted keys), so insertion order is not mistaken for a content change.
-      // A string child is NFC-normalized before hashing for the same reason (the
-      // hex docDigest is opaque to core's NFC pass), so a decomposed vs composed
-      // string child folds to one digest.
-      identity.docDigest = sha256Hex(
-        typeof v === 'string' ? v.normalize('NFC') : stableStringify(v),
-      );
+      // Reader-OWNED reserved key computed from the CHILD (never a sibling field).
+      identity[k === 'children' ? '#children' : '#child'] = sha256Hex(canonicalizeLeafValue(v));
       continue;
     }
-    identity[k] = String(v);
+    const key = `a:${k.normalize('NFC')}`;
+    if (seenKeys.has(key)) reject('NFC-duplicate embed field keys');
+    seenKeys.add(key);
+    identity[key] = canonicalizeLeafValue(v);
   }
   return { embedType, identity };
 }
@@ -217,7 +258,16 @@ export class YjsCovenantDocReader implements CovenantDocReader {
     let parent: Y.AbstractType<unknown> | null = body.parent;
     while (parent && parent instanceof Y.XmlElement) {
       const attrs: Record<string, string> = {};
-      for (const [k, v] of Object.entries(parent.getAttributes())) attrs[k] = String(v);
+      const seenKeys = new Set<string>();
+      // Allowlist-encode each ancestor attribute value (a nested object goes
+      // field-by-field, an exotic fails closed) and NFC-dedup the keys, exactly as
+      // the production reader does — never `String(obj)`.
+      for (const [k, v] of Object.entries(parent.getAttributes())) {
+        const key = k.normalize('NFC');
+        if (seenKeys.has(key)) reject('NFC-duplicate ancestor attribute keys');
+        seenKeys.add(key);
+        attrs[key] = canonicalizeLeafValue(v);
+      }
       chain.push({ type: parent.nodeName, attrs });
       parent = parent.parent;
     }

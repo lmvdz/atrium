@@ -428,6 +428,81 @@ export function runReaderConformance(label: string, make: ReaderFactory): void {
     );
   });
 
+  // ════════════════════════════════════════════════════════════════════════════
+  // INJECTIVE-ENCODING COLLISIONS (#189 round-3 — ALLOWLIST). The digest encoder
+  // must be injective: two DISTINCT embed contents must never share a digest, and a
+  // NON-COMPLIANT shape must FAIL CLOSED (throw ⇒ certify mints no anchor ⇒ DRIFT)
+  // rather than collapse onto a compliant form's encoding. Run against BOTH readers
+  // so neither can quietly reintroduce a collision. On base `e20d7a4` the production
+  // reader FAILS each of these (two distinct contents → one digest); after, each is
+  // distinct-or-DRIFT.
+  // ════════════════════════════════════════════════════════════════════════════
+
+  /** Certify an embed and report its digest, or a DRIFT sentinel if it fails closed. */
+  const embedResult = (embed: Record<string, unknown>): string => {
+    const doc = new Y.Doc();
+    const frag = doc.getXmlFragment('doc');
+    const para = new Y.XmlElement('paragraph');
+    const bodyEl = new Y.XmlText();
+    frag.insert(0, [para]);
+    para.insert(0, [bodyEl]);
+    bodyEl.insertEmbed(0, embed);
+    try {
+      const anchor = certifyAnchor(make(doc, { path: [0, 0], start: 0, end: 1 }), {
+        objectId: 'o_embed',
+        roomId: 'room_1',
+        certifier: ALICE,
+        certifiedAt: AT,
+      });
+      return anchor === null ? 'DRIFT:null' : `digest:${anchor.renderedDigest}`;
+    } catch {
+      return 'DRIFT:throw'; // canonicalize threw at certify ⇒ fail closed
+    }
+  };
+
+  it(L("collision: a typed array (Uint8Array) can NEVER share a plain object's encoding"), () => {
+    // Base: `Uint8Array([1])` and `{0:1}` both serialize to `o:{"0":n:1}` → one digest
+    // (a false ✓). A Uint8Array is a real Yjs/lib0 wire value; it must fail closed.
+    expect(embedResult({ embedType: 'x', data: new Uint8Array([1]) })).not.toBe(
+      embedResult({ embedType: 'x', data: { 0: 1 } }),
+    );
+  });
+  it(L("collision: a SPARSE array (a hole) can NEVER share the empty array's encoding"), () => {
+    // Base: `new Array(1)` and `[]` both serialize to `a:[]` (`.map` skips the hole).
+    expect(embedResult({ embedType: 'x', data: new Array(1) })).not.toBe(
+      embedResult({ embedType: 'x', data: [] }),
+    );
+  });
+  it(L('collision: NFC-duplicate object keys in an embed field ⇒ fail closed'), () => {
+    // Two distinct raw keys that normalize equal — base keeps both / core key-NFC then
+    // last-wins-drops one. Neither is injective ⇒ refuse (DRIFT), never a silent drop.
+    const dup: Record<string, unknown> = {};
+    dup['caf\u00e9'] = 'INNOCENT'; // composed U+00E9
+    dup['cafe\u0301'] = 'x'; // decomposed e + U+0301
+    expect(Object.keys(dup).length).toBe(2); // guard: genuinely two raw keys
+    expect(embedResult({ embedType: 'x', data: dup }).startsWith('DRIFT')).toBe(true);
+  });
+  it(L('collision: a string embedType cannot IMPERSONATE a non-string type channel'), () => {
+    // Base: string `'o:{}'` and object `{}` both land as embedType `o:{}` → one digest.
+    // The type now lives in a tagged channel a string value cannot forge.
+    expect(embedResult({ embedType: 'o:{}', k: 1 })).not.toBe(embedResult({ embedType: {}, k: 1 }));
+  });
+  it(L('collision: a type field is NOT dropped when embedType is also present'), () => {
+    // Base: the loop skips BOTH `embedType` and `type`, so two embeds differing only in
+    // `type` collide. `type` now flows through as an `a:type` passthrough.
+    expect(embedResult({ embedType: 'img', type: 'a', k: 1 })).not.toBe(
+      embedResult({ embedType: 'img', type: 'b', k: 1 }),
+    );
+  });
+  it(L('embed-field digest isolation: a nested-object field change MOVES the digest'), () => {
+    // Compared as two FRESH-certify digests, so enclosed-item identity (fresh clocks in
+    // each doc) is NOT the discriminator — only the embed FIELD encoding is. A masked
+    // digest bug (field absent from the digest) would make these EQUAL.
+    expect(embedResult({ embedType: 'img', meta: { w: 1 } })).not.toBe(
+      embedResult({ embedType: 'img', meta: { w: 2 } }),
+    );
+  });
+
   // ── provenance is intentionally NOT a drift input ───────────────────────────
   it(L('provenance: changing objectId/roomId/certifier/certifiedAt leaves the verdict OK'), () => {
     const { doc } = makeDoc();
