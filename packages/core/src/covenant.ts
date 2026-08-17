@@ -256,10 +256,21 @@ export type RenderedNode = z.infer<typeof RenderedNode>;
  * The rendered fragment: the ancestor formatting context enclosing the span, and
  * the ordered content within it. This is the whole of what a `✓` vouches for; its
  * canonical digest is the meaning check.
+ *
+ * `bodyAttrs` (SL-2 round-5, #189) is the CONTENT BODY's OWN node attributes — a
+ * y-prosemirror text block stores per-node attrs (`Y.XmlText.setAttribute`) on the
+ * body itself, NOT only on ancestor elements. They are rendered meaning and belong
+ * in the closed surface set, yet they never appear in `toDelta()` (round-4's tie-break
+ * F3: `body.setAttribute` mutations were invisible). It is OPTIONAL and OMITTED when
+ * the body has no live attributes, so a fragment with no body attrs digests exactly as
+ * before (no regression to the primitive), while a body attribute — or a change to one —
+ * moves the digest. Values are the reader's single-canonicalizer encoding, like
+ * ancestor/embed/mark payloads.
  */
 export const RenderedFragment = z.object({
   ancestors: z.array(BlockFormat),
   nodes: z.array(RenderedNode),
+  bodyAttrs: z.record(z.string(), z.string()).optional(),
 });
 export type RenderedFragment = z.infer<typeof RenderedFragment>;
 
@@ -425,6 +436,16 @@ export function normalizeFragment(fragment: RenderedFragment): RenderedFragment 
     } else {
       nodes.push(node);
     }
+  }
+
+  // The body's OWN node attributes (SL-2 round-5). NFC-normalize keys and values,
+  // exactly as ancestor attrs. OMIT the field entirely when there are none, so a
+  // fragment with no body attrs canonicalizes byte-for-byte as it did before this
+  // surface existed (no primitive regression); an actual body attribute moves the
+  // digest, and a mutation to one is DRIFT.
+  const rawBodyAttrs = fragment.bodyAttrs;
+  if (rawBodyAttrs && Object.keys(rawBodyAttrs).length > 0) {
+    return { ancestors, nodes, bodyAttrs: normalizeAttrs(rawBodyAttrs) };
   }
   return { ancestors, nodes };
 }

@@ -111,14 +111,22 @@ interface AncestorSpec {
 }
 type NodeSpec =
   | { kind: 'text'; text: string; marks: Record<string, unknown> }
-  | { kind: 'embed'; embed: Record<string, unknown> };
+  // The embed ROOT is any value, not only a keyed object (#189 round-5 F1): `{}` / `[]`
+  // / `42` / `{a:1}` must all be DISTINCT, so the generator varies the root's TYPE.
+  | { kind: 'embed'; embed: unknown };
 interface Spec {
   ancestors: AncestorSpec[];
   nodes: NodeSpec[];
+  // The body XmlText's OWN node attributes (#189 round-5 F3): a surface `toDelta` never
+  // shows. COMPLIANT values only here; the `__proto__` body attr is a fail-closed case.
+  bodyAttrs?: Record<string, unknown>;
 }
 
-const MARK_NAMES = ['bold', 'italic', 'highlight', 'link'] as const;
+// `constructor` is a COMPLIANT mark name (assignment shadows it as an own key, so the
+// guarded adapter keeps it) — distinct from the `__proto__` hazard, which fails closed.
+const MARK_NAMES = ['bold', 'italic', 'highlight', 'link', 'constructor'] as const;
 const ATTR_NAMES = ['level', 'align', 'indent', 'meta'] as const;
+const BODY_ATTR_NAMES = ['data-id', 'lang', 'dir'] as const;
 const EMBED_TYPES = ['image', 'mention', 'nestedDoc', 'tag'] as const;
 
 function genMarks(rng: Rng): Record<string, unknown> {
@@ -133,7 +141,18 @@ function genMarks(rng: Rng): Record<string, unknown> {
   return marks;
 }
 
-function genEmbed(rng: Rng): Record<string, unknown> {
+// Vary the embed ROOT TYPE (#189 round-5 point 3): a keyed object, an empty object, a
+// dense array, or a bare scalar — the reader must digest each root TYPE distinctly.
+function genEmbed(rng: Rng): unknown {
+  const rootKind = pick(rng, ['object', 'object', 'empty-object', 'array', 'scalar'] as const);
+  if (rootKind === 'empty-object') return {};
+  if (rootKind === 'array') {
+    const n = Math.floor(rng() * 3);
+    const arr: unknown[] = [];
+    for (let i = 0; i < n; i++) arr.push(genValue(rng, 1));
+    return arr;
+  }
+  if (rootKind === 'scalar') return pick(rng, [42, 'x', true, null] as const);
   const embed: Record<string, unknown> = {};
   // The TYPE channel — absent / 'embed' / null / a real type — the round-3 fold class.
   const typeChoice = pick(rng, ['absent', 'embed', 'null', 'real'] as const);
@@ -151,6 +170,17 @@ function genEmbed(rng: Rng): Record<string, unknown> {
   }
   if (chance(rng, 0.5)) embed.child = genValue(rng, 1);
   return embed;
+}
+
+function genBodyAttrs(rng: Rng): Record<string, unknown> {
+  const attrs: Record<string, unknown> = {};
+  const n = Math.floor(rng() * 3); // often none — a body with no attrs must digest as before
+  const names = [...BODY_ATTR_NAMES];
+  for (let i = 0; i < n && names.length > 0; i++) {
+    const name = names.splice(Math.floor(rng() * names.length), 1)[0] as string;
+    attrs[name] = chance(rng, 0.3) ? genValue(rng, 1) : pick(rng, STRINGS);
+  }
+  return attrs;
 }
 
 function genSpec(rng: Rng): Spec {
@@ -177,7 +207,7 @@ function genSpec(rng: Rng): Spec {
         marks: genMarks(rng),
       });
   }
-  return { ancestors, nodes };
+  return { ancestors, nodes, bodyAttrs: genBodyAttrs(rng) };
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -199,6 +229,10 @@ function buildDoc(spec: Spec): { doc: Y.Doc; path: number[]; start: number; end:
   const body = new Y.XmlText();
   parent.insert(0, [body]);
   path.push(0);
+  // The body's OWN node attributes (#189 round-5 F3) — a surface `toDelta` never shows.
+  if (spec.bodyAttrs) {
+    for (const [k, v] of Object.entries(spec.bodyAttrs)) body.setAttribute(k, v as string);
+  }
   let pos = 0;
   for (const node of spec.nodes) {
     if (node.kind === 'text') {
@@ -206,7 +240,9 @@ function buildDoc(spec: Spec): { doc: Y.Doc; path: number[]; start: number; end:
       if (Object.keys(node.marks).length > 0) body.format(pos, node.text.length, node.marks);
       pos += node.text.length;
     } else {
-      body.insertEmbed(pos, node.embed);
+      // The embed root is ANY value (object / array / scalar / empty) — the reader must
+      // discriminate its TYPE. Yjs accepts a non-object embed value verbatim.
+      body.insertEmbed(pos, node.embed as object);
       pos += 1;
     }
   }
@@ -265,33 +301,19 @@ function marksSig(marks: Record<string, unknown>): string {
   return `[${keys.map((k) => `${JSON.stringify(k)}:${valSig(marks[k])}`).join('|')}]`;
 }
 
-function embedSig(embed: Record<string, unknown>): string {
-  const hasEmbedType = Object.hasOwn(embed, 'embedType');
-  const hasType = Object.hasOwn(embed, 'type');
-  // The reader's channel: which field supplied the type, and its value — NO fold.
-  let channel: string;
-  let channelField: string | null;
-  if (hasEmbedType) {
-    channel = `embedType=${valSig(embed.embedType)}`;
-    channelField = 'embedType';
-  } else if (hasType) {
-    channel = `type=${valSig(embed.type)}`;
-    channelField = 'type';
-  } else {
-    channel = 'none';
-    channelField = null;
-  }
-  const fields: string[] = [];
-  for (const [k, v] of Object.entries(embed)) {
-    if (channelField !== null && k === channelField) continue;
-    if (k === 'child' || k === 'children') {
-      fields.push(`#${k}=${valSig(v)}`); // reader digests the child; same child ⇒ same
-      continue;
-    }
-    fields.push(`a:${k.normalize('NFC')}=${valSig(v)}`);
-  }
-  fields.sort();
-  return `EMB(${channel};${fields.join('|')})`;
+// INDEPENDENT embed signature (#189 round-5 — deliberately NOT the reader's walk). The
+// round-4 oracle re-derived the reader's own embed decomposition — the `embedType`/`type`
+// channel selection, the `#child` reserved key, the `a:` passthrough namespace — so a bug
+// SHARED by that walk (the tie-break's embed-root fold: `{}` ≡ `[]` ≡ `42`, all read as an
+// empty keyed-object walk) was mirrored here and slipped past (COMMON-MODE). This signature
+// is a different decomposition entirely: an embed's logical identity is simply its whole
+// root VALUE, encoded structurally by the shared `valSig` — which discriminates `{}` (`O{}`)
+// from `[]` (`A[]`) from `42` (`D(42)`) from `{a:1}` (`O{"a"=D(1)}`) with NO channel/reserved
+// -key/namespace logic. Two embeds are logically equal IFF their root values are deep-equal;
+// a reader that folds distinct roots together therefore lands two distinct sigs on one digest
+// and is CAUGHT. It never inspects `embedType`/`type`/`child` specially — that is the point.
+function embedSig(embed: unknown): string {
+  return `EMB(${valSig(embed)})`;
 }
 
 function specSig(spec: Spec): string {
@@ -310,7 +332,16 @@ function specSig(spec: Spec): string {
         : embedSig(n.embed),
     )
     .join(',');
-  return `ANC[${anc}]::NODES[${nodes}]`;
+  // Body attrs are a distinct surface (#189 round-5 F3); OMITTED when empty so a body
+  // with none signs — and digests — exactly as a body that never had the surface.
+  const bodyKeys = Object.keys(spec.bodyAttrs ?? {})
+    .map((k) => k.normalize('NFC'))
+    .sort();
+  const bodyPart =
+    bodyKeys.length > 0
+      ? `::BODY{${bodyKeys.map((k) => `${JSON.stringify(k)}=${valSig((spec.bodyAttrs as Record<string, unknown>)[k])}`).join('|')}}`
+      : '';
+  return `ANC[${anc}]::NODES[${nodes}]${bodyPart}`;
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -349,8 +380,10 @@ function perturbSpec(spec: Spec, rng: Rng): Spec {
             text: chance(rng, 0.7) ? decompose(n.text) : n.text,
             marks: perturbRecord(n.marks, rng),
           }
-        : { kind: 'embed', embed: perturbRecord(n.embed, rng) },
+        : // The embed root is any value — perturb it AS a value (reorder keys / NFC-decompose).
+          { kind: 'embed', embed: perturbValue(n.embed, rng) },
     ),
+    bodyAttrs: spec.bodyAttrs ? perturbRecord(spec.bodyAttrs, rng) : undefined,
   };
 }
 
@@ -365,7 +398,7 @@ function perturbSpec(spec: Spec, rng: Rng): Spec {
 // ─────────────────────────────────────────────────────────────────────────────
 function discriminatorFamilies(): Spec[] {
   const specs: Spec[] = [];
-  const embedSpec = (embed: Record<string, unknown>): Spec => ({
+  const embedSpec = (embed: unknown): Spec => ({
     ancestors: [{ name: 'paragraph', attrs: {} }],
     nodes: [{ kind: 'embed', embed }],
   });
@@ -373,6 +406,25 @@ function discriminatorFamilies(): Spec[] {
     ancestors: [{ name: 'paragraph', attrs: {} }],
     nodes: [{ kind: 'text', text: 'x', marks }],
   });
+  const bodyAttrSpec = (bodyAttrs: Record<string, unknown>): Spec => ({
+    ancestors: [{ name: 'paragraph', attrs: {} }],
+    nodes: [{ kind: 'text', text: 'x', marks: {} }],
+    bodyAttrs,
+  });
+
+  // F1 (#189 round-5) — the EMBED-ROOT-TYPE fold the tie-break reproduced on real ops:
+  // `insertEmbed {} ≡ [] ≡ 42`, all read as an empty keyed-object walk on base. Each root
+  // TYPE must be distinct, and `{a:1}`/`{a:2}` (the controls) distinct from each other.
+  specs.push(embedSpec({}));
+  specs.push(embedSpec([]));
+  specs.push(embedSpec(42));
+  specs.push(embedSpec('x'));
+  specs.push(embedSpec(true));
+  specs.push(embedSpec(null));
+  specs.push(embedSpec({ a: 1 }));
+  specs.push(embedSpec({ a: 2 }));
+  specs.push(embedSpec([1]));
+  specs.push(embedSpec([1, 2]));
 
   // The `type`-channel fold (round-4): absent ≠ 'embed' ≠ null ≠ 'image' — everything
   // else held fixed. Base folds the first three onto one digest via `?? 'embed'`.
@@ -387,6 +439,9 @@ function discriminatorFamilies(): Spec[] {
   // Scalar vs object mark payload (single canonicalizer) — held under one mark name.
   specs.push(markSpec({ m: 'x' }));
   specs.push(markSpec({ m: { value: 'x' } }));
+  // A `constructor` mark (COMPLIANT — assignment shadows as an own key) with distinct values.
+  specs.push(markSpec({ constructor: 'A' }));
+  specs.push(markSpec({ constructor: 'B' }));
   // bigint vs the string that prints the same.
   specs.push(embedSpec({ type: 't', v: 1n }));
   specs.push(embedSpec({ type: 't', v: '1' }));
@@ -396,6 +451,13 @@ function discriminatorFamilies(): Spec[] {
   // A sibling `docDigest` must never shadow the real child.
   specs.push(embedSpec({ type: 't', child: 'innocent', docDigest: 'A' }));
   specs.push(embedSpec({ type: 't', child: 'EVIL', docDigest: 'A' }));
+
+  // F3 (#189 round-5) — the body XmlText's OWN node attrs: a body with attr `A` ≠ `B` ≠
+  // none. On base the body attrs are never read, so all three fold onto one digest.
+  specs.push(bodyAttrSpec({ 'data-id': 'A' }));
+  specs.push(bodyAttrSpec({ 'data-id': 'B' }));
+  specs.push(bodyAttrSpec({ 'data-id': 'A', lang: 'en' }));
+  specs.push(embedSpec({ type: 't', k: 9 })); // a no-body-attr control, distinct shape
   return specs;
 }
 
@@ -486,6 +548,23 @@ describe('INJECTIVITY ORACLE (property): non-compliant shapes ALWAYS fail closed
     ancestors: [{ name: 'paragraph', attrs }],
     nodes: [{ kind: 'text', text: 'x', marks: {} }],
   });
+  const bodyAttrSpec = (bodyAttrs: Record<string, unknown>): Spec => ({
+    ancestors: [{ name: 'paragraph', attrs: {} }],
+    nodes: [{ kind: 'text', text: 'x', marks: {} }],
+    bodyAttrs,
+  });
+  // Plant a GENUINE own enumerable `__proto__` key the way a CRDT wire object could — a
+  // literal `{ __proto__: … }` only sets the prototype (no own key), so defineProperty.
+  const withOwnProto = (val: unknown): Record<string, unknown> => {
+    const o: Record<string, unknown> = {};
+    Object.defineProperty(o, '__proto__', {
+      value: val,
+      enumerable: true,
+      writable: true,
+      configurable: true,
+    });
+    return o;
+  };
 
   const failsClosed = (spec: Spec) => expect(readerOutcome(spec).startsWith('digest:')).toBe(false);
 
@@ -533,5 +612,46 @@ describe('INJECTIVITY ORACLE (property): non-compliant shapes ALWAYS fail closed
     });
     expect(Object.hasOwn(attrs, '__proto__')).toBe(true);
     failsClosed(ancestorSpec(attrs));
+  });
+
+  // ── F2 (#189 round-5): a `__proto__` MARK — the tie-break's reproduced collision ──
+  it('F2: a `__proto__` MARK ⇒ fail closed, and INNOCENT↔EVIL is distinct-or-DRIFT', () => {
+    // `body.format(…, {__proto__:'INNOCENT', bold:true})` persists a genuine `__proto__`
+    // ContentFormat item, but `toDelta()` DROPS it at read (both flips deltaed back to
+    // only `bold`) — the invisible mutation. Reading marks from the Yjs items directly
+    // surfaces it; the guarded adapter then fails it closed. Both flips fail closed, so
+    // the INNOCENT-certifies-then-EVIL-resolves-`ok` hole is gone (distinct-or-DRIFT).
+    const innocent = readerOutcome(markSpec(withOwnProto('INNOCENT')));
+    const evil = readerOutcome(markSpec(withOwnProto('EVIL')));
+    expect(innocent.startsWith('digest:')).toBe(false); // fail closed, never a digest
+    expect(evil.startsWith('digest:')).toBe(false);
+    // distinct-or-DRIFT holds trivially via the DRIFT branch: neither can resolve `ok`.
+    expect(innocent === 'digest:X' && evil === 'digest:X').toBe(false);
+  });
+  it('F2: a `__proto__` mark alongside a real `bold` mark ⇒ still fail closed', () => {
+    const marks = withOwnProto('EVIL');
+    marks.bold = true;
+    failsClosed(markSpec(marks));
+  });
+
+  // ── NFC-duplicate MARK NAMES (a key surface like object keys) ⇒ fail closed ──
+  it('NFC-duplicate mark names (café composed + decomposed) ⇒ fail closed', () => {
+    const composed = 'café'; // NFC form (e-acute as one code point)
+    const decomposed = composed.normalize('NFD'); // e + combining acute; distinct bytes, same NFC
+    expect(composed).not.toBe(decomposed);
+    expect(composed.normalize('NFC')).toBe(decomposed.normalize('NFC'));
+    const marks: Record<string, unknown> = {};
+    marks[composed] = 1;
+    marks[decomposed] = 2;
+    expect(Object.keys(marks).length).toBe(2); // genuinely two raw keys
+    failsClosed(markSpec(marks));
+  });
+
+  // ── F3 (#189 round-5): a `__proto__` BODY attribute ⇒ fail closed ──
+  it('F3: a `__proto__` body attribute ⇒ fail closed (never an invisible body mutation)', () => {
+    failsClosed(bodyAttrSpec(withOwnProto('EVIL')));
+  });
+  it('a NaN body-attribute value ⇒ fail closed', () => {
+    failsClosed(bodyAttrSpec({ 'data-id': Number.NaN }));
   });
 });

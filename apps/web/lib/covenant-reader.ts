@@ -202,8 +202,6 @@ function base64ToBytes(b64: string): Uint8Array {
   return new Uint8Array(Buffer.from(b64, 'base64'));
 }
 
-type DeltaOp = { insert: string | Record<string, unknown>; attributes?: Record<string, unknown> };
-
 // ─────────────────────────────────────────────────────────────────────────────
 // ALLOWLIST-THE-COMPLIANT-FORM serialization of a leaf value (#189 round-3, the
 // class-closer). The round-2 gauntlet proved a TAG-EVERYTHING encoder can never be
@@ -322,24 +320,118 @@ interface AttrMapItem {
   deleted?: boolean;
 }
 
-function safeElementAttrs(el: Y.XmlElement): Array<[string, unknown]> {
+/**
+ * THE ONE GUARDED-ATTR ADAPTER (#189 round-5). A plain-object materialization
+ * (`obj[key] = value`) SILENTLY DROPS a prototype-setter key — `__proto__` mutates the
+ * object's prototype instead of creating an own key — so any digest taken over the
+ * materialized record is a lie (the round-4 tie-break's F2/F3: a `__proto__` mark and a
+ * `__proto__` body attr both flipped INNOCENT↔EVIL with no digest change). This adapter
+ * is the SINGLE choke point every attribute surface routes through — ancestor attrs,
+ * BODY attrs, and now MARK names/values. It rebuilds the plain-object materialization and
+ * FAILS CLOSED (throw ⇒ DRIFT) if that materialization drops ANY of the live keys. An
+ * honest surface (no prototype-hazard key) materializes losslessly and passes through
+ * unchanged; a hazard key can never resolve to a false `✓`.
+ */
+function guardedAttrEntries(rawEntries: Array<[string, unknown]>): Array<[string, unknown]> {
+  const materialized: Record<string, unknown> = {};
+  for (const [key, value] of rawEntries) materialized[key] = value;
+  for (const [key] of rawEntries) {
+    if (!Object.hasOwn(materialized, key)) {
+      reject(`attribute key dropped by materialization (${JSON.stringify(key)})`);
+    }
+  }
+  return rawEntries;
+}
+
+/**
+ * SAFELY read a type's OWN node attributes — an ancestor `Y.XmlElement` OR the content
+ * `Y.XmlText` body (SL-2 round-5: the body carries its own node attrs, surface 6). Yjs
+ * stores them in the type's own `_map` (a real `Map`, hazard-free); we enumerate the
+ * live (non-deleted) keys there, read each via `getAttribute`, and route the entries
+ * through the ONE {@link guardedAttrEntries} adapter so a `__proto__` key that
+ * `getAttributes()` would drop fails CLOSED instead of vanishing.
+ */
+function safeElementAttrs(el: Y.XmlElement | Y.XmlText): Array<[string, unknown]> {
   const map = (el as unknown as { _map?: Map<string, AttrMapItem> })._map;
   if (!(map instanceof Map)) {
-    // A foreign element shape with no attribute map — cannot enumerate safely.
-    reject('ancestor element has no attribute map (foreign shape)');
+    // A foreign shape with no attribute map — cannot enumerate safely.
+    reject('element has no attribute map (foreign shape)');
   }
-  const materialized = el.getAttributes() as Record<string, unknown>;
-  const entries: Array<[string, unknown]> = [];
+  const raw: Array<[string, unknown]> = [];
   for (const [key, item] of map.entries()) {
     if (item?.deleted) continue; // a deleted attribute is not live content
-    // If the plain-object materialization dropped this live key (a prototype-hazard
-    // key such as `__proto__`), the record is lossy and any digest over it is a lie.
-    if (!Object.hasOwn(materialized, key)) {
-      reject(`ancestor attribute key dropped by materialization (${JSON.stringify(key)})`);
-    }
-    entries.push([key, el.getAttribute(key)]);
+    raw.push([key, el.getAttribute(key)]);
   }
-  return entries;
+  return guardedAttrEntries(raw);
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// DIRECT-ITEM DELTA WALK (#189 round-5, the F2 closer). `body.toDelta()` materializes
+// each op's format attributes into a PLAIN object (`attributes[key] = value`), which
+// silently DROPS a `__proto__` mark — an invisible mutation the digest never saw. So we
+// render from the Yjs items DIRECTLY, mirroring Yjs's own toDelta segmentation but
+// carrying the active marks as a real `Map` (hazard-free): ContentFormat is ZERO-WIDTH
+// and updates the active-attribute Map (set, or delete on a null value); ContentString
+// accumulates into the current run; ContentEmbed / ContentType is a one-column embed op;
+// deleted items are skipped (matching toDelta's visibility filter with no snapshot). The
+// per-op `attrs` are the Map's entries at that point — so a `__proto__` mark REACHES the
+// reader, where {@link guardedAttrEntries} (via `marksOf`) fails it closed. Character
+// offsets match toDelta's (format markers occupy no column), so the span clip and
+// straddle math are unchanged. A foreign content constructor fails CLOSED.
+// ─────────────────────────────────────────────────────────────────────────────
+
+type DirectOp =
+  | { kind: 'text'; text: string; attrs: Array<[string, unknown]> }
+  | { kind: 'embed'; embed: unknown; attrs: Array<[string, unknown]> };
+
+interface YContentItem {
+  content: {
+    constructor: { name: string };
+    str?: string;
+    key?: string;
+    value?: unknown;
+    getContent?: () => unknown[];
+  };
+  deleted: boolean;
+  right: unknown;
+}
+
+function directDelta(body: Y.XmlText): DirectOp[] {
+  const ops: DirectOp[] = [];
+  const active = new Map<string, unknown>();
+  let str = '';
+  const packStr = () => {
+    if (str.length > 0) {
+      ops.push({ kind: 'text', text: str, attrs: [...active.entries()] });
+      str = '';
+    }
+  };
+  let item: unknown = (body as unknown as { _start: unknown })._start;
+  while (item) {
+    const it = item as YContentItem;
+    if (!it.deleted) {
+      const name = it.content.constructor.name;
+      if (name === 'ContentString') {
+        str += it.content.str ?? '';
+      } else if (name === 'ContentEmbed' || name === 'ContentType') {
+        packStr();
+        const embed = it.content.getContent ? it.content.getContent()[0] : undefined;
+        ops.push({ kind: 'embed', embed, attrs: [...active.entries()] });
+      } else if (name === 'ContentFormat') {
+        packStr();
+        const key = it.content.key as string;
+        const value = it.content.value;
+        if (value === null) active.delete(key);
+        else active.set(key, value);
+      } else {
+        // An unrecognized content constructor cannot be rendered honestly → fail closed.
+        reject(`unrecognized Yjs content in body (${name})`);
+      }
+    }
+    item = it.right;
+  }
+  packStr();
+  return ops;
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -384,8 +476,8 @@ export class CovenantDocReaderProd implements CovenantDocReader {
   }
 
   /** Hardening (b): an embed's own inline marks reach the digest. */
-  protected marksForEmbed(attributes: Record<string, unknown> | undefined): Mark[] {
-    return this.marksOf(attributes);
+  protected marksForEmbed(attrEntries: Array<[string, unknown]> | undefined): Mark[] {
+    return this.marksOf(attrEntries);
   }
 
   /** Hardening (c): the async resolution is bounded by a deadline (fail-closed, never hangs). */
@@ -522,15 +614,23 @@ export class CovenantDocReaderProd implements CovenantDocReader {
    *   - a SCALAR / dense-array payload → a single tagged `#scalar`, so a scalar
    *     `"x"` (`s:"x"`) is DISTINCT from the object `{value:"x"}` above.
    */
-  private marksOf(attributes: Record<string, unknown> | undefined): Mark[] {
-    if (!attributes) return [];
+  private marksOf(attrEntries: Array<[string, unknown]> | undefined): Mark[] {
+    if (!attrEntries || attrEntries.length === 0) return [];
+    // GUARDED enumeration (#189 round-5). The mark names/values are read DIRECTLY from
+    // the Yjs items' active-attribute Map (see {@link directDelta}), so a `__proto__`
+    // mark reaches here instead of being dropped by `toDelta`'s materialization. Route
+    // them through the ONE {@link guardedAttrEntries} adapter — the SAME guard the
+    // ancestor and body attrs use — so a `__proto__` mark name FAILS CLOSED (throws ⇒
+    // DRIFT) exactly as a `__proto__` ancestor/body attribute does, never an invisible
+    // INNOCENT↔EVIL flip (the round-4 tie-break's F2).
+    const guarded = guardedAttrEntries(attrEntries);
     // NFC-UNIQUE mark NAMES (#189 round-4 point 4). Mark names are a KEY SURFACE just
     // like object keys / ancestor attr names: two raw names normalizing NFC-equal are
     // ambiguous (a last-wins map would silently drop one) ⇒ fail closed. Round-3
     // normalized object keys but NOT mark names — the same class in a sibling location.
     const seenNames = new Set<string>();
     const marks: Mark[] = [];
-    for (const rawName of Object.keys(attributes)) {
+    for (const [rawName, value] of guarded) {
       const type = rawName.normalize('NFC');
       if (seenNames.has(type)) reject('NFC-duplicate mark names');
       seenNames.add(type);
@@ -542,7 +642,7 @@ export class CovenantDocReaderProd implements CovenantDocReader {
       // (typed array, NFC-dup keys, non-plain proto) throws here ⇒ DRIFT.
       marks.push({
         type,
-        attrs: { '#v': this.canonicalizeLeaf(attributes[rawName]) },
+        attrs: { '#v': this.canonicalizeLeaf(value) },
         straddles: 'none',
       });
     }
@@ -566,10 +666,28 @@ export class CovenantDocReaderProd implements CovenantDocReader {
    *     this, a sibling `docDigest` field won `Object.entries` order and the actual
    *     child content was ignored (`innocent`→`EVIL` stayed `ok`).
    */
-  private embedIdentity(embed: Record<string, unknown>): {
+  private embedIdentity(embed: unknown): {
     embedType: string;
     identity: Record<string, string>;
   } {
+    const identity: Record<string, string> = Object.create(null);
+
+    // EMBED-ROOT VALUE (#189 round-5 point 3, the F1 closer). Route the WHOLE embed root
+    // through the ONE canonicalizer so the root's TYPE discriminates — `{}` (`o:{}`) ≠
+    // `[]` (`a:0:[]`) ≠ `42` (`n:42`) ≠ `{a:1}` (`o:{"a":n:1}`). Round-4 only ever walked
+    // a keyed object (`Object.entries`), so a non-object / array / empty-object root
+    // produced an EMPTY identity and folded onto one digest (the tie-break's reproduced
+    // `insertEmbed {} ≡ [] ≡ 42`). `#root` is reader-owned and cannot be forged: every
+    // passthrough field is `a:`-namespaced and the child digests are `#child`/`#children`.
+    identity['#root'] = this.canonicalizeLeaf(embed);
+
+    // A non-object / array root contributes nothing further below (`Object.hasOwn` /
+    // `Object.entries` are safe but empty on a primitive); `#root` alone carries it.
+    if (embed === null || typeof embed !== 'object') {
+      return { embedType: 'none', identity };
+    }
+    const embedObj = embed as Record<string, unknown>;
+
     // EXPLICIT TYPE-SOURCE + PRESENCE (#189 round-4 point 3) — NO `?? default` folding.
     // Round-3 computed `embed.type ?? 'embed'`, which folded THREE distinct embeds onto
     // one channel: `{k}` (type absent), `{type:'embed',k}`, and `{type:null,k}` all
@@ -581,24 +699,23 @@ export class CovenantDocReaderProd implements CovenantDocReader {
     //   - a string can't impersonate a non-string (`embedType:'o:{}'` → `embedType:s:"o:{}"`
     //     vs `embedType:{}` → `embedType:o:{}`), nor forge the other field's prefix;
     //   - mutating the channel field in place MOVES the channel (⇒ digest moves).
-    const hasEmbedType = Object.hasOwn(embed, 'embedType');
-    const hasType = Object.hasOwn(embed, 'type');
+    const hasEmbedType = Object.hasOwn(embedObj, 'embedType');
+    const hasType = Object.hasOwn(embedObj, 'type');
     let embedType: string;
     let channelField: 'embedType' | 'type' | null;
     if (hasEmbedType) {
-      embedType = `embedType:${this.canonicalizeLeaf(embed.embedType)}`;
+      embedType = `embedType:${this.canonicalizeLeaf(embedObj.embedType)}`;
       channelField = 'embedType';
     } else if (hasType) {
-      embedType = `type:${this.canonicalizeLeaf(embed.type)}`;
+      embedType = `type:${this.canonicalizeLeaf(embedObj.type)}`;
       channelField = 'type';
     } else {
       embedType = 'none';
       channelField = null;
     }
 
-    const identity: Record<string, string> = Object.create(null);
     const seenKeys = new Set<string>();
-    for (const [k, v] of Object.entries(embed)) {
+    for (const [k, v] of Object.entries(embedObj)) {
       // Consume ONLY the field used as the type channel — never both. When `embedType`
       // is the channel, a sibling `type` is NOT dropped: it flows through as a normal
       // `a:type` passthrough, so two embeds differing only in `type` differ.
@@ -624,19 +741,17 @@ export class CovenantDocReaderProd implements CovenantDocReader {
 
   /** The mark-type→attrs active at absolute char `offset` (for straddle), text OR embed. */
   private markActiveAt(
-    delta: DeltaOp[],
+    delta: DirectOp[],
     offset: number,
     type: string,
   ): Record<string, string> | null {
     let pos = 0;
     for (const op of delta) {
-      const len = typeof op.insert === 'string' ? op.insert.length : 1;
+      const len = op.kind === 'text' ? op.text.length : 1;
       if (offset >= pos && offset < pos + len) {
-        const attrs = op.attributes;
-        if (!attrs) return null;
         // Reconstruct through `marksOf` so the mark NAME is compared in its NFC-normalized
         // form (a raw `type in attrs` shortcut would miss a normalizing-equal name).
-        const m = this.marksOf(attrs).find((x) => x.type === type);
+        const m = this.marksOf(op.attrs).find((x) => x.type === type);
         return m ? m.attrs : null;
       }
       pos += len;
@@ -683,20 +798,23 @@ export class CovenantDocReaderProd implements CovenantDocReader {
     start: number,
     end: number,
   ): { fragment: RenderedFragment; enclosedItems: EnclosedItem[] } {
-    const delta = body.toDelta() as DeltaOp[];
+    // Render from the Yjs items DIRECTLY (#189 round-5), not the lossy `toDelta` — so a
+    // `__proto__` mark (dropped by toDelta's plain-object materialization) reaches the
+    // digest and fails closed. Character offsets are identical to toDelta's.
+    const delta = directDelta(body);
     const nodes: RenderedNode[] = [];
     let firstNode = -1;
     let lastNode = -1;
     let pos = 0;
     for (const op of delta) {
-      if (typeof op.insert === 'string') {
+      if (op.kind === 'text') {
         const opStart = pos;
-        const opEnd = pos + op.insert.length;
+        const opEnd = pos + op.text.length;
         const from = Math.max(start, opStart);
         const to = Math.min(end, opEnd);
         if (to > from) {
-          const text = op.insert.slice(from - opStart, to - opStart);
-          const marks = this.marksOf(op.attributes);
+          const text = op.text.slice(from - opStart, to - opStart);
+          const marks = this.marksOf(op.attrs);
           if (firstNode === -1) firstNode = nodes.length;
           lastNode = nodes.length;
           nodes.push({ kind: 'text', text, marks });
@@ -706,8 +824,8 @@ export class CovenantDocReaderProd implements CovenantDocReader {
         // An embed occupies exactly one character: its structural identity AND its
         // own inline marks (hardening b) — a link/highlight/bold stamped on it.
         if (pos >= start && pos < end) {
-          const { embedType, identity } = this.embedIdentity(op.insert);
-          const marks = this.marksForEmbed(op.attributes);
+          const { embedType, identity } = this.embedIdentity(op.embed);
+          const marks = this.marksForEmbed(op.attrs);
           if (firstNode === -1) firstNode = nodes.length;
           lastNode = nodes.length;
           nodes.push({ kind: 'embed', embedType, identity, marks });
@@ -751,9 +869,32 @@ export class CovenantDocReaderProd implements CovenantDocReader {
     stamp(lastNode, 'end');
 
     return {
-      fragment: { ancestors: this.ancestorsOf(body), nodes },
+      fragment: { ancestors: this.ancestorsOf(body), nodes, bodyAttrs: this.bodyAttrsOf(body) },
       enclosedItems: this.enclosedItemsOf(body, start, end),
     };
+  }
+
+  /**
+   * The BODY's OWN node attributes (#189 round-5 point 6, the F3 closer). A
+   * y-prosemirror text block stores per-node attrs on the `Y.XmlText` body itself, and
+   * they NEVER surface in `toDelta()` — round-4's tie-break showed `body.setAttribute`
+   * mutations were invisible. Read them through the SAME guarded {@link safeElementAttrs}
+   * adapter the ancestors use (so a `__proto__` body attr fails closed), each value
+   * through the ONE canonicalizer, keys NFC-deduped. Returns `undefined` when the body
+   * has no live attributes, so a body with none digests exactly as before (no regression).
+   */
+  private bodyAttrsOf(body: Y.XmlText): Record<string, string> | undefined {
+    const attrs: Record<string, string> = Object.create(null);
+    const seenKeys = new Set<string>();
+    let any = false;
+    for (const [k, v] of safeElementAttrs(body)) {
+      const key = k.normalize('NFC');
+      if (seenKeys.has(key)) reject('NFC-duplicate body attribute keys');
+      seenKeys.add(key);
+      attrs[key] = this.canonicalizeLeaf(v);
+      any = true;
+    }
+    return any ? attrs : undefined;
   }
 
   /**
