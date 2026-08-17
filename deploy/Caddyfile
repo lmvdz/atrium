@@ -87,6 +87,26 @@ http://localhost:2019 {
 		reverse_proxy minio:9000
 	}
 
+	# Electric shapes (#201) — THROUGH THE APP, and there is no route from here
+	# to `electric:3000`.
+	#
+	# The fallback `handle` below would send these to `app` anyway. This block is
+	# written out regardless, because the thing worth being unable to typo is the
+	# ABSENCE of a `reverse_proxy electric:3000` next to it. Electric authenticates
+	# nobody: it answers any shape request for any table in its publication, with
+	# any `where` the caller writes. A route straight to it would hand every
+	# browser every room's document.
+	#
+	# So the browser's only path to a shape is this one, and it lands on
+	# `apps/web/app/electric/v1/shape/route.ts`, which reads the session cookie
+	# that rides this same-origin request, authorizes the room membership, and
+	# composes the `where` clause server-side before forwarding. Electric's port
+	# is published nowhere in docker-compose.yml, and its API secret is held only
+	# by `app` — two more locks on the same door.
+	handle /electric/* {
+		reverse_proxy app:3000
+	}
+
 	# Everything else is the Next.js app: pages, Server Actions, the auth
 	# catch-all route.
 	handle {

@@ -100,6 +100,37 @@ services:
       POSTGRES_USER: ${POSTGRES_USER:-atrium}
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in .env — there is no default; see the header}
       POSTGRES_DB: ${POSTGRES_DB:-atrium}
+    # ┌─ wal_level=logical, AND WHAT IT COSTS TO TURN ON LATER ─────────────────
+    # │ Electric is a read-path sync engine over LOGICAL REPLICATION (#201). Its
+    # │ replication slot cannot be created at all on the `replica` default, so
+    # │ this line is what makes the whole document stream possible.
+    # │
+    # │ ON AN EXISTING DATA VOLUME THIS IS A RESTART, NOT A RE-INIT. `wal_level`
+    # │ is a postmaster-start parameter, so `docker compose up -d` after adding
+    # │ this line is enough — the container restarts and comes back logical, with
+    # │ its data intact. It is emphatically NOT one of the POSTGRES_* variables
+    # │ that only apply to an empty `PGDATA`, and nobody should delete a volume
+    # │ over it. Confirm with `docker compose exec postgres psql -U atrium -c
+    # │ 'SHOW wal_level'` — the answer must be `logical`.
+    # │
+    # │ The two slot/sender ceilings are here because the defaults (10 each on
+    # │ PG16) are already enough for one Electric and would be silently wrong if
+    # │ a future deployment ran a second one plus a backup subscriber. Stating
+    # │ them costs nothing and makes the budget visible.
+    # │
+    # │ The WAL cost is real but bounded: logical decoding writes more per
+    # │ transaction, and REPLICA IDENTITY FULL on the two ydoc tables (migration
+    # │ 0053) writes whole old rows on UPDATE/DELETE — which those two tables
+    # │ almost never do. Nothing else in the schema is in Electric's publication.
+    # └─────────────────────────────────────────────────────────────────────────
+    command:
+      - postgres
+      - -c
+      - wal_level=logical
+      - -c
+      - max_wal_senders=10
+      - -c
+      - max_replication_slots=10
     ports:
       # Loopback only. Published at all so `pnpm test:e2e` and psql can reach it
       # from the host; reachable from nowhere else, because a bare
@@ -174,6 +205,97 @@ services:
       DATABASE_URL: postgres://${POSTGRES_USER:-atrium}:${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in .env — there is no default; see the header}@postgres:5432/${POSTGRES_DB:-atrium}
       LOG_LEVEL: ${LOG_LEVEL:-info}
     restart: 'no'
+
+  # One-shot: provision the least-privilege Electric replication role, then exit.
+  #
+  # AFTER `migrate`, not before: `deploy/electric-role.sql` grants SELECT on the
+  # two ydoc tables by name, and a GRANT on a table that does not exist yet is an
+  # error rather than a promise. It runs as POSTGRES_USER because creating a role
+  # needs a privilege the application role must not have.
+  #
+  # Why a role at all, rather than pointing Electric at POSTGRES_USER: with this
+  # role, "Electric can only ever read the two document tables" is enforced by
+  # Postgres — it owns nothing and cannot alter its own publication — instead of
+  # being a property of this file that one edit would remove. See that SQL file.
+  electric-init:
+    image: postgres:16-alpine
+    depends_on:
+      postgres:
+        condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
+    environment:
+      PGPASSWORD: ${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in .env — there is no default; see the header}
+    volumes:
+      - ./deploy/electric-role.sql:/electric-role.sql:ro
+    command:
+      - psql
+      - --host=postgres
+      - --username=${POSTGRES_USER:-atrium}
+      - --dbname=${POSTGRES_DB:-atrium}
+      - --set=ON_ERROR_STOP=1
+      # Quoted by psql on interpolation, so a password with a quote in it is a
+      # password rather than a syntax error. No default: an Electric role with a
+      # guessable password is a replication client anybody can be.
+      - --set=electric_password=${ELECTRIC_DATABASE_PASSWORD:?set ELECTRIC_DATABASE_PASSWORD in .env — there is no default; it is the credential Electric replicates with}
+      - --set=database_name=${POSTGRES_DB:-atrium}
+      - --file=/electric-role.sql
+    restart: 'no'
+
+  # The sync fabric (#201). Electric streams `ydoc_updates` / `ydoc_awareness` to
+  # browsers as HTTP shapes; it is how a room's Yjs document reaches a reader.
+  #
+  # ┌─ NO PUBLISHED PORT, AND THAT IS THE SECURITY MODEL ────────────────────────
+  # │ Electric has NO IDEA WHO IS ASKING. It answers any shape request for any
+  # │ table in its publication, for any `where` the caller writes — that is what
+  # │ a sync engine is. So the browser never talks to it: `proxy` routes
+  # │ `/electric/*` to `app`, and `apps/web/app/electric/v1/shape/route.ts`
+  # │ authenticates the session, authorizes the room membership, and pins the
+  # │ `where` clause SERVER-side before forwarding. A published port here would
+  # │ be a second way in that skips all three.
+  # │
+  # │ ELECTRIC_SECRET is the second lock on the same door: even inside the
+  # │ compose network, a request without it is refused, so a compromised
+  # │ sidecar cannot read a stranger's room by curling `electric:3000`. The app
+  # │ adds it; nothing else knows it.
+  # └────────────────────────────────────────────────────────────────────────────
+  #
+  # ELECTRIC_REPLICATION_STREAM_ID is deliberately NOT set: it defaults to
+  # `default`, and migration 0053 creates the publication Electric then looks for
+  # under exactly that derived name (`electric_publication_default`). Setting one
+  # here without moving the migration's name makes Electric refuse to start.
+  electric:
+    image: electricsql/electric:1.7.11
+    restart: unless-stopped
+    depends_on:
+      postgres:
+        condition: service_healthy
+      electric-init:
+        condition: service_completed_successfully
+    environment:
+      # The least-privilege replication role, not POSTGRES_USER.
+      DATABASE_URL: postgres://atrium_electric:${ELECTRIC_DATABASE_PASSWORD:?set ELECTRIC_DATABASE_PASSWORD in .env — there is no default; it is the credential Electric replicates with}@postgres:5432/${POSTGRES_DB:-atrium}
+      ELECTRIC_PORT: '3000'
+      # Electric refuses to start with neither a secret nor an explicit insecure
+      # opt-in, which is the right shape. We give it a secret.
+      ELECTRIC_SECRET: ${ELECTRIC_SECRET:?set ELECTRIC_SECRET in .env — generate one with `openssl rand -base64 32`; it is what stops anything on the compose network reading any room's document}
+      # Electric normally ALTERs the publication to add tables it is asked for.
+      # It cannot here — `atrium_electric` owns nothing — and it must not: the
+      # publication IS the list of tables the sync service may ever see, and
+      # migration 0053 is where that list is written down.
+      ELECTRIC_MANUAL_TABLE_PUBLISHING: 'true'
+      ELECTRIC_LOG_LEVEL: ${ELECTRIC_LOG_LEVEL:-info}
+      ELECTRIC_STORAGE_DIR: /var/lib/electric/persistent
+    volumes:
+      - electric-data:/var/lib/electric/persistent
+    healthcheck:
+      # `curl` is what this image ships (no wget, verified against 1.7.11), and
+      # `/v1/health` answers `{"status":"active"}` once replication is attached.
+      test: ['CMD-SHELL', 'curl -sf http://127.0.0.1:3000/v1/health | grep -q active']
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 20s
 
   # One server, and that is now a capacity decision rather than a correctness
   # one (#22 gauntlet r2). Appends serialize on a Postgres advisory lock the
@@ -310,9 +432,27 @@ services:
         condition: service_healthy
       migrate:
         condition: service_completed_successfully
+      # The shape proxy is a route in THIS app, so the app is the only thing that
+      # ever talks to Electric. Starting before it is up means a room's document
+      # 502s for a few seconds rather than being wrong, so `service_started` is
+      # honest here — but the dependency is declared so `compose up` orders them.
+      electric:
+        condition: service_started
     environment:
       NODE_ENV: production
       PORT: 3000
+      # ── The Electric sync fabric (#201) ───────────────────────────────────
+      # The INTERNAL origin, on the compose network. It is never sent to a
+      # browser and never appears in a page: `app/electric/v1/shape/route.ts`
+      # reads it server-side, authorizes the caller against the room, pins the
+      # shape's `where` clause, and forwards. What the browser gets is the
+      # same-origin PATH below, over its own session cookie.
+      #
+      # Not `NEXT_PUBLIC_*`, and not derivable from ATRIUM_DOMAIN either: this
+      # names a container, so inlining it into a bundle would ship a URL no
+      # browser can resolve and freeze it into the image besides.
+      ELECTRIC_URL: http://electric:3000
+      ELECTRIC_SECRET: ${ELECTRIC_SECRET:?set ELECTRIC_SECRET in .env — generate one with `openssl rand -base64 32`; it is what stops anything on the compose network reading any room's document}
       HOSTNAME: 0.0.0.0
       # THE SOCKET URL IS DELIBERATELY NOT SET HERE.
       #
@@ -420,3 +560,9 @@ volumes:
   minio-data:
   caddy-data:
   caddy-config:
+  # Electric's shape log. Named rather than ephemeral so a restart resumes its
+  # shapes instead of re-snapshotting every room's document from Postgres — and
+  # so a client's `handle`/`offset` stays valid across one. Losing it is
+  # survivable (clients re-sync from `offset=-1`), which is why it is not
+  # backed up alongside postgres-data: it is a cache of a durable table.
+  electric-data:

@@ -25,6 +25,27 @@ export function GET(): Response {
     {
       wsUrl: process.env.ATRIUM_WS_URL ?? null,
       wsPath: process.env.ATRIUM_WS_PATH ?? '/ws',
+      /**
+       * Where the browser reads a room's document (#201) — a PATH on this
+       * origin, and only ever a path.
+       *
+       * `ELECTRIC_URL` is emphatically NOT published here. That variable names
+       * the sync service on the private network, and Electric authenticates
+       * nobody: handing a browser its address would be handing every browser
+       * every room's document. What is published is the route in this app that
+       * checks the session, checks the membership, and pins the shape's `where`
+       * clause server-side. The value is configurable only so a deployment that
+       * mounts the proxy elsewhere can say so — it is not a way to point the
+       * browser at Electric directly, and `resolveElectricShapeUrl` refuses an
+       * absolute value for exactly that reason.
+       *
+       * Reported as `null` when this deployment has no Electric, so the client
+       * can render a room without a live document rather than retrying a route
+       * that will 503 forever.
+       */
+      electricShapePath: process.env.ELECTRIC_URL?.trim()
+        ? (process.env.ATRIUM_ELECTRIC_SHAPE_PATH ?? '/electric/v1/shape')
+        : null,
     },
     {
       headers: {

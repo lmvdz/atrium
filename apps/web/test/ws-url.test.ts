@@ -1,7 +1,7 @@
 import { readdirSync, readFileSync, statSync } from 'node:fs';
 import { join } from 'node:path';
 import { describe, expect, it } from 'vitest';
-import { resolveWsUrl, WsUrlError } from '../src/lib/ws-url.js';
+import { resolveElectricShapeUrl, resolveWsUrl, WsUrlError } from '../src/lib/ws-url.js';
 
 /**
  * The routed finding from #19, kept fixed: the WebSocket endpoint must be
@@ -53,6 +53,49 @@ describe('resolveWsUrl — runtime override', () => {
 
   it('refuses a value that is neither absolute nor origin-relative', () => {
     expect(() => resolveWsUrl({ wsUrl: 'atrium.example/ws' }, https)).toThrow(WsUrlError);
+  });
+});
+
+/**
+ * The shape endpoint (#201) is the socket URL's stricter sibling, and the
+ * asymmetry is the whole test.
+ *
+ * A socket may legitimately live on another origin — `pnpm dev` puts it on
+ * :4000 — so `wsUrl` is allowed to be absolute. A shape read may not: it is
+ * authorized by the session cookie at `app/electric/v1/shape/route.ts`, and a
+ * cookie only rides a same-origin request. An absolute value here would be a
+ * cross-origin fetch arriving unauthenticated at an Electric that cannot
+ * authenticate anyway — one room's document readable by anybody who guessed the
+ * URL. So the refusal below is a security property, not input hygiene.
+ */
+describe('resolveElectricShapeUrl — same origin, always', () => {
+  it('defaults to the proxy route on the page’s own origin', () => {
+    expect(resolveElectricShapeUrl({}, https)).toBe('https://atrium.example/electric/v1/shape');
+    expect(resolveElectricShapeUrl({}, http)).toBe('http://localhost:3000/electric/v1/shape');
+  });
+
+  it('follows a deployment that mounts the proxy elsewhere', () => {
+    expect(resolveElectricShapeUrl({ electricShapePath: '/sync/shape' }, https)).toBe(
+      'https://atrium.example/sync/shape',
+    );
+  });
+
+  it('ignores an empty or absent value rather than producing a bare origin', () => {
+    expect(resolveElectricShapeUrl({ electricShapePath: '   ' }, https)).toBe(
+      'https://atrium.example/electric/v1/shape',
+    );
+    expect(resolveElectricShapeUrl({ electricShapePath: null }, https)).toBe(
+      'https://atrium.example/electric/v1/shape',
+    );
+  });
+
+  it('REFUSES an absolute URL, which would send the read without the session cookie', () => {
+    expect(() =>
+      resolveElectricShapeUrl({ electricShapePath: 'https://electric.example/v1/shape' }, https),
+    ).toThrow(WsUrlError);
+    expect(() =>
+      resolveElectricShapeUrl({ electricShapePath: 'http://electric:3000/v1/shape' }, https),
+    ).toThrow(WsUrlError);
   });
 });
 

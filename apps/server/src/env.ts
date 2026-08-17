@@ -305,6 +305,30 @@ const RawEnvSchema = BaseEnvSchema.extend({
    */
   S3_ACCESS_KEY_ID: z.string().min(1).optional(),
   S3_SECRET_ACCESS_KEY: z.string().min(1).optional(),
+
+  /**
+   * The Electric sync service's INTERNAL origin (#201) — `http://electric:3000`
+   * in the compose stack.
+   *
+   * Optional, and optional is the honest default: this process does not sync a
+   * document today. It is here so that when the agent-peer harness (#184) joins
+   * a room's Yjs doc from the server side, it reads the same variable the web
+   * app reads rather than growing a second name for one service. A deployment
+   * with no Electric leaves it unset and nothing changes.
+   *
+   * NEVER handed to a browser. It names a container: the browser reaches shapes
+   * at a same-origin path through the app's authenticated proxy, which is the
+   * only thing that knows which rooms a caller may open.
+   */
+  ELECTRIC_URL: z.url().optional(),
+  /**
+   * Electric's API secret. Electric authenticates the CALLER with it and knows
+   * nothing about rooms or sessions, so this is a network-level lock, not an
+   * authorization: it stops something else on the compose network reading any
+   * room's document by asking Electric directly. Room authorization is the app
+   * proxy's job and is not replaceable by this value.
+   */
+  ELECTRIC_SECRET: z.string().min(1).optional(),
 });
 
 const EnvSchema = RawEnvSchema.transform((raw, ctx) => {
