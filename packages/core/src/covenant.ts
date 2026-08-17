@@ -226,6 +226,14 @@ export type BlockFormat = z.infer<typeof BlockFormat>;
  * nested doc's digest. The embed identity is why a mention re-pointed at another
  * user, or an image whose `src` was swapped, is drift though the span's visible
  * structure is unchanged (acceptance test, class 4).
+ *
+ * An embed ALSO carries its own inline `marks` — a Yjs `format()` stamps
+ * attributes onto an embed op exactly as onto a text op, so a link put on a
+ * certified image, a highlight put on a certified mention chip, or a mark that
+ * straddles an embed-ONLY span (a boundary with no in-span text run) is rendered
+ * meaning and MUST move the digest. Without this field the embed's format
+ * attributes had nowhere to live, so such a mark stayed a false `✓` (round-3
+ * PRIMARY — the standalone false-`✓`). Empty for an unmarked embed.
  */
 export const RenderedNode = z.discriminatedUnion('kind', [
   z.object({
@@ -238,6 +246,8 @@ export const RenderedNode = z.discriminatedUnion('kind', [
     embedType: z.string().min(1),
     /** e.g. `{ target: 'u_alice' }`, `{ src: 'https://…' }`, `{ docDigest: '…' }`. */
     identity: z.record(z.string(), z.string()),
+    /** Inline marks stamped onto the embed op (link/highlight/bold), with straddle. */
+    marks: z.array(Mark),
   }),
 ]);
 export type RenderedNode = z.infer<typeof RenderedNode>;
@@ -397,6 +407,10 @@ export function normalizeFragment(fragment: RenderedFragment): RenderedFragment 
         kind: 'embed',
         embedType: normalizeString(node.embedType),
         identity: normalizeAttrs(node.identity),
+        // An embed's own marks are rendered meaning too (a link/highlight on the
+        // embed, or a straddle across an embed-only boundary). Sort/normalize them
+        // exactly as a text run's, so mark order is not mistaken for a change.
+        marks: sortedMarks(node.marks),
       });
     }
   }
@@ -514,6 +528,33 @@ export interface CapturedSelection {
  * anchored items were deleted and garbage-collected, the state vector names a
  * document this is not, or the positions no longer resolve. `null` is the
  * fail-closed signal, and {@link resolveCovenant} turns it into DRIFT.
+ *
+ * ## CONFORMANCE REQUIREMENTS for the PRODUCTION reader (#181/#183)
+ *
+ * The reference reader in `test/support/yjs-reader.ts` and the conformance suite
+ * (`covenant-conformance.test.ts`) are the contract a production reader must
+ * satisfy. In addition to every advertised drift class the suite exercises, a
+ * production reader over the real (TipTap / y-prosemirror) embed representation
+ * MUST honour the following — they are OUT OF SCOPE for #180 (whose reference
+ * reader is a test double) precisely because they depend on the unknown production
+ * embed shape, and are routed here so #181 cannot reproduce the gap:
+ *
+ *   - **Deep embed fields are rendered STRUCTURALLY, never `String(obj)`.** An
+ *     embed whose identity or child carries a NON-`child` nested OBJECT field must
+ *     be serialized field-by-field (canonically, key-sorted, NFC-normalized on its
+ *     string leaves — the discipline `embedIdentity`/`stableStringify` use for the
+ *     `child` field), NOT coerced with `String(v)` — which collapses every distinct
+ *     object to `"[object Object]"`, a false `✓` across two different embeds. Every
+ *     meaning-bearing leaf of an embed must reach the digest.
+ *   - **Embed inline marks reach the digest.** A `format()` over an embed (a link
+ *     on an image, a highlight on a mention) is rendered meaning; emit it as the
+ *     embed node's `marks` (see {@link RenderedNode}). #180 closed this for the
+ *     reference reader; the production reader must keep it for its own embed op shape.
+ *   - **Resolution has a DEADLINE / is non-blocking.** {@link resolveSpan} is
+ *     synchronous here; a production adapter backed by a live Electric/Yjs stream
+ *     must not block indefinitely — a resolve that cannot complete promptly is the
+ *     "could not faithfully resolve" case and MUST fail closed (`null` ⇒ DRIFT),
+ *     never hang. The timeout/deadline mechanism is #181/#182's to build.
  */
 export interface CovenantDocReader {
   /** Capture a fresh anchor's raw materials from the currently-selected span. */

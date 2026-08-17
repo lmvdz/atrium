@@ -78,8 +78,8 @@ function sampleFragment(): RenderedFragment {
     ancestors: [{ type: 'heading', attrs: { level: '2' } }],
     nodes: [
       { kind: 'text', text: 'ship it', marks: [{ type: 'bold', attrs: {}, straddles: 'start' }] },
-      { kind: 'embed', embedType: 'mention', identity: { target: 'u_alice' } },
-      { kind: 'embed', embedType: 'image', identity: { src: 'https://x/a.png' } },
+      { kind: 'embed', embedType: 'mention', identity: { target: 'u_alice' }, marks: [] },
+      { kind: 'embed', embedType: 'image', identity: { src: 'https://x/a.png' }, marks: [] },
     ],
   };
 }
@@ -360,15 +360,21 @@ describe('EXACT content: NFC-only normalization — the prose fold is GONE (roun
     expect(renderedDigestOf(text("won't"))).not.toBe(renderedDigestOf(text('won’t')));
   });
   it('an injected ZERO-WIDTH SPACE is content (the mention-target attack) → different digest', () => {
-    const clean = wrap([{ kind: 'embed', embedType: 'mention', identity: { target: 'u_alice' } }]);
-    const zwsp = wrap([{ kind: 'embed', embedType: 'mention', identity: { target: 'u_ali​ce' } }]);
+    const clean = wrap([
+      { kind: 'embed', embedType: 'mention', identity: { target: 'u_alice' }, marks: [] },
+    ]);
+    const zwsp = wrap([
+      { kind: 'embed', embedType: 'mention', identity: { target: 'u_ali​ce' }, marks: [] },
+    ]);
     expect(renderedDigestOf(clean)).not.toBe(renderedDigestOf(zwsp));
   });
   it('an image src with an invisible char is content → different digest', () => {
     const clean = wrap([
-      { kind: 'embed', embedType: 'image', identity: { src: 'https://x/a.png' } },
+      { kind: 'embed', embedType: 'image', identity: { src: 'https://x/a.png' }, marks: [] },
     ]);
-    const inv = wrap([{ kind: 'embed', embedType: 'image', identity: { src: 'https://x/a​png' } }]);
+    const inv = wrap([
+      { kind: 'embed', embedType: 'image', identity: { src: 'https://x/a​png' }, marks: [] },
+    ]);
     expect(renderedDigestOf(clean)).not.toBe(renderedDigestOf(inv));
   });
   it('markdown is NOT unfolded: `foo bar` vs `[foo](bar)` → different digest', () => {

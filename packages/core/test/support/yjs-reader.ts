@@ -88,19 +88,27 @@ function marksOf(attributes: Record<string, unknown> | undefined): Mark[] {
 }
 
 /**
- * A stable, insertion-order-independent JSON string. `JSON.stringify` serializes
- * object keys in insertion order, so two nested-embed children that are the SAME
- * object built in a different key order would hash differently — a false-stale.
- * Sort keys at every depth so identical content ⇒ one digest (the same key-sort
- * discipline `@atrium/core`'s `canonical()` uses on the fragment itself).
+ * A stable, insertion-order-independent, NFC-normalized JSON string. Two concerns:
+ *
+ *  - `JSON.stringify` serializes object keys in insertion order, so the SAME child
+ *    built in a different key order would hash differently — a false-stale. Sort
+ *    keys at every depth (the same key-sort discipline `@atrium/core`'s
+ *    `canonical()` uses on the fragment itself).
+ *  - The nested child is hashed to a hex `docDigest`, and core's NFC pass then runs
+ *    on that HEX — a no-op. So NFC must be applied to the child's STRING LEAVES here,
+ *    before hashing, or `{title:'café'}` composed vs decomposed digests differently
+ *    → a false-STALE (round-3). Normalize every string key and value to NFC, exactly
+ *    as core does for a fragment's strings, so canonical equivalence folds identically
+ *    inside a nested child.
  */
 function stableStringify(value: unknown): string {
+  if (typeof value === 'string') return JSON.stringify(value.normalize('NFC'));
   if (value === null || typeof value !== 'object') return JSON.stringify(value) ?? 'null';
   if (Array.isArray(value)) return `[${value.map(stableStringify).join(',')}]`;
   const obj = value as Record<string, unknown>;
   return `{${Object.keys(obj)
     .sort()
-    .map((k) => `${JSON.stringify(k)}:${stableStringify(obj[k])}`)
+    .map((k) => `${JSON.stringify(k.normalize('NFC'))}:${stableStringify(obj[k])}`)
     .join(',')}}`;
 }
 
@@ -118,7 +126,12 @@ function embedIdentity(embed: Record<string, unknown>): {
       // inside the child (not just a top-level attr) is drift (class A / #163). A
       // string child is hashed as-is; an OBJECT child is canonicalized first
       // (sorted keys), so insertion order is not mistaken for a content change.
-      identity.docDigest = sha256Hex(typeof v === 'string' ? v : stableStringify(v));
+      // A string child is NFC-normalized before hashing for the same reason (the
+      // hex docDigest is opaque to core's NFC pass), so a decomposed vs composed
+      // string child folds to one digest.
+      identity.docDigest = sha256Hex(
+        typeof v === 'string' ? v.normalize('NFC') : stableStringify(v),
+      );
       continue;
     }
     identity[k] = String(v);
@@ -219,11 +232,11 @@ export class YjsCovenantDocReader implements CovenantDocReader {
   ): { fragment: RenderedFragment; enclosedItems: EnclosedItem[] } {
     const delta = body.toDelta() as DeltaOp[];
     const nodes: RenderedNode[] = [];
-    // Track the first / last IN-SPAN text node so straddle is stamped on the runs
-    // adjacent to the span boundaries — even when the boundary itself is an EMBED
-    // (in which case no text op satisfies the old `from<=start` / `to>=end` guard).
-    let firstText = -1;
-    let lastText = -1;
+    // Track the first / last IN-SPAN node (text OR embed) so straddle is stamped on
+    // whatever sits adjacent to each span boundary — even when the boundary itself
+    // is an EMBED, and even for an embed-ONLY span with no in-span text run at all.
+    let firstNode = -1;
+    let lastNode = -1;
     let pos = 0;
     for (const op of delta) {
       if (typeof op.insert === 'string') {
@@ -234,16 +247,23 @@ export class YjsCovenantDocReader implements CovenantDocReader {
         if (to > from) {
           const text = op.insert.slice(from - opStart, to - opStart);
           const marks = marksOf(op.attributes); // straddle stamped in the post-pass
-          if (firstText === -1) firstText = nodes.length;
-          lastText = nodes.length;
+          if (firstNode === -1) firstNode = nodes.length;
+          lastNode = nodes.length;
           nodes.push({ kind: 'text', text, marks });
         }
         pos = opEnd;
       } else {
-        // An embed occupies exactly one character.
+        // An embed occupies exactly one character. It carries BOTH its internal
+        // identity (embedIdentity) AND its own inline marks (op.attributes: a
+        // link/highlight/bold stamped onto the embed) — the round-3 PRIMARY gap
+        // was rendering only the identity, so a mark on a certified embed had
+        // nowhere to land and stayed a false `✓`.
         if (pos >= start && pos < end) {
           const { embedType, identity } = embedIdentity(op.insert);
-          nodes.push({ kind: 'embed', embedType, identity });
+          const marks = marksOf(op.attributes); // straddle stamped in the post-pass
+          if (firstNode === -1) firstNode = nodes.length;
+          lastNode = nodes.length;
+          nodes.push({ kind: 'embed', embedType, identity, marks });
         }
         pos += 1;
       }
@@ -258,19 +278,22 @@ export class YjsCovenantDocReader implements CovenantDocReader {
     const straddlesAcross = (m: Mark, before: number, after: number): boolean =>
       sameAttrs(m.attrs, markActiveAt(delta, before, m.type)) &&
       sameAttrs(m.attrs, markActiveAt(delta, after, m.type));
-    const stamp = (idx: number, kind: 'start' | 'end') => {
+    // Stamp straddle on the boundary-adjacent node — text OR embed (both carry
+    // `marks` now), so a mark that straddles an embed on the boundary, or an
+    // embed-only span, is detected instead of reading a byte-identical `none`.
+    const stamp = (idx: number, boundary: 'start' | 'end') => {
       if (idx === -1) return;
       const node = nodes[idx];
-      if (node?.kind !== 'text') return;
+      if (!node) return;
       node.marks = node.marks.map((m) => {
         const straddleStart =
           m.straddles === 'start' ||
           m.straddles === 'both' ||
-          (kind === 'start' && straddlesAcross(m, start - 1, start));
+          (boundary === 'start' && straddlesAcross(m, start - 1, start));
         const straddleEnd =
           m.straddles === 'end' ||
           m.straddles === 'both' ||
-          (kind === 'end' && straddlesAcross(m, end - 1, end));
+          (boundary === 'end' && straddlesAcross(m, end - 1, end));
         const straddles: Mark['straddles'] =
           straddleStart && straddleEnd
             ? 'both'
@@ -282,8 +305,8 @@ export class YjsCovenantDocReader implements CovenantDocReader {
         return { ...m, straddles };
       });
     };
-    stamp(firstText, 'start');
-    stamp(lastText, 'end');
+    stamp(firstNode, 'start');
+    stamp(lastNode, 'end');
 
     return {
       fragment: { ancestors: this.ancestorsOf(body), nodes },
@@ -374,11 +397,17 @@ export class YjsCovenantDocReader implements CovenantDocReader {
 
   /**
    * The (client:clock,len) of every DELETED (tombstoned) item whose position falls
-   * strictly INSIDE the certified span [start,end). A deletion inside the span
-   * changed the span's content, so the certifier must have recorded it in the
-   * captured delete set; a deletion OUTSIDE the span (another block, or elsewhere
-   * in this block) is irrelevant to this `✓` and is deliberately NOT required —
-   * that is what keeps an anchor robust to edits elsewhere (no false-stale storm).
+   * within the certified span `[start,end]`, BOUNDARIES INCLUDED. A deletion inside
+   * or AT either edge of the span changed the span's content, so the certifier must
+   * have recorded it in the captured delete set. Round-3: the old `offset > start &&
+   * offset < end` EXCLUDED a boundary tombstone (`offset == start | end`), so an
+   * anchor that dropped a boundary tombstone from its delete set slipped past
+   * completeness → a false `✓`. Widened to `offset >= start && offset <= end`.
+   *
+   * A deletion OUTSIDE the span (another block, or elsewhere in this block) is
+   * irrelevant to this `✓` and is deliberately NOT required — that span-scoping is
+   * what keeps an anchor robust to edits elsewhere (no false-stale storm). Do NOT
+   * widen this to a global delete-set check.
    */
   private spanDeletedItems(
     body: Y.XmlText,
@@ -397,7 +426,9 @@ export class YjsCovenantDocReader implements CovenantDocReader {
       };
       if (it.deleted) {
         // A tombstone contributes no visible width; it sits AT the current offset.
-        if (offset > start && offset < end)
+        // Boundaries included: a deletion at offset == start or offset == end is
+        // span content the certifier saw removed.
+        if (offset >= start && offset <= end)
           out.push({ client: it.id.client, clock: it.id.clock, len: it.length });
       } else {
         offset += it.length;
@@ -405,6 +436,27 @@ export class YjsCovenantDocReader implements CovenantDocReader {
       item = it.right;
     }
     return out;
+  }
+
+  /**
+   * The set of REAL per-client state-vector frontiers the live doc has passed
+   * through for `client` — `{0} ∪ {clock+len}` over that client's contiguous
+   * structs in the struct store. A Yjs state vector always records, per client, the
+   * next-expected clock, which is exactly one of these boundaries; a value that is
+   * NOT one of them (mid-struct, or past the client's last op) is a state the doc
+   * never occupied and so cannot be a genuine certify-time frontier. Used to reject
+   * a fabricated / redistributed SV that merely preserves the sum (round-3 SECONDARY).
+   */
+  private clientBoundaries(doc: Y.Doc, client: number): Set<number> {
+    const bounds = new Set<number>([0]);
+    const structs = (
+      doc as unknown as {
+        store: { clients: Map<number, Array<{ id: { clock: number }; length: number }>> };
+      }
+    ).store.clients.get(client);
+    if (!structs) return bounds;
+    for (const s of structs) bounds.add(s.id.clock + s.length);
+    return bounds;
   }
 
   /**
@@ -439,6 +491,16 @@ export class YjsCovenantDocReader implements CovenantDocReader {
       const liveSV = Y.decodeStateVector(Y.encodeStateVector(doc));
       for (const [client, clock] of anchorSV.entries()) {
         if ((liveSV.get(client) ?? 0) < clock) return false;
+      }
+
+      // Toward certify-time EQUALITY, not merely same-sum-prefix (round-3 SECONDARY):
+      // every per-client frontier must land on a REAL boundary the doc actually
+      // passed through. A redistributed SV that preserves the sum but shifts a
+      // client's clock to a value the doc never occupied (mid-struct, or off its
+      // op count) is not a genuine certify-time frontier → DRIFT. A genuine SV is
+      // always boundary-aligned, so this never false-stales an honest anchor.
+      for (const [client, clock] of anchorSV.entries()) {
+        if (!this.clientBoundaries(doc, client).has(clock)) return false;
       }
 
       // COVERAGE (closes the zeroed-revision / emptied-SV lie): every item the span

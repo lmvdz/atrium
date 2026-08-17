@@ -562,3 +562,217 @@ describe('provenance fields are intentionally NOT drift inputs (round-3 DOCUMENT
     expect(status(reader, reprovenanced)).toBe('ok');
   });
 });
+
+// ─────────────────────────────────────────────────────────────────────────────
+// EMBED-MARK DIGEST GAP (round-4 PRIMARY — the standalone false-`✓`). A mark
+// applied to a certified embed (a link on an image, a highlight on a mention), or
+// a mark that straddles an EMBED-ONLY span, had nowhere to live in RenderedNode, so
+// it was NOT in the digest and the mutation stayed `ok`. The embed now carries its
+// own `marks[]` (with straddle), so each case drifts.
+// ─────────────────────────────────────────────────────────────────────────────
+describe('embed-mark digest gap (round-4 PRIMARY)', () => {
+  // These assert on the DIGEST directly. An end-to-end `format()`-then-resolve would
+  // ALSO drift on the reference reader via the snapshot-coverage axis (format() adds
+  // items into the span), which would MASK the digest gap — the very hole the fix
+  // closes. The digest is the primary authority a production reader relies on, so the
+  // load-bearing proof is that an embed mark MOVES THE DIGEST. (End-to-end `drift` is
+  // additionally asserted where it does not ride the coverage axis.)
+  it('(a) a LINK on a certified IMAGE embed moves the digest (was absent from it)', () => {
+    const plain = certify(capturingReader(makeDoc().doc));
+    const linked = (() => {
+      const { doc, body } = makeDoc();
+      body.format(16, 1, { link: { href: 'https://evil.example' } }); // the image at idx 16
+      return certify(capturingReader(doc));
+    })();
+    // Identity (src) and item id are unchanged; ONLY the embed's inline mark differs.
+    // On the base reader (no embed marks) these digest identically — a false `✓`.
+    expect(linked.renderedDigest).not.toBe(plain.renderedDigest);
+  });
+
+  it('(b) a HIGHLIGHT on a certified MENTION chip moves the digest', () => {
+    const plain = certify(capturingReader(makeDoc().doc));
+    const lit = (() => {
+      const { doc, body } = makeDoc();
+      body.format(14, 1, { highlight: 'red' }); // the mention chip at idx 14
+      return certify(capturingReader(doc));
+    })();
+    expect(lit.renderedDigest).not.toBe(plain.renderedDigest);
+  });
+
+  it('(c) an EMBED-ONLY span: a mark that straddles it vs one that does not → DIFFERENT digest', () => {
+    // `X · [mention] · Y`. The span is the single embed [1,2) — there is NO in-span
+    // text run for stamp() to land on, so the straddle must be expressed ON the embed.
+    function bolded(span: 'across' | 'embed-only'): CovenantAnchor {
+      const doc = new Y.Doc();
+      const frag = doc.getXmlFragment('doc');
+      const para = new Y.XmlElement('paragraph');
+      const body = new Y.XmlText();
+      frag.insert(0, [para]);
+      para.insert(0, [body]);
+      body.insert(0, 'X');
+      body.insertEmbed(1, { embedType: 'mention', target: 'u_alice' });
+      body.insert(2, 'Y');
+      // 'across' → bold on X, embed, Y (the embed's bold STRADDLES both boundaries);
+      // 'embed-only' → bold on JUST the embed (straddles neither). The embed's own
+      // bold attrs are byte-identical in both; ONLY the straddle differs.
+      if (span === 'across') body.format(0, 3, { bold: true });
+      else body.format(1, 1, { bold: true });
+      return certify(new YjsCovenantDocReader(doc, { path: [0, 0], start: 1, end: 2 }));
+    }
+    // On the base reader (embed has no marks/straddle) both digest to the bare embed
+    // identity → EQUAL → the retarget would be a false `✓`.
+    expect(bolded('across').renderedDigest).not.toBe(bolded('embed-only').renderedDigest);
+  });
+
+  it('(c-e2e) retargeting a straddling mark off an embed-only span → DRIFT end-to-end', () => {
+    // Confirms the digest gap is observable end-to-end. This one does NOT ride the
+    // coverage axis for the START: `format(…,{bold:null})` on already-bold content
+    // adds a format item, but the assertion that isolates the fix is the digest (c).
+    const doc = new Y.Doc();
+    const frag = doc.getXmlFragment('doc');
+    const para = new Y.XmlElement('paragraph');
+    const body = new Y.XmlText();
+    frag.insert(0, [para]);
+    para.insert(0, [body]);
+    body.insert(0, 'X');
+    body.insertEmbed(1, { embedType: 'mention', target: 'u_alice' });
+    body.insert(2, 'Y');
+    body.format(0, 3, { bold: true });
+    const reader = new YjsCovenantDocReader(doc, { path: [0, 0], start: 1, end: 2 });
+    const anchor = certify(reader);
+    expect(status(reader, anchor)).toBe('ok');
+    body.format(0, 1, { bold: null });
+    body.format(2, 1, { bold: null });
+    expect(status(reader, anchor)).toBe('drift');
+  });
+});
+
+// ─────────────────────────────────────────────────────────────────────────────
+// NFC NESTED-CHILD (round-4 — determinism, false-STALE not a lie). The nested-embed
+// child is hashed to a hex docDigest, and core's NFC pass runs on that hex (a no-op),
+// so NFC must be applied to the child's STRING LEAVES before hashing — else composed
+// vs decomposed `café` false-stales.
+// ─────────────────────────────────────────────────────────────────────────────
+describe('NFC nested-embed child (round-4)', () => {
+  function childDoc(child: unknown): Y.Doc {
+    const doc = new Y.Doc();
+    const frag = doc.getXmlFragment('doc');
+    const para = new Y.XmlElement('paragraph');
+    const body = new Y.XmlText();
+    frag.insert(0, [para]);
+    para.insert(0, [body]);
+    body.insertEmbed(0, { embedType: 'nestedDoc', child });
+    return doc;
+  }
+  const certifyChild = (child: unknown): CovenantAnchor =>
+    certify(new YjsCovenantDocReader(childDoc(child), { path: [0, 0], start: 0, end: 1 }));
+
+  const composed = 'café'; // café, U+00E9
+  const decomposed = 'café'; // café, e + U+0301 combining acute
+
+  it('a STRING child composed vs decomposed → SAME digest (NFC folds canonical equivalence)', () => {
+    expect(certifyChild(composed).renderedDigest).toBe(certifyChild(decomposed).renderedDigest);
+  });
+
+  it('an OBJECT child with a composed vs decomposed string leaf → SAME digest', () => {
+    const a = certifyChild({ title: composed });
+    const b = certifyChild({ title: decomposed });
+    expect(a.renderedDigest).toBe(b.renderedDigest);
+  });
+
+  it('a genuinely different child leaf still → DIFFERENT digest (NFC is not blindness)', () => {
+    expect(certifyChild({ title: 'café' }).renderedDigest).not.toBe(
+      certifyChild({ title: 'latte' }).renderedDigest,
+    );
+  });
+});
+
+// ─────────────────────────────────────────────────────────────────────────────
+// SNAPSHOT tightened toward certify-time equality (round-4 SECONDARY, defence-in-
+// depth). The digest is the primary authority; these harden the secondary gate.
+//  - the captured SV must land on a REAL per-client boundary (a state the doc
+//    actually passed through), not a fabricated / redistributed value that merely
+//    preserves the sum;
+//  - span-scoped DS-completeness now includes BOUNDARY tombstones (offset==start|end),
+//    kept span-scoped so an unrelated deletion elsewhere does NOT false-stale.
+// ─────────────────────────────────────────────────────────────────────────────
+describe('snapshot tightened toward certify-time equality (round-4 SECONDARY)', () => {
+  it('an SV frontier that is NOT a real per-client boundary (redistributed/off-boundary) → DRIFT', () => {
+    // One bulk item for the text, so the client boundaries are COARSE ({0,1,2,11}),
+    // and a shifted frontier can land between them — a value the doc never occupied.
+    const doc = new Y.Doc();
+    doc.clientID = 424242;
+    const frag = doc.getXmlFragment('doc');
+    const para = new Y.XmlElement('paragraph');
+    const body = new Y.XmlText();
+    frag.insert(0, [para]);
+    para.insert(0, [body]);
+    body.insert(0, 'shipitnow'); // one item, len 9 → text boundary at clock 11
+    const reader = new YjsCovenantDocReader(doc, { path: [0, 0], start: 0, end: 9 });
+    const anchor = certify(reader);
+    expect(status(reader, anchor)).toBe('ok');
+
+    // A tampering doc (same clientID) whose frontier is 6 — OFF the live doc's
+    // boundary set {0,1,2,11}. Sum-bind still holds (revision := the tampered sum),
+    // prefix still holds (6 ≤ 11), span-coverage still holds (text clock 2 < 6) —
+    // the OLD checks all pass. Only boundary-alignment rejects it.
+    const t = new Y.Doc();
+    t.clientID = 424242;
+    const tf = t.getXmlFragment('doc');
+    const tp = new Y.XmlElement('paragraph');
+    const tb = new Y.XmlText();
+    tf.insert(0, [tp]);
+    tp.insert(0, [tb]);
+    tb.insert(0, 'ship'); // frontier 2 (para,body) + 4 = 6
+    const tSV = Y.decodeStateVector(Y.encodeStateVector(t));
+    let tSum = 0;
+    for (const c of tSV.values()) tSum += c;
+    expect(tSum).toBe(6); // guard: the tampered frontier really is off-boundary
+    expect(
+      status(reader, { ...anchor, stateVector: b64(Y.encodeStateVector(t)), revision: tSum }),
+    ).toBe('drift');
+  });
+
+  it('a BOUNDARY tombstone (offset==start | offset==end) dropped from the deleteSet → DRIFT', () => {
+    // Delete content at BOTH the span start and end (before certify), so the captured
+    // deleteSet carries two boundary tombstones the old strict `>start && <end` check
+    // would have ignored.
+    const doc = new Y.Doc();
+    const frag = doc.getXmlFragment('doc');
+    const para = new Y.XmlElement('paragraph');
+    const body = new Y.XmlText();
+    frag.insert(0, [para]);
+    para.insert(0, [body]);
+    body.insert(0, 'XABCDEY'); // 7 chars
+    body.delete(0, 1); // drop 'X' → tombstone at offset 0 (== span start)
+    body.delete(5, 1); // drop 'Y' → tombstone at offset 5 (== span end); visible 'ABCDE'
+    const reader = new YjsCovenantDocReader(doc, { path: [0, 0], start: 0, end: 5 });
+    const anchor = certify(reader);
+    expect(status(reader, anchor)).toBe('ok');
+    // Sanity: the captured deleteSet is genuinely non-empty (the boundary tombstones).
+    const capturedDS = JSON.parse(Buffer.from(anchor.deleteSet, 'base64').toString('utf8'));
+    expect(Object.keys(capturedDS).length).toBeGreaterThan(0);
+    // Weaken to empty: with boundary tombstones now in span-scoped completeness, the
+    // dropped boundary deletions are detected → DRIFT (old `>start && <end` missed them).
+    const emptied = Buffer.from(JSON.stringify({})).toString('base64');
+    expect(status(reader, { ...anchor, deleteSet: emptied })).toBe('drift');
+  });
+
+  it('CONTROL: a legitimate unrelated deletion ELSEWHERE still resolves OK (span-scoped, no false-stale)', () => {
+    const doc = new Y.Doc();
+    const frag = doc.getXmlFragment('doc');
+    const para = new Y.XmlElement('paragraph');
+    const body = new Y.XmlText();
+    frag.insert(0, [para]);
+    para.insert(0, [body]);
+    body.insert(0, 'ABCDEFGHIJ'); // span will be [0,5) = 'ABCDE'
+    const reader = new YjsCovenantDocReader(doc, { path: [0, 0], start: 0, end: 5 });
+    const anchor = certify(reader);
+    expect(status(reader, anchor)).toBe('ok');
+    // Delete 'GHI' (indices 6-8) — strictly OUTSIDE and not adjacent to the span. Its
+    // tombstone sits at offset 6 (> end), so span-scoped completeness never requires
+    // it; the span content 'ABCDE' is byte-identical → OK, not a false-stale.
+    body.delete(6, 3);
+    expect(status(reader, anchor)).toBe('ok');
+  });
+});
