@@ -1,4 +1,3 @@
-import * as Y from 'yjs';
 import {
   type AuthoritativeContext,
   type CapturedSelection,
@@ -11,6 +10,7 @@ import {
   type ResolvedSpan,
   sha256Hex,
 } from '@atrium/core';
+import * as Y from 'yjs';
 
 /* ═══════════════════════════════════════════════════════════════════════════
  * THE PRODUCTION `CovenantDocReader` (#189 / SL-2), over the live conversation's
@@ -51,10 +51,13 @@ import {
  *
  *   (c) RESOLUTION HAS A DEADLINE / fails closed. A production adapter is backed
  *       by a live stream whose handle may not be ready. The reader reaches the doc
- *       ONLY through a non-blocking {@link DocSource} poll and a wall-clock
- *       deadline: a handle that never becomes ready yields `null` (⇒ DRIFT) within
- *       the deadline, and NEVER hangs. `resolveSpan` stays synchronous, so the
- *       deadline is enforced by bounded polling, not by racing a blocking call.
+ *       ONLY through a non-blocking {@link DocSource} poll. The SYNCHRONOUS port
+ *       methods poll ONCE — a source not ready right now fails closed at once,
+ *       never blocking the event loop. The LIVE/streaming path uses the async port
+ *       (`resolveSpanAsync` / `captureSelectionAsync` / `authoritativeContextAsync`)
+ *       whose deadline is genuinely async, cancellable, and MONOTONIC: a never-ready
+ *       OR slow-eventually-ready source yields `null` (⇒ DRIFT) at the deadline
+ *       without a late `ok` and without a busy-spin (the 250ms busy-spin is gone).
  *
  * The three hardenings sit behind protected seams (`canonicalizeLeaf`,
  * `marksForEmbed`, `deadlineEnabled`) so the not-theater proof can drive a
@@ -90,12 +93,41 @@ class ImmediateSource implements DocSource {
   }
 }
 
-/** How long the reader will wait (busy-poll) for a stalled source before DRIFT. */
+/**
+ * A resolver for the doc's CONTENT ROOT — the share where the certified span's
+ * body lives. The live conversation's rich-text bodies (#194) are NOT under an
+ * arbitrary `getXmlFragment('doc')`; binding to the wrong share means a content
+ * mutation is never seen (the #189 MEDIUM). The caller supplies the share it
+ * actually writes conversation content into; `null` ⇒ the share is absent, which
+ * fails CLOSED (no capture, DRIFT) rather than resolving against an empty plant.
+ */
+export type RootResolver = (doc: Y.Doc) => Y.XmlFragment | Y.XmlElement | null;
+
+/** The default content root — the `'doc'` XML fragment (the synthetic conformance shape). */
+const DEFAULT_ROOT: RootResolver = (doc) => doc.getXmlFragment('doc');
+
 export interface ReaderOptions {
-  /** Resolution deadline in ms. A source not ready within it fails closed. */
+  /**
+   * The async resolution deadline in ms (hardening c). A source not ready within
+   * a genuinely async, cancellable, MONOTONIC deadline fails closed — and a source
+   * that becomes ready only AFTER the deadline is refused (no late `ok`). Consumed
+   * by {@link CovenantDocReaderProd.resolveSpanAsync} and its siblings; the
+   * synchronous port methods poll ONCE (never block the event loop).
+   */
   deadlineMs?: number;
-  /** Injected clock (defaults to `Date.now`) — deterministic in tests. */
-  now?: () => number;
+  /**
+   * The MONOTONIC clock the async deadline reads (defaults to `performance.now`).
+   * Injected in tests. Must be monotonic — a wall clock can jump backwards and
+   * make a deadline never fire; the busy-spin this replaces used `Date.now`.
+   */
+  monotonicNow?: () => number;
+  /**
+   * Where the certified span's body is resolved FROM — the live conversation
+   * content share. Defaults to the `'doc'` XML fragment. The live binding
+   * ({@link readerForLiveDoc}) points this at the real conversation content so a
+   * content mutation is actually seen; an absent share (`null`) fails closed.
+   */
+  resolveRoot?: RootResolver;
 }
 
 const DEFAULT_DEADLINE_MS = 250;
@@ -105,6 +137,38 @@ export type BodyPath = number[];
 
 function isDocSource(x: unknown): x is DocSource {
   return typeof x === 'object' && x !== null && typeof (x as DocSource).poll === 'function';
+}
+
+/** A monotonic clock — never runs backwards, unlike `Date.now`. */
+function defaultMonotonicNow(): number {
+  if (typeof performance !== 'undefined' && typeof performance.now === 'function') {
+    return performance.now();
+  }
+  return Number(process.hrtime.bigint() / 1_000_000n);
+}
+
+/**
+ * Sleep `ms`, resolving EARLY (not rejecting) if `signal` aborts — so the async
+ * deadline loop yields the event loop between polls (never a busy-spin) and is
+ * cancellable. A zero/negative `ms` still yields one macrotask, so a never-ready
+ * source cannot starve the loop.
+ */
+function delay(ms: number, signal?: AbortSignal): Promise<void> {
+  return new Promise((resolve) => {
+    if (signal?.aborted) {
+      resolve();
+      return;
+    }
+    const timer = setTimeout(resolve, Math.max(0, ms));
+    signal?.addEventListener(
+      'abort',
+      () => {
+        clearTimeout(timer);
+        resolve();
+      },
+      { once: true },
+    );
+  });
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -130,32 +194,68 @@ function base64ToBytes(b64: string): Uint8Array {
 type DeltaOp = { insert: string | Record<string, unknown>; attributes?: Record<string, unknown> };
 
 // ─────────────────────────────────────────────────────────────────────────────
-// Canonical, type-preserving, NFC-normalized serialization of an arbitrary leaf
-// value — the discipline `@atrium/core`'s `canonical()` uses on the fragment
-// itself. This is hardening (a): a NESTED OBJECT is serialized field-by-field
-// (keys sorted at every depth), NOT coerced to `"[object Object]"`, and its string
-// leaves are NFC-normalized, so two distinct objects never collide and canonical
-// Unicode equivalence still folds. Every JS type keeps a DISTINCT shape (a number
-// `1` never equals the string `"1"`), so a field's type is itself content.
+// INJECTIVE, type-tagged, NFC-normalized serialization of an arbitrary leaf value
+// — the discipline `@atrium/core`'s `canonical()` uses on the fragment itself,
+// hardened for the covenant's INJECTIVITY requirement (#189 CRITICAL): DISTINCT
+// content MUST serialize to a DISTINCT string (no false `✓`). Every branch carries
+// a TYPE TAG, so a scalar `"x"` (`s:"x"`) ≠ an object `{value:"x"}` (`o:{…}`);
+// `null` (`z:null`) ≠ `NaN` (`n:NaN`) ≠ `Infinity` (`n:Infinity`) — where a bare
+// `JSON.stringify` folds `NaN`/`Infinity` to `null`; a bigint `1n` (`i:1`) ≠ the
+// string `"bigint:1"` (`s:"bigint:1"`); and `Date`/`Map`/`Set` keep their own tag
+// and structure instead of collapsing to `{}` (their `Object.keys` is empty). A
+// nested object is serialized field-by-field with keys NFC-normalized BEFORE they
+// are sorted (sort-before-normalize false-STALES a composed vs decomposed key). A
+// value with NO injective rendering (a function / symbol) THROWS — fail-CLOSED to
+// DRIFT — rather than collapsing onto a token two distinct values would share.
 // ─────────────────────────────────────────────────────────────────────────────
 
 export function canonicalizeLeafValue(value: unknown): string {
-  if (value === null) return 'null';
-  if (value === undefined) return '"\\u0000undefined"';
-  if (typeof value === 'string') return JSON.stringify(value.normalize('NFC'));
-  if (typeof value === 'number' || typeof value === 'boolean') return JSON.stringify(value);
-  if (typeof value === 'bigint') return `"bigint:${value.toString()}"`;
-  if (Array.isArray(value)) return `[${value.map(canonicalizeLeafValue).join(',')}]`;
-  if (typeof value === 'object') {
+  if (value === null) return 'z:null';
+  if (value === undefined) return 'z:undefined';
+  const t = typeof value;
+  if (t === 'string') return `s:${JSON.stringify((value as string).normalize('NFC'))}`;
+  if (t === 'boolean') return `b:${value ? 'true' : 'false'}`;
+  if (t === 'number') {
+    const n = value as number;
+    if (Number.isNaN(n)) return 'n:NaN';
+    if (n === Number.POSITIVE_INFINITY) return 'n:Infinity';
+    if (n === Number.NEGATIVE_INFINITY) return 'n:-Infinity';
+    if (Object.is(n, -0)) return 'n:-0'; // -0 and +0 are distinct writes
+    return `n:${JSON.stringify(n)}`;
+  }
+  if (t === 'bigint') return `i:${(value as bigint).toString()}`;
+  if (t === 'function' || t === 'symbol') {
+    // No rendered meaning and no injective serialization — fail CLOSED (the throw
+    // becomes DRIFT in resolveCovenant / a refused anchor at certify), NEVER a
+    // shared token two distinct unsupported values would collapse onto.
+    throw new Error(`covenant reader: unsupported leaf value of type ${t}`);
+  }
+  if (Array.isArray(value)) return `a:[${value.map(canonicalizeLeafValue).join(',')}]`;
+  if (value instanceof Date) {
+    const ms = value.getTime();
+    return `d:${Number.isNaN(ms) ? 'NaN' : String(ms)}`;
+  }
+  if (value instanceof Map) {
+    const parts = [...(value as Map<unknown, unknown>).entries()]
+      .map(([k, v]) => `${canonicalizeLeafValue(k)}=>${canonicalizeLeafValue(v)}`)
+      .sort();
+    return `m:{${parts.join(',')}}`;
+  }
+  if (value instanceof Set) {
+    const parts = [...(value as Set<unknown>).values()].map(canonicalizeLeafValue).sort();
+    return `t:[${parts.join(',')}]`;
+  }
+  if (t === 'object') {
     const obj = value as Record<string, unknown>;
-    const keys = Object.keys(obj).sort();
-    return `{${keys
-      .map((k) => `${JSON.stringify(k.normalize('NFC'))}:${canonicalizeLeafValue(obj[k])}`)
+    // NFC-normalize each key BEFORE sorting, then tag it so no key can collide with
+    // a positional token.
+    const entries = Object.keys(obj).map((k) => [k.normalize('NFC'), obj[k]] as const);
+    entries.sort((x, y) => (x[0] < y[0] ? -1 : x[0] > y[0] ? 1 : 0));
+    return `o:{${entries
+      .map(([k, v]) => `${JSON.stringify(k)}:${canonicalizeLeafValue(v)}`)
       .join(',')}}`;
   }
-  // A function / symbol has no rendered meaning; give it a total, distinct token
-  // rather than throwing, so a malformed embed still fails CLOSED (DRIFT), never OK.
-  return JSON.stringify(` nonvalue:${typeof value}`);
+  throw new Error(`covenant reader: unsupported leaf value of type ${t}`);
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -166,7 +266,8 @@ export class CovenantDocReaderProd implements CovenantDocReader {
   private readonly source: DocSource;
   private readonly immediate: ImmediateSource | null;
   private readonly deadlineMs: number;
-  private readonly now: () => number;
+  private readonly monotonicNow: () => number;
+  private readonly resolveRoot: RootResolver;
 
   constructor(
     input: Y.Doc | null | DocSource,
@@ -182,7 +283,8 @@ export class CovenantDocReaderProd implements CovenantDocReader {
       this.source = this.immediate;
     }
     this.deadlineMs = options?.deadlineMs ?? DEFAULT_DEADLINE_MS;
-    this.now = options?.now ?? Date.now;
+    this.monotonicNow = options?.monotonicNow ?? defaultMonotonicNow;
+    this.resolveRoot = options?.resolveRoot ?? DEFAULT_ROOT;
   }
 
   /** Simulate the doc handle dropping (a lost stream) — conformance parity. */
@@ -202,36 +304,64 @@ export class CovenantDocReaderProd implements CovenantDocReader {
     return this.marksOf(attributes);
   }
 
-  /** Hardening (c): resolution is bounded by a deadline (fail-closed, never hangs). */
+  /** Hardening (c): the async resolution is bounded by a deadline (fail-closed, never hangs). */
   protected get deadlineEnabled(): boolean {
     return true;
   }
 
-  // ── deadline-bounded doc acquisition (hardening c) ──────────────────────────
+  // ── doc acquisition (hardening c) ───────────────────────────────────────────
 
   /**
-   * Reach the live doc through the non-blocking source, bounded by the deadline.
-   * A source that never becomes ready returns `null` here within `deadlineMs`
-   * (⇒ DRIFT / no-capture) instead of hanging. When the deadline is disabled (the
-   * naive reader), a never-ready source loops forever — which is exactly the hang
-   * the hardening prevents, and what the not-theater test observes.
+   * SYNCHRONOUS acquisition: a SINGLE non-blocking poll. The synchronous port
+   * methods (which `@atrium/core`'s sync `certifyAnchor` / `resolveCovenant` call)
+   * never block the event loop and never busy-spin — a source not ready RIGHT NOW
+   * fails closed (`null` ⇒ DRIFT / no capture) immediately. Waiting for a
+   * catching-up stream is the ASYNC path's job ({@link acquireAsync}); a
+   * synchronous caller cannot honestly wait, so it does not pretend to.
    */
   private acquire(): Y.Doc | null {
-    const start = this.now();
+    return this.source.poll();
+  }
+
+  /**
+   * ASYNCHRONOUS acquisition with a genuinely async, cancellable, MONOTONIC
+   * deadline (hardening c, rebuilt — the 250ms busy-spin is gone). Between polls
+   * it `await`s a real timer, so the event loop is free (a stream catching up on a
+   * timer CAN make progress — a busy-spin would starve it). Three guarantees:
+   *
+   *   - a NEVER-ready source resolves `null` (⇒ DRIFT) promptly at the deadline;
+   *   - a source that becomes ready only AFTER the deadline is REFUSED (`null`) —
+   *     the deadline is checked BEFORE the poll is accepted, so there is no late `ok`;
+   *   - an aborted `signal` resolves `null` at once (cancellable).
+   *
+   * When the deadline is disabled (the naive foil), a never-ready source is polled
+   * forever — the hang the hardening prevents, which the not-theater test observes.
+   */
+  private async acquireAsync(signal?: AbortSignal): Promise<Y.Doc | null> {
+    const start = this.monotonicNow();
+    // Poll cadence: small enough to be prompt, non-zero so a stalled source cannot
+    // starve the loop. Never longer than the remaining budget.
+    const pollEveryMs = 1;
     for (;;) {
+      if (signal?.aborted) return null;
+      const elapsed = this.monotonicNow() - start;
+      // Deadline FIRST: a doc that only just became ready AT/AFTER the deadline is
+      // a late arrival and must NOT be accepted (the false-`ok` codex found).
+      if (this.deadlineEnabled && elapsed >= this.deadlineMs) return null;
       const doc = this.source.poll();
       if (doc) return doc;
-      if (this.deadlineEnabled && this.now() - start >= this.deadlineMs) return null;
+      const remaining = this.deadlineEnabled ? this.deadlineMs - elapsed : pollEveryMs;
+      await delay(Math.min(pollEveryMs, Math.max(0, remaining)), signal);
     }
   }
 
-  private fragmentOf(doc: Y.Doc): Y.XmlFragment {
-    return doc.getXmlFragment('doc');
+  private rootOf(doc: Y.Doc): Y.XmlFragment | Y.XmlElement | null {
+    return this.resolveRoot(doc);
   }
 
-  /** Follow a path of child indices from the fragment to a `Y.XmlText` body. */
+  /** Follow a path of child indices from the content root to a `Y.XmlText` body. */
   private bodyAtPath(doc: Y.Doc, path: BodyPath): Y.XmlText | null {
-    let node: Y.XmlFragment | Y.XmlElement | Y.XmlText | null = this.fragmentOf(doc);
+    let node: Y.XmlFragment | Y.XmlElement | Y.XmlText | null = this.rootOf(doc);
     for (const idx of path) {
       if (!node || node instanceof Y.XmlText) return null;
       const child: unknown = node.get(idx);
@@ -243,57 +373,90 @@ export class CovenantDocReaderProd implements CovenantDocReader {
 
   // ── rendering ───────────────────────────────────────────────────────────────
 
-  /** The marks a text OR embed op carries, with payloads canonicalized (hardening a). */
+  /**
+   * The marks a text OR embed op carries, INJECTIVELY (hardening a + the #189
+   * injectivity CRITICAL). The mark's payload SHAPE is encoded so no two distinct
+   * payloads collapse to one `attrs` map:
+   *
+   *   - an OBJECT payload (`{ link: { href, meta:{…} } }`) → each field under a
+   *     reserved `f:` namespace, plus a `#shape:object` tag, so a field literally
+   *     named `value`/`scalar` can never masquerade as the scalar/flag branch, and
+   *     an empty object `{}` (`{#shape:object}`) never equals a boolean flag;
+   *   - a FLAG payload (`bold:true` / `null` / `undefined` / `false`) → `#flag`
+   *     carrying the tagged value, so `true` ≠ `false` ≠ `null` ≠ `undefined`;
+   *   - a SCALAR / array / Date / Map / Set payload → a single tagged `#scalar`, so
+   *     a scalar `"x"` (`s:"x"`) is DISTINCT from the object `{value:"x"}` above.
+   */
   private marksOf(attributes: Record<string, unknown> | undefined): Mark[] {
     if (!attributes) return [];
     return Object.keys(attributes)
       .sort()
       .map((type) => {
         const raw = attributes[type];
+        const isPlainObject =
+          raw !== null &&
+          typeof raw === 'object' &&
+          !Array.isArray(raw) &&
+          !(raw instanceof Date) &&
+          !(raw instanceof Map) &&
+          !(raw instanceof Set);
         let attrs: Record<string, string>;
-        if (raw && typeof raw === 'object' && !Array.isArray(raw)) {
-          // An object-valued mark ({ link: { href, meta:{…} } }): each field is
-          // canonicalized STRUCTURALLY, so a nested-object mark field cannot collide.
-          attrs = {};
+        if (isPlainObject) {
+          attrs = { '#shape': 'object' };
           for (const [k, v] of Object.entries(raw as Record<string, unknown>)) {
-            attrs[k] = this.canonicalizeLeaf(v);
+            attrs[`f:${k}`] = this.canonicalizeLeaf(v);
           }
-        } else if (raw === true || raw === null || raw === undefined) {
-          attrs = {}; // a boolean mark (bold:true) has no payload
+        } else if (raw === true || raw === false || raw === null || raw === undefined) {
+          attrs = { '#flag': this.canonicalizeLeaf(raw) }; // true ≠ false ≠ null ≠ undefined
         } else {
-          attrs = { value: this.canonicalizeLeaf(raw) }; // a scalar payload IS meaning
+          // A scalar / array / Date / Map / Set payload — a single tagged value; the
+          // tag encodes the TYPE, so a scalar can never collide with an object field.
+          attrs = { '#scalar': this.canonicalizeLeaf(raw) };
         }
         return { type, attrs, straddles: 'none' as const };
       });
   }
 
   /**
-   * The identity of an embed — every field serialized STRUCTURALLY (hardening a),
-   * plus a digest of any `child`/`children` body. NO `String(obj)` anywhere: a
-   * nested-object field is canonicalized field-by-field, so two distinct embeds
-   * that differ only in a nested object no longer collide to a false `✓`.
+   * The identity of an embed — every field serialized INJECTIVELY (hardening a +
+   * the #189 injectivity CRITICAL), plus a digest of any `child`/`children` body
+   * computed FROM THE CHILD. Two things are closed here:
+   *
+   *   - NO `String(obj)` anywhere: `embedType` and every attr go through the tagged
+   *     `canonicalizeLeaf`, so two distinct embeds differing only in a nested object
+   *     no longer collide to a false `✓`, and an unsupported value fails CLOSED.
+   *   - THE READER'S OWN FIELDS ARE RESERVED / NAMESPACED (grok's headline). The
+   *     child digest lands on a reader-owned `#child` / `#children` key computed
+   *     from the child itself, while EVERY passthrough attr is `a:`-namespaced — so
+   *     a caller-supplied CRDT field named `docDigest` (or `#child`, or anything)
+   *     becomes `a:docDigest` and can NEVER shadow the real child digest. Before
+   *     this, a sibling `docDigest` field won `Object.entries` order and the actual
+   *     child content was ignored (`innocent`→`EVIL` stayed `ok`).
    */
   private embedIdentity(embed: Record<string, unknown>): {
     embedType: string;
     identity: Record<string, string>;
   } {
-    const embedType = String(embed.embedType ?? embed.type ?? 'embed');
+    const rawType = embed.embedType ?? embed.type ?? 'embed';
+    // A string type is used verbatim (NFC); a non-string type is canonicalized
+    // injectively (still a non-empty string, so `RenderedNode.embedType` is valid)
+    // rather than `String(obj)`-collapsed — an unsupported shape throws (fail-closed).
+    const embedType =
+      typeof rawType === 'string' ? rawType.normalize('NFC') : this.canonicalizeLeaf(rawType);
     const identity: Record<string, string> = {};
     for (const [k, v] of Object.entries(embed)) {
       if (k === 'embedType' || k === 'type') continue;
       if (k === 'child' || k === 'children') {
-        // Child body: digest it so a change INSIDE the child is drift. A string
-        // child is NFC-normalized first (the hex docDigest is opaque to core's NFC
-        // pass); an object child is canonicalized (sorted keys, NFC leaves), so
-        // insertion order is not mistaken for a content change.
-        identity.docDigest = sha256Hex(
-          typeof v === 'string' ? v.normalize('NFC') : this.canonicalizeLeaf(v),
-        );
+        // Reader-OWNED reserved key, computed from the CHILD `v` (never a sibling).
+        // Every passthrough attr is `a:`-namespaced, so nothing a peer writes can
+        // produce this bare `#child` / `#children` key.
+        identity[k === 'children' ? '#children' : '#child'] = sha256Hex(this.canonicalizeLeaf(v));
         continue;
       }
-      // Every OTHER field, structurally — a scalar keeps its type, a nested object
-      // is serialized field-by-field, NEVER coerced to "[object Object]".
-      identity[k] = this.canonicalizeLeaf(v);
+      // Every OTHER field under the `a:` passthrough namespace, serialized
+      // injectively — a scalar keeps its type, a nested object is field-by-field,
+      // NEVER coerced to "[object Object]".
+      identity[`a:${k}`] = this.canonicalizeLeaf(v);
     }
     return { embedType, identity };
   }
@@ -332,7 +495,12 @@ export class CovenantDocReaderProd implements CovenantDocReader {
     let parent: Y.AbstractType<unknown> | null = body.parent;
     while (parent && parent instanceof Y.XmlElement) {
       const attrs: Record<string, string> = {};
-      for (const [k, v] of Object.entries(parent.getAttributes())) attrs[k] = String(v);
+      // An ancestor attribute value (y-prosemirror stores a node's `attrs` here) can
+      // be a nested OBJECT — `setAttribute('meta', { v: 2 })`. `String(v)` collapsed
+      // every such object to "[object Object]", so `{v:2}` and `{v:1}` shared a digest
+      // (#189 CRITICAL). Serialize it INJECTIVELY, exactly as an embed/mark field.
+      for (const [k, v] of Object.entries(parent.getAttributes()))
+        attrs[k] = this.canonicalizeLeaf(v);
       chain.push({ type: parent.nodeName, attrs });
       parent = parent.parent;
     }
@@ -604,17 +772,11 @@ export class CovenantDocReaderProd implements CovenantDocReader {
     };
   }
 
-  authoritativeContext(): AuthoritativeContext | null {
-    const doc = this.acquire();
-    if (!doc) return null; // unavailable / stalled ⇒ no context to sign (fail-closed)
-    return this.contextOf(doc);
-  }
-
-  captureSelection(): CapturedSelection | null {
-    const doc = this.acquire();
-    if (!doc || !this.selection) return null;
+  /** Build the captured selection from an acquired doc (shared by sync + async). */
+  private buildCapture(doc: Y.Doc): CapturedSelection | null {
+    if (!this.selection) return null;
     const body = this.bodyAtPath(doc, this.selection.path);
-    if (!body) return null;
+    if (!body) return null; // content share absent / path unresolved ⇒ fail-closed
     const { start, end } = this.selection;
 
     const relStart = Y.createRelativePositionFromTypeIndex(body, start, -1);
@@ -630,10 +792,8 @@ export class CovenantDocReaderProd implements CovenantDocReader {
     };
   }
 
-  resolveSpan(anchor: CovenantAnchor): ResolvedSpan | null {
-    const doc = this.acquire();
-    if (!doc) return null; // unavailable / stalled ⇒ fail-closed
-
+  /** Resolve an anchor against an acquired doc (shared by sync + async). */
+  private buildResolve(doc: Y.Doc, anchor: CovenantAnchor): ResolvedSpan | null {
     const relStart = Y.decodeRelativePosition(base64ToBytes(anchor.relStart));
     const relEnd = Y.decodeRelativePosition(base64ToBytes(anchor.relEnd));
     const absStart = Y.createAbsolutePositionFromRelativePosition(relStart, doc);
@@ -653,6 +813,53 @@ export class CovenantDocReaderProd implements CovenantDocReader {
       snapshotVerified: this.verifySnapshot(doc, anchor, body, start, end),
     };
   }
+
+  // ── SYNCHRONOUS port (single-poll; the sync core primitives call these) ──────
+
+  authoritativeContext(): AuthoritativeContext | null {
+    const doc = this.acquire();
+    if (!doc) return null; // unavailable / stalled ⇒ no context to sign (fail-closed)
+    return this.contextOf(doc);
+  }
+
+  captureSelection(): CapturedSelection | null {
+    const doc = this.acquire();
+    if (!doc) return null;
+    return this.buildCapture(doc);
+  }
+
+  resolveSpan(anchor: CovenantAnchor): ResolvedSpan | null {
+    const doc = this.acquire();
+    if (!doc) return null; // unavailable / stalled ⇒ fail-closed
+    return this.buildResolve(doc, anchor);
+  }
+
+  // ── ASYNCHRONOUS port (deadline-bounded; the live/streaming read path, #191) ──
+  // These honour the genuinely-async, cancellable, monotonic deadline of hardening
+  // (c): a stalled stream yields `null` (⇒ DRIFT / no capture) at the deadline,
+  // never a late `ok`, without blocking the event loop. A render throw propagates
+  // (⇒ the read authority's guard turns it into DRIFT), matching the sync path.
+
+  async authoritativeContextAsync(signal?: AbortSignal): Promise<AuthoritativeContext | null> {
+    const doc = await this.acquireAsync(signal);
+    if (!doc) return null;
+    return this.contextOf(doc);
+  }
+
+  async captureSelectionAsync(signal?: AbortSignal): Promise<CapturedSelection | null> {
+    const doc = await this.acquireAsync(signal);
+    if (!doc) return null;
+    return this.buildCapture(doc);
+  }
+
+  async resolveSpanAsync(
+    anchor: CovenantAnchor,
+    signal?: AbortSignal,
+  ): Promise<ResolvedSpan | null> {
+    const doc = await this.acquireAsync(signal);
+    if (!doc) return null; // never-ready / past-deadline / aborted ⇒ fail-closed
+    return this.buildResolve(doc, anchor);
+  }
 }
 
 /**
@@ -660,11 +867,18 @@ export class CovenantDocReaderProd implements CovenantDocReader {
  *
  * #183's `ConversationDoc` today carries MESSAGE-LEVEL content (a `Y.Array` of
  * JSON messages); its rich-text bodies — the `Y.XmlText` spans this reader
- * resolves against — arrive with sub-message co-editing (#184/#185). This binding
- * takes the same handle the surface already holds and exposes it as a
- * deadline-guarded {@link DocSource}: a torn-down / dropped doc polls `null` and
- * fails closed to DRIFT, exactly as a stalled Electric stream does. `provider`
- * returns the live `Y.Doc` or `null` when the handle is gone.
+ * resolves against — arrive with #194 (rich-text-spans-first). This binding takes
+ * the same handle the surface already holds and exposes it as a deadline-guarded
+ * {@link DocSource}: a torn-down / dropped doc polls `null` and fails closed to
+ * DRIFT, exactly as a stalled Electric stream does. `provider` returns the live
+ * `Y.Doc` or `null` when the handle is gone.
+ *
+ * WATCH THE CORRECT SHARE (#189 MEDIUM). The reader resolves the certified span's
+ * body from `options.resolveRoot` — the SHARE the conversation actually writes its
+ * content into (`#194`'s rich-text bodies), NOT a hardcoded / planted
+ * `getXmlFragment('doc')`. Pass the conversation's real content root so a content
+ * mutation is genuinely seen; if the share is absent, `resolveRoot` returns `null`
+ * and capture/resolve fail closed (DRIFT) instead of vouching for an empty plant.
  */
 export function readerForLiveDoc(
   provider: () => Y.Doc | null,

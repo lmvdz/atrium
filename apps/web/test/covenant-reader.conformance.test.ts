@@ -1,8 +1,12 @@
+import { type CovenantAnchor, certifyAnchor, resolveCovenant } from '@atrium/core';
 import { describe, expect, it } from 'vitest';
 import * as Y from 'yjs';
-import { type CovenantAnchor, certifyAnchor, resolveCovenant } from '@atrium/core';
 import { ConversationDoc } from '@/app/prototype/yjs-conversation';
-import { CovenantDocReaderProd, readerForLiveDoc } from '@/lib/covenant-reader';
+import {
+  CovenantDocReaderProd,
+  canonicalizeLeafValue,
+  readerForLiveDoc,
+} from '@/lib/covenant-reader';
 import { NaiveCovenantDocReader } from './support/naive-covenant-reader';
 
 /**
@@ -457,9 +461,7 @@ describe('PROD reader — canonical + NFC nested-embed child', () => {
     );
   });
   it('a STRING child composed vs decomposed → SAME digest (NFC)', () => {
-    expect(certifyChild('café').renderedDigest).toBe(
-      certifyChild('café').renderedDigest,
-    );
+    expect(certifyChild('café').renderedDigest).toBe(certifyChild('café').renderedDigest);
   });
   it('an OBJECT child with a composed vs decomposed string leaf → SAME digest', () => {
     expect(certifyChild({ title: 'café' }).renderedDigest).toBe(
@@ -566,9 +568,8 @@ describe('HARDENING (b): an embed format() mutation reaches the digest → DRIFT
     const linked = (() => {
       const { doc, body } = makeDoc();
       body.format(16, 1, { link: { href: 'https://evil.example' } });
-      return certify(
-        new NaiveCovenantDocReader(doc, { path: [0, 0, 0], start: 8, end: 21 }),
-      ).renderedDigest;
+      return certify(new NaiveCovenantDocReader(doc, { path: [0, 0, 0], start: 8, end: 21 }))
+        .renderedDigest;
     })();
     expect(linked).toBe(plain);
   });
@@ -601,77 +602,246 @@ describe('HARDENING (b): an embed format() mutation reaches the digest → DRIFT
   });
 });
 
-describe('HARDENING (c): a stalled doc handle yields DRIFT within a deadline, never hangs', () => {
+describe('HARDENING (c): a genuinely async, cancellable, monotonic deadline → DRIFT, never a late ok', () => {
   /** A source that NEVER becomes ready (a permanently-catching-up / dropped stream). */
-  function neverReady(counter?: { polls: number }, cap = 5000) {
-    return {
-      poll(): Y.Doc | null {
-        if (counter) {
-          counter.polls++;
-          if (counter.polls > cap) throw new Error('CAP: reader never self-terminated');
-        }
-        return null;
-      },
-    };
+  const neverReady = (): { poll(): Y.Doc | null } => ({ poll: () => null });
+
+  /** A source that becomes ready only after `ms` (a slow, eventually-caught-up stream). */
+  function readyAfter(ms: number, doc: Y.Doc): { poll(): Y.Doc | null } {
+    let ready = false;
+    setTimeout(() => {
+      ready = true;
+    }, ms);
+    return { poll: () => (ready ? doc : null) };
   }
 
-  it('PRODUCTION: a never-ready source → resolveSpan returns null → resolveCovenant DRIFT', () => {
-    // Deterministic clock: each call advances 1ms; deadline 50ms ⇒ bails after ~50 polls.
-    let t = 0;
-    const now = () => t++;
-    // A throwaway anchor so resolveSpan is exercised (it fails at acquire, before use).
-    const anchor = certify(capturingReader(makeDoc().doc));
-    const counter = { polls: 0 };
-    const reader = new CovenantDocReaderProd(neverReady(counter), undefined, {
-      deadlineMs: 50,
-      now,
-    });
-    expect(reader.resolveSpan(anchor)).toBeNull();
-    expect(resolveCovenant(reader, anchor).covenantStatus).toBe('drift');
-    expect(counter.polls).toBeLessThan(200); // bounded — the deadline was honored
-  });
-
-  it('PRODUCTION: authoritativeContext / captureSelection on a stalled source → null (no ✓ signed)', () => {
-    let t = 0;
-    const reader = new CovenantDocReaderProd(
-      neverReady(),
-      { path: [0, 0], start: 0, end: 1 },
-      { deadlineMs: 30, now: () => (t += 2) },
-    );
-    expect(reader.authoritativeContext()).toBeNull();
-    expect(reader.captureSelection()).toBeNull();
-    // certifyAnchor therefore refuses to mint an anchor over a stalled doc.
-    expect(
-      certifyAnchor(reader, {
-        objectId: 'o',
-        roomId: 'r',
-        certifier: ALICE,
-        certifiedAt: AT,
-      }),
-    ).toBeNull();
-  });
-
-  it('PRODUCTION real-clock: a never-ready source returns DRIFT promptly (does not hang)', () => {
+  it('SYNC fail-closed: a never-ready source → resolveCovenant DRIFT, promptly, no busy-spin', () => {
     const anchor = certify(capturingReader(makeDoc().doc));
     const reader = new CovenantDocReaderProd(neverReady(), undefined, { deadlineMs: 20 });
     const t0 = Date.now();
-    const verdict = resolveCovenant(reader, anchor).covenantStatus;
-    const elapsed = Date.now() - t0;
-    expect(verdict).toBe('drift');
-    expect(elapsed).toBeLessThan(2000); // completed — no hang
+    expect(reader.resolveSpan(anchor)).toBeNull();
+    expect(resolveCovenant(reader, anchor).covenantStatus).toBe('drift');
+    expect(Date.now() - t0).toBeLessThan(200); // single poll — no hang, no spin
   });
 
-  it('NAIVE theater: no deadline → the reader NEVER self-terminates (loops to the cap)', () => {
-    // Proof the deadline is load-bearing: without it, the identical acquire loop
-    // polls forever. Capped so the test itself terminates; hitting the cap IS the
-    // demonstration that it would otherwise hang.
+  it('PRODUCTION async: a NEVER-ready source → resolveSpanAsync null (⇒ DRIFT) at the deadline', async () => {
     const anchor = certify(capturingReader(makeDoc().doc));
-    const counter = { polls: 0 };
-    const naive = new NaiveCovenantDocReader(neverReady(counter, 3000), undefined, {
-      deadlineMs: 50, // ignored — deadlineEnabled is false
-    });
-    expect(() => naive.resolveSpan(anchor)).toThrow(/never self-terminated/);
-    expect(counter.polls).toBeGreaterThan(3000); // it blew past any deadline
+    const reader = new CovenantDocReaderProd(neverReady(), undefined, { deadlineMs: 30 });
+    const t0 = Date.now();
+    expect(await reader.resolveSpanAsync(anchor)).toBeNull();
+    const elapsed = Date.now() - t0;
+    expect(elapsed).toBeGreaterThanOrEqual(25); // it actually waited the deadline
+    expect(elapsed).toBeLessThan(1500); // and returned promptly (no hang)
+  });
+
+  it('PRODUCTION async: a SLOW-eventually-ready source PAST the deadline → null, NEVER a late ok', async () => {
+    const { doc } = makeDoc();
+    const anchor = certify(capturingReader(doc));
+    // Ready at ~120ms, deadline 25ms ⇒ the doc arrives well AFTER the deadline.
+    const reader = new CovenantDocReaderProd(readyAfter(120, doc), undefined, { deadlineMs: 25 });
+    const res = await reader.resolveSpanAsync(anchor);
+    expect(res).toBeNull(); // the late doc is refused — no late ok
+  });
+
+  it('PRODUCTION async: a source ready WITHIN the deadline → resolves (proves the loop yields the event loop)', async () => {
+    // A busy-spin could never let the setTimeout that flips readiness fire, so the
+    // source would never become ready and this would hang: passing PROVES non-blocking.
+    const { doc } = makeDoc();
+    const reader0 = capturingReader(doc);
+    const anchor = certify(reader0);
+    const reader = new CovenantDocReaderProd(
+      readyAfter(10, doc),
+      { path: [0, 0, 0], ...SPAN },
+      {
+        deadlineMs: 1000,
+      },
+    );
+    const res = await reader.resolveSpanAsync(anchor);
+    expect(res).not.toBeNull();
+    expect(res?.snapshotVerified).toBe(true); // became ready in time → would resolve ok
+  });
+
+  it('PRODUCTION async: an aborted signal → null at once (cancellable)', async () => {
+    const anchor = certify(capturingReader(makeDoc().doc));
+    const reader = new CovenantDocReaderProd(neverReady(), undefined, { deadlineMs: 5000 });
+    const ac = new AbortController();
+    setTimeout(() => ac.abort(), 15);
+    const t0 = Date.now();
+    expect(await reader.resolveSpanAsync(anchor, ac.signal)).toBeNull();
+    expect(Date.now() - t0).toBeLessThan(1000); // cancelled long before the 5s deadline
+  });
+
+  it('PRODUCTION async: authoritativeContext/captureSelection on a stalled source → null (no ✓ signed)', async () => {
+    const reader = new CovenantDocReaderProd(
+      neverReady(),
+      { path: [0, 0], start: 0, end: 1 },
+      {
+        deadlineMs: 20,
+      },
+    );
+    expect(await reader.authoritativeContextAsync()).toBeNull();
+    expect(await reader.captureSelectionAsync()).toBeNull();
+  });
+
+  it('NAIVE theater: no deadline → a slow-past-deadline source yields a LATE ok (the hole)', async () => {
+    // The foil: with deadlineEnabled=false the naive reader waits indefinitely and
+    // accepts the doc that arrives AFTER the deadline — exactly the late ok the
+    // production deadline refuses above. Same source, opposite outcome ⇒ load-bearing.
+    const { doc } = makeDoc();
+    const reader0 = capturingReader(doc);
+    const anchor = certify(reader0);
+    const naive = new NaiveCovenantDocReader(
+      readyAfter(40, doc),
+      { path: [0, 0, 0], ...SPAN },
+      {
+        deadlineMs: 10, // ignored — deadlineEnabled is false
+      },
+    );
+    const res = await naive.resolveSpanAsync(anchor);
+    expect(res).not.toBeNull(); // accepted the LATE doc — the production reader returned null
+    expect(res?.snapshotVerified).toBe(true);
+  });
+
+  it('NAIVE theater: no deadline → a never-ready source NEVER self-terminates (loses the race to a timer)', async () => {
+    const anchor = certify(capturingReader(makeDoc().doc));
+    const naive = new NaiveCovenantDocReader(neverReady(), undefined, { deadlineMs: 10 });
+    const settled = naive.resolveSpanAsync(anchor).then(() => 'settled' as const);
+    const timedOut = new Promise<'timeout'>((r) => setTimeout(() => r('timeout'), 100));
+    // If the deadline were honored it would settle; without one, the timer wins.
+    expect(await Promise.race([settled, timedOut])).toBe('timeout');
+  });
+});
+
+// ═════════════════════════════════════════════════════════════════════════════
+// INJECTIVITY (#189 CRITICAL) — distinct content ⇒ DISTINCT digest, no false ✓.
+// Each collision the gauntlet named is closed: the digest MOVES for it on the
+// production reader, where the base (String(obj) / docDigest-shadow / untyped)
+// reader collapsed two distinct contents onto one.
+// ═════════════════════════════════════════════════════════════════════════════
+
+describe('INJECTIVITY: the leaf encoder is injective across the gauntlet collisions', () => {
+  const enc = canonicalizeLeafValue;
+  it('scalar "x" ≠ object { value: "x" }', () => {
+    expect(enc('x')).not.toBe(enc({ value: 'x' }));
+  });
+  it('null ≠ NaN ≠ Infinity (a bare JSON.stringify folds all three toward "null")', () => {
+    expect(new Set([enc(null), enc(Number.NaN), enc(Number.POSITIVE_INFINITY)]).size).toBe(3);
+    expect(enc(Number.NEGATIVE_INFINITY)).not.toBe(enc(Number.POSITIVE_INFINITY));
+  });
+  it('bigint 1n ≠ the string "bigint:1"', () => {
+    expect(enc(1n)).not.toBe(enc('bigint:1'));
+  });
+  it('number 1 ≠ string "1" (type is content)', () => {
+    expect(enc(1)).not.toBe(enc('1'));
+  });
+  it('Date / Map / Set do NOT collapse to {} (nor to each other)', () => {
+    const shapes = [enc(new Date(0)), enc(new Map([['a', 1]])), enc(new Set([1])), enc({})];
+    expect(new Set(shapes).size).toBe(4);
+    expect(enc(new Date(0))).not.toBe(enc(new Date(1)));
+    expect(enc(new Map([['a', 1]]))).not.toBe(enc(new Map([['a', 2]])));
+    expect(enc(new Set([1]))).not.toBe(enc(new Set([2])));
+  });
+  it('keys are NFC-normalized BEFORE sorting (composed vs decomposed key → SAME encoding)', () => {
+    // 'café' composed (U+00E9) vs decomposed (e + U+0301) as a KEY must fold.
+    expect(enc({ café: 1 })).toBe(enc({ café: 1 }));
+  });
+  it('an unsupported value (function) FAILS CLOSED — throws, never a shared token', () => {
+    expect(() => enc(() => 0)).toThrow(/unsupported leaf value/);
+    expect(() => enc(Symbol('x'))).toThrow(/unsupported leaf value/);
+  });
+});
+
+describe('INJECTIVITY: distinct content digests distinctly through the production reader', () => {
+  const sel = { path: [0, 0], start: 0, end: 1 };
+
+  /** An embed carrying an arbitrary extra field, certified through the production reader. */
+  function certifyEmbed(embed: Record<string, unknown>): CovenantAnchor {
+    const doc = new Y.Doc();
+    const frag = doc.getXmlFragment('doc');
+    const para = new Y.XmlElement('paragraph');
+    const body = new Y.XmlText();
+    frag.insert(0, [para]);
+    para.insert(0, [body]);
+    body.insertEmbed(0, embed);
+    return certify(new CovenantDocReaderProd(doc, sel));
+  }
+
+  it('an ancestor object attribute { meta:{v:1} } vs { meta:{v:2} } → DIFFERENT digest (the :335 String collision)', () => {
+    const withMeta = (v: number): CovenantAnchor => {
+      const doc = new Y.Doc();
+      const frag = doc.getXmlFragment('doc');
+      const para = new Y.XmlElement('paragraph');
+      // y-prosemirror stores a node's attrs as an object attribute — the shape the
+      // base reader collapsed with String(v).
+      para.setAttribute('meta', { v } as unknown as string);
+      const body = new Y.XmlText();
+      frag.insert(0, [para]);
+      para.insert(0, [body]);
+      body.insert(0, 'x');
+      return certify(new CovenantDocReaderProd(doc, { path: [0, 0], start: 0, end: 1 }));
+    };
+    expect(withMeta(1).renderedDigest).not.toBe(withMeta(2).renderedDigest);
+  });
+
+  it("grok's headline: a sibling `docDigest` field can NEVER shadow the real child digest", () => {
+    // Two embeds with the SAME caller-supplied `docDigest` sibling but DIFFERENT
+    // child content. `docDigest` is placed AFTER `child` so the base reader's loop
+    // sets the real child digest and then OVERWRITES it with String(docDigest) —
+    // dropping the child → SAME digest (innocent→EVIL stayed ok). Namespaced now.
+    const innocent = certifyEmbed({ embedType: 'nestedDoc', child: 'innocent', docDigest: 'X' });
+    const evil = certifyEmbed({ embedType: 'nestedDoc', child: 'EVIL', docDigest: 'X' });
+    expect(innocent.renderedDigest).not.toBe(evil.renderedDigest);
+  });
+
+  it("grok's headline, end-to-end: mutating the child under a fixed `docDigest` sibling → DRIFT", () => {
+    const doc = new Y.Doc();
+    const frag = doc.getXmlFragment('doc');
+    const para = new Y.XmlElement('paragraph');
+    const body = new Y.XmlText();
+    frag.insert(0, [para]);
+    para.insert(0, [body]);
+    body.insertEmbed(0, { embedType: 'nestedDoc', child: 'innocent', docDigest: 'X' });
+    const reader = new CovenantDocReaderProd(doc, sel);
+    const anchor = certify(reader);
+    expect(status(reader, anchor)).toBe('ok');
+    body.delete(0, 1);
+    body.insertEmbed(0, { embedType: 'nestedDoc', child: 'EVIL', docDigest: 'X' });
+    expect(status(reader, anchor)).toBe('drift');
+  });
+
+  it('a scalar mark "x" and an object mark { value:"x" } digest DIFFERENTLY', () => {
+    // Build two docs whose only difference is a scalar vs object mark on the embed.
+    const mk = (markValue: unknown): CovenantAnchor => {
+      const doc = new Y.Doc();
+      const frag = doc.getXmlFragment('doc');
+      const para = new Y.XmlElement('paragraph');
+      const body = new Y.XmlText();
+      frag.insert(0, [para]);
+      para.insert(0, [body]);
+      body.insertEmbed(0, { embedType: 'image', src: 'a' });
+      body.format(0, 1, { note: markValue } as Record<string, unknown>);
+      return certify(new CovenantDocReaderProd(doc, sel));
+    };
+    expect(mk('x').renderedDigest).not.toBe(mk({ value: 'x' }).renderedDigest);
+  });
+
+  it('an in-place mutation moves the DIGEST itself (not only the enclosed-item identity — the masking codex found)', () => {
+    // A text edit inside the span (no embed touched, so enclosed-item identity is
+    // unchanged) must still move the digest — proving the digest, not merely the
+    // identity set, is doing the detecting.
+    const digestOf = (mutate?: (b: Y.XmlText) => void): string => {
+      const doc = new Y.Doc();
+      const frag = doc.getXmlFragment('doc');
+      const para = new Y.XmlElement('paragraph');
+      const body = new Y.XmlText();
+      frag.insert(0, [para]);
+      para.insert(0, [body]);
+      body.insert(0, 'ship it');
+      mutate?.(body);
+      return certify(new CovenantDocReaderProd(doc, { path: [0, 0], start: 0, end: body.length }))
+        .renderedDigest;
+    };
+    expect(digestOf()).not.toBe(digestOf((b) => b.insert(4, 'X')));
   });
 });
 
@@ -681,21 +851,80 @@ describe('HARDENING (c): a stalled doc handle yields DRIFT within a deadline, ne
 // same doc; #183's message-level Y.Array grows rich-text spans at #184/#185.)
 // ═════════════════════════════════════════════════════════════════════════════
 
-describe('live #183 ConversationDoc binding — fail-closed on teardown', () => {
-  it('binds to the real doc handle; a torn-down ConversationDoc → DRIFT (stream gone)', () => {
-    const convo = new ConversationDoc();
-    // A rich-text body on the SAME underlying Y.Doc the ConversationDoc owns.
-    const frag = convo.doc.getXmlFragment('doc');
+describe('live #183 ConversationDoc binding — watches the CORRECT content share', () => {
+  // The conversation's rich-text bodies (#194) live under a NAMED content share,
+  // NOT a planted `getXmlFragment('doc')`. The base reader hardcoded 'doc' and so
+  // could never see a mutation to the real content (the #189 MEDIUM). The binding
+  // now resolves against the caller-provided share; these prove it (a) sees a
+  // content mutation there and (b) fails closed when that share is absent.
+  const CONTENT_SHARE = 'conversation-body';
+  const contentRoot = (doc: Y.Doc): Y.XmlFragment | null => {
+    const f = doc.getXmlFragment(CONTENT_SHARE);
+    return f.length > 0 ? f : null; // absent / empty content ⇒ fail closed
+  };
+
+  /** Seat a rich-text body under the conversation's real content share. */
+  function seatBody(convo: ConversationDoc): Y.XmlText {
+    const frag = convo.doc.getXmlFragment(CONTENT_SHARE);
     const para = new Y.XmlElement('paragraph');
     const body = new Y.XmlText();
     frag.insert(0, [para]);
     para.insert(0, [body]);
     body.insert(0, 'ship it');
+    return body;
+  }
 
-    // The production bind: reach the live doc through ConversationDoc's own handle,
-    // returning null once it is destroyed (exactly the stalled-stream fail-closed).
+  it('a CONTENT mutation in the bound share is SEEN → DRIFT (the base plant ignored it)', () => {
+    const convo = new ConversationDoc();
+    const body = seatBody(convo);
     const provider = () => (convo.isDestroyed() ? null : convo.doc);
-    const reader = readerForLiveDoc(provider, { path: [0, 0], start: 0, end: 7 });
+    const reader = readerForLiveDoc(
+      provider,
+      { path: [0, 0], start: 0, end: 7 },
+      {
+        resolveRoot: contentRoot,
+      },
+    );
+    const anchor = certify(reader);
+    expect(status(reader, anchor)).toBe('ok');
+    // Edit the real conversation content — the reader watches THIS share, so it drifts.
+    body.insert(4, 'X');
+    expect(status(reader, anchor)).toBe('drift');
+  });
+
+  it('span precision: an UNRELATED deletion elsewhere in the body does NOT de-certify it', () => {
+    const convo = new ConversationDoc();
+    const frag = convo.doc.getXmlFragment(CONTENT_SHARE);
+    const para = new Y.XmlElement('paragraph');
+    const body = new Y.XmlText();
+    frag.insert(0, [para]);
+    para.insert(0, [body]);
+    body.insert(0, 'ship it ZZZ'); // span [0,7)='ship it'; index 7=' ' (gap); 8-10='ZZZ'
+    const provider = () => (convo.isDestroyed() ? null : convo.doc);
+    const reader = readerForLiveDoc(
+      provider,
+      { path: [0, 0], start: 0, end: 7 },
+      {
+        resolveRoot: contentRoot,
+      },
+    );
+    const anchor = certify(reader);
+    expect(status(reader, anchor)).toBe('ok');
+    body.delete(8, 3); // delete 'ZZZ' at offset 8 (> end 7, with the space at 7 as a gap)
+    expect(status(reader, anchor)).toBe('ok');
+  });
+
+  it('a torn-down ConversationDoc → DRIFT (stream gone), fragment null', () => {
+    const convo = new ConversationDoc();
+    seatBody(convo);
+    const provider = () => (convo.isDestroyed() ? null : convo.doc);
+    const reader = readerForLiveDoc(
+      provider,
+      { path: [0, 0], start: 0, end: 7 },
+      {
+        resolveRoot: contentRoot,
+      },
+    );
     const anchor = certify(reader);
     expect(status(reader, anchor)).toBe('ok');
 
@@ -703,5 +932,21 @@ describe('live #183 ConversationDoc binding — fail-closed on teardown', () => 
     const res = resolveCovenant(reader, anchor);
     expect(res.covenantStatus).toBe('drift');
     expect(res.renderedFragment).toBeNull();
+  });
+
+  it('the content share is ABSENT → capture fails closed (no anchor minted over an empty plant)', () => {
+    const convo = new ConversationDoc(); // no body seated under CONTENT_SHARE
+    const provider = () => (convo.isDestroyed() ? null : convo.doc);
+    const reader = readerForLiveDoc(
+      provider,
+      { path: [0, 0], start: 0, end: 7 },
+      {
+        resolveRoot: contentRoot,
+      },
+    );
+    expect(reader.captureSelection()).toBeNull();
+    expect(
+      certifyAnchor(reader, { objectId: 'o', roomId: 'r', certifier: ALICE, certifiedAt: AT }),
+    ).toBeNull();
   });
 });
