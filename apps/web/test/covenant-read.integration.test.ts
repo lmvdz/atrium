@@ -73,7 +73,11 @@ describe('covenant read authority × production reader — async fail-closed end
     const { doc } = makeDoc();
     const reader = capturingReader(doc);
     const anchor = certify(reader);
-    const authority = webCovenantReadAuthority({ loadAnchor: async () => anchor, reader });
+    const authority = webCovenantReadAuthority({
+      loadAnchor: async () => anchor,
+      reader,
+      expectedRoomId: 'room_1',
+    });
     expect((await authority.resolve('o_span')).covenantStatus).toBe('ok');
     expect(authority.read('o_span').covenantStatus).toBe('ok');
   });
@@ -83,7 +87,11 @@ describe('covenant read authority × production reader — async fail-closed end
     const reader = capturingReader(doc);
     const anchor = certify(reader);
     body.insert(9, 'X'); // mutate inside the span after certifying
-    const authority = webCovenantReadAuthority({ loadAnchor: async () => anchor, reader });
+    const authority = webCovenantReadAuthority({
+      loadAnchor: async () => anchor,
+      reader,
+      expectedRoomId: 'room_1',
+    });
     expect((await authority.resolve('o_span')).covenantStatus).toBe('drift');
   });
 
@@ -93,7 +101,11 @@ describe('covenant read authority × production reader — async fail-closed end
     // A reader over a NEVER-ready source with a real (non-trivial) deadline: the async
     // resolve stays IN FLIGHT until the deadline fires.
     const stalled = new CovenantDocReaderProd(neverReady, undefined, { deadlineMs: 50 });
-    const authority = webCovenantReadAuthority({ loadAnchor: async () => anchor, reader: stalled });
+    const authority = webCovenantReadAuthority({
+      loadAnchor: async () => anchor,
+      reader: stalled,
+      expectedRoomId: 'room_1',
+    });
 
     const inflight = authority.resolve('o_span');
     // Synchronously, before the deadline: resolution is pending ⇒ `~`.
@@ -111,7 +123,11 @@ describe('covenant read authority × production reader — async fail-closed end
     const { doc } = makeDoc();
     const anchor = certify(capturingReader(doc));
     const stalled = new CovenantDocReaderProd(neverReady, undefined, { deadlineMs: 20 });
-    const authority = webCovenantReadAuthority({ loadAnchor: async () => anchor, reader: stalled });
+    const authority = webCovenantReadAuthority({
+      loadAnchor: async () => anchor,
+      reader: stalled,
+      expectedRoomId: 'room_1',
+    });
     expect((await authority.resolve('o_span')).covenantStatus).toBe('drift');
   });
 
@@ -126,7 +142,11 @@ describe('covenant read authority × production reader — async fail-closed end
     const { doc } = makeDoc();
     const reader = capturingReader(doc);
     const anchor = certify(reader);
-    const authority = webCovenantReadAuthority({ loadAnchor: async () => anchor, reader });
+    const authority = webCovenantReadAuthority({
+      loadAnchor: async () => anchor,
+      reader,
+      expectedRoomId: 'room_1',
+    });
     await authority.resolve('o_span');
     const a = authority.read('o_span');
     const b = authority.read('o_span');
@@ -139,10 +159,15 @@ describe('covenant read authority × production reader — async fail-closed end
     const reader = capturingReader(doc);
     const anchor = certify(reader);
     body.insert(9, 'Z'); // drift
-    const first = webCovenantReadAuthority({ loadAnchor: async () => anchor, reader });
+    const first = webCovenantReadAuthority({
+      loadAnchor: async () => anchor,
+      reader,
+      expectedRoomId: 'room_1',
+    });
     const second = webCovenantReadAuthority({
       loadAnchor: async () => anchor,
       reader: capturingReader(doc),
+      expectedRoomId: 'room_1',
     });
     // Second caller reads before resolving ⇒ `~`, not ok.
     expect(second.read('o_span').covenantStatus).toBe('unresolved');
@@ -166,7 +191,11 @@ describe('covenant read authority × production reader — the cardinal rule: no
     const { doc, body } = makeDoc();
     const reader = capturingReader(doc);
     const anchor = certify(reader);
-    const authority = webCovenantReadAuthority({ loadAnchor: async () => anchor, reader });
+    const authority = webCovenantReadAuthority({
+      loadAnchor: async () => anchor,
+      reader,
+      expectedRoomId: 'room_1',
+    });
 
     // Warm the cache with a genuine `ok` over unchanged content.
     expect((await authority.resolve('o_span')).covenantStatus).toBe('ok');
@@ -186,11 +215,67 @@ describe('covenant read authority × production reader — the cardinal rule: no
     expect(authority.read('o_span').covenantStatus).toBe('drift');
   });
 
+  it('PURE DELETION inside the span: the SAME authority’s sync read is `~`, NEVER the stale `ok` (composite token)', async () => {
+    const { doc, body } = makeDoc();
+    const reader = capturingReader(doc);
+    const anchor = certify(reader);
+    const authority = webCovenantReadAuthority({
+      loadAnchor: async () => anchor,
+      reader,
+      expectedRoomId: 'room_1',
+    });
+
+    // Warm the cache with a genuine `ok` over unchanged content.
+    expect((await authority.resolve('o_span')).covenantStatus).toBe('ok');
+    expect(authority.read('o_span').covenantStatus).toBe('ok');
+
+    // A peer DELETES a character from the certified span — an ordinary backspace. A
+    // deletion lands in the delete SET; the Yjs STATE VECTOR (max-seen clocks) is
+    // UNCHANGED. A state-vector-ONLY freshness token reads `S === S` and serves the
+    // stale `✓` forever — the round-2 gauntlet FAIL. The COMPOSITE token (SV + delete
+    // set) moves, so `read()` demotes to `~`.
+    const svBefore = Y.encodeStateVector(doc);
+    body.delete(9, 1);
+    const svAfter = Y.encodeStateVector(doc);
+    // The state vector genuinely does NOT change on a pure deletion — this is why an
+    // SV-only token missed it (and why the fix must also sample the delete set).
+    expect(Buffer.from(svAfter).equals(Buffer.from(svBefore))).toBe(true);
+
+    const afterDelete = authority.read('o_span');
+    // not-theater: FAILS on base 13cbe9f (SV-only token ⇒ serves the stale `ok`).
+    expect(afterDelete.covenantStatus).not.toBe('ok');
+    expect(afterDelete.covenantStatus).toBe('unresolved');
+    expect(afterDelete.renderedFragment).toBeNull();
+
+    // The kicked re-resolve concludes the real, current verdict: drift.
+    await authority.resolve('o_span');
+    expect(authority.read('o_span').covenantStatus).toBe('drift');
+  });
+
+  it('unbound room: the web factory REFUSES to build an authority with no expectedRoomId (fail-closed)', () => {
+    const { doc } = makeDoc();
+    const reader = capturingReader(doc);
+    // not-theater: base makes `expectedRoomId` OPTIONAL and builds an UNBOUND authority
+    // — one that would resolve a foreign-room anchor carrying the requested objectId to
+    // `ok`. The fix makes the room binding required and fails closed when it is absent,
+    // so no unbound authority is ever constructed. FAILS on base (does not throw).
+    expect(() =>
+      webCovenantReadAuthority({
+        loadAnchor: async () => null,
+        reader,
+      } as unknown as Parameters<typeof webCovenantReadAuthority>[0]),
+    ).toThrow();
+  });
+
   it('peek() over the same authority also refuses a stale `ok` once the span drifts', async () => {
     const { doc, body } = makeDoc();
     const reader = capturingReader(doc);
     const anchor = certify(reader);
-    const authority = webCovenantReadAuthority({ loadAnchor: async () => anchor, reader });
+    const authority = webCovenantReadAuthority({
+      loadAnchor: async () => anchor,
+      reader,
+      expectedRoomId: 'room_1',
+    });
     expect((await authority.resolve('o_span')).covenantStatus).toBe('ok');
     body.insert(9, 'Q'); // drift
     expect(authority.peek('o_span').covenantStatus).not.toBe('ok');
@@ -201,7 +286,11 @@ describe('covenant read authority × production reader — the cardinal rule: no
     const { doc } = makeDoc();
     const reader = capturingReader(doc);
     const anchor = certify(reader);
-    const authority = webCovenantReadAuthority({ loadAnchor: async () => anchor, reader });
+    const authority = webCovenantReadAuthority({
+      loadAnchor: async () => anchor,
+      reader,
+      expectedRoomId: 'room_1',
+    });
     expect((await authority.resolve('o_span')).covenantStatus).toBe('ok');
     reader.makeUnavailable(); // the stream / doc handle is gone — freshness unprovable
     expect(authority.read('o_span').covenantStatus).not.toBe('ok');
@@ -212,7 +301,11 @@ describe('covenant read authority × production reader — the cardinal rule: no
     const { doc } = makeDoc();
     const reader = capturingReader(doc);
     const anchor = certify(reader);
-    const authority = webCovenantReadAuthority({ loadAnchor: async () => anchor, reader });
+    const authority = webCovenantReadAuthority({
+      loadAnchor: async () => anchor,
+      reader,
+      expectedRoomId: 'room_1',
+    });
     expect((await authority.resolve('o_span')).covenantStatus).toBe('ok');
     authority.invalidate('o_span');
     expect(authority.read('o_span').covenantStatus).toBe('unresolved');

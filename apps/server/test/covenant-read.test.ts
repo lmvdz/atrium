@@ -1,4 +1,5 @@
-import type { CovenantAnchor, EnclosedItem, ResolvedSpan } from '@atrium/core';
+import type { CovenantAnchor, EnclosedItem, RenderedFragment, ResolvedSpan } from '@atrium/core';
+import { renderedDigestOf } from '@atrium/core';
 import type { Database } from '@atrium/db';
 import { describe, expect, it } from 'vitest';
 import { readCovenantAnchor, serverCovenantReadAuthority } from '../src/covenant-read.js';
@@ -139,6 +140,35 @@ describe('serverCovenantReadAuthority — the authority wired to the ledger read
     });
     expect((await authority.resolve('o_missing')).covenantStatus).toBe('drift');
     expect(resolverCalled).toBe(false);
+  });
+
+  // SL-4 fix round 2, HIGH — server static mode is FAIL-CLOSED until #182. The server
+  // has no sync doc handle, so it wires no `liveFreshness` port; a cached `ok` it cannot
+  // freshness-prove must be served as `~`, never a stale `✓`, until #182's invalidate-on-
+  // drift is live (the `#182-before-server-✓` constraint).
+  it('a server-cached `ok` that cannot be freshness-proven is served as `~` (fail-closed until #182)', async () => {
+    // Build a fragment + its exact digest, so the resolver reports a GENUINE `ok`.
+    const fragment: RenderedFragment = {
+      ancestors: [],
+      nodes: [{ kind: 'text', text: 'ship it', marks: [] }],
+    };
+    const digest = renderedDigestOf(fragment);
+    const resolveSpan = async (anchor: CovenantAnchor): Promise<ResolvedSpan | null> => ({
+      fragment,
+      enclosedItems: anchor.enclosedItems,
+      snapshotVerified: true,
+    });
+    const authority = serverCovenantReadAuthority({
+      db: fakeDb([goodRow({ renderedDigest: digest, enclosedItems: ENCLOSED })]),
+      roomId: 'room_1',
+      resolveSpan,
+    });
+    const r = await authority.resolve('o_span');
+    expect(r.covenantStatus).toBe('ok'); // a genuine `✓` is now cached
+    // not-theater: base returns the cached `ok` from `read()` (the fail-open); the fix
+    // serves `~` because the server cannot prove the cached `ok` is still fresh.
+    expect(authority.read('o_span').covenantStatus).not.toBe('ok');
+    expect(authority.read('o_span').covenantStatus).toBe('unresolved');
   });
 
   it('a ledger read that THROWS (null-certifier parse aside) fails closed to drift, never propagates', async () => {

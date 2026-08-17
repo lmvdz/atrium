@@ -496,6 +496,67 @@ describe('CovenantReadAuthority — SL-4 warm-cache defects (#191 fix)', () => {
     expect(authority.read('o_span').covenantStatus).not.toBe('ok');
   });
 
+  // ── HIGH: invalidated in-flight resolve — awaiters must NOT get the dropped `ok` ──
+  it('invalidated in-flight resolve: the AWAITERS of the superseded promise get `~`, never the dropped stale `ok`', async () => {
+    const doc = sampleDoc();
+    const anchor = anchorFor(doc);
+    const gate = deferred<ResolvedSpan | null>();
+    const authority = new CovenantReadAuthority({
+      loadAnchor: async () => anchor,
+      resolveSpan: () => gate.promise, // held pending until the drift lands
+    });
+    const inflight = authority.resolve('o_span'); // compute starts at generation 0
+    const joined = authority.resolve('o_span'); // JOINS the same in-flight (generation 0)
+    expect(joined).toBe(inflight);
+    // The span drifts and SL-6 / #182 invalidates BEFORE the in-flight compute settles.
+    authority.invalidate('o_span');
+    // The pre-drift compute now settles `ok`. The generation guard already refuses to
+    // RECACHE it — but its AWAITERS (the very readers that called resolve) must not be
+    // handed the superseded verdict either.
+    gate.resolve(doc.resolveSpan(anchor));
+    const settled = await inflight;
+    // not-theater: base returns `entry.result` (the stale `ok`) to every awaiter; the
+    // fix returns `unresolved` (`~`) — a re-resolve, never the dropped `ok`.
+    expect(settled.covenantStatus).not.toBe('ok');
+    expect(settled.covenantStatus).toBe('unresolved');
+    expect(settled.renderedFragment).toBeNull();
+    // And the cache was not repopulated (the generation guard), so read stays `~`.
+    expect(authority.read('o_span').covenantStatus).toBe('unresolved');
+  });
+
+  // ── HIGH: server static mode must be fail-closed until #182 ───────────────────
+  it('failClosedWithoutFreshness: a cached `ok` with NO freshness port is served as `~` (server static mode)', async () => {
+    const doc = sampleDoc();
+    const anchor = anchorFor(doc);
+    const authority = new CovenantReadAuthority({
+      loadAnchor: async () => anchor,
+      resolveSpan: resolverFor(doc),
+      // The server's mode: no sync doc handle ⇒ no `liveFreshness` port, and #182's
+      // `invalidate`-on-drift is not yet wired, so a cached `ok` cannot be proven fresh.
+      failClosedWithoutFreshness: true,
+    } as ConstructorParameters<typeof CovenantReadAuthority>[0]);
+    expect((await authority.resolve('o_span')).covenantStatus).toBe('ok');
+    // not-theater: base ignores the flag ⇒ `isFresh` returns `true` ⇒ `read()` serves
+    // the cached `ok` (the fail-open the gauntlet caught). The fix serves `~`.
+    expect(authority.read('o_span').covenantStatus).not.toBe('ok');
+    expect(authority.read('o_span').covenantStatus).toBe('unresolved');
+  });
+
+  it('the DEFAULT (invalidate-driven) mode is unchanged: without the flag, a cached `ok` still serves', async () => {
+    const doc = sampleDoc();
+    const anchor = anchorFor(doc);
+    const authority = new CovenantReadAuthority({
+      loadAnchor: async () => anchor,
+      resolveSpan: resolverFor(doc),
+      // no failClosedWithoutFreshness, no port ⇒ trust-until-invalidate (unchanged).
+    });
+    expect((await authority.resolve('o_span')).covenantStatus).toBe('ok');
+    expect(authority.read('o_span').covenantStatus).toBe('ok');
+    // An explicit invalidate still drops it (the invalidate-driven contract).
+    authority.invalidate('o_span');
+    expect(authority.read('o_span').covenantStatus).toBe('unresolved');
+  });
+
   it('generation guard: a FRESH resolve after invalidate does repopulate (the guard only drops the pre-drift one)', async () => {
     const doc = sampleDoc();
     const anchor = anchorFor(doc);

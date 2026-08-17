@@ -114,15 +114,24 @@ export type SpanResolver = (anchor: CovenantAnchor) => Promise<ResolvedSpan | nu
  * fresh WITHOUT awaiting, and is the mechanism that closes the cardinal rule (SL-4
  * gauntlet FAIL): **`read()` must NEVER serve a stale `ok`.**
  *
- * The recommended token is the live doc's Yjs STATE VECTOR (in the span's range, or
- * — a safe over-approximation — the whole doc): any op that lands advances it. The
- * app binding is `CovenantDocReaderProd.authoritativeContext().stateVector` (a single
- * non-blocking poll of the live `Y.Doc`), so any edit under the `✓` changes the token.
+ * The token MUST be a COMPOSITE of the live doc's Yjs STATE VECTOR **and its DELETE
+ * SET** (SL-4 fix round 2, CRITICAL). `Y.encodeStateVector` records only max-seen
+ * clocks — an INSERT advances it, but a pure DELETION lands in the delete SET and
+ * leaves the state vector UNCHANGED. A state-vector-only token therefore misses the
+ * whole delete class: a char/embed deleted from the certified span reads `S === S`,
+ * the cache is called fresh, and the old `ok` is served INDEFINITELY over content the
+ * digest (and #180's anchor) already know drifted. Composing the delete set in closes
+ * that: this is the SAME SV-vs-delete-set completeness #180's anchor already encodes
+ * (`stateVector` + `deleteSet`), and the freshness token must match it. The app
+ * binding reuses the production reader's own `authoritativeContext()` — which already
+ * computes both `stateVector` and `deleteSet` for the anchor — and concatenates them
+ * (a single non-blocking poll of the live `Y.Doc`), so ANY drift the digest catches —
+ * insert, delete, delete+reinsert, format — advances the token.
  *
  * The authority captures this token at resolve time and re-samples it on every
  * `read()`; **any difference — or a `null` (doc gone / cannot sample) — is treated as
- * STALE**, so `read()` returns `~` and kicks an async re-resolve. A whole-doc state
- * vector over-detects (an unrelated edit triggers a harmless re-resolve), which is the
+ * STALE**, so `read()` returns `~` and kicks an async re-resolve. The whole-doc token
+ * over-detects (an unrelated edit triggers a harmless re-resolve), which is the
  * fail-closed direction: it can only ever demote a stale `ok` to `~`, never mint one.
  *
  * When this port is ABSENT the authority is in STATIC-DOC mode: a cached result is
@@ -144,6 +153,31 @@ export interface CovenantReadAuthorityOptions {
    * without it, freshness is driven only by `invalidate`.
    */
   readonly liveFreshness?: LiveFreshness;
+  /**
+   * FAIL-CLOSED when freshness cannot be proven (SL-4 fix round 2, HIGH — the server
+   * static-mode fail-open). When `true` AND no {@link liveFreshness} port is wired, a
+   * cached `ok` is UNPROVABLE (there is no sync doc handle to sample), so `read()`
+   * serves it as `unresolved` (`~`) rather than trusting it — a server-cached `ok`
+   * must never outlive a drift the server cannot yet observe.
+   *
+   * ## The `#182-before-server-✓` sequencing constraint
+   *
+   * The server binding has NO sync doc handle, so its ONLY freshness signal is the
+   * explicit {@link CovenantReadAuthority.invalidate} hook that SL-6 / #182's
+   * drift-on-update sweep calls. Until #182 is implemented and wired, NOTHING calls
+   * `invalidate`, so a server-cached `ok` would survive live drift indefinitely — the
+   * exact fail-open the gauntlet caught. This flag makes the interim fail-closed: the
+   * server serves `~` for any cached `ok` it cannot prove fresh, and a server-path `✓`
+   * is only reachable once #182 guarantees invalidate-on-drift (an entry that survives
+   * an invalidate-covered window IS proven fresh — the guard drops any that drifted).
+   * This is a HARD sequencing constraint: **do not flip the server to trust a cached
+   * `ok` (clear this flag) before #182's invalidate-on-drift is live.**
+   *
+   * Absent / `false` (the default, and the invalidate-driven mode the web binding uses
+   * alongside its always-wired freshness port): a cached result is trusted until an
+   * explicit `invalidate` drops it — the pre-existing static-doc contract.
+   */
+  readonly failClosedWithoutFreshness?: boolean;
   /**
    * OPTIONAL room binding. When set, the loaded anchor's `roomId` MUST equal it, else
    * the authority fails closed to `drift` — defence-in-depth against a loader / cache /
@@ -275,11 +309,18 @@ export class CovenantReadAuthority {
    * `unresolved` just because freshness cannot be sampled).
    */
   private isFresh(entry: CacheEntry): boolean {
-    if (!this.opts.liveFreshness) return true; // static-doc mode: invalidate-driven only
-    if (entry.anchor === null) return true; // no live span (no-anchor / thrown result)
-    const current = this.sampleFreshness(entry.anchor);
-    if (current === null) return false; // cannot prove fresh ⇒ STALE ⇒ `~`
-    return current === entry.token; // any state-vector advance ⇒ STALE
+    if (this.opts.liveFreshness) {
+      if (entry.anchor === null) return true; // no live span (no-anchor / thrown result)
+      const current = this.sampleFreshness(entry.anchor);
+      if (current === null) return false; // cannot prove fresh ⇒ STALE ⇒ `~`
+      return current === entry.token; // any freshness-token advance (SV or delete set) ⇒ STALE
+    }
+    // No freshness port. Either invalidate-driven trust (the default: a cached result is
+    // trusted until an explicit `invalidate` drops it) OR — when the binding cannot rely
+    // on invalidate coverage — fail-closed: an `ok` that cannot be proven fresh is STALE
+    // and served as `~`. The server sets `failClosedWithoutFreshness` until #182 wires
+    // invalidate-on-drift (see {@link CovenantReadAuthorityOptions.failClosedWithoutFreshness}).
+    return !this.opts.failClosedWithoutFreshness;
   }
 
   /**
@@ -329,8 +370,16 @@ export class CovenantReadAuthority {
         // started. Otherwise the result predates a drift ⇒ drop it (read stays `~`).
         if (this.generationOf(objectId) === startGeneration) {
           this.cache.set(objectId, entry);
+          return entry.result;
         }
-        return entry.result;
+        // Invalidated mid-flight (SL-4 fix round 2, HIGH). The compute — and every caller
+        // AWAITING this same in-flight promise — predates a drift the generation guard
+        // already refused to cache. Handing those awaiters `entry.result` would leak the
+        // superseded verdict (a stale `ok`) to the very readers that asked. Fail-closed:
+        // they get `unresolved` (`~`) instead, exactly what a sync `read()` now returns
+        // for the dropped entry, and a subsequent resolve()/prime() re-resolves under the
+        // new generation. Never the dropped `ok`.
+        return pending(objectId);
       })
       .finally(() => {
         // Only clear if WE are still the registered in-flight (invalidate may have

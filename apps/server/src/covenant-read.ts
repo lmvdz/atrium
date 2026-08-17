@@ -108,6 +108,14 @@ export function serverCovenantReadAuthority(input: {
     // Bind the authority to its room: an anchor loaded for a different room fails
     // closed (defence-in-depth over the `(room_id, object_id)`-keyed query).
     expectedRoomId: input.roomId,
+    // FAIL-CLOSED until #182 (SL-4 fix round 2, HIGH — the `#182-before-server-✓`
+    // constraint). The server has NO sync doc handle, so it cannot wire a
+    // `liveFreshness` port; its only freshness signal is the `invalidate` hook that
+    // #182's drift-on-update sweep calls — and #182 is not yet built. Until it is,
+    // NOTHING invalidates a server-cached `ok`, so it would outlive live drift. This
+    // flag makes the interim fail-closed: `read()` serves an unproven cached `ok` as
+    // `~`, never a stale `✓`. Do NOT clear it before #182's invalidate-on-drift is live.
+    failClosedWithoutFreshness: true,
   };
   return new CovenantReadAuthority(options);
 }
