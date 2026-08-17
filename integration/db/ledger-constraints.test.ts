@@ -3490,6 +3490,15 @@ describe('foreign keys — the audit is the catalog, not a paragraph', () => {
       // a display column nulls, the authority is elsewhere — one table over.
       'auth_sessions_active_organization_id_workspaces_id_fk',
       'corrections_by_user_id_users_id_fk',
+      /* #180/#190's. WHO CERTIFIED a covenant anchor (a `✓` on a CRDT span). Nulls
+         on the identity's deletion for this list's own reason: the signature
+         happened and outlives the person, and the column is not authority —
+         `certifier_kind` is held to a human by 0050's CHECK and 0052's correlation
+         trigger, and the anchor's signed content is frozen by the immutability
+         trigger. Added by 0050 and NOT recorded here, so this assertion had been red
+         on the branch since that migration landed (found while building #190 SL-3) —
+         reconciled here, because the audit's job is to fail until someone does. */
+      'covenant_anchors_certifier_id_fk',
       'messages_author_id_users_id_fk',
       'proposals_decided_by_users_id_fk',
       'proposals_interpretation_id_interpretations_id_fk',
@@ -3560,6 +3569,14 @@ describe('foreign keys — the audit is the catalog, not a paragraph', () => {
       'core_events_room_id_rooms_id_fk',
       'corrections_object_same_room_fk',
       'corrections_room_id_rooms_id_fk',
+      // #180/#190's. A covenant anchor lives in its room and dies with it — the
+      // room is the isolation boundary, and an anchor without its room is
+      // meaningless, exactly as the accepted-object and correction edges above.
+      // Added by 0050 and NOT recorded here, so this list had been red on the
+      // branch since that migration landed; reconciled while building #190 SL-3.
+      // Its composite `covenant_anchors_object_same_room_fk` is NO ACTION and so,
+      // like the funded-arm note below, this query never sees it.
+      'covenant_anchors_room_id_fk',
       /* #128's funded-arm claims. All three cascade for this list's own reason:
          a claim is a fact about a draw taken in a room, from a message, into a
          session, and it is meaningless once any of the three is gone. Note what

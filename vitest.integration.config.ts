@@ -31,6 +31,14 @@ export default defineConfig({
       // order, and what the compiler checks has to be what the runner runs.
       { find: /^@atrium\/auth$/, replacement: src('./packages/auth/src/index.ts') },
       /**
+       * `yjs` — the covenant certify path (#190) resolves a live span through
+       * `apps/web/lib/covenant-reader.ts`, which binds the Yjs port. `yjs` is a
+       * dependency of `apps/web`, not the repo root, so the root-run integration
+       * runner cannot resolve the bare specifier; point it at the one installed
+       * copy under `apps/web`, exactly as the `@atrium/*` aliases point at source.
+       */
+      { find: /^yjs$/, replacement: src('./apps/web/node_modules/yjs/dist/yjs.mjs') },
+      /**
        * `server-only` — the same alias `apps/web/vitest.config.ts` carries, and
        * for the same reason.
        *

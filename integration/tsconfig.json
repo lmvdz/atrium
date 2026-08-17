@@ -20,7 +20,13 @@
       "@atrium/core": ["./packages/core/src/index.ts"],
       "@atrium/db": ["./packages/db/src/index.ts"],
       "@atrium/db/schema": ["./packages/db/src/schema.ts"],
-      "@atrium/auth": ["./packages/auth/src/index.ts"]
+      "@atrium/auth": ["./packages/auth/src/index.ts"],
+      // The covenant certify path (#190) resolves a live span through
+      // `apps/web/lib/covenant-reader.ts`, which binds the Yjs port. `yjs` is an
+      // `apps/web` dependency, not a root one, so point the compiler at the one
+      // installed copy — exactly as `vitest.integration.config.ts` aliases it for
+      // the runner, so what tsc checks is what the runner runs.
+      "yjs": ["./apps/web/node_modules/yjs/dist/src/index.d.ts"]
     }
   },
   "include": ["**/*.ts", "../apps/web/lib/replay-data.ts", "../vitest.integration.config.ts"]

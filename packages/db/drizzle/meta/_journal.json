@@ -365,6 +365,13 @@
       "when": 1788691200000,
       "tag": "0051_the_covenant_anchor_persists_its_span_boundaries",
       "breakpoints": true
+    },
+    {
+      "idx": 52,
+      "version": "7",
+      "when": 1788777600000,
+      "tag": "0052_the_covenant_certifier_is_a_human_principal",
+      "breakpoints": true
     }
   ]
 }
