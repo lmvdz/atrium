@@ -3,6 +3,7 @@ import {
   ClaimPayload,
   CommitmentPayload,
   DecisionPayload,
+  epistemicStateFromAcceptance,
   ObjectivePayload,
   OpenQuestionPayload,
 } from '@atrium/core';
@@ -25,6 +26,7 @@ import type {
 import {
   citationFrom,
   happenedKindFor,
+  isSettled,
   messageEntry,
   owedSummary,
   participantKindOf,
@@ -681,25 +683,42 @@ export function replayReceipt(
   // #102-gated `amend {verification:'verified'}` moves. A retracted row is
   // withdrawn, so it is neither certifiable nor removable.
   const isActive = accepted !== undefined && accepted.retractedAt === null;
-  // Certify is the `~`→`✓` vouch, so it is offered ONLY on a genuinely `~` claim
-  // — one whose acceptance is still a machine's reading (`self_reported`). The
-  // old `!== 'verified'` also admitted `accepted` (a human-accepted claim that
-  // already renders `✓`), so a settled reading was offered "Certify … (~→✓)"
-  // that misdescribed it (#110 finding 3). `self_reported` is the ONLY `~` claim
-  // state — `accepted` and `verified` are both `✓` — so this is the exact gate.
-  const certifiable =
-    isActive && object.state.kind === 'claim' && object.state.verification === 'self_reported';
+  // PROVENANCE — "has a human taken responsibility for this reading" — read off
+  // the persisted acceptance columns, the SAME predicate the pre-migration glyph
+  // used. This is a KEEP concern (SL-5's partition, `COVENANT-PREDICATE-PARTITION.md`):
+  // `resolveCovenant` deliberately does not answer it.
+  //
+  // SL-6 FIX (#193, HIGH — the decoupling): certify/remove ELIGIBILITY must gate
+  // on this provenance value, NOT on `object.state.verification`. The migration
+  // overloaded that field with the CONTENT-drift glyph, which fails closed to `~`
+  // whenever no resolver is wired (the state today) — so keying the acts on it
+  // offered to Certify/Remove a reading a human had ALREADY certified (the server
+  // then refuses the retract; the UI must not invite it). The fail-closed DISPLAY
+  // `~` (correct, by design until the resolver wires — #182/#194) must never
+  // downgrade this provenance-gated behaviour.
+  const humanCertified =
+    accepted !== undefined &&
+    epistemicStateFromAcceptance(
+      accepted.acceptedByKind,
+      accepted.humanTouchedAt === null ? null : accepted.humanTouchedAt.toISOString(),
+    ) === 'confirmed';
+  // Certify is the `~`→`✓` vouch, so it is offered ONLY on a claim NO person has
+  // yet stood behind. The old gate keyed on `verification === 'self_reported'`,
+  // which was exactly `!humanCertified` for a claim BEFORE the content glyph
+  // migrated — restoring the provenance predicate keeps that pre-migration meaning
+  // (excluding an already `accepted`/`verified` `✓` claim, #110 finding 3) without
+  // being moved by the drift glyph.
+  const certifiable = isActive && object.state.kind === 'claim' && !humanCertified;
   // Remove withdraws a `~` reading — the covenant's removal act, on a reading no
-  // person has stood behind. It must NOT be offered on a `✓` (#110 finding 1):
-  // withdrawing another person's certified reading is a judgement act the server
-  // now refuses (`retractConfirmedRefusal`), and the button must not invite what
-  // the covenant forbids. The `~` states are exactly `self_reported` for a claim
-  // and `open`/`proposed` for a question (answered-and-confirmed is `accepted`,
-  // the `✓`); every `✓` state is excluded here, matching the server gate.
+  // person has stood behind. It must NOT be offered where a human has certified
+  // (#110 finding 1): withdrawing another person's certified reading is a judgement
+  // act the server refuses (`retractConfirmedRefusal`). Pre-migration this was
+  // `self_reported` for a claim and `!== 'accepted'` for a question — both exactly
+  // `!humanCertified` — so the provenance gate matches the server gate byte-for-byte.
   const removable =
     isActive &&
-    ((object.state.kind === 'claim' && object.state.verification === 'self_reported') ||
-      (object.state.kind === 'question' && object.state.verification !== 'accepted'));
+    !humanCertified &&
+    (object.state.kind === 'claim' || object.state.kind === 'question');
 
   const viewer = changes.viewer;
   let certifyRefusal: string | null = null;
@@ -1052,8 +1071,16 @@ function stateForObject(
  * `epistemicStateOf` predicate — both minted a `✓` the instant a person clicked,
  * before any anchor resolved. The tick now requires the object's certified content
  * to RESOLVE ({@link anchorCertifies}): a stalled / pending / unresolvable anchor
- * stays `~` — never a stale optimistic `✓`. When no authority is wired
- * (`resolver === undefined`) it fails closed to the row's existing verification.
+ * stays `~`, AND a retained overlay whose object has SINCE drifted demotes its
+ * prior settled `✓` back to `~` — never a stale optimistic `✓`. When no authority
+ * is wired (`resolver === undefined`) it fails closed the same way. Wiring a live
+ * doc so `✓` shows for real (not `~`) is #182/#194; until then this reads `~`.
+ *
+ * SL-6 FIX (#193, CRITICAL): the base preserved `state.verification` when the
+ * authority did not confirm, so an input already at `accepted`/`verified` (a
+ * previously-settled overlay) survived as a stale `✓` after its object drifted.
+ * Fail-closed demands ANY non-`ok` verdict render `~` — so a settled input is
+ * demoted (never preserved) through {@link failClosedVerification}.
  */
 export function locallyAcceptedState(
   state: EpistemicState,
@@ -1063,9 +1090,25 @@ export function locallyAcceptedState(
   const confirmed = anchorCertifies(resolver, objectId);
   return {
     ...state,
-    verification: confirmed ? 'accepted' : state.verification,
+    verification: confirmed ? 'accepted' : failClosedVerification(state),
     owedToViewer: false,
   };
+}
+
+/**
+ * The `~` a fail-closed DISPLAY reader falls back to when the covenant authority
+ * does not resolve `ok` (drift / pending / no resolver wired). A settled input
+ * (`✓ accepted`/`verified`) must NEVER survive as a stale tick, so it demotes to
+ * its kind's unsettled state (`self_reported` for a claim, `proposed` otherwise);
+ * an already-unsettled or `open`/`?` input is its own honest `~` and is kept.
+ *
+ * This governs the DISPLAY glyph only. Certify/remove ELIGIBILITY is a PROVENANCE
+ * concern and must NOT read this fail-closed value — see {@link replayReceipt},
+ * which keys those acts on {@link epistemicStateFromAcceptance} instead.
+ */
+function failClosedVerification(state: EpistemicState): EpistemicState['verification'] {
+  if (!isSettled(state)) return state.verification;
+  return state.kind === 'claim' ? 'self_reported' : 'proposed';
 }
 
 function payloadText(

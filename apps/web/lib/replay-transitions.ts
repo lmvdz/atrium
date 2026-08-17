@@ -109,7 +109,31 @@ export function reopenQuestion(
 export function applyReplayTransitions(
   objects: readonly StateObject[],
   transitions: readonly ReplayCorrectionTransition[],
+  glyphResolver?: ObjectGlyphResolver,
 ): readonly StateObject[] {
   const latest = new Map(transitions.map((transition) => [transition.objectId, transition]));
-  return objects.map((object) => latest.get(object.id)?.after ?? object);
+  return objects.map((object) => {
+    const transition = latest.get(object.id);
+    if (transition === undefined) return object;
+    if (transition.action !== 'retype') return transition.after;
+    /*
+     * SL-6 FIX (#193, CRITICAL): the retype's DISPLAY tick is RE-DERIVED against
+     * the authority HERE, at apply time, not replayed from the value baked into
+     * `after` when {@link retypeAsClaim} recorded the correction. Replaying the
+     * stored `after` verbatim would paint a stale `✓` over an object that has
+     * SINCE drifted (its `after` captured `accepted` while the anchor still
+     * resolved `ok`). Fail-closed: any authority verdict other than `ok` — drift,
+     * pending, or no resolver wired — demotes the glyph to `~` (`self_reported`),
+     * exactly as the durable and optimistic-accept readers do. The retype
+     * CORRECTION itself (the decision→claim fact, its source link) is durable and
+     * untouched; only the ephemeral certification glyph re-reads the live verdict.
+     */
+    return {
+      ...transition.after,
+      state: {
+        ...transition.after.state,
+        verification: anchorCertifies(glyphResolver, object.id) ? 'accepted' : 'self_reported',
+      },
+    };
+  });
 }

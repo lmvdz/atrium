@@ -98,7 +98,7 @@ export function ReplaySession({ data, viewerId }: { data: ReplayData; viewerId?:
     ...objective,
     open: openObjectives[objective.id] ?? objective.open,
   }));
-  const correctedObjects = applyReplayTransitions(view.objects, corrections);
+  const correctedObjects = applyReplayTransitions(view.objects, corrections, glyphResolver);
   const objects = correctedObjects.map((object) => {
     const accepted =
       acceptedSubjects.includes(object.id) && object.kind !== 'claim'

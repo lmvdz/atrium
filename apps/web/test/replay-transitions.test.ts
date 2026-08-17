@@ -51,7 +51,14 @@ describe('replay correction transitions', () => {
       after: { id: decision.id, kind: 'claim', state: { verification: 'accepted' } },
     });
     expect(transition.after.facts).toContain('claim truth remains unverified');
-    expect(applyReplayTransitions([decision], [transition])[0]).toBe(transition.after);
+    // SL-6 FIX (#193, CRITICAL): applyReplayTransitions RE-DERIVES the display
+    // tick against the APPLY-TIME authority rather than replaying the value baked
+    // into `after` — so an object that drifts AFTER the correction was recorded
+    // cannot show a stale `✓`. Under the SAME `ok` verdict the applied object is
+    // value-identical to the recorded correction (identity + kind + the re-derived
+    // `✓`), though it is a fresh object rather than the same reference.
+    const applied = applyReplayTransitions([decision], [transition], glyphResolver('ok'))[0];
+    expect(applied).toEqual(transition.after);
   });
 
   /**
