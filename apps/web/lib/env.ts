@@ -156,6 +156,46 @@ export function realtimeOrigin(): string | null {
 }
 
 /**
+ * Where the Electric sync service is, on the private network (#201).
+ *
+ * `null` when there is no Electric in this deployment, which is a running
+ * deployment: the shape proxy answers 503 and a room's live document does not
+ * connect. That is the honest degradation and it is why this returns null rather
+ * than throwing — a missing sync fabric must not take down sign-in.
+ *
+ * **This value never reaches a browser.** It names a container on the compose
+ * network, and more importantly Electric has no idea who is asking: it answers
+ * any shape request for any table in its publication, with any `where` the
+ * caller writes. The browser's only route to a shape is
+ * `app/electric/v1/shape/route.ts`, which authenticates the session, authorizes
+ * the room, and pins the predicate server-side. `/api/runtime-config` therefore
+ * publishes a PATH, not this origin.
+ *
+ * Trailing slash stripped so callers can concatenate `/v1/shape` without
+ * producing a double slash Electric would 404.
+ */
+export function electricUrl(): string | null {
+  const raw = process.env.ELECTRIC_URL?.trim();
+  if (!raw) return null;
+  return raw.replace(/\/$/, '');
+}
+
+/**
+ * Electric's API secret, sent by the shape proxy on every forwarded request.
+ *
+ * A network-level lock, NOT an authorization: Electric knows nothing about
+ * sessions or rooms, so holding this secret means "you may ask Electric for a
+ * shape", never "you may read this room". The membership check in the proxy is
+ * the authorization and this cannot substitute for it.
+ *
+ * Null when Electric was started with `ELECTRIC_INSECURE=true`, which
+ * `docker-compose.yml` never does.
+ */
+export function electricSecret(): string | null {
+  return process.env.ELECTRIC_SECRET?.trim() || null;
+}
+
+/**
  * GitHub OAuth, if it is configured. Returning null rather than throwing is the
  * point: one OAuth provider is a feature, not a prerequisite, and a fresh clone
  * must be able to sign up with an email address and nothing else.

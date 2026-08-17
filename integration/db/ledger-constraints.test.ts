@@ -3633,6 +3633,16 @@ describe('foreign keys — the audit is the catalog, not a paragraph', () => {
       'workspace_invitations_organization_id_workspaces_id_fk',
       'workspace_members_organization_id_workspaces_id_fk',
       'workspace_members_user_id_users_id_fk',
+      /* #201's Electric document stream. A room's Yjs update log and its presence
+         table cascade for this list's own reason: both are meaningless without
+         the room, and the room is the isolation boundary. Note the direction —
+         deleting a room DESTROYS its document rather than orphaning it, which is
+         the only honest answer for content a `✓` may have signed: an anchor whose
+         rendered content no longer exists must be unresolvable, and unresolvable
+         is `~` (fail-closed, #163). A SET NULL here would leave document updates
+         belonging to no room at all, readable by no membership check. */
+      'ydoc_awareness_room_fk',
+      'ydoc_updates_room_fk',
     ]);
 
     // And the stale row, named so the correction cannot be quietly re-broken:

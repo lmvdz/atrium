@@ -43,10 +43,11 @@ export async function loadRuntimeConfig(
       if (!response.ok) return {};
       const body: unknown = await response.json();
       if (typeof body !== 'object' || body === null) return {};
-      const { wsUrl, wsPath } = body as RuntimeConfig;
+      const { wsUrl, wsPath, electricShapePath } = body as RuntimeConfig;
       return {
         wsUrl: typeof wsUrl === 'string' ? wsUrl : null,
         wsPath: typeof wsPath === 'string' ? wsPath : null,
+        electricShapePath: typeof electricShapePath === 'string' ? electricShapePath : null,
       };
     } catch {
       return {};

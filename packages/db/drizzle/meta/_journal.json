@@ -372,6 +372,13 @@
       "when": 1788777600000,
       "tag": "0052_the_covenant_certifier_is_a_human_principal",
       "breakpoints": true
+    },
+    {
+      "idx": 53,
+      "version": "7",
+      "when": 1788864000000,
+      "tag": "0053_the_document_stream_is_a_gated_append",
+      "breakpoints": true
     }
   ]
 }

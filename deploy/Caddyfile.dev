@@ -59,6 +59,14 @@ localhost:80, 127.0.0.1:80, [::1]:80 {
 	handle /{$S3_BUCKET}/* {
 		reverse_proxy minio:9000
 	}
+	# Electric shapes go through the app, exactly as in deploy/Caddyfile — see
+	# that file's paragraph. The rule is the same in development because the
+	# thing it protects (a browser reaching a sync engine that authenticates
+	# nobody) is the same in development, and a dev topology that skipped the
+	# authorized proxy would be a dev loop that never exercises it.
+	handle /electric/* {
+		reverse_proxy app:3000
+	}
 	handle {
 		reverse_proxy app:3000
 	}

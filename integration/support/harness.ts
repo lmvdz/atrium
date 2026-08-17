@@ -47,6 +47,13 @@ const APP_TABLES = [
   // CASCADE from `sessions`: the reset's contract is that every app table is
   // emptied, and a table that only ever gets cleared as somebody else's cascade
   // is one FK refactor away from surviving a reset silently.
+  // The Electric document stream (#201). Named for the reason every other
+  // projection below is: both tables cascade from `rooms` today, and a table
+  // cleared only as somebody else's cascade is one FK refactor away from
+  // surviving a reset silently — which here would leak one test's Yjs updates
+  // into the next test's document.
+  'ydoc_updates',
+  'ydoc_awareness',
   'session_signals',
   'session_subscriptions',
   // The funded-arm claims (#128). Named for the same reason the two above are:

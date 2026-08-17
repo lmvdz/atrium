@@ -24,6 +24,7 @@ import {
   bigserial,
   boolean,
   check,
+  customType,
   foreignKey,
   index,
   integer,
@@ -2495,6 +2496,92 @@ export const covenantAnchors = pgTable(
     /** Only a human certifies. The covenant's whole claim is a human vouched for this. */
     check('covenant_anchors_certifier_is_human', sql`${t.certifierKind} = 'human'`),
     check('covenant_anchors_revision_nonneg', sql`${t.revision} >= 0`),
+  ],
+);
+
+/**
+ * `bytea`, which drizzle-orm 0.45 has no built-in column for.
+ *
+ * Declared once here rather than at each use so the two Electric tables cannot
+ * disagree about what a Yjs update is stored as. `Buffer` on the way out is what
+ * `postgres`-js hands back for a `bytea`; `Uint8Array` on the way in is what Yjs
+ * produces, and a Buffer is one.
+ */
+const bytea = customType<{ data: Uint8Array; driverData: Buffer }>({
+  dataType: () => 'bytea',
+});
+
+/* ── the Electric sync fabric (#201) ─────────────────────────────────────────
+ *
+ * Two tables that are NOT ours by shape: `room`, `op`, `client_id` and `updated`
+ * are y-electric's documented column names, read by name inside
+ * `@electric-sql/y-electric` and by the shape `where` in
+ * `apps/web/app/prototype/electric-transport.ts`. Renaming any of them is a
+ * change to a wire contract, not a tidy-up.
+ *
+ * The one deliberate departure from upstream's example schema is that `room` is
+ * a `uuid` REFERENCES `rooms` rather than free text: the read gate
+ * (`/electric/v1/shape`) authorizes "is this caller a member of THAT room", and
+ * a stream key no membership can be checked against is a room-scoping rule with
+ * a hole in it.
+ *
+ * **Their real boundary is in SQL, not here.** Migration 0053 puts a
+ * `SECURITY DEFINER` append function, a call-stack guard trigger, an
+ * append-only trigger and a REVOKE in front of `ydoc_updates` — the 0003/0004
+ * pattern — because the content a human `✓` signs lives in that table. Drizzle
+ * declares the columns; it does not declare the door, and inserting through
+ * this table object will be refused.
+ */
+
+/**
+ * The durable Yjs update log for a room's conversation document.
+ *
+ * Append-only. Electric streams it as a room-scoped shape; readers fold every
+ * `op` into their `Y.Doc`. Writes go through `atrium_append_ydoc_update()`
+ * (E2's `sendUrl` door is an HTTP wrapper over that function) — a direct INSERT,
+ * including one through this drizzle table, is refused by the guard trigger.
+ */
+export const ydocUpdates = pgTable(
+  'ydoc_updates',
+  {
+    id: uuid('id').primaryKey().defaultRandom(),
+    /** The room whose document this update belongs to — the shape's whole predicate. */
+    room: uuid('room')
+      .notNull()
+      .references(() => rooms.id, { onDelete: 'cascade' }),
+    /** The Yjs update, as y-electric names and reads it. */
+    op: bytea('op').notNull(),
+    appendedAt: timestamp('appended_at', { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [
+    index('ydoc_updates_room_idx').on(t.room, t.appendedAt),
+    check('ydoc_updates_op_not_empty', sql`octet_length(${t.op}) > 0`),
+  ],
+);
+
+/**
+ * Presence for a room's live document: one overwritable row per (client, room).
+ *
+ * Carries no document content and no covenant value, which is why it is an
+ * upsert rather than a log — but it is still room-scoped and still written only
+ * through `atrium_upsert_ydoc_awareness()`, because a cursor attributed to
+ * somebody who is not in the room is an identity claim.
+ */
+export const ydocAwareness = pgTable(
+  'ydoc_awareness',
+  {
+    clientId: text('client_id').notNull(),
+    room: uuid('room')
+      .notNull()
+      .references(() => rooms.id, { onDelete: 'cascade' }),
+    op: bytea('op').notNull(),
+    updated: timestamp('updated', { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [
+    primaryKey({ name: 'ydoc_awareness_pk', columns: [t.clientId, t.room] }),
+    index('ydoc_awareness_room_idx').on(t.room, t.updated),
+    check('ydoc_awareness_client_id_not_blank', sql`length(${t.clientId}) > 0`),
+    check('ydoc_awareness_op_not_empty', sql`octet_length(${t.op}) > 0`),
   ],
 );
 

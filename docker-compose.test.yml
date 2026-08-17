@@ -40,6 +40,15 @@ services:
       # appends; the 100 default is enough but leaves no room to debug.
       - -c
       - max_connections=200
+      # Same as the production stack (#201). Not because this suite runs an
+      # Electric — it does not — but because migration 0053 creates the
+      # publication Electric attaches to, and `SHOW wal_level` is one of the
+      # ticket's acceptance items. A test database on the `replica` default would
+      # let that assertion pass or fail for a reason the production stack does
+      # not share, which is the shape of test that reports green through a
+      # regression. Costs a little more WAL on a tmpfs that is thrown away.
+      - -c
+      - wal_level=logical
     ports:
       - '${ATRIUM_TEST_PG_PORT:-55445}:5432'
     tmpfs:

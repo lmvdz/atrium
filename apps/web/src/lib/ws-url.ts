@@ -33,6 +33,44 @@ export interface RuntimeConfig {
   wsUrl?: string | null;
   /** Same-origin path when there is no `wsUrl`. Defaults to `/ws`. */
   wsPath?: string | null;
+  /**
+   * Where the browser reads Electric shapes (#201) — ALWAYS a same-origin path,
+   * never an absolute URL, and `null` when this deployment has no sync fabric.
+   *
+   * Deliberately not the twin of `wsUrl`. The socket may legitimately live on
+   * another origin (`pnpm dev` puts it on :4000), so that value is allowed to be
+   * absolute. A shape read may not: it is authorized by the session cookie, and
+   * a cookie only rides a same-origin request. An absolute value here would be a
+   * cross-origin fetch that arrives unauthenticated at an Electric which cannot
+   * authenticate anyway — a room's document readable by anyone who guessed the
+   * URL. `resolveElectricShapeUrl` refuses one rather than trusting the config.
+   */
+  electricShapePath?: string | null;
+}
+
+/** The path the shape proxy is mounted at when nothing says otherwise. */
+export const DEFAULT_ELECTRIC_SHAPE_PATH = '/electric/v1/shape';
+
+/**
+ * Resolve the shape endpoint the Yjs transport reads a room's document from.
+ *
+ * Same-origin by construction, for the reason `electricShapePath` gives: the
+ * proxy authorizes the read against the session cookie, and a cross-origin URL
+ * would send the request without one. Pure, like `resolveWsUrl`, so the rule is
+ * testable rather than merely asserted.
+ */
+export function resolveElectricShapeUrl(
+  config: RuntimeConfig = {},
+  location?: LocationLike,
+): string {
+  const here = location ?? currentLocation();
+  const path = config.electricShapePath?.trim() || DEFAULT_ELECTRIC_SHAPE_PATH;
+  if (!path.startsWith('/')) {
+    throw new WsUrlError(
+      `runtime electricShapePath "${path}" must be an origin-relative path starting with "/" — a shape read is authorized by the session cookie, which only rides a same-origin request`,
+    );
+  }
+  return `${here.protocol}//${here.host}${path}`;
 }
 
 /** The subset of `window.location` this needs. Keeps the function testable. */
