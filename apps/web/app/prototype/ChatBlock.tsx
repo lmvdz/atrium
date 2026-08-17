@@ -28,13 +28,7 @@ import { MessageBody } from '@/src/components/primitives/MessageBody';
 import { SystemRow } from '@/src/components/timeline/SystemRow';
 import { TimelineRow } from '@/src/components/timeline/TimelineRow';
 import { ChatTopBar } from './ChatChrome';
-import {
-  type ConversationItem,
-  conversationModel,
-  type Echo,
-  echoItem,
-  messageBody,
-} from './conversation-model';
+import { type ConversationItem, type Echo, echoItem, messageBody } from './conversation-model';
 import { IconChevron, IconDot } from './icons';
 import { MessageText } from './MessageText';
 import styles from './prototype.module.css';
@@ -50,6 +44,7 @@ import {
   type TurnData,
   type TurnStep,
 } from './types';
+import { useConversationModel } from './use-conversation-model';
 
 /* PRIMITIVE: a stream of diff hunks. Rendered identically whether it has the
    floor or is materialized inside a tree node — that sameness IS the algebra.
@@ -671,11 +666,15 @@ export function ChatBlock({
     return () => window.clearTimeout(t);
   }, [selected, shownSel]);
 
-  /* SEAM(#155/Phase 6): the conversation, THROUGH the model interface. The feed
-     renders shipped records/entries; a CRDT-backed impl swaps the source without
-     changing anything below. Echoes (locally-sent lines) are the viewer typing —
-     real typed records on the SAME register, so they render as shipped rows too. */
-  const model = useMemo(() => conversationModel(shownSel), [shownSel]);
+  /* SEAM(#155/#183): the conversation, THROUGH the model interface — now read
+     live off a Yjs document (`useConversationModel` → `ConversationDoc`). The
+     feed renders the same shipped records/entries; the CRDT-backed source swaps
+     in without changing anything below, and the feed re-renders as the document
+     converges. On the fixture route the doc is seeded from the mock seam, so this
+     is byte-identical to the prior `conversationModel(shownSel)`. Echoes
+     (locally-sent lines) are the viewer typing — real typed records on the SAME
+     register, so they render as shipped rows too. */
+  const model = useConversationModel(shownSel);
   const { records, items } = useMemo(() => {
     const echoes_ = echoes.map((echo, index) => echoItem(echo, index, model.room));
     return {

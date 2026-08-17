@@ -261,16 +261,24 @@ function authorKindOf(kind: ChatKind): ParticipantKind {
 }
 
 /**
- * TODAY'S IMPLEMENTATION of the swap seam, backed by the mock conversation seam.
- * When #159/Phase 6 lands, THIS function is what changes — its output shape does
- * not, so nothing downstream does either.
+ * THE PURE PROJECTION — a list of `ChatMsg`es + the room + the participants → the
+ * `ConversationModel` the surface renders. This is the one transform both sources
+ * share (#183): the mock seam feeds it today (`conversationModel`), and the Yjs
+ * document feeds the SAME function tomorrow (`conversationModelFromDoc` in
+ * `yjs-conversation.ts`). Keeping the transform in one place is what makes
+ * "components do not know the difference" literally true — the Yjs-backed model
+ * is byte-identical to the mock one for the same messages, proven in
+ * `test/yjs-conversation.test.ts`.
  */
-export function conversationModel(selection: Selection): ConversationModel {
-  const room = sessionFor(selection).agent.room;
+export function buildConversationModel(
+  messages: readonly ChatMsg[],
+  room: string,
+  participants: readonly ParticipantSummary[],
+): ConversationModel {
   const records: MessageRecord[] = [];
   const items: ConversationItem[] = [];
 
-  for (const message of conversationFor(selection)) {
+  for (const message of messages) {
     const mm = mmFor(message);
 
     if (message.kind === 'system') {
@@ -336,7 +344,22 @@ export function conversationModel(selection: Selection): ConversationModel {
     });
   }
 
-  return { room, records, items, participants: participantsFor(selection) };
+  return { room, records, items, participants };
+}
+
+/**
+ * TODAY'S IMPLEMENTATION of the swap seam, backed by the mock conversation seam.
+ * Phase 6 (#183) re-seats the SOURCE onto a Yjs document (`conversationDocFor`);
+ * the output shape does not change, so nothing downstream does either. This
+ * function stays as the fixture/`/prototype`-route source and the reference the
+ * Yjs-backed model is proven equal to.
+ */
+export function conversationModel(selection: Selection): ConversationModel {
+  return buildConversationModel(
+    conversationFor(selection),
+    sessionFor(selection).agent.room,
+    participantsFor(selection),
+  );
 }
 
 /**
