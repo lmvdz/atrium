@@ -1,5 +1,6 @@
 import { z } from 'zod';
 import { Actor, Id, Timestamp } from './common.js';
+import { normalizeForReceipt } from './matching.js';
 
 /**
  * THE COVENANT ANCHOR — the record a human `✓` binds to on the object/span axis,
@@ -273,21 +274,127 @@ export type EnclosedItem = z.infer<typeof EnclosedItem>;
  * whitespace. Two fragments that render identically serialize to the identical
  * string on a server, in a worker, and in a browser — the same property the
  * reducer relies on. Everything reachable here is a string, an array, or a plain
- * object with string keys, so this total function needs no cycle guard.
+ * object with string keys.
+ *
+ * `undefined` is serialized explicitly (`"undefined"`, a token no valid value
+ * produces) rather than throwing: a malformed fragment must still yield a total,
+ * DIFFERENT string, so it fails the digest comparison as DRIFT instead of
+ * throwing out of {@link resolveCovenant}. Defence for class D (fail-closed).
  */
 function canonical(value: unknown): string {
   if (value === null) return 'null';
+  if (value === undefined) return '"\\u0000undefined"';
   if (typeof value === 'string') return JSON.stringify(value);
   if (typeof value === 'number' || typeof value === 'boolean') return JSON.stringify(value);
   if (Array.isArray(value)) return `[${value.map(canonical).join(',')}]`;
+  if (typeof value !== 'object') return JSON.stringify(String(value));
   const obj = value as Record<string, unknown>;
   const keys = Object.keys(obj).sort();
   return `{${keys.map((k) => `${JSON.stringify(k)}:${canonical(obj[k])}`).join(',')}}`;
 }
 
+/**
+ * DETERMINISTIC CANONICALIZATION (class E). Yjs presents the SAME logical content
+ * in more than one shape — a run split into two ops after an insert, a string in
+ * NFC vs NFD form, marks in whatever order the map iterated — and a naive digest
+ * of the raw fragment false-stales on every one of them. Normalize so that same
+ * logical content ⇒ same digest, and only a REAL rendered change moves it:
+ *
+ *   1. **NFC-normalize + prose-fold every string** — text, mark/ancestor attribute
+ *      values and keys, embed identity. `normalizeForReceipt` is core's existing
+ *      prose fold (Unicode-invisible drop, whitespace-run collapse, apostrophe +
+ *      link canonicalization) and is the same fold the receipt path trusts; NFC
+ *      first so composed and decomposed accents agree. This is the prose-v1
+ *      normalization of #163 (a reflow must not false-stale).
+ *   2. **Sort each text run's `marks[]`** — mark order is not rendered meaning.
+ *   3. **Coalesce adjacent text runs with identical marks**, and drop empty runs —
+ *      Yjs op-splitting is not rendered meaning.
+ *
+ * Embeds are boundaries: two text runs on either side of an embed do NOT coalesce.
+ */
+function normalizeString(s: string): string {
+  return normalizeForReceipt(s.normalize('NFC'));
+}
+
+function normalizeAttrs(attrs: Record<string, string>): Record<string, string> {
+  const out: Record<string, string> = {};
+  for (const k of Object.keys(attrs)) out[normalizeString(k)] = normalizeString(attrs[k] ?? '');
+  return out;
+}
+
+function normalizeMark(mark: Mark): Mark {
+  return { type: normalizeString(mark.type), attrs: normalizeAttrs(mark.attrs), straddles: mark.straddles };
+}
+
+/** A stable, total ordering key for a mark — its own canonical form. */
+function markKey(mark: Mark): string {
+  return canonical(normalizeMark(mark));
+}
+
+/** Sort a mark set into its canonical order (mark order is not rendered meaning). */
+function sortedMarks(marks: readonly Mark[]): Mark[] {
+  return marks.map(normalizeMark).sort((a, b) => (markKey(a) < markKey(b) ? -1 : markKey(a) > markKey(b) ? 1 : 0));
+}
+
+/** True when two already-sorted normalized mark sets are identical. */
+function sameMarks(a: readonly Mark[], b: readonly Mark[]): boolean {
+  if (a.length !== b.length) return false;
+  for (let i = 0; i < a.length; i++) {
+    if (markKey(a[i] as Mark) !== markKey(b[i] as Mark)) return false;
+  }
+  return true;
+}
+
+/**
+ * Normalize a fragment to its canonical form (class E) before digesting.
+ *
+ * Text is coalesced on RAW text before the prose fold, then folded ONCE per run:
+ * `normalizeForReceipt` trims and collapses whitespace, so folding each Yjs op
+ * separately and concatenating would drop the boundary spaces a single fold
+ * keeps — the coalesce must precede the fold, or `'ship '·'it'` and `'ship it'`
+ * digest differently (they must not).
+ */
+export function normalizeFragment(fragment: RenderedFragment): RenderedFragment {
+  const ancestors: BlockFormat[] = fragment.ancestors.map((a) => ({
+    type: normalizeString(a.type),
+    attrs: normalizeAttrs(a.attrs),
+  }));
+
+  // Pass 1: normalize marks / embeds, keep text RAW; coalesce adjacent same-mark
+  // runs by concatenating their raw text.
+  type RawText = { kind: 'text'; rawText: string; marks: Mark[] };
+  const staged: (RawText | Extract<RenderedNode, { kind: 'embed' }>)[] = [];
+  for (const node of fragment.nodes) {
+    if (node.kind === 'text') {
+      const marks = sortedMarks(node.marks);
+      const prev = staged[staged.length - 1];
+      if (prev && prev.kind === 'text' && sameMarks(prev.marks, marks)) {
+        prev.rawText += node.text;
+      } else {
+        staged.push({ kind: 'text', rawText: node.text, marks });
+      }
+    } else {
+      staged.push({ kind: 'embed', embedType: normalizeString(node.embedType), identity: normalizeAttrs(node.identity) });
+    }
+  }
+
+  // Pass 2: fold each coalesced run once; drop a run that renders nothing.
+  const nodes: RenderedNode[] = [];
+  for (const node of staged) {
+    if (node.kind === 'text') {
+      const text = normalizeString(node.rawText);
+      if (text === '') continue;
+      nodes.push({ kind: 'text', text, marks: node.marks });
+    } else {
+      nodes.push(node);
+    }
+  }
+  return { ancestors, nodes };
+}
+
 /** The canonical rendered string a digest is taken of. Exported for tests/debug. */
 export function canonicalRendered(fragment: RenderedFragment): string {
-  return canonical(fragment);
+  return canonical(normalizeFragment(fragment));
 }
 
 /**
@@ -295,9 +402,14 @@ export function canonicalRendered(fragment: RenderedFragment): string {
  * ancestor formatting, every inline mark (with its straddle), and every embed's
  * internal identity — so any of the drift classes moves it — and is stable for a
  * byte-identical re-render.
+ *
+ * The input is `RenderedFragment.parse`d first (class D): a reader that hands back
+ * a malformed shape is rejected HERE, so the throw is contained by
+ * {@link resolveCovenant}'s guard and becomes DRIFT, never an unhandled exception.
  */
 export function renderedDigestOf(fragment: RenderedFragment): string {
-  return sha256Hex(canonicalRendered(fragment));
+  const parsed = RenderedFragment.parse(fragment);
+  return sha256Hex(canonicalRendered(parsed));
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -316,6 +428,14 @@ export const CovenantAnchor = z.object({
   roomId: Id,
   /** The logical revision the `✓` was bound to. */
   revision: z.number().int().nonnegative(),
+  /**
+   * Opaque, caller-encoded Yjs RELATIVE POSITION of the span's start / end. These
+   * are PERSISTED on the anchor (migration 0051), not held on a reader instance —
+   * so `resolveCovenant` locates the span from the ledger after a reload, and a
+   * sibling inserted at the same index cannot redirect the anchor to it (class B).
+   */
+  relStart: z.string().min(1),
+  relEnd: z.string().min(1),
   /** Opaque, caller-encoded Yjs state vector — resolution context (see class 6). */
   stateVector: z.string().min(1),
   /** Opaque, caller-encoded Yjs delete set — resolution context. */
@@ -334,11 +454,23 @@ export type CovenantAnchor = z.infer<typeof CovenantAnchor>;
 export interface ResolvedSpan {
   fragment: RenderedFragment;
   enclosedItems: EnclosedItem[];
+  /**
+   * The reader's INDEPENDENT verdict (class C) on whether the anchor's captured
+   * resolution context — `revision`, `stateVector`, `deleteSet` — is consistent
+   * with the live document: the captured state must be a sub-state of the live
+   * one (the certifier saw a prefix of what exists now) and the revision must not
+   * post-date it. A forged or foreign context is `false`, and
+   * {@link resolveCovenant} turns that into DRIFT regardless of the digest. The
+   * captured context is thus VERIFIED, never trusted (the "well-formed lie").
+   */
+  snapshotVerified: boolean;
 }
 
 /** What a reader returns when it captures a fresh anchor from a live selection. */
 export interface CapturedSelection {
   revision: number;
+  relStart: string;
+  relEnd: string;
   stateVector: string;
   deleteSet: string;
   fragment: RenderedFragment;
@@ -389,6 +521,8 @@ export function certifyAnchor(
     objectId: meta.objectId,
     roomId: meta.roomId,
     revision: captured.revision,
+    relStart: captured.relStart,
+    relEnd: captured.relEnd,
     stateVector: captured.stateVector,
     deleteSet: captured.deleteSet,
     enclosedItems: captured.enclosedItems,
@@ -427,33 +561,53 @@ function sameEnclosedItems(a: readonly EnclosedItem[], b: readonly EnclosedItem[
  * document and answer OK / DRIFT, fail-closed.
  *
  * DETECT-only, fail-CLOSED (#164): the ONLY way to `ok` is a span that resolves
- * AND whose enclosed-item identity is unchanged AND whose canonical rendered
- * digest is byte-identical to the one certified. Every other path — an
- * unresolvable / GC'd / unavailable doc (`resolveSpan` ⇒ `null`), a changed
- * identity set, or a moved digest — is DRIFT. There is no OK-by-default and no
- * OK-on-error anywhere in this function; that is the whole point of the phase.
+ * AND whose captured resolution context the reader independently VERIFIED against
+ * the live doc (class C) AND whose enclosed-item identity is unchanged AND whose
+ * canonical rendered digest is byte-identical to the one certified. Every other
+ * path — an unresolvable / GC'd / unavailable doc (`resolveSpan` ⇒ `null`), an
+ * unverified / forged context, a changed identity set, or a moved digest — is
+ * DRIFT. There is no OK-by-default and no OK-on-error anywhere in this function.
+ *
+ * FAIL-CLOSED ON THROW (class D): the whole body runs under a guard. A reader that
+ * throws — a `_item.id` deref on a root type, a malformed shape that fails
+ * `RenderedFragment.parse`, a decode error on a forged position/vector — yields
+ * DRIFT, never a propagated exception and never OK. An exception is exactly the
+ * "I could not faithfully resolve" case, which is drift by the covenant.
  */
 export function resolveCovenant(doc: CovenantDocReader, anchor: CovenantAnchor): CovenantResolution {
-  const resolved = doc.resolveSpan(anchor);
-  // Fail-closed: unavailable / GC'd / unresolvable ⇒ DRIFT, never OK (class 6).
-  if (resolved === null) {
-    return { revision: anchor.revision, renderedFragment: null, covenantStatus: 'drift' };
-  }
-  // A changed identity set (e.g. a deleted enclosed item) is drift on its own
-  // axis (class 5), checked before and independently of the digest.
-  if (!sameEnclosedItems(resolved.enclosedItems, anchor.enclosedItems)) {
+  try {
+    const parsedAnchor = CovenantAnchor.parse(anchor);
+    const resolved = doc.resolveSpan(parsedAnchor);
+    // Fail-closed: unavailable / GC'd / unresolvable ⇒ DRIFT, never OK (class 6).
+    if (resolved === null) {
+      return { revision: parsedAnchor.revision, renderedFragment: null, covenantStatus: 'drift' };
+    }
+    // The captured resolution context is VERIFIED, not trusted (class C): a forged
+    // / foreign revision, state vector, or delete set the reader could not confirm
+    // against the live doc is DRIFT before the digest is even consulted.
+    if (resolved.snapshotVerified !== true) {
+      return { revision: parsedAnchor.revision, renderedFragment: resolved.fragment, covenantStatus: 'drift' };
+    }
+    // A changed identity set (e.g. a deleted enclosed item) is drift on its own
+    // axis (class 5), checked before and independently of the digest.
+    if (!sameEnclosedItems(resolved.enclosedItems, parsedAnchor.enclosedItems)) {
+      return { revision: parsedAnchor.revision, renderedFragment: resolved.fragment, covenantStatus: 'drift' };
+    }
+    // The meaning check: byte-identical rendered content ⇒ OK, anything else ⇒ DRIFT
+    // (classes 1–4, and 7's OK). `renderedDigestOf` parses its input, so a
+    // malformed fragment throws HERE and is caught below as DRIFT.
+    const digest = renderedDigestOf(resolved.fragment);
     return {
-      revision: anchor.revision,
+      revision: parsedAnchor.revision,
       renderedFragment: resolved.fragment,
-      covenantStatus: 'drift',
+      covenantStatus: digest === parsedAnchor.renderedDigest ? 'ok' : 'drift',
     };
+  } catch {
+    // Any throw is "could not faithfully resolve" ⇒ fail-closed to DRIFT. The
+    // revision is read defensively; a malformed anchor still yields a resolution.
+    const revision = typeof (anchor as { revision?: unknown })?.revision === 'number'
+      ? (anchor as { revision: number }).revision
+      : 0;
+    return { revision, renderedFragment: null, covenantStatus: 'drift' };
   }
-  // The meaning check: byte-identical rendered content ⇒ OK, anything else ⇒ DRIFT
-  // (classes 1–4, and 7's OK).
-  const digest = renderedDigestOf(resolved.fragment);
-  return {
-    revision: anchor.revision,
-    renderedFragment: resolved.fragment,
-    covenantStatus: digest === anchor.renderedDigest ? 'ok' : 'drift',
-  };
 }

@@ -2454,7 +2454,15 @@ export const covenantAnchors = pgTable(
     objectId: uuid('object_id').notNull(),
     /** The logical revision the `✓` was bound to. */
     revision: integer('revision').notNull(),
-    /** Opaque, caller-encoded Yjs state vector — resolution context, not compared. */
+    /**
+     * Opaque, caller-encoded Yjs RELATIVE POSITIONS of the span's start / end
+     * (migration 0051). PERSISTED here so `resolveCovenant` locates the span from
+     * the ledger after a reader reload — a sibling inserted at the same index
+     * cannot redirect the anchor to it (round-2 empty-span-sibling false-`✓`).
+     */
+    relStart: text('rel_start').notNull(),
+    relEnd: text('rel_end').notNull(),
+    /** Opaque, caller-encoded Yjs state vector — resolution context, VERIFIED not trusted. */
     stateVector: text('state_vector').notNull(),
     /** Opaque, caller-encoded Yjs delete set / snapshot — resolution context. */
     deleteSet: text('delete_set').notNull(),

@@ -358,6 +358,13 @@
       "when": 1788604800000,
       "tag": "0050_the_covenant_anchor_binds_a_check_to_its_rendered_content",
       "breakpoints": true
+    },
+    {
+      "idx": 51,
+      "version": "7",
+      "when": 1788691200000,
+      "tag": "0051_the_covenant_anchor_persists_its_span_boundaries",
+      "breakpoints": true
     }
   ]
 }

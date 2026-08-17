@@ -48,6 +48,8 @@ class StubDoc implements CovenantDocReader {
     if (!this.available) return null;
     return {
       revision: this.revision,
+      relStart: 'rel-start',
+      relEnd: 'rel-end',
       stateVector: this.stateVector,
       deleteSet: this.deleteSet,
       fragment: this.fragment,
@@ -57,18 +59,16 @@ class StubDoc implements CovenantDocReader {
 
   resolveSpan(anchor: CovenantAnchor) {
     if (!this.available) return null;
-    // Resolution context must match — a foreign state vector / delete set / a
-    // revision this snapshot is not means the positions do not resolve here.
-    if (
-      anchor.revision !== this.revision ||
-      anchor.stateVector !== this.stateVector ||
-      anchor.deleteSet !== this.deleteSet
-    ) {
-      return null;
-    }
-    // Any anchored item that has been GC'd ⇒ unresolvable.
+    // Any anchored item that has been GC'd ⇒ unresolvable (fail-closed null).
     if (this.enclosedItems.some((i) => !this.liveIds.has(i.id))) return null;
-    return { fragment: this.fragment, enclosedItems: this.enclosedItems };
+    // Resolution context is VERIFIED, not trusted (class C): a foreign revision /
+    // state vector / delete set fails verification, and resolveCovenant turns an
+    // unverified snapshot into DRIFT regardless of the digest.
+    const snapshotVerified =
+      anchor.revision === this.revision &&
+      anchor.stateVector === this.stateVector &&
+      anchor.deleteSet === this.deleteSet;
+    return { fragment: this.fragment, enclosedItems: this.enclosedItems, snapshotVerified };
   }
 }
 
@@ -271,5 +271,112 @@ describe('canonicalRendered — deterministic regardless of key insertion order'
     };
     expect(canonicalRendered(a)).toBe(canonicalRendered(b));
     expect(renderedDigestOf(a)).toBe(renderedDigestOf(b));
+  });
+});
+
+describe('deterministic canonicalization — same logical content ⇒ same digest (class E)', () => {
+  const wrap = (nodes: RenderedFragment['nodes']): RenderedFragment => ({ ancestors: [], nodes });
+
+  it('NFC-normalizes strings (composed vs decomposed accents agree)', () => {
+    const composedText = 'resume'.replace('e', 'é').normalize('NFC'); // é as one code point
+    const decomposedText = composedText.normalize('NFD'); // e + combining acute (U+0301)
+    expect(composedText).not.toBe(decomposedText); // genuinely different byte strings
+    const composed = wrap([{ kind: 'text', text: composedText, marks: [] }]);
+    const decomposed = wrap([{ kind: 'text', text: decomposedText, marks: [] }]);
+    expect(renderedDigestOf(composed)).toBe(renderedDigestOf(decomposed));
+  });
+
+  it('sorts marks[] — mark order is not rendered meaning', () => {
+    const one = wrap([
+      { kind: 'text', text: 'x', marks: [
+        { type: 'bold', attrs: {}, straddles: 'none' },
+        { type: 'italic', attrs: {}, straddles: 'none' },
+      ] },
+    ]);
+    const two = wrap([
+      { kind: 'text', text: 'x', marks: [
+        { type: 'italic', attrs: {}, straddles: 'none' },
+        { type: 'bold', attrs: {}, straddles: 'none' },
+      ] },
+    ]);
+    expect(renderedDigestOf(one)).toBe(renderedDigestOf(two));
+  });
+
+  it('coalesces adjacent same-mark text runs — Yjs op-splitting is not meaning', () => {
+    const split = wrap([
+      { kind: 'text', text: 'ship ', marks: [{ type: 'bold', attrs: {}, straddles: 'none' }] },
+      { kind: 'text', text: 'it', marks: [{ type: 'bold', attrs: {}, straddles: 'none' }] },
+    ]);
+    const whole = wrap([
+      { kind: 'text', text: 'ship it', marks: [{ type: 'bold', attrs: {}, straddles: 'none' }] },
+    ]);
+    expect(renderedDigestOf(split)).toBe(renderedDigestOf(whole));
+  });
+
+  it('does NOT coalesce across different marks (a real change still moves the digest)', () => {
+    const differing = wrap([
+      { kind: 'text', text: 'ship ', marks: [{ type: 'bold', attrs: {}, straddles: 'none' }] },
+      { kind: 'text', text: 'it', marks: [] },
+    ]);
+    const allBold = wrap([
+      { kind: 'text', text: 'ship it', marks: [{ type: 'bold', attrs: {}, straddles: 'none' }] },
+    ]);
+    expect(renderedDigestOf(differing)).not.toBe(renderedDigestOf(allBold));
+  });
+
+  it('a real content change still moves the digest (normalization is not blindness)', () => {
+    const a = wrap([{ kind: 'text', text: 'ship it', marks: [] }]);
+    const b = wrap([{ kind: 'text', text: 'ship it now', marks: [] }]);
+    expect(renderedDigestOf(a)).not.toBe(renderedDigestOf(b));
+  });
+});
+
+describe('fail-closed on throw — a reader that throws yields DRIFT, never OK (class D)', () => {
+  const anchorFixture = (): CovenantAnchor => anchorFor(sampleDoc());
+
+  it('a reader whose resolveSpan throws ⇒ DRIFT, not an unhandled exception', () => {
+    const throwing: CovenantDocReader = {
+      captureSelection: () => null,
+      resolveSpan: () => {
+        throw new Error('boom (a _item.id deref on a root type)');
+      },
+    };
+    const res = resolveCovenant(throwing, anchorFixture());
+    expect(res.covenantStatus).toBe('drift');
+    expect(res.renderedFragment).toBeNull();
+  });
+
+  it('a reader that returns a malformed fragment ⇒ DRIFT (renderedDigestOf parses it)', () => {
+    const malformed: CovenantDocReader = {
+      captureSelection: () => null,
+      // `nodes` is not an array — RenderedFragment.parse throws inside renderedDigestOf.
+      resolveSpan: () => ({
+        fragment: { ancestors: [], nodes: undefined as unknown as RenderedFragment['nodes'] },
+        enclosedItems: [],
+        snapshotVerified: true,
+      }),
+    };
+    const res = resolveCovenant(malformed, anchorFixture());
+    expect(res.covenantStatus).toBe('drift');
+  });
+
+  it('a malformed ANCHOR (bad shape) ⇒ DRIFT, never a throw out of resolveCovenant', () => {
+    const doc = sampleDoc();
+    const bad = { ...anchorFor(doc), renderedDigest: 'not-a-sha' } as unknown as CovenantAnchor;
+    const res = resolveCovenant(doc, bad);
+    expect(res.covenantStatus).toBe('drift');
+  });
+});
+
+describe('snapshot is verified, not trusted (class C)', () => {
+  it('a forged revision the reader cannot confirm ⇒ DRIFT even with a matching digest', () => {
+    const doc = sampleDoc();
+    const res = resolveCovenant(doc, { ...anchorFor(doc), revision: 999 });
+    expect(res.covenantStatus).toBe('drift');
+  });
+  it('a forged state vector ⇒ DRIFT', () => {
+    const doc = sampleDoc();
+    const res = resolveCovenant(doc, { ...anchorFor(doc), stateVector: 'forged' });
+    expect(res.covenantStatus).toBe('drift');
   });
 });
