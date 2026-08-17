@@ -1,0 +1,275 @@
+import { describe, expect, it } from 'vitest';
+import {
+  type CapturedSelection,
+  type CovenantAnchor,
+  type CovenantDocReader,
+  type EnclosedItem,
+  type RenderedFragment,
+  canonicalRendered,
+  certifyAnchor,
+  renderedDigestOf,
+  resolveCovenant,
+  sha256Hex,
+} from '../src/index.js';
+
+/**
+ * The covenant anchor + `resolveCovenant`, pinned at the pure core level. The
+ * document is a stub reader that genuinely consumes EVERY anchor field, so a
+ * flip of any field moves the verdict — the "if flipping an input doesn't move
+ * the output the field isn't wired" discipline, made mechanical. A companion
+ * suite (`covenant-yjs.test.ts`) proves the same against a real in-memory Y.Doc.
+ */
+
+const ALICE = { kind: 'human', userId: 'u_alice' } as const;
+const AT = '2026-08-16T12:00:00.000Z';
+
+/**
+ * A stub live document. It holds ONE known snapshot keyed by (revision,
+ * stateVector, deleteSet); `resolveSpan` returns the current fragment only when
+ * the anchor's resolution context matches that snapshot AND every anchored item
+ * still exists — otherwise `null`, the fail-closed signal. This is the minimal
+ * faithful model of what a Yjs reader does: resolve positions against a
+ * historical revision, or fail if the doc moved out from under them / GC'd them.
+ */
+class StubDoc implements CovenantDocReader {
+  constructor(
+    public revision: number,
+    public stateVector: string,
+    public deleteSet: string,
+    public fragment: RenderedFragment,
+    public enclosedItems: EnclosedItem[],
+    /** Ids the doc still knows; a GC removes an id from this set. */
+    public liveIds: Set<string> = new Set(enclosedItems.map((i) => i.id)),
+    /** When false, the doc handle itself is unavailable. */
+    public available = true,
+  ) {}
+
+  captureSelection(): CapturedSelection | null {
+    if (!this.available) return null;
+    return {
+      revision: this.revision,
+      stateVector: this.stateVector,
+      deleteSet: this.deleteSet,
+      fragment: this.fragment,
+      enclosedItems: this.enclosedItems,
+    };
+  }
+
+  resolveSpan(anchor: CovenantAnchor) {
+    if (!this.available) return null;
+    // Resolution context must match — a foreign state vector / delete set / a
+    // revision this snapshot is not means the positions do not resolve here.
+    if (
+      anchor.revision !== this.revision ||
+      anchor.stateVector !== this.stateVector ||
+      anchor.deleteSet !== this.deleteSet
+    ) {
+      return null;
+    }
+    // Any anchored item that has been GC'd ⇒ unresolvable.
+    if (this.enclosedItems.some((i) => !this.liveIds.has(i.id))) return null;
+    return { fragment: this.fragment, enclosedItems: this.enclosedItems };
+  }
+}
+
+function sampleFragment(): RenderedFragment {
+  return {
+    ancestors: [{ type: 'heading', attrs: { level: '2' } }],
+    nodes: [
+      { kind: 'text', text: 'ship it', marks: [{ type: 'bold', attrs: {}, straddles: 'start' }] },
+      { kind: 'embed', embedType: 'mention', identity: { target: 'u_alice' } },
+      { kind: 'embed', embedType: 'image', identity: { src: 'https://x/a.png' } },
+    ],
+  };
+}
+
+function sampleDoc(): StubDoc {
+  const fragment = sampleFragment();
+  const enclosed: EnclosedItem[] = [
+    { id: 'i_text', kind: 'text' },
+    { id: 'i_mention', kind: 'embed' },
+    { id: 'i_image', kind: 'embed' },
+  ];
+  return new StubDoc(7, 'sv-base', 'ds-base', fragment, enclosed);
+}
+
+function anchorFor(doc: StubDoc): CovenantAnchor {
+  const anchor = certifyAnchor(doc, {
+    objectId: 'o_span',
+    roomId: 'room_1',
+    certifier: ALICE,
+    certifiedAt: AT,
+  });
+  if (anchor === null) throw new Error('capture failed in fixture');
+  return anchor;
+}
+
+describe('sha256Hex — the digest is a correct SHA-256 (FIPS-180-4 vectors)', () => {
+  it('hashes the empty string', () => {
+    expect(sha256Hex('')).toBe(
+      'e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855',
+    );
+  });
+  it('hashes "abc"', () => {
+    expect(sha256Hex('abc')).toBe(
+      'ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad',
+    );
+  });
+  it('hashes the 56-byte multi-block vector', () => {
+    expect(sha256Hex('abcdbcdecdefdefgefghfghighijhijkijkljklmklmnlmnomnopnopq')).toBe(
+      '248d6a61d20638b8e5c026930c3e6039a33ce45964ff2167f6ecedd419db06c1',
+    );
+  });
+  it('hashes multi-byte UTF-8 the same way every run (deterministic, no globals)', () => {
+    expect(sha256Hex('✓ résumé 🚀')).toBe(sha256Hex('✓ résumé 🚀'));
+    expect(sha256Hex('✓')).not.toBe(sha256Hex('~'));
+  });
+});
+
+describe('certifyAnchor — the digest is computed here, not accepted from the reader', () => {
+  it('captures the complete anchor with a digest over the rendered fragment', () => {
+    const doc = sampleDoc();
+    const anchor = anchorFor(doc);
+    expect(anchor.revision).toBe(7);
+    expect(anchor.stateVector).toBe('sv-base');
+    expect(anchor.deleteSet).toBe('ds-base');
+    expect(anchor.enclosedItems).toHaveLength(3);
+    expect(anchor.renderedDigest).toBe(renderedDigestOf(doc.fragment));
+    expect(anchor.renderedDigest).toMatch(/^[0-9a-f]{64}$/);
+  });
+  it('returns null when the selection cannot even be captured (no `✓` over a lie)', () => {
+    const doc = sampleDoc();
+    doc.available = false;
+    expect(certifyAnchor(doc, { objectId: 'o', roomId: 'r', certifier: ALICE, certifiedAt: AT })).toBeNull();
+  });
+});
+
+describe('resolveCovenant — byte-identical re-render is the only OK (class 7)', () => {
+  it('resolves OK when nothing moved', () => {
+    const doc = sampleDoc();
+    const anchor = anchorFor(doc);
+    const res = resolveCovenant(doc, anchor);
+    expect(res.covenantStatus).toBe('ok');
+    expect(res.revision).toBe(7);
+    expect(res.renderedFragment).not.toBeNull();
+  });
+});
+
+describe('resolveCovenant — each drift class moves the verdict to DRIFT', () => {
+  it('class 1: an enclosed item’s text changed', () => {
+    const doc = sampleDoc();
+    const anchor = anchorFor(doc);
+    (doc.fragment.nodes[0] as { text: string }).text = 'ship it now';
+    expect(resolveCovenant(doc, anchor).covenantStatus).toBe('drift');
+  });
+
+  it('class 2: ancestor formatting changed (heading level)', () => {
+    const doc = sampleDoc();
+    const anchor = anchorFor(doc);
+    (doc.fragment.ancestors[0] as { attrs: Record<string, string> }).attrs.level = '3';
+    expect(resolveCovenant(doc, anchor).covenantStatus).toBe('drift');
+  });
+
+  it('class 3: a mark straddling the boundary changed', () => {
+    const doc = sampleDoc();
+    const anchor = anchorFor(doc);
+    const mark = (doc.fragment.nodes[0] as { marks: { straddles: string }[] }).marks[0] as {
+      straddles: string;
+    };
+    mark.straddles = 'both'; // grew to also straddle the end
+    expect(resolveCovenant(doc, anchor).covenantStatus).toBe('drift');
+  });
+
+  it('class 4a: an embed internal — mention target — changed', () => {
+    const doc = sampleDoc();
+    const anchor = anchorFor(doc);
+    (doc.fragment.nodes[1] as { identity: Record<string, string> }).identity.target = 'u_bob';
+    expect(resolveCovenant(doc, anchor).covenantStatus).toBe('drift');
+  });
+
+  it('class 4b: an embed internal — image URL — changed', () => {
+    const doc = sampleDoc();
+    const anchor = anchorFor(doc);
+    (doc.fragment.nodes[2] as { identity: Record<string, string> }).identity.src = 'https://x/b.png';
+    expect(resolveCovenant(doc, anchor).covenantStatus).toBe('drift');
+  });
+
+  it('class 5: an enclosed item was deleted (identity set changed)', () => {
+    const doc = sampleDoc();
+    const anchor = anchorFor(doc);
+    // The image node is removed from BOTH the rendered fragment and the identity
+    // set — caught on the identity axis before the digest is even consulted.
+    doc.fragment.nodes.pop();
+    doc.enclosedItems.pop();
+    expect(resolveCovenant(doc, anchor).covenantStatus).toBe('drift');
+  });
+
+  it('class 6a: the doc is unavailable → DRIFT, never OK (fail-closed)', () => {
+    const doc = sampleDoc();
+    const anchor = anchorFor(doc);
+    doc.available = false;
+    const res = resolveCovenant(doc, anchor);
+    expect(res.covenantStatus).toBe('drift');
+    expect(res.renderedFragment).toBeNull();
+  });
+
+  it('class 6b: an anchored item was GC’d → unresolvable → DRIFT', () => {
+    const doc = sampleDoc();
+    const anchor = anchorFor(doc);
+    doc.liveIds.delete('i_mention');
+    expect(resolveCovenant(doc, anchor).covenantStatus).toBe('drift');
+  });
+});
+
+describe('flip-the-input — mutating ANY anchor field moves the verdict', () => {
+  // The proof that each field is WIRED: certify against a clean doc, corrupt one
+  // field of the persisted anchor, and require DRIFT. A field that does not move
+  // the verdict is a field the anchor carries for show.
+  it('revision', () => {
+    const doc = sampleDoc();
+    const res = resolveCovenant(doc, { ...anchorFor(doc), revision: 8 });
+    expect(res.covenantStatus).toBe('drift');
+  });
+  it('stateVector', () => {
+    const doc = sampleDoc();
+    const res = resolveCovenant(doc, { ...anchorFor(doc), stateVector: 'sv-forged' });
+    expect(res.covenantStatus).toBe('drift');
+  });
+  it('deleteSet', () => {
+    const doc = sampleDoc();
+    const res = resolveCovenant(doc, { ...anchorFor(doc), deleteSet: 'ds-forged' });
+    expect(res.covenantStatus).toBe('drift');
+  });
+  it('enclosedItems', () => {
+    const doc = sampleDoc();
+    const anchor = anchorFor(doc);
+    const res = resolveCovenant(doc, {
+      ...anchor,
+      enclosedItems: [...anchor.enclosedItems, { id: 'i_ghost', kind: 'text' }],
+    });
+    expect(res.covenantStatus).toBe('drift');
+  });
+  it('renderedDigest', () => {
+    const doc = sampleDoc();
+    const res = resolveCovenant(doc, {
+      ...anchorFor(doc),
+      renderedDigest: 'f'.repeat(64),
+    });
+    expect(res.covenantStatus).toBe('drift');
+  });
+});
+
+describe('canonicalRendered — deterministic regardless of key insertion order', () => {
+  it('two fragments equal up to key order digest identically', () => {
+    const a: RenderedFragment = {
+      ancestors: [{ type: 'p', attrs: { a: '1', b: '2' } }],
+      nodes: [{ kind: 'text', text: 'x', marks: [] }],
+    };
+    const b: RenderedFragment = {
+      ancestors: [{ type: 'p', attrs: { b: '2', a: '1' } }],
+      nodes: [{ kind: 'text', text: 'x', marks: [] }],
+    };
+    expect(canonicalRendered(a)).toBe(canonicalRendered(b));
+    expect(renderedDigestOf(a)).toBe(renderedDigestOf(b));
+  });
+});

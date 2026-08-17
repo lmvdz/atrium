@@ -27,6 +27,7 @@
   "devDependencies": {
     "@types/node": "^26.1.2",
     "typescript": "^5.9.3",
-    "vitest": "^4.1.10"
+    "vitest": "^4.1.10",
+    "yjs": "^13.6.27"
   }
 }

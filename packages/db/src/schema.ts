@@ -9,6 +9,7 @@ import type {
   CoreEventType,
   CorrectionAction,
   DecisionPayload,
+  EnclosedItem,
   ObjectivePayload,
   OpenQuestionPayload,
   ProposalStatus,
@@ -2420,6 +2421,72 @@ export const acceptedObjects = pgTable(
       columns: [t.roomId, t.sessionId],
       foreignColumns: [sessions.roomId, sessions.id],
     }),
+  ],
+);
+
+/**
+ * THE COVENANT ANCHOR — the complete-form record a human `✓` binds to on the
+ * object/span axis (#180; governed by #163 complete-form, #164 DETECT-only).
+ *
+ * A `✓` over a span of the live Yjs document vouches for the EXACT certified
+ * *rendered* content, fail-closed: it stays true only while that content
+ * re-resolves byte-identically, and auto-stales the moment it drifts (map #162).
+ * This is the object/span analogue of the SESSION content anchor — session
+ * certify binds a `✓` to `md5(artifact::text)` (0034) — brought to the CRDT-span
+ * axis and made complete: a bare state vector was ruled a "well-formed lie" in
+ * the round-2 gauntlet because it preserves structure, not meaning, so the anchor
+ * carries the rendered digest and the enclosed-item identity too.
+ *
+ * Authority lives on the gated ledger, never in the CRDT: this is a Postgres row
+ * the room reads read-only, not a Yjs field agent-peers can write. The DETECT
+ * read authority (#181) resolves `@atrium/core`'s `resolveCovenant()` against
+ * these columns; the drift scheduler (#182) re-runs it on Yjs update events. This
+ * table owns only the persistence + the certify-time capture.
+ */
+export const covenantAnchors = pgTable(
+  'covenant_anchors',
+  {
+    id: uuid('id').primaryKey().defaultRandom(),
+    roomId: uuid('room_id')
+      .notNull()
+      .references(() => rooms.id, { onDelete: 'cascade' }),
+    /** The accepted object whose span this `✓` is over. */
+    objectId: uuid('object_id').notNull(),
+    /** The logical revision the `✓` was bound to. */
+    revision: integer('revision').notNull(),
+    /** Opaque, caller-encoded Yjs state vector — resolution context, not compared. */
+    stateVector: text('state_vector').notNull(),
+    /** Opaque, caller-encoded Yjs delete set / snapshot — resolution context. */
+    deleteSet: text('delete_set').notNull(),
+    /** The identity of every item inside the span, in document order (see core). */
+    enclosedItems: jsonb('enclosed_items').$type<EnclosedItem[]>().notNull(),
+    /** SHA-256 (64 lower-case hex) of the canonical rendered fragment at certify. */
+    renderedDigest: text('rendered_digest').notNull(),
+    /**
+     * The KIND of the certifier. Only a human may certify (map #162, #164); the
+     * check constraint below is the table backstop under the app guard, mirroring
+     * `sessions_certify_needs_artifact` (0034). `accepted_by alone cannot answer
+     * isHuman` — an agent also carries a users id — so the kind is stored.
+     */
+    certifierKind: actorKind('certifier_kind').notNull(),
+    certifierId: uuid('certifier_id').references(() => users.id, { onDelete: 'set null' }),
+    certifiedAt: timestamp('certified_at', { withTimezone: true }).notNull(),
+    createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [
+    /** One live anchor per certified span; re-certify replaces it (a new signature). */
+    uniqueIndex('covenant_anchors_object_key').on(t.roomId, t.objectId),
+    /** Composite, like every reference out of a semantic row: the span is in THIS room. */
+    foreignKey({
+      name: 'covenant_anchors_object_same_room_fk',
+      columns: [t.roomId, t.objectId],
+      foreignColumns: [acceptedObjects.roomId, acceptedObjects.id],
+    }),
+    /** The digest is a SHA-256 hex string — a malformed one is a lie the DB refuses. */
+    check('covenant_anchors_digest_is_sha256', sql`${t.renderedDigest} ~ '^[0-9a-f]{64}$'`),
+    /** Only a human certifies. The covenant's whole claim is a human vouched for this. */
+    check('covenant_anchors_certifier_is_human', sql`${t.certifierKind} = 'human'`),
+    check('covenant_anchors_revision_nonneg', sql`${t.revision} >= 0`),
   ],
 );
 

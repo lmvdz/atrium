@@ -1,0 +1,459 @@
+import { z } from 'zod';
+import { Actor, Id, Timestamp } from './common.js';
+
+/**
+ * THE COVENANT ANCHOR — the record a human `✓` binds to on the object/span axis,
+ * such that ANY drift from the exact certified *rendered* content makes it fail
+ * to resolve. Phase 6, #180; governed by #163 (complete-form re-resolution) and
+ * #164 (DETECT-only, fail-closed — there is NO hard span lock).
+ *
+ * ## Why this exists, and what it is NOT
+ *
+ * `epistemic.ts`'s one predicate (`epistemicStateOf`) answers "has a *human*
+ * touched this object" — provenance, not content. That is the right question for
+ * an object accepted through the reducer; it is the WRONG question once the
+ * object is a span of a live multiplayer CRDT document that agent-peers can edit
+ * underneath the human's `✓`. There, "a human touched it once" stays true while
+ * the content it vouched for drifts. The covenant anchor is the content half:
+ * `✓` vouches for the EXACT certified rendered content, and auto-stales the
+ * moment that content moves (map #162).
+ *
+ * ## Extends a PROVEN pattern, on a new axis
+ *
+ * Session certify already content-anchors: `certify_armed_artifact_digest =
+ * md5(artifact::text)` binds a session `✓` to the artifact it signed
+ * (apps/web/lib/certify-session.ts; migration 0034). This brings the identical
+ * discipline — "a `✓` is a signature OF a specific rendered thing, frozen at the
+ * moment of signing, and any change underneath the signature is refused/detected"
+ * — to the OBJECT/SPAN axis and makes it Yjs-span-shaped.
+ *
+ * ## The round-2 finding this answers
+ *
+ * A bare `state_vector` was ruled a WELL-FORMED LIE: relative positions and a
+ * state vector preserve CRDT *structure*, not rendered *meaning*, so an anchor
+ * that resolves against them alone can report OK over content that reads
+ * differently to a human (Electric read + AgentRoom §2.2 corroborate). The
+ * COMPLETE form (#163) therefore carries, and re-checks, all of:
+ *
+ *   - `revision`        — the logical revision the `✓` was bound to.
+ *   - `stateVector`     — resolution context: resolve the anchored positions
+ *                         against the doc AS OF that revision, and detect GC /
+ *                         a foreign document (opaque bytes; caller-encoded).
+ *   - `deleteSet`       — resolution context: what was deleted as of the snapshot
+ *                         (opaque bytes; caller-encoded).
+ *   - `enclosedItems`   — the IDENTITY of every item inside the span, so deleting
+ *                         one is detectable as an identity change, not only as a
+ *                         content change.
+ *   - `renderedDigest`  — the canonical RENDERED content (ancestor formatting +
+ *                         inline marks incl. straddling ones + transitive embed /
+ *                         overlay identity), hashed. This is the meaning check the
+ *                         bare state vector could not make.
+ *
+ * ## Purity
+ *
+ * This module lives in `@atrium/core` and obeys its zero-I/O boundary: it imports
+ * only `zod` and its own siblings, reads no clock, rolls no dice, and — crucially
+ * — does NOT import `yjs`. The document is reached only through the
+ * {@link CovenantDocReader} port; the Yjs binding of that port ships in the app
+ * layer (#181/#183, where the live doc exists), exactly as `ports.ts` ships its
+ * adapters in `apps/server`. Everything meaning-bearing — canonical rendering,
+ * the digest, and the OK/DRIFT comparison — is owned HERE, under the core gate,
+ * so a reader cannot quietly weaken it.
+ */
+
+// ─────────────────────────────────────────────────────────────────────────────
+// A pure SHA-256. `crypto.*` is forbidden in this package (ids and hashes are
+// the caller's to supply elsewhere, but the RENDERED digest is meaning this
+// module owns), so the digest is computed here, deterministically, with no
+// global and no I/O. Validated against the FIPS-180-4 vectors in the test.
+// ─────────────────────────────────────────────────────────────────────────────
+
+// `Uint32Array` (not a plain array) so indexed reads are typed `number`, not
+// `number | undefined`, under `noUncheckedIndexedAccess`.
+const K = new Uint32Array([
+  0x428a2f98, 0x71374491, 0xb5c0fbcf, 0xe9b5dba5, 0x3956c25b, 0x59f111f1, 0x923f82a4, 0xab1c5ed5,
+  0xd807aa98, 0x12835b01, 0x243185be, 0x550c7dc3, 0x72be5d74, 0x80deb1fe, 0x9bdc06a7, 0xc19bf174,
+  0xe49b69c1, 0xefbe4786, 0x0fc19dc6, 0x240ca1cc, 0x2de92c6f, 0x4a7484aa, 0x5cb0a9dc, 0x76f988da,
+  0x983e5152, 0xa831c66d, 0xb00327c8, 0xbf597fc7, 0xc6e00bf3, 0xd5a79147, 0x06ca6351, 0x14292967,
+  0x27b70a85, 0x2e1b2138, 0x4d2c6dfc, 0x53380d13, 0x650a7354, 0x766a0abb, 0x81c2c92e, 0x92722c85,
+  0xa2bfe8a1, 0xa81a664b, 0xc24b8b70, 0xc76c51a3, 0xd192e819, 0xd6990624, 0xf40e3585, 0x106aa070,
+  0x19a4c116, 0x1e376c08, 0x2748774c, 0x34b0bcb5, 0x391c0cb3, 0x4ed8aa4a, 0x5b9cca4f, 0x682e6ff3,
+  0x748f82ee, 0x78a5636f, 0x84c87814, 0x8cc70208, 0x90befffa, 0xa4506ceb, 0xbef9a3f7, 0xc67178f2,
+]);
+
+/** UTF-8 encode a string to bytes, without `TextEncoder` (no ambient globals). */
+function utf8Bytes(input: string): number[] {
+  const out: number[] = [];
+  for (const ch of input) {
+    let cp = ch.codePointAt(0) as number;
+    if (cp < 0x80) out.push(cp);
+    else if (cp < 0x800) out.push(0xc0 | (cp >> 6), 0x80 | (cp & 0x3f));
+    else if (cp < 0x10000) out.push(0xe0 | (cp >> 12), 0x80 | ((cp >> 6) & 0x3f), 0x80 | (cp & 0x3f));
+    else {
+      out.push(
+        0xf0 | (cp >> 18),
+        0x80 | ((cp >> 12) & 0x3f),
+        0x80 | ((cp >> 6) & 0x3f),
+        0x80 | (cp & 0x3f),
+      );
+    }
+  }
+  return out;
+}
+
+function rotr(x: number, n: number): number {
+  return (x >>> n) | (x << (32 - n));
+}
+
+/** SHA-256 of a UTF-8 string, lower-case hex. Pure, deterministic, no I/O. */
+export function sha256Hex(input: string): string {
+  const bytes = utf8Bytes(input);
+  const bitLen = bytes.length * 8;
+  bytes.push(0x80);
+  while (bytes.length % 64 !== 56) bytes.push(0);
+  // 64-bit big-endian length. Inputs here are far under 2^32 bytes, so the high
+  // word is always zero; write it explicitly rather than assume it.
+  const hi = Math.floor(bitLen / 0x100000000);
+  const lo = bitLen >>> 0;
+  bytes.push(
+    (hi >>> 24) & 0xff,
+    (hi >>> 16) & 0xff,
+    (hi >>> 8) & 0xff,
+    hi & 0xff,
+    (lo >>> 24) & 0xff,
+    (lo >>> 16) & 0xff,
+    (lo >>> 8) & 0xff,
+    lo & 0xff,
+  );
+
+  let h0 = 0x6a09e667;
+  let h1 = 0xbb67ae85;
+  let h2 = 0x3c6ef372;
+  let h3 = 0xa54ff53a;
+  let h4 = 0x510e527f;
+  let h5 = 0x9b05688c;
+  let h6 = 0x1f83d9ab;
+  let h7 = 0x5be0cd19;
+
+  const msg = Uint8Array.from(bytes);
+  const w = new Uint32Array(64);
+  for (let i = 0; i < msg.length; i += 64) {
+    for (let t = 0; t < 16; t++) {
+      const j = i + t * 4;
+      w[t] = ((msg[j]! << 24) | (msg[j + 1]! << 16) | (msg[j + 2]! << 8) | msg[j + 3]!) >>> 0;
+    }
+    for (let t = 16; t < 64; t++) {
+      const w15 = w[t - 15]!;
+      const w2 = w[t - 2]!;
+      const s0 = rotr(w15, 7) ^ rotr(w15, 18) ^ (w15 >>> 3);
+      const s1 = rotr(w2, 17) ^ rotr(w2, 19) ^ (w2 >>> 10);
+      w[t] = (w[t - 16]! + s0 + w[t - 7]! + s1) >>> 0;
+    }
+
+    let a = h0;
+    let b = h1;
+    let c = h2;
+    let d = h3;
+    let e = h4;
+    let f = h5;
+    let g = h6;
+    let h = h7;
+
+    for (let t = 0; t < 64; t++) {
+      const S1 = rotr(e, 6) ^ rotr(e, 11) ^ rotr(e, 25);
+      const chn = (e & f) ^ (~e & g);
+      const temp1 = (h + S1 + chn + K[t]! + w[t]!) >>> 0;
+      const S0 = rotr(a, 2) ^ rotr(a, 13) ^ rotr(a, 22);
+      const maj = (a & b) ^ (a & c) ^ (b & c);
+      const temp2 = (S0 + maj) >>> 0;
+      h = g;
+      g = f;
+      f = e;
+      e = (d + temp1) >>> 0;
+      d = c;
+      c = b;
+      b = a;
+      a = (temp1 + temp2) >>> 0;
+    }
+
+    h0 = (h0 + a) >>> 0;
+    h1 = (h1 + b) >>> 0;
+    h2 = (h2 + c) >>> 0;
+    h3 = (h3 + d) >>> 0;
+    h4 = (h4 + e) >>> 0;
+    h5 = (h5 + f) >>> 0;
+    h6 = (h6 + g) >>> 0;
+    h7 = (h7 + h) >>> 0;
+  }
+
+  const hex = (n: number) => (n >>> 0).toString(16).padStart(8, '0');
+  return hex(h0) + hex(h1) + hex(h2) + hex(h3) + hex(h4) + hex(h5) + hex(h6) + hex(h7);
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// The rendered model — a plain, deterministic representation of what a human
+// SEES for the certified span. The Yjs adapter (the port) produces this from a
+// live doc; this module never touches Yjs itself.
+// ─────────────────────────────────────────────────────────────────────────────
+
+/**
+ * One inline mark (bold, italic, link, …) on a text run, with its attributes and
+ * whether it STRADDLES the certified boundary — i.e. begins before the span, or
+ * ends after it. Straddle is meaning: a bold that a certified word is the tail of
+ * reads differently from a bold that starts at that word, so a mark that grows to
+ * straddle (or shrinks to stop straddling) is drift even when the enclosed text
+ * is byte-identical (acceptance test, class 3).
+ */
+export const Mark = z.object({
+  type: z.string().min(1),
+  attrs: z.record(z.string(), z.string()),
+  /** `none` | `start` (opens before the span) | `end` (closes after) | `both`. */
+  straddles: z.enum(['none', 'start', 'end', 'both']),
+});
+export type Mark = z.infer<typeof Mark>;
+
+/** The formatting of one enclosing ancestor block (heading level, list, quote…). */
+export const BlockFormat = z.object({
+  type: z.string().min(1),
+  attrs: z.record(z.string(), z.string()),
+});
+export type BlockFormat = z.infer<typeof BlockFormat>;
+
+/**
+ * One rendered node inside the span: a run of text with its marks, or an embed
+ * carrying its INTERNAL identity — the mention's target, the image's URL, the
+ * nested doc's digest. The embed identity is why a mention re-pointed at another
+ * user, or an image whose `src` was swapped, is drift though the span's visible
+ * structure is unchanged (acceptance test, class 4).
+ */
+export const RenderedNode = z.discriminatedUnion('kind', [
+  z.object({
+    kind: z.literal('text'),
+    text: z.string(),
+    marks: z.array(Mark),
+  }),
+  z.object({
+    kind: z.literal('embed'),
+    embedType: z.string().min(1),
+    /** e.g. `{ target: 'u_alice' }`, `{ src: 'https://…' }`, `{ docDigest: '…' }`. */
+    identity: z.record(z.string(), z.string()),
+  }),
+]);
+export type RenderedNode = z.infer<typeof RenderedNode>;
+
+/**
+ * The rendered fragment: the ancestor formatting context enclosing the span, and
+ * the ordered content within it. This is the whole of what a `✓` vouches for; its
+ * canonical digest is the meaning check.
+ */
+export const RenderedFragment = z.object({
+  ancestors: z.array(BlockFormat),
+  nodes: z.array(RenderedNode),
+});
+export type RenderedFragment = z.infer<typeof RenderedFragment>;
+
+/**
+ * The identity of one enclosed item — its stable CRDT id and kind. The ORDERED
+ * list of these is a distinct anchor field from the digest: it makes a deletion
+ * detectable as an identity change even for a renderer that might have folded the
+ * deleted node out of the digest input. Defence in depth for class 5.
+ */
+export const EnclosedItem = z.object({
+  id: z.string().min(1),
+  kind: z.enum(['text', 'embed']),
+});
+export type EnclosedItem = z.infer<typeof EnclosedItem>;
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Canonical serialization + the digest of a rendered fragment.
+// ─────────────────────────────────────────────────────────────────────────────
+
+/**
+ * Deterministic JSON: object keys sorted, arrays in order, no incidental
+ * whitespace. Two fragments that render identically serialize to the identical
+ * string on a server, in a worker, and in a browser — the same property the
+ * reducer relies on. Everything reachable here is a string, an array, or a plain
+ * object with string keys, so this total function needs no cycle guard.
+ */
+function canonical(value: unknown): string {
+  if (value === null) return 'null';
+  if (typeof value === 'string') return JSON.stringify(value);
+  if (typeof value === 'number' || typeof value === 'boolean') return JSON.stringify(value);
+  if (Array.isArray(value)) return `[${value.map(canonical).join(',')}]`;
+  const obj = value as Record<string, unknown>;
+  const keys = Object.keys(obj).sort();
+  return `{${keys.map((k) => `${JSON.stringify(k)}:${canonical(obj[k])}`).join(',')}}`;
+}
+
+/** The canonical rendered string a digest is taken of. Exported for tests/debug. */
+export function canonicalRendered(fragment: RenderedFragment): string {
+  return canonical(fragment);
+}
+
+/**
+ * The digest a `✓` binds to: SHA-256 of the canonical rendered fragment. Includes
+ * ancestor formatting, every inline mark (with its straddle), and every embed's
+ * internal identity — so any of the drift classes moves it — and is stable for a
+ * byte-identical re-render.
+ */
+export function renderedDigestOf(fragment: RenderedFragment): string {
+  return sha256Hex(canonicalRendered(fragment));
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// The anchor record + the reader port.
+// ─────────────────────────────────────────────────────────────────────────────
+
+/**
+ * THE COVENANT ANCHOR, complete form (#163). A gated Postgres ledger row (persisted
+ * by migration 0050), never a CRDT field: the `✓` is authority, and authority
+ * lives on the ledger the room reads read-only, not inside the substrate agents
+ * can write.
+ */
+export const CovenantAnchor = z.object({
+  /** The object/span this `✓` is over. */
+  objectId: Id,
+  roomId: Id,
+  /** The logical revision the `✓` was bound to. */
+  revision: z.number().int().nonnegative(),
+  /** Opaque, caller-encoded Yjs state vector — resolution context (see class 6). */
+  stateVector: z.string().min(1),
+  /** Opaque, caller-encoded Yjs delete set — resolution context. */
+  deleteSet: z.string().min(1),
+  /** The identity of every item inside the span, in document order. */
+  enclosedItems: z.array(EnclosedItem),
+  /** SHA-256 of the canonical rendered fragment at certify time. */
+  renderedDigest: z.string().regex(/^[0-9a-f]{64}$/, 'a rendered digest is 64 lower-case hex chars'),
+  /** Who certified. Only a human may (enforced upstream); recorded for the receipt. */
+  certifier: Actor,
+  certifiedAt: Timestamp,
+});
+export type CovenantAnchor = z.infer<typeof CovenantAnchor>;
+
+/** What a reader returns when it re-resolves an anchor against the live document. */
+export interface ResolvedSpan {
+  fragment: RenderedFragment;
+  enclosedItems: EnclosedItem[];
+}
+
+/** What a reader returns when it captures a fresh anchor from a live selection. */
+export interface CapturedSelection {
+  revision: number;
+  stateVector: string;
+  deleteSet: string;
+  fragment: RenderedFragment;
+  enclosedItems: EnclosedItem[];
+}
+
+/**
+ * The seam to the live document — a type-only PORT, like everything in `ports.ts`.
+ * Its Yjs binding ships in the app layer (#181/#183); this package never imports
+ * Yjs. The reader owns exactly the CRDT-specific work — resolving relative
+ * positions against a historical revision, reading formatting, detecting GC — and
+ * NOTHING meaning-bearing: the digest and the OK/DRIFT verdict are computed here.
+ *
+ * `resolveSpan` MUST return `null` — never throw, never a best-effort fragment —
+ * when the span cannot be faithfully resolved: the doc is unavailable, the
+ * anchored items were deleted and garbage-collected, the state vector names a
+ * document this is not, or the positions no longer resolve. `null` is the
+ * fail-closed signal, and {@link resolveCovenant} turns it into DRIFT.
+ */
+export interface CovenantDocReader {
+  /** Capture a fresh anchor's raw materials from the currently-selected span. */
+  captureSelection(): CapturedSelection | null;
+  /** Re-resolve an existing anchor against the live document. `null` ⇒ fail-closed. */
+  resolveSpan(anchor: CovenantAnchor): ResolvedSpan | null;
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Certify capture + the resolve primitive.
+// ─────────────────────────────────────────────────────────────────────────────
+
+/**
+ * CERTIFY CAPTURE — build the complete anchor for a freshly-certified span. The
+ * digest is computed HERE from the reader's rendered materials, so a reader
+ * cannot supply a digest that does not match what it rendered (the round-2
+ * "caller-supplied value is a well-formed lie" class, closed by construction).
+ *
+ * Returns `null` when the selection cannot be captured — there is no anchor to
+ * persist for a span that does not resolve even at certify time, and a `✓` is
+ * never recorded over one.
+ */
+export function certifyAnchor(
+  doc: CovenantDocReader,
+  meta: { objectId: string; roomId: string; certifier: Actor; certifiedAt: Timestamp },
+): CovenantAnchor | null {
+  const captured = doc.captureSelection();
+  if (captured === null) return null;
+  return CovenantAnchor.parse({
+    objectId: meta.objectId,
+    roomId: meta.roomId,
+    revision: captured.revision,
+    stateVector: captured.stateVector,
+    deleteSet: captured.deleteSet,
+    enclosedItems: captured.enclosedItems,
+    renderedDigest: renderedDigestOf(captured.fragment),
+    certifier: meta.certifier,
+    certifiedAt: meta.certifiedAt,
+  });
+}
+
+/** The covenant's live status for a span: the exact content holds, or it drifted. */
+export type CovenantStatus = 'ok' | 'drift';
+
+/** What {@link resolveCovenant} returns — the shape #181's read authority consumes. */
+export interface CovenantResolution {
+  /** The revision the `✓` was bound to (carried through from the anchor). */
+  revision: number;
+  /** The live re-rendered fragment, or `null` when it could not be resolved. */
+  renderedFragment: RenderedFragment | null;
+  /** `ok` only for a byte-identical re-render; `drift` for every other outcome. */
+  covenantStatus: CovenantStatus;
+}
+
+function sameEnclosedItems(a: readonly EnclosedItem[], b: readonly EnclosedItem[]): boolean {
+  if (a.length !== b.length) return false;
+  for (let i = 0; i < a.length; i++) {
+    const x = a[i];
+    const y = b[i];
+    if (x === undefined || y === undefined) return false;
+    if (x.id !== y.id || x.kind !== y.kind) return false;
+  }
+  return true;
+}
+
+/**
+ * THE PRIMITIVE #181's readers call. Resolve the `✓`'s anchor against the live
+ * document and answer OK / DRIFT, fail-closed.
+ *
+ * DETECT-only, fail-CLOSED (#164): the ONLY way to `ok` is a span that resolves
+ * AND whose enclosed-item identity is unchanged AND whose canonical rendered
+ * digest is byte-identical to the one certified. Every other path — an
+ * unresolvable / GC'd / unavailable doc (`resolveSpan` ⇒ `null`), a changed
+ * identity set, or a moved digest — is DRIFT. There is no OK-by-default and no
+ * OK-on-error anywhere in this function; that is the whole point of the phase.
+ */
+export function resolveCovenant(doc: CovenantDocReader, anchor: CovenantAnchor): CovenantResolution {
+  const resolved = doc.resolveSpan(anchor);
+  // Fail-closed: unavailable / GC'd / unresolvable ⇒ DRIFT, never OK (class 6).
+  if (resolved === null) {
+    return { revision: anchor.revision, renderedFragment: null, covenantStatus: 'drift' };
+  }
+  // A changed identity set (e.g. a deleted enclosed item) is drift on its own
+  // axis (class 5), checked before and independently of the digest.
+  if (!sameEnclosedItems(resolved.enclosedItems, anchor.enclosedItems)) {
+    return {
+      revision: anchor.revision,
+      renderedFragment: resolved.fragment,
+      covenantStatus: 'drift',
+    };
+  }
+  // The meaning check: byte-identical rendered content ⇒ OK, anything else ⇒ DRIFT
+  // (classes 1–4, and 7's OK).
+  const digest = renderedDigestOf(resolved.fragment);
+  return {
+    revision: anchor.revision,
+    renderedFragment: resolved.fragment,
+    covenantStatus: digest === anchor.renderedDigest ? 'ok' : 'drift',
+  };
+}
