@@ -13,6 +13,7 @@ export * from './authority.js';
 export * from './common.js';
 export * from './corrections.js';
 export * from './covenant.js';
+export * from './covenant-read.js';
 export * from './epistemic.js';
 export * from './escalation.js';
 export * from './events.js';
