@@ -283,7 +283,15 @@ export function LiveRoomSession({ data, viewerId }: { data: ReplayData; viewerId
     viewerId,
     view.viewer,
   );
-  const receiptObject = replayReceiptSubject(data, view.objects, receiptId);
+  // The SAME `glyphResolver` the live view reads through. `replayReceiptSubject`
+  // RECONSTRUCTS a subject that is not in `view.objects` (an objective still in
+  // proposal, or an accepted objective the view did not surface), and that
+  // reconstruction re-derives the glyph through `stateForObject`. Without the
+  // resolver those paths fail closed to `~` while `/replay` — which does pass it —
+  // renders the server's `ok` verdict as `✓`: the same receipt, two glyphs, split
+  // across surfaces. Fail-closed is the right default for an UNWIRED authority, but
+  // here the authority IS wired; dropping it is drift, not caution.
+  const receiptObject = replayReceiptSubject(data, view.objects, receiptId, glyphResolver);
   const receipt = receiptObject
     ? // Live receipts are derived only from the refreshed persisted projection.
       // No semantic command is rendered optimistically. The viewer rides along so
