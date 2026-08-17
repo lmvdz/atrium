@@ -18,14 +18,38 @@
  *        CREATE TABLE ydoc_updates   (id uuid PK, room text, op bytea);
  *        CREATE TABLE ydoc_awareness (client_id text, room text, op bytea, ...);
  *   3. A tiny write API (`sendUrl`) that appends `op` bytea rows — Electric syncs
- *      reads, not writes, so the app owns the append endpoint
- *      (electric-sql/electric `examples/yjs/server`).
+ *      reads, not writes, so the app owns the append endpoint. THAT ENDPOINT NOW
+ *      EXISTS: `app/api/rooms/[room]/ydoc/route.ts` (#202), reached via
+ *      `resolveElectricSendUrl(room)` — a same-origin PUT so the session cookie
+ *      rides and the door can stamp the update to the authenticated writer.
  *
- * None of that exists in-sandbox, so convergence is PROVEN against the in-memory
- * hub instead (test/yjs-conversation.test.ts), per the ticket's infra guardrail:
- * a working seam + a named infra gap beats a stalled lane. Wiring this transport
- * is a follow-up spike — stand up items 1–3, then hand the config below to
+ * None of items 1–2 exist in-sandbox, so convergence is PROVEN against the
+ * in-memory hub instead (test/yjs-conversation.test.ts), per the ticket's infra
+ * guardrail: a working seam + a named infra gap beats a stalled lane. Wiring this
+ * transport into a mounted client is a follow-up spike (E4) — stand up items 1–2,
+ * build `config.shapeUrl`/`config.sendUrl` from `resolveElectricShapeUrl` /
+ * `resolveElectricSendUrl(room)`, then hand the config below to
  * `useConversationModel(selection, electricConversationTransport(config))`.
+ *
+ * ## THE WRITE PATH'S TRUST, THREADED HERE (#202)
+ *
+ * `sendUrl` points at the authenticated door, and two things make the door able
+ * to attribute the write:
+ *
+ *   * the PUT is SAME-ORIGIN (`resolveElectricSendUrl` refuses any other), so the
+ *     session cookie rides — and `sendFetch` below sets `credentials:
+ *     'same-origin'` explicitly rather than leaning on a fetch default that a
+ *     future runtime could change;
+ *   * the writer identity is derived at the DOOR from that session, never from
+ *     this client. Nothing here names an author, and the door would ignore it if
+ *     it did — the Yjs update's own `clientID` in the bytes is not the writer.
+ *
+ * Rate limiting is the door's job (in-process, per writer and per IP, reusing the
+ * proxy-hops plumbing) — a client cannot rate-limit itself honestly. What this
+ * client does is BACK OFF correctly: `documentRetryHandler` retries a transient
+ * refusal (429, 5xx, a dropped connection) and GIVES UP on a permanent one
+ * (401/403/400/413), so a member whose access was revoked mid-session stops
+ * hammering a door that will only ever refuse them.
  *
  * IMPORTANT — the durable stream carries CONVERSATION CONTENT ONLY. The covenant
  * ledger stays the gated Postgres store, synced read-only (#181); a `✓` is never
@@ -33,9 +57,41 @@
  * ═════════════════════════════════════════════════════════════════════════ */
 
 import type { Row } from '@electric-sql/client';
-import { ElectricProvider, parseToDecoder, type ResumeState } from '@electric-sql/y-electric';
+import {
+  ElectricProvider,
+  parseToDecoder,
+  type ResumeState,
+  type SendErrorRetryHandler,
+} from '@electric-sql/y-electric';
 import { encodeStateVector, Doc as YDoc } from 'yjs';
 import type { ConversationTransport } from './conversation-transport';
+
+/**
+ * Send the update with the session cookie attached (#202).
+ *
+ * y-electric's own `send()` does not set `credentials`; a same-origin PUT sends
+ * cookies by default today, but the write door's whole authorization rests on the
+ * cookie arriving, so it is stated rather than assumed — a future default of
+ * `omit` would silently turn every write into an unauthenticated 401.
+ */
+const sendFetch: typeof fetch = (input, init) =>
+  fetch(input, { ...init, credentials: 'same-origin' });
+
+/**
+ * Retry a TRANSIENT refusal, give up on a PERMANENT one (#202).
+ *
+ * 429 (rate limited) and 5xx (server hiccup) and a network error (no response)
+ * are transient — retry. 401/403/400/413 are the door's final word: not signed
+ * in, not a member, malformed, too large. Retrying those pins the append path for
+ * a client that will only ever be refused; a revoked member should stop, not
+ * spin. Returning `false` lets the provider disconnect rather than loop.
+ */
+const documentRetryHandler: SendErrorRetryHandler = async ({ response }) => {
+  if (!response) return true; // network error — transient
+  if (response.status === 429) return true; // rate limited — back off and retry
+  if (response.status >= 500) return true; // server hiccup — transient
+  return false; // 4xx (401/403/400/413) — the door's final word
+};
 
 /**
  * The state vector of an EMPTY doc — "the stream has nothing of mine yet". Handed
@@ -68,7 +124,12 @@ export interface ElectricTransportConfig {
   readonly room: string;
   /** The Electric HTTP shape-proxy URL for reading `ydoc_updates`. */
   readonly shapeUrl: string;
-  /** The app's write endpoint that appends an `op` bytea row for this room. */
+  /**
+   * The app's write door for this room (#202) — `resolveElectricSendUrl(room)`,
+   * a same-origin `/api/rooms/{room}/ydoc`. The transport PUTs each update here
+   * with the session cookie; the door authenticates, authorizes membership, and
+   * stamps the update to the authenticated writer.
+   */
   readonly sendUrl: string;
   /** Optional resume state, so a reconnect does not retransmit the whole doc. */
   readonly resumeState?: ResumeState;
@@ -106,7 +167,11 @@ export function electricConversationTransport(
           sendUrl: config.sendUrl,
           // y-electric's documented column: the update bytea lives in `op`.
           getUpdateFromRow: (row) => row.op,
+          // Back off on a transient refusal, give up on a permanent one (#202).
+          sendErrorRetryHandler: documentRetryHandler,
         },
+        // Carry the session cookie on every write, so the door can attribute it.
+        fetchClient: sendFetch,
         // Upload the doc's pre-connect state by default (#183 F5): a caller-supplied
         // resumeState wins (a real reconnect resumes from its own baseline), but
         // when none is given we baseline against an EMPTY vector so the provider
