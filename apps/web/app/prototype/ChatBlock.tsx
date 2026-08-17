@@ -22,19 +22,14 @@
  *     is why the design feed shell (scroll container, minimap, composer) stays. */
 
 import { useEffect, useMemo, useRef, useState } from 'react';
-import { fileText } from '@/src/components/model';
+import { type EpistemicState, fileText, systemStatement } from '@/src/components/model';
 import { AttributionLedger } from '@/src/components/model/ledger';
 import { MessageBody } from '@/src/components/primitives/MessageBody';
 import { SystemRow } from '@/src/components/timeline/SystemRow';
 import { TimelineRow } from '@/src/components/timeline/TimelineRow';
 import { ChatTopBar } from './ChatChrome';
-import {
-  type ConversationItem,
-  conversationModel,
-  type Echo,
-  echoItem,
-  messageBody,
-} from './conversation-model';
+import { type ConversationItem, type Echo, echoItem, messageBody } from './conversation-model';
+import type { ConversationTransport } from './conversation-transport';
 import { IconChevron, IconDot } from './icons';
 import { MessageText } from './MessageText';
 import styles from './prototype.module.css';
@@ -50,6 +45,17 @@ import {
   type TurnData,
   type TurnStep,
 } from './types';
+import { useConversationModel } from './use-conversation-model';
+
+/* The honest "conversation not wired" notice's state — a routine `·` system
+   notice (a status fact, not a failed action), used when a live room mounts with
+   no conversation transport (#183 round-2 SHIP-BLOCKER #3). */
+const NOT_DELIVERED_NOTICE: EpistemicState = {
+  kind: 'event',
+  verification: 'routine',
+  owedToViewer: false,
+  irreversible: false,
+};
 
 /* PRIMITIVE: a stream of diff hunks. Rendered identically whether it has the
    floor or is materialized inside a tree node — that sameness IS the algebra.
@@ -648,12 +654,34 @@ export function ChatBlock({
   echoes,
   draftComment,
   onSay,
+  transport,
+  liveMount = false,
 }: {
   selected: Selection;
   echoes: readonly Echo[];
   draftComment: CommentDraft | null;
   onSay: (text: string) => void;
+  /**
+   * The replication fabric this room's doc joins (#183 F4). When present, the
+   * conversation is LIVE: the doc catches up from the stream, and a typed line is
+   * appended straight into the converging doc (so a peer sees it and it survives
+   * reload) instead of becoming a local `echo`. Omitted on the `/prototype`
+   * fixture route, where the composer keeps the local echo behaviour.
+   */
+  transport?: ConversationTransport;
+  /**
+   * Whether this is a LIVE room mount (a real control plane / room), as opposed
+   * to the `/prototype` fixture demo (#183 round-2 SHIP-BLOCKER #3). On a live
+   * mount with NO transport wired, the conversation must NOT seed the mock
+   * fixture — presenting mock history on a real room as its live conversation is
+   * a lie. The feed renders an honest "not wired yet" notice instead. The real
+   * shipped-surface + Electric wiring is the filed follow-up.
+   */
+  liveMount?: boolean;
 }) {
+  // A live room whose conversation source is not wired: no transport, but not the
+  // fixture demo either. The feed is honestly empty + a notice, never mock seed.
+  const unwired = liveMount && transport === undefined;
   const [value, setValue] = useState('');
   const inputRef = useRef<HTMLTextAreaElement>(null);
   const logRef = useRef<HTMLDivElement>(null);
@@ -671,11 +699,18 @@ export function ChatBlock({
     return () => window.clearTimeout(t);
   }, [selected, shownSel]);
 
-  /* SEAM(#155/Phase 6): the conversation, THROUGH the model interface. The feed
-     renders shipped records/entries; a CRDT-backed impl swaps the source without
-     changing anything below. Echoes (locally-sent lines) are the viewer typing —
-     real typed records on the SAME register, so they render as shipped rows too. */
-  const model = useMemo(() => conversationModel(shownSel), [shownSel]);
+  /* SEAM(#155/#183): the conversation, THROUGH the model interface — now read
+     live off a Yjs document (`useConversationModel` → `ConversationDoc`). The
+     feed renders the same shipped records/entries; the CRDT-backed source swaps
+     in without changing anything below, and the feed re-renders as the document
+     converges. On the fixture route the doc is seeded from the mock seam, so this
+     is byte-identical to the prior `conversationModel(shownSel)`. Echoes
+     (locally-sent lines) are the viewer typing — real typed records on the SAME
+     register, so they render as shipped rows too. */
+  const { model, version, say } = useConversationModel(shownSel, transport, {
+    // Live room without a transport ⇒ do NOT seed the mock fixture (honest empty).
+    seedFixture: !liveMount,
+  });
   const { records, items } = useMemo(() => {
     const echoes_ = echoes.map((echo, index) => echoItem(echo, index, model.room));
     return {
@@ -699,7 +734,10 @@ export function ChatBlock({
       <ChatTopBar selected={selected} />
       <ChatMinimap
         scrollRef={logRef}
-        revision={`${shownSel.kind}:${shownSel.id}|${echoes.length}|${draftComment ? draftComment.text.length : -1}|${fading ? 1 : 0}`}
+        // `version` bumps whenever the live doc converges (a remote line arrives),
+        // so the minimap remeasures the feed then too, not only on local changes
+        // (#183 secondary: minimap re-measure on live model version bump).
+        revision={`${shownSel.kind}:${shownSel.id}|${echoes.length}|${draftComment ? draftComment.text.length : -1}|${fading ? 1 : 0}|v${version}`}
       />
       {/* The feed renders inside the register every shipped `TimelineRow` resolves
           its citation against — one ledger for the whole thread. */}
@@ -709,6 +747,29 @@ export function ChatBlock({
             {items.map((item) => (
               <FeedItem key={item.id} item={item} />
             ))}
+            {/* HONEST UNWIRED STATE (#183 round-2 SHIP-BLOCKER #3). On a live room
+                with no conversation transport wired, the feed does not fabricate a
+                converging conversation from mock seed — it says, plainly, that the
+                live conversation is not yet on this surface. A typed line here is
+                a local draft, not delivered (see the composer + MoldingSurface). */}
+            {unwired ? (
+              <div className={styles.chatRow} data-kind="system">
+                <Avatar kind="system" />
+                <div className={styles.chatContent}>
+                  <SystemRow
+                    entry={{
+                      type: 'system',
+                      id: 'conversation-unwired',
+                      at: 'now',
+                      statement: systemStatement(
+                        'the live conversation is not yet wired to this surface — messages typed here are local drafts, not delivered to the room',
+                      ),
+                      state: NOT_DELIVERED_NOTICE,
+                    }}
+                  />
+                </div>
+              </div>
+            ) : null}
           </div>
           {/* the comment being composed in the artifact pane, portaled here live */}
           {draftComment ? <DraftComment draft={draftComment} /> : null}
@@ -721,7 +782,11 @@ export function ChatBlock({
             onChange={setValue}
             onSubmit={() => {
               if (value.trim().length > 0) {
-                onSay(value);
+                // LIVE: the typed line enters the converging doc, so a peer sees
+                // it and it survives reload (#183 F4). FIXTURE: the local echo
+                // path, unchanged (the `/prototype` design demo).
+                if (transport) say(value);
+                else onSay(value);
                 setValue('');
               }
             }}

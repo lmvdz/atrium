@@ -19,6 +19,8 @@
     "@atrium/auth": "workspace:*",
     "@atrium/core": "workspace:*",
     "@atrium/db": "workspace:*",
+    "@electric-sql/client": "^1.5.26",
+    "@electric-sql/y-electric": "^0.1.52",
     "@fontsource-variable/jetbrains-mono": "^5.3.0",
     "@fontsource/ibm-plex-mono": "^5.3.0",
     "better-auth": "^1.6.25",
@@ -30,6 +32,7 @@
     "react-markdown": "^10.1.0",
     "remark-gfm": "^4.0.1",
     "server-only": "^0.0.1",
+    "yjs": "^13.6.32",
     "zod": "^4.4.3"
   },
   "devDependencies": {
