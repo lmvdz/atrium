@@ -31,6 +31,7 @@ import {
   type BodySegment,
   type BodySpan,
   bodyModelLength,
+  bodyRenderDivergesFromRaw,
   EMBED_ATTR,
   type ObjectSpanRequest,
   objectSpanRequest,
@@ -60,7 +61,8 @@ const REFUSAL_COPY = {
   not_in_room: 'you are no longer a member of this room, so nothing was certified',
   derive_failed:
     'the live document could not be read for this span (the room’s conversation doc is not bound to this surface yet), so nothing was certified',
-  already_certified: 'a certified reading already stands for this object — re-certify replaces it',
+  already_certified:
+    'a certified reading already stands for this object, and a certification is written once — this span was not certified over it',
 } as const;
 const GENERIC_REFUSAL = 'this span was not certified';
 
@@ -93,10 +95,14 @@ function tooLongNote(bodyLength: number): string {
  * Render a body text run into index-faithful DOM through the VERBATIM-CONTENT door.
  *
  * Body text is live doc content, so it goes through `fileText` — the same door
- * `DraftComment` renders a doc slice through — which NFC-neutralizes the bidi /
- * control characters a raw render of untrusted content must never paint. That
- * neutralization is LENGTH-PRESERVING (one code unit → one U+FFFD), so it does not
- * disturb the byte-exact index the span mapping depends on. The one control char
+ * `DraftComment` renders a doc slice through — which REPLACES the bidi / control
+ * characters a raw render of untrusted content must never paint with U+FFFD (this is
+ * a control-char substitution, NOT an NFC normalization — no code points are folded,
+ * so the coordinates still align). That replacement is LENGTH-PRESERVING (one code
+ * unit → one U+FFFD), so it does not disturb the byte-exact index the span mapping
+ * depends on — but it means a rewritten char reads as `�` while the covenant would
+ * certify the raw character, which {@link CertifyPassage} surfaces as a warning
+ * ({@link bodyRenderDivergesFromRaw}). The one control char
  * `fileText` also rewrites is the newline; to keep a multi-line body reading as
  * multiple lines (and to keep each `\n` its own one-unit position), the run is
  * split on `\n` FIRST and the newline re-emitted as a literal between the door-fed
@@ -166,6 +172,16 @@ export interface CertifyPassageProps {
   /** Which message's body this certifies a passage of. */
   readonly messageId: string;
   /**
+   * The doc's convergence tick (`useConversationModel().version`) — bumps on every
+   * CRDT convergence, local or remote. Threaded here so a body edit UNDER an open
+   * panel recomputes the rendered segments AND invalidates any pending selection: a
+   * span mapped against the previous body names coordinates the human never saw, and
+   * must never reach the server (E8 finding #1). Without it the panel would show
+   * stale text at stale offsets while the server minted an anchor from the CURRENT
+   * body at those coordinates — certifying a passage the human never read.
+   */
+  readonly version: number;
+  /**
    * The accepted covenant OBJECT the ✓ is over (a uuid). Decoupled from the body
    * path and the message id — `bodyPath` names WHERE the body is, `objectId` names
    * WHAT object the reading is of. `null` when the surface has no object bound for
@@ -203,6 +219,7 @@ const CERTIFIED_GLYPH: Glyph = glyphFor({
 export function CertifyPassage({
   doc,
   messageId,
+  version,
   objectId,
   workspaceSlug,
   roomSlug,
@@ -214,15 +231,32 @@ export function CertifyPassage({
   const [span, setSpan] = useState<BodySpan | null>(null);
   const [status, setStatus] = useState<Status>({ phase: 'idle' });
 
-  // The body's live rich-text, projected to the index-faithful render model. The
-  // doc `version` is not threaded here (the certify surface is a focused, static
-  // snapshot of one body); a body edit while certifying would DRIFT server-side,
-  // which is the correct covenant outcome — you certify the reading you were shown.
+  // The body's live rich-text, projected to the index-faithful render model.
+  // RECOMPUTED ON `version` (E8 finding #1): a body edit under an open panel — local
+  // or remote — bumps `version`, so the rendered segments (and the offsets a
+  // selection is measured against) always reflect the CURRENT body. The server
+  // mints the anchor from the current body too; if this surface lagged, it would
+  // show stale text at stale offsets and certify coordinates the human never saw.
+  // biome-ignore lint/correctness/useExhaustiveDependencies: `version` is the convergence trigger; body identity is captured by (doc, messageId)
   const segments = useMemo<BodySegment[]>(() => {
     const body = doc.body(messageId);
     return body ? renderBodyModel(body) : [];
-  }, [doc, messageId]);
+  }, [doc, messageId, version]);
   const bodyLength = bodyModelLength(segments);
+  const divergesFromRaw = useMemo(() => bodyRenderDivergesFromRaw(segments), [segments]);
+
+  // INVALIDATE A PENDING SELECTION WHEN THE BODY CHANGES (E8 finding #1). A span
+  // captured against the previous body indexes coordinates that no longer describe
+  // what the human read; it must never complete a certify. On any convergence we
+  // clear the pending span (disabling the ✓) AND collapse the browser selection, so
+  // the human re-selects against the recomputed body rather than certifying at stale
+  // coords. The first render's run is a no-op (span is already null).
+  // biome-ignore lint/correctness/useExhaustiveDependencies: fire only on a body convergence, keyed by `version`
+  useEffect(() => {
+    setSpan(null);
+    const sel = bodyRef.current?.ownerDocument?.defaultView?.getSelection();
+    sel?.removeAllRanges();
+  }, [version]);
 
   // Recompute the selected span from the live DOM selection. Fires on mouseup and
   // on the document's selectionchange, so a keyboard (shift-arrow) selection is
@@ -282,6 +316,19 @@ export function CertifyPassage({
         <span className={styles.certifyTitle}>certify a passage</span>
         <span className={styles.certifyHint}>{selectionHint(objectId, span, bodyLength)}</span>
       </div>
+
+      {/* FIDELITY WARNING (E8 finding #4). This body carries a bidi/control char the
+          verbatim door paints as `�` — so what you see is NOT byte-for-byte what a
+          certification would cover (the anchor is minted from the raw content). Not a
+          refusal: the raw content is legitimate to certify and the span index is
+          still exact; the warning simply keeps the human's eye and the covenant's
+          bytes honest with each other. */}
+      {!tooLong && divergesFromRaw ? (
+        <div className={styles.certifyWarn} role="note" data-testid="certify-fidelity-warning">
+          this passage contains characters shown as “�” for safety; certifying covers the raw
+          content, not the displayed form
+        </div>
+      ) : null}
 
       {/* THE 1:1 BODY — what you select is the span. A body longer than the door's
           cap fails closed (an honest note) rather than rendering a truncated,

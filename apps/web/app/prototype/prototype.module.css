@@ -3561,6 +3561,18 @@
   color: var(--tx3);
   font-style: italic;
 }
+/* fidelity warning (E8 #4): this body renders a control/bidi char as � — what you
+   see is not byte-for-byte what a certification covers. Amber, so it reads as a
+   caution the human weighs, not a refusal (the act is still available). */
+.certifyWarn {
+  color: var(--amb2);
+  font-size: 10px;
+  line-height: 1.4;
+  padding: 6px 8px;
+  border: 1px solid var(--amb2);
+  border-radius: 3px;
+  background: color-mix(in srgb, var(--amb2) 8%, transparent);
+}
 /* the per-message toggle that opens the certify passage — quiet until hovered,
    so certify is an available act, not clutter on every line */
 .certifyRowWrap {

@@ -681,12 +681,16 @@ export interface CertifyConfig {
 function MessageCertify({
   doc,
   messageId,
+  version,
   config,
   open,
   onToggle,
 }: {
   doc: ConversationDoc;
   messageId: string;
+  /** The doc convergence tick — threaded to CertifyPassage so a body edit under an
+      open panel recomputes the render and invalidates a stale selection (E8 #1). */
+  version: number;
   config: CertifyConfig;
   open: boolean;
   onToggle: () => void;
@@ -706,6 +710,7 @@ function MessageCertify({
         <CertifyPassage
           doc={doc}
           messageId={messageId}
+          version={version}
           objectId={config.objectIdFor(messageId)}
           workspaceSlug={config.workspaceSlug}
           roomSlug={config.roomSlug}
@@ -830,6 +835,7 @@ export function ChatBlock({
                   <MessageCertify
                     doc={doc}
                     messageId={item.id}
+                    version={version}
                     config={certify}
                     open={certifyOpenId === item.id}
                     onToggle={() =>

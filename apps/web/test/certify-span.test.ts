@@ -10,6 +10,7 @@ import { CertifyBody } from '../app/prototype/CertifyPassage';
 import {
   bodyLengthOf,
   bodyModelLength,
+  bodyRenderDivergesFromRaw,
   objectSpanRequest,
   renderBodyModel,
   spanFromRange,
@@ -24,22 +25,29 @@ import { renderCertifyBodyDom } from './support/certify-body-dom';
  *
  * The load-bearing property: a DOM range over a body rendered 1:1 maps to the
  * EXACT `{ bodyPath, start, end }` the covenant resolver re-reads from the live
- * `Y.XmlText`. These tests prove it three ways that cannot all pass by accident:
+ * `Y.XmlText`. These tests prove it three ways that cannot all pass by accident —
+ * and, crucially, the "expected" span is ALWAYS derived INDEPENDENTLY of the mapper
+ * (from the fixture string's own indices), never from the mapper's own output:
  *
- *   1. RAW-INDEX, NOT RENDERED. The offsets index the raw `Y.XmlText` string
- *      (`body.toString()`), so `T.slice(start, end)` is exactly the selected
- *      passage — a rendered-offset mapping would land elsewhere.
- *   2. THE RESOLVER AGREES. Feeding those offsets to the production
- *      `CovenantDocReaderProd` (the same class the server certify path uses),
- *      `certifyAnchor` + `resolveCovenant` return `ok` — the span the resolver
- *      re-reads is the span we mapped.
+ *   1. RAW-INDEX, NOT RENDERED. The offsets index the raw `Y.XmlText` string, so
+ *      `T.slice(start, end)` is exactly the selected passage — a rendered-offset
+ *      mapping would land elsewhere. The expected offsets are computed from the
+ *      fixture text (`T.indexOf`, `.length`), not read back from the mapper.
+ *   2. THE READER RE-READS THE SAME BYTES (end-to-end, NOT tautological). The
+ *      mapped offsets are handed to the production `CovenantDocReaderProd` — the
+ *      class the server certify path uses — and its OWN captured fragment text is
+ *      asserted to equal the INDEPENDENTLY-sliced passage. (The old test only
+ *      asserted `resolveCovenant(...) === ok`, which is `ok` for ANY in-range span
+ *      on an unchanged doc — it proved the request was well-formed, never that the
+ *      coords matched the selection. That framing is gone.)
  *   3. IT MOVES (the mutation gate). Flip / shift / grow the selection and the
- *      mapped span moves with it, character-for-character. If the output did not
- *      move when the input did, the mapping would be ornament — that is the whole
- *      point of E8, so it is asserted directly.
+ *      mapped span moves with it, character-for-character, against independently
+ *      computed targets.
  *
- * Embeds count as exactly one unit and inline marks as zero (the reader's index
- * space), proven the same way.
+ * Embeds count as exactly one unit and inline marks as zero — and the never-flip
+ * fixtures (surrogate pair, combining mark, newline-split nodes, control-char
+ * rewrite, embed boundaries, 2nd-message body, last char, cross-body) each pin a
+ * coordinate class that a naive offset would silently get wrong.
  * ═════════════════════════════════════════════════════════════════════════ */
 
 const ALICE = { kind: 'human', userId: 'u_alice' } as const;
@@ -51,8 +59,12 @@ function nn<T>(value: T | null | undefined): T {
   return value;
 }
 
-function seededDoc(message: ChatMsg): ConversationDoc {
-  return new ConversationDoc().seed([message]);
+function seededDoc(...messages: ChatMsg[]): ConversationDoc {
+  return new ConversationDoc().seed(messages);
+}
+
+function msg(id: string, text: string): ChatMsg {
+  return { id, time: '12:00', kind: 'human', who: 'you', text };
 }
 
 /** A capturing reader over a body span — the exact pattern the server certify path uses. */
@@ -72,6 +84,24 @@ function readerFor(
   );
 }
 
+/**
+ * The text the PRODUCTION reader itself re-reads at a mapped span — an INDEPENDENT
+ * witness of what the covenant would certify. Text nodes contribute their verbatim
+ * characters; an embed contributes the U+FFFC object-replacement sentinel (its one
+ * opaque unit). Comparing this to a passage sliced straight from the fixture string
+ * proves the mapped coordinates address the selected region end-to-end — not that
+ * "the resolver agrees with itself".
+ */
+function readerText(
+  convo: ConversationDoc,
+  id: string,
+  span: { start: number; end: number },
+): string {
+  const capture = readerFor(convo, id, span).captureSelection();
+  if (!capture) throw new Error('reader captured nothing for span');
+  return capture.fragment.nodes.map((node) => (node.kind === 'text' ? node.text : '￼')).join('');
+}
+
 function certify(
   convo: ConversationDoc,
   id: string,
@@ -87,16 +117,21 @@ function certify(
   return anchor;
 }
 
-const statusOf = (convo: ConversationDoc, id: string, anchorSpan: { start: number; end: number }) =>
-  resolveCovenant(readerFor(convo, id, anchorSpan), certify(convo, id, anchorSpan)).covenantStatus;
+/** The round-trip STATUS — kept only to assert a mapped span is a well-formed,
+    in-range covenant input; it is NOT a mapping proof (see the header). */
+const roundTripStatus = (
+  convo: ConversationDoc,
+  id: string,
+  span: { start: number; end: number },
+) => resolveCovenant(readerFor(convo, id, span), certify(convo, id, span)).covenantStatus;
 
 // A raw body deliberately carrying source markers a RENDERED view would transform
 // (a `@mention`, a `==highlight==`) — so a rendered-offset mapping would be caught.
 const T = 'ship the @scout reading; ==audited== and safe to merge';
 
 describe('the selection→span mapping addresses the exact Y.XmlText span', () => {
-  it('maps a DOM range to the raw Y.XmlText offsets, and the resolver re-reads that span', () => {
-    const convo = seededDoc({ id: 'm1', time: '12:00', kind: 'human', who: 'you', text: T });
+  it('maps a DOM range to the raw Y.XmlText offsets, and the reader re-reads that exact passage', () => {
+    const convo = seededDoc(msg('m1', T));
     const body = nn(convo.body('m1'));
     expect(body.toString()).toBe(T); // the substrate holds the RAW text, markers and all
 
@@ -105,11 +140,12 @@ describe('the selection→span mapping addresses the exact Y.XmlText span', () =
     expect(bodyLengthOf(root)).toBe(body.length);
     expect(bodyModelLength(renderBodyModel(body))).toBe(body.length);
 
+    // INDEPENDENT expected offsets — from the fixture string, not the mapper.
     const passage = '==audited==';
     const i = T.indexOf(passage);
     const j = i + passage.length;
+    expect(i).toBeGreaterThan(0);
 
-    // A human's selection: a Range over the body's text at raw offsets [i, j).
     const range = root.ownerDocument.createRange();
     const tn = textNodeOf(0); // the single text run
     range.setStart(tn, i);
@@ -117,16 +153,15 @@ describe('the selection→span mapping addresses the exact Y.XmlText span', () =
 
     const span = nn(spanFromRange(root, range));
     expect(span).toEqual({ start: i, end: j });
-    // BYTE-FOR-BYTE: the mapped offsets slice exactly the selected passage out of
-    // the raw Y.XmlText string — not a rendered/transformed offset.
+    // BYTE-FOR-BYTE: the mapped offsets slice exactly the selected passage.
     expect(T.slice(span.start, span.end)).toBe(passage);
-
-    // THE RESOLVER AGREES: certifying [i,j) and resolving it returns ok.
-    expect(statusOf(convo, 'm1', span)).toBe('ok');
+    // END-TO-END: the PRODUCTION reader, handed those offsets, re-reads the SAME
+    // passage — independent witness, not a self-agreeing resolver.
+    expect(readerText(convo, 'm1', span)).toBe(passage);
   });
 
   it('MOVES with the selection — shift, flip, and grow the range (the mutation gate)', () => {
-    const convo = seededDoc({ id: 'm1', time: '12:00', kind: 'human', who: 'you', text: T });
+    const convo = seededDoc(msg('m1', T));
     const body = nn(convo.body('m1'));
     const { root, textNodeOf } = renderCertifyBodyDom(CertifyBody, renderBodyModel(body));
     const tn = textNodeOf(0);
@@ -140,13 +175,14 @@ describe('the selection→span mapping addresses the exact Y.XmlText span', () =
     const base = nn(spanFromRange(root, rangeAt(9, 15))); // '@scout'
     expect(base).toEqual({ start: 9, end: 15 });
     expect(T.slice(base.start, base.end)).toBe('@scout');
+    expect(readerText(convo, 'm1', base)).toBe('@scout');
 
     // SHIFT right by 15 chars — the whole span moves by 15, not stays put.
     const shifted = nn(spanFromRange(root, rangeAt(24, 30)));
     expect(shifted.start).toBe(base.start + 15);
     expect(shifted.end).toBe(base.end + 15);
     expect(shifted).not.toEqual(base);
-    expect(T.slice(shifted.start, shifted.end)).toBe(T.slice(24, 30));
+    expect(readerText(convo, 'm1', shifted)).toBe(T.slice(24, 30));
 
     // FLIP the boundaries — a BACKWARDS selection (anchor after focus, which only
     // `Selection` can express; a `Range` auto-normalizes). spanFromSelection must
@@ -162,16 +198,11 @@ describe('the selection→span mapping addresses the exact Y.XmlText span', () =
     expect(grown.start).toBe(base.start);
     expect(grown.end).toBe(base.end + 9);
     expect(grown.end).not.toBe(base.end);
-
-    // Each distinct span the resolver re-reads round-trips ok — the mapping is live,
-    // not a constant.
-    expect(statusOf(convo, 'm1', base)).toBe('ok');
-    expect(statusOf(convo, 'm1', shifted)).toBe('ok');
-    expect(statusOf(convo, 'm1', grown)).toBe('ok');
+    expect(readerText(convo, 'm1', grown)).toBe(T.slice(9, 24));
   });
 
   it('a collapsed (empty) selection maps to null — there is no passage to certify', () => {
-    const convo = seededDoc({ id: 'm1', time: '12:00', kind: 'human', who: 'you', text: T });
+    const convo = seededDoc(msg('m1', T));
     const body = nn(convo.body('m1'));
     const { root, textNodeOf } = renderCertifyBodyDom(CertifyBody, renderBodyModel(body));
     const r = root.ownerDocument.createRange();
@@ -179,11 +210,162 @@ describe('the selection→span mapping addresses the exact Y.XmlText span', () =
     r.setEnd(textNodeOf(0), 4);
     expect(spanFromRange(root, r)).toBeNull();
   });
+
+  it('the LAST character selects to the exact body end (no off-by-one at the tail)', () => {
+    const convo = seededDoc(msg('m1', 'hello'));
+    const body = nn(convo.body('m1'));
+    const { root, textNodeOf } = renderCertifyBodyDom(CertifyBody, renderBodyModel(body));
+    const r = root.ownerDocument.createRange();
+    r.setStart(textNodeOf(0), 4);
+    r.setEnd(textNodeOf(0), 5); // just the final 'o'
+    const span = nn(spanFromRange(root, r));
+    expect(span).toEqual({ start: 4, end: 5 });
+    expect('hello'.slice(4, 5)).toBe('o');
+    expect(readerText(convo, 'm1', span)).toBe('o');
+  });
 });
 
-describe('an embed counts as exactly one unit; inline marks as zero', () => {
-  it('the embed is one index unit, not its rendered label length, and the resolver agrees', () => {
-    const convo = seededDoc({ id: 'm2', time: '12:00', kind: 'human', who: 'you', text: 'AB CD' });
+describe('never-flipped coordinate classes: a naive offset would get these wrong', () => {
+  it('a surrogate pair (emoji) is TWO UTF-16 units — the span counts code units, not glyphs', () => {
+    const emoji = String.fromCodePoint(0x1f600); // 😀, one glyph, two UTF-16 units
+    const text = `a${emoji}b`;
+    expect(text.length).toBe(4); // a(1) + emoji(2) + b(1)
+    const convo = seededDoc(msg('m1', text));
+    const body = nn(convo.body('m1'));
+    expect(body.length).toBe(4);
+    const { root, textNodeOf } = renderCertifyBodyDom(CertifyBody, renderBodyModel(body));
+
+    // Select just the emoji — INDEPENDENT offsets: after 'a' (1) through the pair (3).
+    const r = root.ownerDocument.createRange();
+    r.setStart(textNodeOf(0), 1);
+    r.setEnd(textNodeOf(0), 3);
+    const span = nn(spanFromRange(root, r));
+    expect(span).toEqual({ start: 1, end: 3 });
+    expect(text.slice(1, 3)).toBe(emoji);
+    expect(readerText(convo, 'm1', span)).toBe(emoji);
+  });
+
+  it('a combining mark is its OWN unit — selecting base+mark spans two units', () => {
+    const combining = String.fromCharCode(0x0301); // combining acute accent
+    const text = `e${combining}x`; // "é" (decomposed) + 'x'
+    expect(text.length).toBe(3);
+    const convo = seededDoc(msg('m1', text));
+    const body = nn(convo.body('m1'));
+    const { root, textNodeOf } = renderCertifyBodyDom(CertifyBody, renderBodyModel(body));
+
+    const r = root.ownerDocument.createRange();
+    r.setStart(textNodeOf(0), 0);
+    r.setEnd(textNodeOf(0), 2); // base 'e' + the combining mark
+    const span = nn(spanFromRange(root, r));
+    expect(span).toEqual({ start: 0, end: 2 });
+    expect(text.slice(0, 2)).toBe(`e${combining}`);
+    expect(readerText(convo, 'm1', span)).toBe(`e${combining}`);
+  });
+
+  it('a newline splits a run into MULTIPLE text nodes — a span across it still maps by raw offset', () => {
+    const text = 'line1\nline2';
+    expect(text.length).toBe(11); // 5 + 1 (\n) + 5
+    const convo = seededDoc(msg('m1', text));
+    const body = nn(convo.body('m1'));
+    const segments = renderBodyModel(body);
+    // The whole thing is one run, but renderRun emits several text nodes for it.
+    expect(segments).toHaveLength(1);
+    const { root, pointOf } = renderCertifyBodyDom(CertifyBody, segments);
+    // More than one descendant text node exists for segment 0 (the newline split) —
+    // the old `.firstChild` helper would have addressed only "line1".
+    const first = pointOf(0, 0).node;
+    expect(first.data).toBe('line1');
+
+    // Select '1\nl' — INDEPENDENT offsets [4, 7) straddling the newline.
+    const start = pointOf(0, 4);
+    const end = pointOf(0, 7);
+    const r = root.ownerDocument.createRange();
+    r.setStart(start.node, start.offset);
+    r.setEnd(end.node, end.offset);
+    const span = nn(spanFromRange(root, r));
+    expect(span).toEqual({ start: 4, end: 7 });
+    expect(text.slice(4, 7)).toBe('1\nl');
+    expect(readerText(convo, 'm1', span)).toBe('1\nl');
+  });
+
+  it('a control char is CERTIFIED raw though rendered as U+FFFD — coords align, and the surface warns', () => {
+    const rlo = String.fromCharCode(0x202e); // right-to-left override (a bidi attack char)
+    const text = `a${rlo}b`;
+    expect(text.length).toBe(3);
+    const convo = seededDoc(msg('m1', text));
+    const body = nn(convo.body('m1'));
+    const segments = renderBodyModel(body);
+
+    // FIDELITY (finding #4): the raw body carries a char the surface paints as `�`,
+    // so the surface must WARN — what is shown is not byte-for-byte what is certified.
+    expect(bodyRenderDivergesFromRaw(segments)).toBe(true);
+    // A plain body never trips the warning.
+    expect(
+      bodyRenderDivergesFromRaw(renderBodyModel(nn(seededDoc(msg('m2', 'plain')).body('m2')))),
+    ).toBe(false);
+
+    const { root, textNodeOf } = renderCertifyBodyDom(CertifyBody, segments);
+    // The DOM render is length-preserving (the U+FFFD is one unit), so offsets align.
+    expect(bodyLengthOf(root)).toBe(3);
+    const r = root.ownerDocument.createRange();
+    r.setStart(textNodeOf(0), 0);
+    r.setEnd(textNodeOf(0), 3);
+    const span = nn(spanFromRange(root, r));
+    expect(span).toEqual({ start: 0, end: 3 });
+    // The reader re-reads the RAW override char — the covenant certifies the bytes,
+    // NOT the sanitized `�` the human saw (which is exactly why the surface warns).
+    expect(readerText(convo, 'm1', span)).toBe(text);
+    expect(readerText(convo, 'm1', span)).toContain(rlo);
+  });
+
+  it('a selection in the SECOND message maps to its OWN bodyPath, read from its own body', () => {
+    const convo = seededDoc(msg('m1', T), msg('m2', 'the second body here'));
+    const path1 = nn(convo.bodyPath('m1'));
+    const path2 = nn(convo.bodyPath('m2'));
+    expect(path2).not.toEqual(path1); // distinct blocks — not a hand-built [0, 0]
+
+    const body2 = nn(convo.body('m2'));
+    const { root, textNodeOf } = renderCertifyBodyDom(CertifyBody, renderBodyModel(body2));
+    const passage = 'second';
+    const i = 'the second body here'.indexOf(passage);
+    const j = i + passage.length;
+    const r = root.ownerDocument.createRange();
+    r.setStart(textNodeOf(0), i);
+    r.setEnd(textNodeOf(0), j);
+    const span = nn(spanFromRange(root, r));
+    expect(span).toEqual({ start: i, end: j });
+
+    const req = nn(
+      objectSpanRequest({
+        workspaceSlug: 'ws',
+        roomSlug: 'room',
+        objectId: '00000000-0000-4000-8000-000000000000',
+        bodyPath: convo.bodyPath('m2'),
+        span,
+      }),
+    );
+    expect(req.bodyPath).toEqual(path2);
+    expect(req.bodyPath).not.toEqual(path1);
+    // Read back through m2's OWN path — proves the span addresses m2, not m1.
+    expect(readerText(convo, 'm2', span)).toBe(passage);
+  });
+
+  it('a selection straddling TWO message bodies maps to null — no single-body span to certify', () => {
+    const convo = seededDoc(msg('m1', 'first body'), msg('m2', 'second body'));
+    const dom1 = renderCertifyBodyDom(CertifyBody, renderBodyModel(nn(convo.body('m1'))));
+    const dom2 = renderCertifyBodyDom(CertifyBody, renderBodyModel(nn(convo.body('m2'))));
+    const r = dom1.root.ownerDocument.createRange();
+    r.setStart(dom1.textNodeOf(0), 0); // starts in body 1
+    r.setEnd(dom2.textNodeOf(0), 3); // ends in body 2
+    // Neither root fully contains the range → refuse (never a cross-body span).
+    expect(spanFromRange(dom1.root, r)).toBeNull();
+    expect(spanFromRange(dom2.root, r)).toBeNull();
+  });
+});
+
+describe('an embed counts as exactly one unit, and a selection touching it includes it whole', () => {
+  it('the embed is one index unit, not its rendered label length, and reads back as one atom', () => {
+    const convo = seededDoc(msg('m2', 'AB CD'));
     const body = nn(convo.body('m2'));
     body.insertEmbed(2, { embedType: 'image', src: 'x' }); // between 'AB' and ' CD'
     expect(body.length).toBe(6); // A B <embed> ' ' C D
@@ -199,25 +381,76 @@ describe('an embed counts as exactly one unit; inline marks as zero', () => {
     whole.selectNodeContents(root);
     const span = nn(spanFromRange(root, whole));
     expect(span).toEqual({ start: 0, end: 6 });
-    expect(statusOf(convo, 'm2', span)).toBe('ok');
+    // INDEPENDENT: the reader re-reads text with the embed as a single opaque unit.
+    expect(readerText(convo, 'm2', span)).toBe('AB￼ CD');
 
     // A span covering JUST the embed is exactly one unit wide.
     const embedEl = nn(root.querySelector('[data-certify-embed]'));
     const justEmbed = root.ownerDocument.createRange();
     justEmbed.selectNode(embedEl);
     const embedSpan = nn(spanFromRange(root, justEmbed));
-    expect(embedSpan.end - embedSpan.start).toBe(1);
     expect(embedSpan).toEqual({ start: 2, end: 3 });
+    expect(readerText(convo, 'm2', embedSpan)).toBe('￼');
+  });
+
+  it('a selection ENDING INSIDE the embed atom INCLUDES it — finding #2, the always-start bug', () => {
+    const convo = seededDoc(msg('m2', 'AB CD'));
+    const body = nn(convo.body('m2'));
+    body.insertEmbed(2, { embedType: 'image', src: 'x' });
+    const segments = renderBodyModel(body);
+    const { root, textNodeOf } = renderCertifyBodyDom(CertifyBody, segments);
+
+    // A point genuinely INSIDE the embed's inner DOM (its label text node), as the
+    // UPPER bound of a selection that started before it.
+    const embedEl = nn(root.querySelector('[data-certify-embed]'));
+    const embedInner = nn(embedEl.firstChild) as Text; // e.g. the '⟦' text node
+    expect(embedInner.nodeType).toBe(3);
+
+    const r = root.ownerDocument.createRange();
+    r.setStart(textNodeOf(0), 0); // start of 'AB'
+    r.setEnd(embedInner, 1); // INSIDE the embed atom
+    const span = nn(spanFromRange(root, r));
+    // Before the fix this ended at 2 (embed silently EXCLUDED). It must be 3.
+    expect(span).toEqual({ start: 0, end: 3 });
+    expect(readerText(convo, 'm2', span)).toBe('AB￼');
+  });
+
+  it('a selection ENDING EXACTLY at the embed boundary EXCLUDES it — only what was highlighted', () => {
+    const convo = seededDoc(msg('m2', 'AB CD'));
+    const body = nn(convo.body('m2'));
+    body.insertEmbed(2, { embedType: 'image', src: 'x' });
+    const segments = renderBodyModel(body);
+    const { root, textNodeOf } = renderCertifyBodyDom(CertifyBody, segments);
+
+    // End exactly at the end of 'AB' — the boundary BEFORE the embed. The embed is
+    // NOT touched, so it is excluded (the endpoint is not inside the atom).
+    const r = root.ownerDocument.createRange();
+    r.setStart(textNodeOf(0), 0);
+    r.setEnd(textNodeOf(0), 2); // 'AB', ending at the embed's near boundary
+    const span = nn(spanFromRange(root, r));
+    expect(span).toEqual({ start: 0, end: 2 });
+    expect(readerText(convo, 'm2', span)).toBe('AB');
+  });
+
+  it('a selection whose BOTH endpoints fall inside the embed maps to the whole atom (never empty)', () => {
+    const convo = seededDoc(msg('m2', 'AB CD'));
+    const body = nn(convo.body('m2'));
+    body.insertEmbed(2, { embedType: 'image', src: 'x' });
+    const segments = renderBodyModel(body);
+    const { root } = renderCertifyBodyDom(CertifyBody, segments);
+
+    const embedEl = nn(root.querySelector('[data-certify-embed]'));
+    const inner = nn(embedEl.firstChild) as Text;
+    const r = root.ownerDocument.createRange();
+    r.setStart(inner, 0);
+    r.setEnd(inner, 1); // both inside the atom
+    const span = nn(spanFromRange(root, r));
+    expect(span).toEqual({ start: 2, end: 3 }); // the whole atom, one unit
+    expect(readerText(convo, 'm2', span)).toBe('￼');
   });
 
   it('an inline mark wrapper adds no units — offsets are unchanged by emphasis', () => {
-    const convo = seededDoc({
-      id: 'm3',
-      time: '12:00',
-      kind: 'human',
-      who: 'you',
-      text: 'bold word here',
-    });
+    const convo = seededDoc(msg('m3', 'bold word here'));
     const body = nn(convo.body('m3'));
     body.format(0, 4, { bold: true }); // 'bold' is emphasised
     const segments = renderBodyModel(body);
@@ -231,12 +464,13 @@ describe('an embed counts as exactly one unit; inline marks as zero', () => {
     const whole = root.ownerDocument.createRange();
     whole.selectNodeContents(root);
     expect(spanFromRange(root, whole)).toEqual({ start: 0, end: 'bold word here'.length });
+    expect(readerText(convo, 'm3', { start: 0, end: 14 })).toBe('bold word here');
   });
 });
 
-describe('objectSpanRequest assembles exactly the strict certify payload', () => {
+describe('objectSpanRequest assembles exactly the strict certify payload (wiring, not mapping)', () => {
   it('carries the six wire fields and nothing resolution-bearing', () => {
-    const convo = seededDoc({ id: 'm1', time: '12:00', kind: 'human', who: 'you', text: T });
+    const convo = seededDoc(msg('m1', T));
     const req = objectSpanRequest({
       workspaceSlug: 'ws',
       roomSlug: 'room',
@@ -255,7 +489,7 @@ describe('objectSpanRequest assembles exactly the strict certify payload', () =>
   });
 
   it('the mapped request PASSES the real certifyObjectSpanAction strict schema (wiring closes)', () => {
-    const convo = seededDoc({ id: 'm1', time: '12:00', kind: 'human', who: 'you', text: T });
+    const convo = seededDoc(msg('m1', T));
     const req = nn(
       objectSpanRequest({
         workspaceSlug: 'ws',
@@ -267,12 +501,13 @@ describe('objectSpanRequest assembles exactly the strict certify payload', () =>
     );
     // The exact object the affordance hands `certifyObjectSpanAction` parses clean —
     // and carries NO extra (resolution-bearing) field the .strict() schema refuses.
+    // NOTE: schema-parse proves the WIRE SHAPE, not the mapping (see the header).
     const parsed = CertifyObjectSpanInput.safeParse(req);
     expect(parsed.success).toBe(true);
   });
 
   it('is null when the message has no resolvable body path (honestly inert)', () => {
-    const convo = seededDoc({ id: 'm1', time: '12:00', kind: 'human', who: 'you', text: T });
+    const convo = seededDoc(msg('m1', T));
     expect(
       objectSpanRequest({
         workspaceSlug: 'ws',
@@ -282,5 +517,12 @@ describe('objectSpanRequest assembles exactly the strict certify payload', () =>
         span: { start: 0, end: 1 },
       }),
     ).toBeNull();
+  });
+
+  it('a mapped span is a well-formed, in-range covenant input (round-trip sanity, NOT a mapping proof)', () => {
+    const convo = seededDoc(msg('m1', T));
+    // This only asserts the request is in-range and structurally certifiable; the
+    // MAPPING correctness lives in the byte-for-byte + reader-re-read tests above.
+    expect(roundTripStatus(convo, 'm1', { start: 9, end: 15 })).toBe('ok');
   });
 });

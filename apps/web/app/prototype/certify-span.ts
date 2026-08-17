@@ -106,6 +106,9 @@ function nodeBodyLength(node: Node): number {
   return 0;
 }
 
+/** Which end of a two-point span a DOM point is being measured as. */
+type SpanEdge = 'lower' | 'upper';
+
 /**
  * The body index of a DOM point `(node, offset)` within `root` — the number of
  * body-index units lying strictly before it in document order. This is the value
@@ -113,33 +116,41 @@ function nodeBodyLength(node: Node): number {
  * position, because both count text as UTF-16 units and embeds as 1.
  *
  * `offset` is a character offset when `node` is a text node, or a child index when
- * `node` is an element (the two shapes the DOM Range/Selection API produces). A
- * point that lands INSIDE an embed atom is clamped to that atom's near/far edge, so
- * a stray anchor within an atom can never split its single unit.
+ * `node` is an element (the two shapes the DOM Range/Selection API produces).
+ *
+ * EMBED-ATOM ENDPOINTS. An embed is ONE indivisible index unit; a point that lands
+ * ON the atom's element or INSIDE its inner DOM cannot split it. Rather than
+ * silently collapse every such point to the atom's START (which dropped the embed
+ * from any selection whose UPPER bound touched it — the E8 finding-#2 wrong span),
+ * the point is snapped by the end of the span it belongs to: a `lower` bound snaps
+ * to the atom's NEAR edge (index before it) and an `upper` bound to its FAR edge
+ * (index after it). So an atom the selection touches at either end is included
+ * WHOLE — never split, never silently excluded. Endpoints that merely sit at an
+ * atom's boundary (expressed as a child index on the PARENT, e.g. `selectNode`)
+ * are handled by the ordinary element/child-index walk below, so ending a selection
+ * exactly before an atom still excludes it — only a point genuinely on/inside the
+ * atom is rounded outward.
  */
-function indexOfPoint(root: Node, node: Node, offset: number): number {
-  // If the point sits inside (or on) an embed atom, snap it to the atom's edges so
-  // the atom stays exactly one unit: offset 0 ⇒ the atom's start, else its end.
+function indexOfPoint(root: Node, node: Node, offset: number, edge: SpanEdge): number {
   let target: Node = node;
   let within: number;
+  // `closestEmbed` is ancestor-OR-self, so this covers both a point on the atom
+  // element itself and one inside its inner DOM. Snap outward by the span edge.
   const embedAncestor = closestEmbed(root, node);
-  if (embedAncestor && embedAncestor !== node) {
-    // Inside an atom's inner DOM — collapse to the atom itself.
+  if (embedAncestor) {
     target = embedAncestor;
-    within = 0; // measured up to the atom's start; the atom's own unit is added by preceding-sibling walk only when we step past it
+    // `within` is measured from `target`'s start: 0 ⇒ before the atom (near edge);
+    // 1 ⇒ after the atom's single unit (far edge). The preceding-sibling walk below
+    // then adds every unit lying before the atom.
+    within = edge === 'upper' ? 1 : 0;
   } else if (node.nodeType === 3 /* TEXT_NODE */) {
     within = Math.max(0, Math.min(offset, (node.nodeValue ?? '').length));
   } else if (node.nodeType === 1 /* ELEMENT_NODE */) {
     const el = node as Element;
-    if (isEmbedAtom(el)) {
-      // A point expressed as (embedElement, childIndex): 0 ⇒ before it, ≥1 ⇒ after it.
-      within = offset > 0 ? 1 : 0;
-    } else {
-      within = 0;
-      for (let i = 0; i < offset && i < el.childNodes.length; i++) {
-        const child = el.childNodes[i];
-        if (child) within += nodeBodyLength(child);
-      }
+    within = 0;
+    for (let i = 0; i < offset && i < el.childNodes.length; i++) {
+      const child = el.childNodes[i];
+      if (child) within += nodeBodyLength(child);
     }
   } else {
     within = 0;
@@ -190,8 +201,11 @@ export function bodyLengthOf(root: Node): number {
  */
 export function spanFromRange(root: Node, range: Range): BodySpan | null {
   if (!root.contains(range.startContainer) || !root.contains(range.endContainer)) return null;
-  const a = indexOfPoint(root, range.startContainer, range.startOffset);
-  const b = indexOfPoint(root, range.endContainer, range.endOffset);
+  // A `Range` is always document-ordered (start ≤ end), so its start container is
+  // the span's LOWER bound and its end container the UPPER bound — the edge that
+  // decides which way an embed-interior point rounds (see {@link indexOfPoint}).
+  const a = indexOfPoint(root, range.startContainer, range.startOffset, 'lower');
+  const b = indexOfPoint(root, range.endContainer, range.endOffset, 'upper');
   const start = Math.min(a, b);
   const end = Math.max(a, b);
   if (end <= start) return null;
@@ -299,4 +313,53 @@ export function bodyModelLength(segments: readonly BodySegment[]): number {
   let n = 0;
   for (const seg of segments) n += seg.kind === 'text' ? seg.text.length : 1;
   return n;
+}
+
+/**
+ * Whether a character's RENDERED form on the certify surface differs from its raw
+ * code unit (E8 finding #4). The body is drawn through the `fileText`
+ * verbatim-content door, which replaces every bidi override/isolate and nonprinting
+ * control char with U+FFFD (the replacement glyph). That rewrite is
+ * LENGTH-PRESERVING (one code unit in, one out), so the span index still aligns
+ * byte-for-byte -- but the human sees the replacement glyph while the covenant
+ * would certify the RAW character. This predicate matches exactly the `fileText`
+ * control-char set MINUS the newline (0x0A, which this surface re-emits as a real
+ * line break) and TAB (0x09, which `fileText` leaves intact): a char it accepts is
+ * one the human would see rendered differently from what would be certified.
+ */
+function isRenderDivergent(code: number): boolean {
+  return (
+    (code >= 0x00 && code <= 0x08) ||
+    (code >= 0x0b && code <= 0x1f) ||
+    (code >= 0x7f && code <= 0x9f) ||
+    code === 0x061c ||
+    code === 0x200e ||
+    code === 0x200f ||
+    code === 0x2028 ||
+    code === 0x2029 ||
+    (code >= 0x202a && code <= 0x202e) ||
+    (code >= 0x2066 && code <= 0x2069)
+  );
+}
+
+/**
+ * Whether any TEXT run in the rendered body carries a character the certify surface
+ * paints as the U+FFFD replacement glyph rather than its raw form
+ * ({@link isRenderDivergent}). When true, what the human SEES is not byte-for-byte
+ * what the covenant would CERTIFY -- the anchor is minted from the raw `Y.XmlText`,
+ * not the sanitized render -- so the surface surfaces a warning. It does NOT refuse:
+ * the raw content is legitimate to certify and the span index is still exact
+ * (the sanitization is length-preserving), and the U+FFFD sanitization stays -- it
+ * is a bidi-security defense, not a display quirk. Embeds are excluded; their label
+ * divergence never affects the certified body, which counts an embed as one opaque
+ * unit regardless of label.
+ */
+export function bodyRenderDivergesFromRaw(segments: readonly BodySegment[]): boolean {
+  for (const seg of segments) {
+    if (seg.kind !== 'text') continue;
+    for (let i = 0; i < seg.text.length; i++) {
+      if (isRenderDivergent(seg.text.charCodeAt(i))) return true;
+    }
+  }
+  return false;
 }
