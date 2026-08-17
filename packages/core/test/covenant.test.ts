@@ -3,10 +3,10 @@ import {
   type CapturedSelection,
   type CovenantAnchor,
   type CovenantDocReader,
-  type EnclosedItem,
-  type RenderedFragment,
   canonicalRendered,
   certifyAnchor,
+  type EnclosedItem,
+  type RenderedFragment,
   renderedDigestOf,
   resolveCovenant,
   sha256Hex,
@@ -17,7 +17,8 @@ import {
  * document is a stub reader that genuinely consumes EVERY anchor field, so a
  * flip of any field moves the verdict — the "if flipping an input doesn't move
  * the output the field isn't wired" discipline, made mechanical. A companion
- * suite (`covenant-yjs.test.ts`) proves the same against a real in-memory Y.Doc.
+ * suite (`covenant-conformance.test.ts`) proves the same against a real in-memory
+ * Y.Doc through the reference reader.
  */
 
 const ALICE = { kind: 'human', userId: 'u_alice' } as const;
@@ -106,9 +107,7 @@ function anchorFor(doc: StubDoc): CovenantAnchor {
 
 describe('sha256Hex — the digest is a correct SHA-256 (FIPS-180-4 vectors)', () => {
   it('hashes the empty string', () => {
-    expect(sha256Hex('')).toBe(
-      'e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855',
-    );
+    expect(sha256Hex('')).toBe('e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855');
   });
   it('hashes "abc"', () => {
     expect(sha256Hex('abc')).toBe(
@@ -140,7 +139,9 @@ describe('certifyAnchor — the digest is computed here, not accepted from the r
   it('returns null when the selection cannot even be captured (no `✓` over a lie)', () => {
     const doc = sampleDoc();
     doc.available = false;
-    expect(certifyAnchor(doc, { objectId: 'o', roomId: 'r', certifier: ALICE, certifiedAt: AT })).toBeNull();
+    expect(
+      certifyAnchor(doc, { objectId: 'o', roomId: 'r', certifier: ALICE, certifiedAt: AT }),
+    ).toBeNull();
   });
 });
 
@@ -190,7 +191,8 @@ describe('resolveCovenant — each drift class moves the verdict to DRIFT', () =
   it('class 4b: an embed internal — image URL — changed', () => {
     const doc = sampleDoc();
     const anchor = anchorFor(doc);
-    (doc.fragment.nodes[2] as { identity: Record<string, string> }).identity.src = 'https://x/b.png';
+    (doc.fragment.nodes[2] as { identity: Record<string, string> }).identity.src =
+      'https://x/b.png';
     expect(resolveCovenant(doc, anchor).covenantStatus).toBe('drift');
   });
 
@@ -288,16 +290,24 @@ describe('deterministic canonicalization — same logical content ⇒ same diges
 
   it('sorts marks[] — mark order is not rendered meaning', () => {
     const one = wrap([
-      { kind: 'text', text: 'x', marks: [
-        { type: 'bold', attrs: {}, straddles: 'none' },
-        { type: 'italic', attrs: {}, straddles: 'none' },
-      ] },
+      {
+        kind: 'text',
+        text: 'x',
+        marks: [
+          { type: 'bold', attrs: {}, straddles: 'none' },
+          { type: 'italic', attrs: {}, straddles: 'none' },
+        ],
+      },
     ]);
     const two = wrap([
-      { kind: 'text', text: 'x', marks: [
-        { type: 'italic', attrs: {}, straddles: 'none' },
-        { type: 'bold', attrs: {}, straddles: 'none' },
-      ] },
+      {
+        kind: 'text',
+        text: 'x',
+        marks: [
+          { type: 'italic', attrs: {}, straddles: 'none' },
+          { type: 'bold', attrs: {}, straddles: 'none' },
+        ],
+      },
     ]);
     expect(renderedDigestOf(one)).toBe(renderedDigestOf(two));
   });
@@ -328,6 +338,49 @@ describe('deterministic canonicalization — same logical content ⇒ same diges
     const a = wrap([{ kind: 'text', text: 'ship it', marks: [] }]);
     const b = wrap([{ kind: 'text', text: 'ship it now', marks: [] }]);
     expect(renderedDigestOf(a)).not.toBe(renderedDigestOf(b));
+  });
+});
+
+describe('EXACT content: NFC-only normalization — the prose fold is GONE (round-3 CRITICAL)', () => {
+  const wrap = (nodes: RenderedFragment['nodes']): RenderedFragment => ({ ancestors: [], nodes });
+  const text = (t: string): RenderedFragment => wrap([{ kind: 'text', text: t, marks: [] }]);
+
+  // Each of these resolved `ok` under the removed `normalizeForReceipt` prose fold;
+  // under EXACT content each MUST move the digest (→ DRIFT when re-resolved).
+  it('whitespace is content: `ship it` vs `ship  it` (double space) → different digest', () => {
+    expect(renderedDigestOf(text('ship it'))).not.toBe(renderedDigestOf(text('ship  it')));
+  });
+  it('a newline is content: `ship it` vs `ship\\nit` → different digest', () => {
+    expect(renderedDigestOf(text('ship it'))).not.toBe(renderedDigestOf(text('ship\nit')));
+  });
+  it('leading/trailing whitespace is content (no trim): ` x ` vs `x` → different digest', () => {
+    expect(renderedDigestOf(text(' x '))).not.toBe(renderedDigestOf(text('x')));
+  });
+  it('apostrophes are content: straight vs curly apostrophe → different digest', () => {
+    expect(renderedDigestOf(text("won't"))).not.toBe(renderedDigestOf(text('won’t')));
+  });
+  it('an injected ZERO-WIDTH SPACE is content (the mention-target attack) → different digest', () => {
+    const clean = wrap([{ kind: 'embed', embedType: 'mention', identity: { target: 'u_alice' } }]);
+    const zwsp = wrap([{ kind: 'embed', embedType: 'mention', identity: { target: 'u_ali​ce' } }]);
+    expect(renderedDigestOf(clean)).not.toBe(renderedDigestOf(zwsp));
+  });
+  it('an image src with an invisible char is content → different digest', () => {
+    const clean = wrap([
+      { kind: 'embed', embedType: 'image', identity: { src: 'https://x/a.png' } },
+    ]);
+    const inv = wrap([{ kind: 'embed', embedType: 'image', identity: { src: 'https://x/a​png' } }]);
+    expect(renderedDigestOf(clean)).not.toBe(renderedDigestOf(inv));
+  });
+  it('markdown is NOT unfolded: `foo bar` vs `[foo](bar)` → different digest', () => {
+    expect(renderedDigestOf(text('foo bar'))).not.toBe(renderedDigestOf(text('[foo](bar)')));
+  });
+
+  // The ONE thing NFC SHOULD fold: canonical (composed vs decomposed) equivalence.
+  it('NFC still folds canonical equivalence: composed `é` vs decomposed `é` → SAME digest', () => {
+    const composed = 'café'; // é as U+00E9
+    const decomposed = 'café'; // e + combining acute U+0301
+    expect(composed).not.toBe(decomposed);
+    expect(renderedDigestOf(text(composed))).toBe(renderedDigestOf(text(decomposed)));
   });
 });
 

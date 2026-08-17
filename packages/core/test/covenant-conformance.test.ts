@@ -1,7 +1,9 @@
-import * as Y from 'yjs';
 import { describe, expect, it } from 'vitest';
+import * as Y from 'yjs';
 import { type CovenantAnchor, certifyAnchor, resolveCovenant } from '../src/index.js';
 import { YjsCovenantDocReader } from './support/yjs-reader.js';
+
+const b64 = (bytes: Uint8Array): string => Buffer.from(bytes).toString('base64');
 
 /**
  * THE `CovenantDocReader` CONFORMANCE SUITE.
@@ -81,7 +83,12 @@ function capturingReader(doc: Y.Doc): YjsCovenantDocReader {
 }
 
 function certify(reader: YjsCovenantDocReader): CovenantAnchor {
-  const anchor = certifyAnchor(reader, { objectId: 'o_span', roomId: 'room_1', certifier: ALICE, certifiedAt: AT });
+  const anchor = certifyAnchor(reader, {
+    objectId: 'o_span',
+    roomId: 'room_1',
+    certifier: ALICE,
+    certifiedAt: AT,
+  });
   if (anchor === null) throw new Error('capture failed');
   return anchor;
 }
@@ -353,11 +360,205 @@ describe('flip-the-input on the real Yjs reader — every field is wired', () =>
   it('enclosedItems (a ghost item in the identity set)', () => {
     const { reader, anchor } = fresh();
     expect(
-      status(reader, { ...anchor, enclosedItems: [...anchor.enclosedItems, { id: '9:9', kind: 'text' }] }),
+      status(reader, {
+        ...anchor,
+        enclosedItems: [...anchor.enclosedItems, { id: '9:9', kind: 'text' }],
+      }),
     ).toBe('drift');
   });
   it('renderedDigest', () => {
     const { reader, anchor } = fresh();
     expect(status(reader, { ...anchor, renderedDigest: 'f'.repeat(64) })).toBe('drift');
+  });
+});
+
+// ─────────────────────────────────────────────────────────────────────────────
+// EXACT content, on the REAL reader (round-3 CRITICAL). The prose fold that let
+// mutated content resolve `ok` is gone; whitespace between two embeds is content.
+// ─────────────────────────────────────────────────────────────────────────────
+describe('EXACT content on the real Yjs reader — no prose fold (round-3 CRITICAL)', () => {
+  // grok's sharpest case: mention · " " · image. The space is a text run BETWEEN
+  // two embeds; deleting it collided the two embeds under the old fold (the run
+  // trimmed to '' and was dropped, enclosedItems listed only the embeds, and the
+  // digest did not move → false ✓). Under NFC-only the space is content.
+  function embedSpaceEmbed(): { doc: Y.Doc; body: Y.XmlText } {
+    const doc = new Y.Doc();
+    const frag = doc.getXmlFragment('doc');
+    const para = new Y.XmlElement('paragraph');
+    const body = new Y.XmlText();
+    frag.insert(0, [para]);
+    para.insert(0, [body]);
+    body.insertEmbed(0, { embedType: 'mention', target: 'u_alice', label: 'Alice' });
+    body.insert(1, ' ');
+    body.insertEmbed(2, { embedType: 'image', src: 'https://x/a.png' });
+    return { doc, body };
+  }
+
+  it('delete the space between a mention and an image → DRIFT (the collide-embeds attack)', () => {
+    const { doc, body } = embedSpaceEmbed();
+    const reader = new YjsCovenantDocReader(doc, { path: [0, 0], start: 0, end: 3 });
+    const anchor = certify(reader);
+    expect(status(reader, anchor)).toBe('ok'); // unchanged
+    body.delete(1, 1); // remove the space
+    expect(status(reader, anchor)).toBe('drift');
+  });
+
+  it('a double space inside the span → DRIFT (whitespace runs are not collapsed)', () => {
+    const doc = new Y.Doc();
+    const frag = doc.getXmlFragment('doc');
+    const para = new Y.XmlElement('paragraph');
+    const body = new Y.XmlText();
+    frag.insert(0, [para]);
+    para.insert(0, [body]);
+    body.insert(0, 'ship it');
+    const reader = new YjsCovenantDocReader(doc, { path: [0, 0], start: 0, end: 7 });
+    const anchor = certify(reader);
+    body.insert(4, ' '); // "ship  it" (double space)
+    expect(status(reader, anchor)).toBe('drift');
+  });
+
+  it('inject a zero-width space into a mention target → DRIFT (agent-peer write attack)', () => {
+    const doc = new Y.Doc();
+    const frag = doc.getXmlFragment('doc');
+    const para = new Y.XmlElement('paragraph');
+    const body = new Y.XmlText();
+    frag.insert(0, [para]);
+    para.insert(0, [body]);
+    body.insertEmbed(0, { embedType: 'mention', target: 'u_alice', label: 'Alice' });
+    const reader = new YjsCovenantDocReader(doc, { path: [0, 0], start: 0, end: 1 });
+    const anchor = certify(reader);
+    body.delete(0, 1);
+    body.insertEmbed(0, { embedType: 'mention', target: 'u_ali​ce', label: 'Alice' });
+    expect(status(reader, anchor)).toBe('drift');
+  });
+});
+
+// ─────────────────────────────────────────────────────────────────────────────
+// STRICT snapshot verification (round-3 HIGH). The captured snapshot must be the
+// certify-time value, not merely a consistent prefix / a weakened subset.
+// ─────────────────────────────────────────────────────────────────────────────
+describe('strict snapshot verification — weakened values are rejected (round-3 HIGH)', () => {
+  it('a ZEROED revision + EMPTIED state vector → DRIFT (was a consistent prefix of every doc)', () => {
+    const { doc } = makeDoc();
+    const reader = capturingReader(doc);
+    const anchor = certify(reader);
+    // (revision:0, stateVector:<empty>) is internally consistent (sum 0 == 0) and a
+    // prefix of every live doc — the old vacuous pass. The span's real items are not
+    // covered by an empty SV, so it is now DRIFT.
+    const emptySV = b64(Y.encodeStateVector(new Y.Doc()));
+    expect(status(reader, { ...anchor, revision: 0, stateVector: emptySV })).toBe('drift');
+  });
+
+  it('a non-empty captured deleteSet REPLACED BY EMPTY → DRIFT (weakening rejected)', () => {
+    // A doc with a real pre-certify deletion, so the captured deleteSet is non-empty.
+    const doc = new Y.Doc();
+    const frag = doc.getXmlFragment('doc');
+    const para = new Y.XmlElement('paragraph');
+    const body = new Y.XmlText();
+    frag.insert(0, [para]);
+    para.insert(0, [body]);
+    body.insert(0, 'shipXit');
+    body.delete(4, 1); // delete the 'X' (strictly inside) → a real deletion in the delete set
+    const reader = new YjsCovenantDocReader(doc, { path: [0, 0], start: 0, end: 6 });
+    const anchor = certify(reader);
+    // Sanity: the captured deleteSet really is non-empty.
+    const capturedDS = JSON.parse(Buffer.from(anchor.deleteSet, 'base64').toString('utf8'));
+    expect(Object.keys(capturedDS).length).toBeGreaterThan(0);
+    expect(status(reader, anchor)).toBe('ok'); // the honest anchor resolves OK
+    // Weaken the deleteSet to empty; the completeness check now fails → DRIFT.
+    const emptied = Buffer.from(JSON.stringify({})).toString('base64');
+    expect(status(reader, { ...anchor, deleteSet: emptied })).toBe('drift');
+  });
+});
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Embed-boundary straddle (round-3 MEDIUM). A mark straddling an EMBED boundary
+// (not an inside-text boundary) must be detected, or a retarget across it is a
+// byte-identical lie.
+// ─────────────────────────────────────────────────────────────────────────────
+describe('embed-boundary straddle (round-3 MEDIUM)', () => {
+  function bar(): { doc: Y.Doc; body: Y.XmlText } {
+    const doc = new Y.Doc();
+    const frag = doc.getXmlFragment('doc');
+    const para = new Y.XmlElement('paragraph');
+    const body = new Y.XmlText();
+    frag.insert(0, [para]);
+    para.insert(0, [body]);
+    body.insert(0, 'AB'); // idx 0,1
+    body.insertEmbed(2, { embedType: 'tag', id: 't1' }); // idx 2
+    body.insert(3, 'CD'); // idx 3,4
+    body.format(0, 5, { bold: true }); // bold runs continuously ACROSS the embed
+    return { doc, body };
+  }
+
+  it('a mark straddling an EMBED at the span start, retargeted to stop crossing → DRIFT', () => {
+    const { doc, body } = bar();
+    // Span [2,5): the START boundary sits ON the embed; the in-span "CD" bold run
+    // straddles the start because bold runs continuously across the embed from "AB".
+    const reader = new YjsCovenantDocReader(doc, { path: [0, 0], start: 2, end: 5 });
+    const anchor = certify(reader);
+    expect(status(reader, anchor)).toBe('ok');
+    // Unbold ONLY the out-of-span "AB". The in-span "CD" text + its bold mark are
+    // byte-identical and the embed identity is unchanged (bold is not embed identity);
+    // ONLY the straddle flag flips start→none. A reader ignoring embed-boundary
+    // straddle (the round-2 hole) would render both as 'none' and NOT drift.
+    body.format(0, 2, { bold: null });
+    expect(status(reader, anchor)).toBe('drift');
+  });
+});
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Canonical nested-embed child (round-3 MEDIUM). An OBJECT child must be hashed
+// key-order-independently, or insertion order false-stales.
+// ─────────────────────────────────────────────────────────────────────────────
+describe('canonical nested-embed child hash (round-3 MEDIUM)', () => {
+  function docWithChild(child: Record<string, unknown>): Y.Doc {
+    const doc = new Y.Doc();
+    const frag = doc.getXmlFragment('doc');
+    const para = new Y.XmlElement('paragraph');
+    const body = new Y.XmlText();
+    frag.insert(0, [para]);
+    para.insert(0, [body]);
+    body.insertEmbed(0, { embedType: 'nestedDoc', child });
+    return doc;
+  }
+  const certifyChild = (child: Record<string, unknown>): CovenantAnchor =>
+    certify(new YjsCovenantDocReader(docWithChild(child), { path: [0, 0], start: 0, end: 1 }));
+
+  it('the same object child in a different key order → SAME digest (insertion order is not content)', () => {
+    const a = certifyChild({ title: 'Plan', author: 'Alice' });
+    const b = certifyChild({ author: 'Alice', title: 'Plan' });
+    expect(a.renderedDigest).toBe(b.renderedDigest);
+  });
+
+  it('a genuinely different object child → DIFFERENT digest (canonicalization is not blindness)', () => {
+    const a = certifyChild({ title: 'Plan', author: 'Alice' });
+    const b = certifyChild({ title: 'Plan', author: 'Bob' });
+    expect(a.renderedDigest).not.toBe(b.renderedDigest);
+  });
+});
+
+// ─────────────────────────────────────────────────────────────────────────────
+// PROVENANCE is not a content-resolution input (round-3 DOCUMENT — not a bug).
+// objectId/roomId/certifier/certifiedAt are receipt identity, frozen immutable by
+// the ledger (0050/0051). resolveCovenant answers "did the CONTENT drift" and must
+// NOT treat them as drift inputs. This test documents that intent so it is not
+// re-flagged: changing all four does not move the OK verdict.
+// ─────────────────────────────────────────────────────────────────────────────
+describe('provenance fields are intentionally NOT drift inputs (round-3 DOCUMENT)', () => {
+  it('changing objectId / roomId / certifier / certifiedAt leaves the verdict OK', () => {
+    const { doc } = makeDoc();
+    const reader = capturingReader(doc);
+    const anchor = certify(reader);
+    expect(status(reader, anchor)).toBe('ok');
+    const reprovenanced: CovenantAnchor = {
+      ...anchor,
+      objectId: 'o_other',
+      roomId: 'room_2',
+      certifier: { kind: 'human', userId: 'u_bob' },
+      certifiedAt: '2099-01-01T00:00:00.000Z',
+    };
+    // Content is unchanged, so the covenant still holds — provenance is not content.
+    expect(status(reader, reprovenanced)).toBe('ok');
   });
 });

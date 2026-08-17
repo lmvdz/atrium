@@ -1,6 +1,5 @@
 import { z } from 'zod';
 import { Actor, Id, Timestamp } from './common.js';
-import { normalizeForReceipt } from './matching.js';
 
 /**
  * THE COVENANT ANCHOR — the record a human `✓` binds to on the object/span axis,
@@ -86,10 +85,11 @@ const K = new Uint32Array([
 function utf8Bytes(input: string): number[] {
   const out: number[] = [];
   for (const ch of input) {
-    let cp = ch.codePointAt(0) as number;
+    const cp = ch.codePointAt(0) as number;
     if (cp < 0x80) out.push(cp);
     else if (cp < 0x800) out.push(0xc0 | (cp >> 6), 0x80 | (cp & 0x3f));
-    else if (cp < 0x10000) out.push(0xe0 | (cp >> 12), 0x80 | ((cp >> 6) & 0x3f), 0x80 | (cp & 0x3f));
+    else if (cp < 0x10000)
+      out.push(0xe0 | (cp >> 12), 0x80 | ((cp >> 6) & 0x3f), 0x80 | (cp & 0x3f));
     else {
       out.push(
         0xf0 | (cp >> 18),
@@ -294,26 +294,39 @@ function canonical(value: unknown): string {
 }
 
 /**
- * DETERMINISTIC CANONICALIZATION (class E). Yjs presents the SAME logical content
- * in more than one shape — a run split into two ops after an insert, a string in
- * NFC vs NFD form, marks in whatever order the map iterated — and a naive digest
- * of the raw fragment false-stales on every one of them. Normalize so that same
- * logical content ⇒ same digest, and only a REAL rendered change moves it:
+ * DETERMINISTIC CANONICALIZATION (class E), under EXACT-CONTENT semantics. Yjs
+ * presents the SAME logical content in more than one *CRDT* shape — a run split
+ * into two ops after an insert, a string in NFC vs NFD form, marks in whatever
+ * order the map iterated, object keys in insertion order — and a naive digest of
+ * the raw fragment false-stales on every one of them. Normalize away ONLY those
+ * CRDT-shape artifacts, so same content ⇒ same digest, and any REAL rendered
+ * change — including one a fuzzy prose fold would have hidden — still moves it:
  *
- *   1. **NFC-normalize + prose-fold every string** — text, mark/ancestor attribute
- *      values and keys, embed identity. `normalizeForReceipt` is core's existing
- *      prose fold (Unicode-invisible drop, whitespace-run collapse, apostrophe +
- *      link canonicalization) and is the same fold the receipt path trusts; NFC
- *      first so composed and decomposed accents agree. This is the prose-v1
- *      normalization of #163 (a reflow must not false-stale).
+ *   1. **NFC-normalize every string** — text, mark/ancestor attribute values and
+ *      keys, embed identity. NFC is Unicode *canonical* equivalence: composed `é`
+ *      (U+00E9) and decomposed `é` (`e`+U+0301) are the SAME character and must
+ *      agree; that is the one and only folding the covenant performs. Round 2
+ *      (both lineages) found the previous `normalizeForReceipt` prose fold —
+ *      whitespace-run collapse, apostrophe fold, invisible-character drop,
+ *      markdown-link unfold, trim — let mutated content resolve `ok`
+ *      (`ship it`→`ship  it`, `won't`→`won’t`, a ZWSP injected into a mention
+ *      target, `foo bar`→`[foo](bar)`). Agent-peers WRITE these strings into the
+ *      CRDT; a `✓` over EXACT content must treat every one of them as DRIFT, so
+ *      the prose fold is removed and NFC is all that remains.
  *   2. **Sort each text run's `marks[]`** — mark order is not rendered meaning.
- *   3. **Coalesce adjacent text runs with identical marks**, and drop empty runs —
- *      Yjs op-splitting is not rendered meaning.
+ *   3. **Coalesce adjacent text runs with identical marks**, and drop only
+ *      genuinely EMPTY (`''`) runs — Yjs op-splitting is not rendered meaning. A
+ *      whitespace-only run is content (a space between two embeds), NOT empty, so
+ *      it is KEPT: deleting it is drift.
  *
  * Embeds are boundaries: two text runs on either side of an embed do NOT coalesce.
+ *
+ * NOTE (reopenable): NFC-only is the recorded EXACT-content stance. A future
+ * meaning-fold or raw-bytes variant is a covenant-semantics decision (#163/#164),
+ * not a code detail — flip it here, deliberately, if that authority changes.
  */
 function normalizeString(s: string): string {
-  return normalizeForReceipt(s.normalize('NFC'));
+  return s.normalize('NFC');
 }
 
 function normalizeAttrs(attrs: Record<string, string>): Record<string, string> {
@@ -323,7 +336,11 @@ function normalizeAttrs(attrs: Record<string, string>): Record<string, string> {
 }
 
 function normalizeMark(mark: Mark): Mark {
-  return { type: normalizeString(mark.type), attrs: normalizeAttrs(mark.attrs), straddles: mark.straddles };
+  return {
+    type: normalizeString(mark.type),
+    attrs: normalizeAttrs(mark.attrs),
+    straddles: mark.straddles,
+  };
 }
 
 /** A stable, total ordering key for a mark — its own canonical form. */
@@ -333,7 +350,9 @@ function markKey(mark: Mark): string {
 
 /** Sort a mark set into its canonical order (mark order is not rendered meaning). */
 function sortedMarks(marks: readonly Mark[]): Mark[] {
-  return marks.map(normalizeMark).sort((a, b) => (markKey(a) < markKey(b) ? -1 : markKey(a) > markKey(b) ? 1 : 0));
+  return marks
+    .map(normalizeMark)
+    .sort((a, b) => (markKey(a) < markKey(b) ? -1 : markKey(a) > markKey(b) ? 1 : 0));
 }
 
 /** True when two already-sorted normalized mark sets are identical. */
@@ -348,11 +367,11 @@ function sameMarks(a: readonly Mark[], b: readonly Mark[]): boolean {
 /**
  * Normalize a fragment to its canonical form (class E) before digesting.
  *
- * Text is coalesced on RAW text before the prose fold, then folded ONCE per run:
- * `normalizeForReceipt` trims and collapses whitespace, so folding each Yjs op
- * separately and concatenating would drop the boundary spaces a single fold
- * keeps — the coalesce must precede the fold, or `'ship '·'it'` and `'ship it'`
- * digest differently (they must not).
+ * Text is coalesced on RAW text BEFORE the per-run NFC normalization: NFC is a
+ * canonical composition that can differ across a concatenation boundary (a base
+ * letter in one Yjs op and its combining accent in the next compose to one code
+ * point only once joined), so coalescing first and normalizing the whole run is
+ * both correct and stable. A byte-identical resplit therefore digests identically.
  */
 export function normalizeFragment(fragment: RenderedFragment): RenderedFragment {
   const ancestors: BlockFormat[] = fragment.ancestors.map((a) => ({
@@ -374,7 +393,11 @@ export function normalizeFragment(fragment: RenderedFragment): RenderedFragment 
         staged.push({ kind: 'text', rawText: node.text, marks });
       }
     } else {
-      staged.push({ kind: 'embed', embedType: normalizeString(node.embedType), identity: normalizeAttrs(node.identity) });
+      staged.push({
+        kind: 'embed',
+        embedType: normalizeString(node.embedType),
+        identity: normalizeAttrs(node.identity),
+      });
     }
   }
 
@@ -443,7 +466,9 @@ export const CovenantAnchor = z.object({
   /** The identity of every item inside the span, in document order. */
   enclosedItems: z.array(EnclosedItem),
   /** SHA-256 of the canonical rendered fragment at certify time. */
-  renderedDigest: z.string().regex(/^[0-9a-f]{64}$/, 'a rendered digest is 64 lower-case hex chars'),
+  renderedDigest: z
+    .string()
+    .regex(/^[0-9a-f]{64}$/, 'a rendered digest is 64 lower-case hex chars'),
   /** Who certified. Only a human may (enforced upstream); recorded for the receipt. */
   certifier: Actor,
   certifiedAt: Timestamp,
@@ -573,8 +598,21 @@ function sameEnclosedItems(a: readonly EnclosedItem[], b: readonly EnclosedItem[
  * `RenderedFragment.parse`, a decode error on a forged position/vector — yields
  * DRIFT, never a propagated exception and never OK. An exception is exactly the
  * "I could not faithfully resolve" case, which is drift by the covenant.
+ *
+ * WHAT IS DELIBERATELY NOT A DRIFT INPUT (documented so reviews don't re-flag it):
+ * `objectId`, `roomId`, `certifier`, and `certifiedAt` are PROVENANCE / receipt
+ * identity — WHO certified WHAT, WHERE, and WHEN — not content. They are frozen
+ * immutable by the ledger (migrations 0050/0051's trigger) and bound to the object
+ * by the same-room composite FK, so they cannot be tampered on a live anchor. This
+ * function answers exactly one question — "did the certified CONTENT drift" — and
+ * so it intentionally does NOT read those four fields; changing one does not (and
+ * must not) move the OK/DRIFT verdict. The provenance question is answered by the
+ * ledger row's identity, not here. (Round-2 gauntlet: confirmed NOT a bug.)
  */
-export function resolveCovenant(doc: CovenantDocReader, anchor: CovenantAnchor): CovenantResolution {
+export function resolveCovenant(
+  doc: CovenantDocReader,
+  anchor: CovenantAnchor,
+): CovenantResolution {
   try {
     const parsedAnchor = CovenantAnchor.parse(anchor);
     const resolved = doc.resolveSpan(parsedAnchor);
@@ -586,12 +624,20 @@ export function resolveCovenant(doc: CovenantDocReader, anchor: CovenantAnchor):
     // / foreign revision, state vector, or delete set the reader could not confirm
     // against the live doc is DRIFT before the digest is even consulted.
     if (resolved.snapshotVerified !== true) {
-      return { revision: parsedAnchor.revision, renderedFragment: resolved.fragment, covenantStatus: 'drift' };
+      return {
+        revision: parsedAnchor.revision,
+        renderedFragment: resolved.fragment,
+        covenantStatus: 'drift',
+      };
     }
     // A changed identity set (e.g. a deleted enclosed item) is drift on its own
     // axis (class 5), checked before and independently of the digest.
     if (!sameEnclosedItems(resolved.enclosedItems, parsedAnchor.enclosedItems)) {
-      return { revision: parsedAnchor.revision, renderedFragment: resolved.fragment, covenantStatus: 'drift' };
+      return {
+        revision: parsedAnchor.revision,
+        renderedFragment: resolved.fragment,
+        covenantStatus: 'drift',
+      };
     }
     // The meaning check: byte-identical rendered content ⇒ OK, anything else ⇒ DRIFT
     // (classes 1–4, and 7's OK). `renderedDigestOf` parses its input, so a
@@ -605,9 +651,10 @@ export function resolveCovenant(doc: CovenantDocReader, anchor: CovenantAnchor):
   } catch {
     // Any throw is "could not faithfully resolve" ⇒ fail-closed to DRIFT. The
     // revision is read defensively; a malformed anchor still yields a resolution.
-    const revision = typeof (anchor as { revision?: unknown })?.revision === 'number'
-      ? (anchor as { revision: number }).revision
-      : 0;
+    const revision =
+      typeof (anchor as { revision?: unknown })?.revision === 'number'
+        ? (anchor as { revision: number }).revision
+        : 0;
     return { revision, renderedFragment: null, covenantStatus: 'drift' };
   }
 }

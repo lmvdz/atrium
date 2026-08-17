@@ -87,16 +87,38 @@ function marksOf(attributes: Record<string, unknown> | undefined): Mark[] {
   });
 }
 
+/**
+ * A stable, insertion-order-independent JSON string. `JSON.stringify` serializes
+ * object keys in insertion order, so two nested-embed children that are the SAME
+ * object built in a different key order would hash differently — a false-stale.
+ * Sort keys at every depth so identical content ⇒ one digest (the same key-sort
+ * discipline `@atrium/core`'s `canonical()` uses on the fragment itself).
+ */
+function stableStringify(value: unknown): string {
+  if (value === null || typeof value !== 'object') return JSON.stringify(value) ?? 'null';
+  if (Array.isArray(value)) return `[${value.map(stableStringify).join(',')}]`;
+  const obj = value as Record<string, unknown>;
+  return `{${Object.keys(obj)
+    .sort()
+    .map((k) => `${JSON.stringify(k)}:${stableStringify(obj[k])}`)
+    .join(',')}}`;
+}
+
 /** The identity of an embed — every field stringified, plus a digest of any child content. */
-function embedIdentity(embed: Record<string, unknown>): { embedType: string; identity: Record<string, string> } {
-  const embedType = String(embed['embedType'] ?? embed['type'] ?? 'embed');
+function embedIdentity(embed: Record<string, unknown>): {
+  embedType: string;
+  identity: Record<string, string>;
+} {
+  const embedType = String(embed.embedType ?? embed.type ?? 'embed');
   const identity: Record<string, string> = {};
   for (const [k, v] of Object.entries(embed)) {
     if (k === 'embedType' || k === 'type') continue;
     if (k === 'child' || k === 'children') {
       // A nested-doc / mention-label body is CHILD content: digest it so a change
-      // inside the child (not just a top-level attr) is drift (class A / #163).
-      identity['docDigest'] = sha256Hex(typeof v === 'string' ? v : JSON.stringify(v));
+      // inside the child (not just a top-level attr) is drift (class A / #163). A
+      // string child is hashed as-is; an OBJECT child is canonicalized first
+      // (sorted keys), so insertion order is not mistaken for a content change.
+      identity.docDigest = sha256Hex(typeof v === 'string' ? v : stableStringify(v));
       continue;
     }
     identity[k] = String(v);
@@ -104,13 +126,25 @@ function embedIdentity(embed: Record<string, unknown>): { embedType: string; ide
   return { embedType, identity };
 }
 
-/** The mark-type→attrs active at absolute char `offset`, or null (for straddle detection). */
-function markActiveAt(delta: DeltaOp[], offset: number, type: string): Record<string, string> | null {
+/**
+ * The mark-type→attrs active at absolute char `offset`, or null (for straddle
+ * detection). Reads `op.attributes` regardless of whether the op is text OR an
+ * EMBED: a Yjs `format()` stamps attributes onto an embed op too (verified —
+ * `{insert:{…embed…},attributes:{bold:true}}`), so a mark that runs CONTINUOUSLY
+ * across an embed at the span boundary is seen as active there. The round-2 hole
+ * was this function returning `null` for every embed, which made a mark straddling
+ * an embed boundary read as `straddles:'none'` — a byte-identical lie when the
+ * mark was later retargeted to stop crossing the boundary.
+ */
+function markActiveAt(
+  delta: DeltaOp[],
+  offset: number,
+  type: string,
+): Record<string, string> | null {
   let pos = 0;
   for (const op of delta) {
     const len = typeof op.insert === 'string' ? op.insert.length : 1;
     if (offset >= pos && offset < pos + len) {
-      if (typeof op.insert !== 'string') return null; // an embed carries no inline marks
       const attrs = op.attributes;
       if (!attrs || !(type in attrs)) return null;
       const m = marksOf(attrs).find((x) => x.type === type);
@@ -185,6 +219,11 @@ export class YjsCovenantDocReader implements CovenantDocReader {
   ): { fragment: RenderedFragment; enclosedItems: EnclosedItem[] } {
     const delta = body.toDelta() as DeltaOp[];
     const nodes: RenderedNode[] = [];
+    // Track the first / last IN-SPAN text node so straddle is stamped on the runs
+    // adjacent to the span boundaries — even when the boundary itself is an EMBED
+    // (in which case no text op satisfies the old `from<=start` / `to>=end` guard).
+    let firstText = -1;
+    let lastText = -1;
     let pos = 0;
     for (const op of delta) {
       if (typeof op.insert === 'string') {
@@ -194,13 +233,9 @@ export class YjsCovenantDocReader implements CovenantDocReader {
         const to = Math.min(end, opEnd);
         if (to > from) {
           const text = op.insert.slice(from - opStart, to - opStart);
-          const marks = marksOf(op.attributes).map((m) => {
-            const straddleStart = from <= start && sameAttrs(m.attrs, markActiveAt(delta, start - 1, m.type));
-            const straddleEnd = to >= end && sameAttrs(m.attrs, markActiveAt(delta, end, m.type));
-            const straddles: Mark['straddles'] =
-              straddleStart && straddleEnd ? 'both' : straddleStart ? 'start' : straddleEnd ? 'end' : 'none';
-            return { ...m, straddles };
-          });
+          const marks = marksOf(op.attributes); // straddle stamped in the post-pass
+          if (firstText === -1) firstText = nodes.length;
+          lastText = nodes.length;
           nodes.push({ kind: 'text', text, marks });
         }
         pos = opEnd;
@@ -213,7 +248,47 @@ export class YjsCovenantDocReader implements CovenantDocReader {
         pos += 1;
       }
     }
-    return { fragment: { ancestors: this.ancestorsOf(body), nodes }, enclosedItems: this.enclosedItemsOf(body, start, end) };
+
+    // STRADDLE post-pass. A mark straddles the START boundary iff the SAME mark
+    // (type + attrs) is active CONTINUOUSLY across it — active at both `start-1`
+    // (just outside) and `start` (just inside) — and likewise across the END
+    // boundary at `end-1` / `end`. Because `markActiveAt` now sees embed ops, this
+    // holds when an embed sits on the boundary. Applied ONLY to the first / last
+    // in-span text runs, so an interior run cannot spuriously read as straddling.
+    const straddlesAcross = (m: Mark, before: number, after: number): boolean =>
+      sameAttrs(m.attrs, markActiveAt(delta, before, m.type)) &&
+      sameAttrs(m.attrs, markActiveAt(delta, after, m.type));
+    const stamp = (idx: number, kind: 'start' | 'end') => {
+      if (idx === -1) return;
+      const node = nodes[idx];
+      if (node?.kind !== 'text') return;
+      node.marks = node.marks.map((m) => {
+        const straddleStart =
+          m.straddles === 'start' ||
+          m.straddles === 'both' ||
+          (kind === 'start' && straddlesAcross(m, start - 1, start));
+        const straddleEnd =
+          m.straddles === 'end' ||
+          m.straddles === 'both' ||
+          (kind === 'end' && straddlesAcross(m, end - 1, end));
+        const straddles: Mark['straddles'] =
+          straddleStart && straddleEnd
+            ? 'both'
+            : straddleStart
+              ? 'start'
+              : straddleEnd
+                ? 'end'
+                : 'none';
+        return { ...m, straddles };
+      });
+    };
+    stamp(firstText, 'start');
+    stamp(lastText, 'end');
+
+    return {
+      fragment: { ancestors: this.ancestorsOf(body), nodes },
+      enclosedItems: this.enclosedItemsOf(body, start, end),
+    };
   }
 
   /**
@@ -265,13 +340,87 @@ export class YjsCovenantDocReader implements CovenantDocReader {
   }
 
   /**
-   * INDEPENDENTLY verify the captured snapshot against the live doc (class C):
-   * the certifier's state must be a sub-state of what exists now, and the recorded
-   * revision must not post-date it. A forged / foreign revision, state vector, or
-   * delete set is `false`. Any decode failure is `false` (fail-closed), never a
-   * throw that could be read as OK.
+   * The (client:clock) id of every non-deleted item OVERLAPPING [start,end) in the
+   * body — text runs and embeds alike. These are exactly the items the certifier
+   * must have SEEN to render the span, so the captured state vector must cover
+   * every one of them (used to close the empty/weakened-SV lie below). Yjs-internal
+   * `_start`/`right` walk, guarded so a foreign shape throws → DRIFT.
    */
-  private verifySnapshot(doc: Y.Doc, anchor: CovenantAnchor): boolean {
+  private spanItemIds(
+    body: Y.XmlText,
+    start: number,
+    end: number,
+  ): Array<{ client: number; clock: number }> {
+    const out: Array<{ client: number; clock: number }> = [];
+    let item: unknown = (body as unknown as { _start: unknown })._start;
+    let offset = 0;
+    while (item) {
+      const it = item as {
+        id: { client: number; clock: number };
+        length: number;
+        deleted: boolean;
+        right: unknown;
+      };
+      if (!it.deleted) {
+        const itStart = offset;
+        const itEnd = offset + it.length;
+        if (itEnd > start && itStart < end) out.push({ client: it.id.client, clock: it.id.clock });
+        offset = itEnd;
+      }
+      item = it.right;
+    }
+    return out;
+  }
+
+  /**
+   * The (client:clock,len) of every DELETED (tombstoned) item whose position falls
+   * strictly INSIDE the certified span [start,end). A deletion inside the span
+   * changed the span's content, so the certifier must have recorded it in the
+   * captured delete set; a deletion OUTSIDE the span (another block, or elsewhere
+   * in this block) is irrelevant to this `✓` and is deliberately NOT required —
+   * that is what keeps an anchor robust to edits elsewhere (no false-stale storm).
+   */
+  private spanDeletedItems(
+    body: Y.XmlText,
+    start: number,
+    end: number,
+  ): Array<{ client: number; clock: number; len: number }> {
+    const out: Array<{ client: number; clock: number; len: number }> = [];
+    let item: unknown = (body as unknown as { _start: unknown })._start;
+    let offset = 0;
+    while (item) {
+      const it = item as {
+        id: { client: number; clock: number };
+        length: number;
+        deleted: boolean;
+        right: unknown;
+      };
+      if (it.deleted) {
+        // A tombstone contributes no visible width; it sits AT the current offset.
+        if (offset > start && offset < end)
+          out.push({ client: it.id.client, clock: it.id.clock, len: it.length });
+      } else {
+        offset += it.length;
+      }
+      item = it.right;
+    }
+    return out;
+  }
+
+  /**
+   * INDEPENDENTLY verify the captured snapshot against the live doc (class C), and
+   * — round 3 — reject WEAKENED values, not merely forged ones. The captured
+   * `revision`/`stateVector`/`deleteSet` must be the certify-time snapshot, so an
+   * anchor whose snapshot fields were zeroed / emptied to slip past the earlier,
+   * vacuous checks is `false`. Any decode failure is `false` (fail-closed).
+   */
+  private verifySnapshot(
+    doc: Y.Doc,
+    anchor: CovenantAnchor,
+    body: Y.XmlText,
+    start: number,
+    end: number,
+  ): boolean {
     try {
       // Revision cannot post-date the live doc.
       if (anchor.revision > this.liveRevision(doc)) return false;
@@ -279,7 +428,7 @@ export class YjsCovenantDocReader implements CovenantDocReader {
       // The state vector and the revision are bound: the recorded revision IS the
       // sum of the certify-time state vector, so a forged revision or a forged /
       // empty state vector (which would otherwise pass the prefix check vacuously)
-      // no longer agree. This is the check that closes the all-zeros SV lie.
+      // no longer agree.
       const anchorSV = Y.decodeStateVector(base64ToBytes(anchor.stateVector));
       let anchorSum = 0;
       for (const clock of anchorSV.values()) anchorSum += clock;
@@ -292,22 +441,52 @@ export class YjsCovenantDocReader implements CovenantDocReader {
         if ((liveSV.get(client) ?? 0) < clock) return false;
       }
 
-      // Every deletion the certifier saw must still be deleted in the live doc
-      // (deletions are permanent; a delete set naming ranges the doc never deleted
-      // is a forgery). The delete set is an ACTUAL delete set the reader decodes,
-      // not a full snapshot.
-      const anchorDS = JSON.parse(new TextDecoder().decode(base64ToBytes(anchor.deleteSet))) as Record<
-        string,
-        [number, number][]
-      >;
+      // COVERAGE (closes the zeroed-revision / emptied-SV lie): every item the span
+      // is rendered FROM must have existed as of the captured SV — its clock must
+      // be strictly below the SV frontier for its client. An empty or under-counted
+      // SV cannot cover the real span items, so `(revision:0, stateVector:<empty>)`
+      // — internally consistent and a prefix of every doc — is now DRIFT. A genuine
+      // certify always covers them, so this never false-stales.
+      for (const { client, clock } of this.spanItemIds(body, start, end)) {
+        if ((anchorSV.get(client) ?? 0) <= clock) return false;
+      }
+
+      // The delete set is an ACTUAL delete set the reader decodes (not a snapshot).
+      const anchorDS = JSON.parse(
+        new TextDecoder().decode(base64ToBytes(anchor.deleteSet)),
+      ) as Record<string, [number, number][]>;
       const liveDS = Y.snapshot(doc).ds;
+
+      // (i) Every deletion the certifier saw must still be deleted in the live doc
+      // (deletions are permanent; a set naming ranges never deleted is a forgery).
       for (const [clientStr, ranges] of Object.entries(anchorDS)) {
         const client = Number(clientStr);
-        const liveRanges = (liveDS.clients.get(client) ?? []) as Array<{ clock: number; len: number }>;
+        const liveRanges = (liveDS.clients.get(client) ?? []) as Array<{
+          clock: number;
+          len: number;
+        }>;
         for (const [clock, len] of ranges) {
-          const covered = liveRanges.some((r) => r.clock <= clock && clock + len <= r.clock + r.len);
+          const covered = liveRanges.some(
+            (r) => r.clock <= clock && clock + len <= r.clock + r.len,
+          );
           if (!covered) return false;
         }
+      }
+
+      // (ii) COMPLETENESS (closes the non-empty→empty weakening) — SCOPED TO THE SPAN.
+      // Every tombstone INSIDE the certified span that existed as of the captured SV
+      // (clock < frontier) must ALSO appear in the captured DS. A deletion inside the
+      // span is content the certifier saw removed; stripping its DS entry (the
+      // non-empty→empty weakening) now fails here → DRIFT. Deletions created AFTER
+      // certify (clock ≥ frontier — e.g. a type-then-revert) and deletions OUTSIDE
+      // the span (other blocks / elsewhere in this block) are excluded, so ordinary
+      // editing never false-stales.
+      for (const { client, clock, len } of this.spanDeletedItems(body, start, end)) {
+        const frontier = anchorSV.get(client) ?? 0;
+        if (clock >= frontier) continue; // created after certify ⇒ not the certifier's deletion
+        const anchorRanges = anchorDS[String(client)] ?? [];
+        const covered = anchorRanges.some(([c, l]) => c <= clock && clock + len <= c + l);
+        if (!covered) return false;
       }
       return true;
     } catch {
@@ -335,7 +514,10 @@ export class YjsCovenantDocReader implements CovenantDocReader {
     const ds = Y.snapshot(doc).ds;
     const dsPlain: Record<string, [number, number][]> = {};
     for (const [client, ranges] of ds.clients.entries()) {
-      dsPlain[String(client)] = (ranges as Array<{ clock: number; len: number }>).map((r) => [r.clock, r.len]);
+      dsPlain[String(client)] = (ranges as Array<{ clock: number; len: number }>).map((r) => [
+        r.clock,
+        r.len,
+      ]);
     }
     return {
       revision: this.liveRevision(doc),
@@ -363,11 +545,15 @@ export class YjsCovenantDocReader implements CovenantDocReader {
     if (!(body instanceof Y.XmlText) || absEnd.type !== body) return null;
     // A GC'd/tombstoned body element ⇒ unresolvable.
     const item = (body as unknown as { _item: { deleted: boolean } | null })._item;
-    if (item && item.deleted) return null;
+    if (item?.deleted) return null;
 
     const start = Math.min(absStart.index, absEnd.index);
     const end = Math.max(absStart.index, absEnd.index);
     const { fragment, enclosedItems } = this.renderWindow(body, start, end);
-    return { fragment, enclosedItems, snapshotVerified: this.verifySnapshot(doc, anchor) };
+    return {
+      fragment,
+      enclosedItems,
+      snapshotVerified: this.verifySnapshot(doc, anchor, body, start, end),
+    };
   }
 }
