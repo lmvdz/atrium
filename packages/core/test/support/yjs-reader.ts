@@ -558,6 +558,34 @@ export class YjsCovenantDocReader implements CovenantDocReader {
 
   // ── Port surface ──────────────────────────────────────────────────────────
 
+  /**
+   * The authoritative resolution context — revision / state vector / delete set
+   * read DIRECTLY from the live doc HEAD. `captureSelection` and
+   * `authoritativeContext` both derive it from here, so an honest same-instant
+   * capture agrees on all three byte-for-byte, and `certifyAnchor` signs THIS.
+   */
+  private contextOf(doc: Y.Doc): { revision: number; stateVector: string; deleteSet: string } {
+    const ds = Y.snapshot(doc).ds;
+    const dsPlain: Record<string, [number, number][]> = {};
+    for (const [client, ranges] of ds.clients.entries()) {
+      dsPlain[String(client)] = (ranges as Array<{ clock: number; len: number }>).map((r) => [
+        r.clock,
+        r.len,
+      ]);
+    }
+    return {
+      revision: this.liveRevision(doc),
+      stateVector: bytesToBase64(Y.encodeStateVector(doc)),
+      deleteSet: bytesToBase64(new TextEncoder().encode(JSON.stringify(dsPlain))),
+    };
+  }
+
+  authoritativeContext(): ReturnType<CovenantDocReader['authoritativeContext']> {
+    const doc = this.doc;
+    if (!doc) return null; // unavailable ⇒ no context to sign (fail-closed)
+    return this.contextOf(doc);
+  }
+
   captureSelection(): CapturedSelection | null {
     const doc = this.doc;
     const frag = this.fragment();
@@ -573,20 +601,10 @@ export class YjsCovenantDocReader implements CovenantDocReader {
     const relEnd = Y.createRelativePositionFromTypeIndex(body, end, 1);
 
     const { fragment, enclosedItems } = this.renderWindow(body, start, end);
-    const ds = Y.snapshot(doc).ds;
-    const dsPlain: Record<string, [number, number][]> = {};
-    for (const [client, ranges] of ds.clients.entries()) {
-      dsPlain[String(client)] = (ranges as Array<{ clock: number; len: number }>).map((r) => [
-        r.clock,
-        r.len,
-      ]);
-    }
     return {
-      revision: this.liveRevision(doc),
+      ...this.contextOf(doc),
       relStart: bytesToBase64(Y.encodeRelativePosition(relStart)),
       relEnd: bytesToBase64(Y.encodeRelativePosition(relEnd)),
-      stateVector: bytesToBase64(Y.encodeStateVector(doc)),
-      deleteSet: bytesToBase64(new TextEncoder().encode(JSON.stringify(dsPlain))),
       fragment,
       enclosedItems,
     };

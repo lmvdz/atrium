@@ -1,11 +1,12 @@
 import { describe, expect, it } from 'vitest';
 import {
   type CapturedSelection,
-  type CovenantAnchor,
+  CovenantAnchor,
   type CovenantDocReader,
   canonicalRendered,
   certifyAnchor,
   type EnclosedItem,
+  HumanCertifier,
   type RenderedFragment,
   renderedDigestOf,
   resolveCovenant,
@@ -55,6 +56,15 @@ class StubDoc implements CovenantDocReader {
       deleteSet: this.deleteSet,
       fragment: this.fragment,
       enclosedItems: this.enclosedItems,
+    };
+  }
+
+  authoritativeContext() {
+    if (!this.available) return null;
+    return {
+      revision: this.revision,
+      stateVector: this.stateVector,
+      deleteSet: this.deleteSet,
     };
   }
 
@@ -142,6 +152,148 @@ describe('certifyAnchor — the digest is computed here, not accepted from the r
     expect(
       certifyAnchor(doc, { objectId: 'o', roomId: 'r', certifier: ALICE, certifiedAt: AT }),
     ).toBeNull();
+  });
+});
+
+describe('certifyAnchor — machine NEVER certifies (human-only certifier at the core type)', () => {
+  // #188 / #181 req 4: reject a non-human certifier at the TYPE, not only the DB
+  // CHECK. Each of these produces NO row (null), and the anchor schema itself
+  // refuses the shape — so a machine certifier cannot exist even as untyped data.
+  const AGENT = { kind: 'agent', userId: 'u_agent' } as const;
+  const SYSTEM = { kind: 'system' } as const;
+  const MODEL = { kind: 'model', model: 'gpt-5.6' } as const;
+
+  it('an agent certifier ⇒ null (never a row)', () => {
+    const doc = sampleDoc();
+    const anchor = certifyAnchor(doc, {
+      objectId: 'o',
+      roomId: 'r',
+      // The compile-time type is HumanCertifier; a machine reaches core only as
+      // untyped data, which the runtime guard refuses.
+      certifier: AGENT as unknown as typeof ALICE,
+      certifiedAt: AT,
+    });
+    expect(anchor).toBeNull();
+  });
+
+  it('a system certifier ⇒ null (never a row)', () => {
+    const doc = sampleDoc();
+    expect(
+      certifyAnchor(doc, {
+        objectId: 'o',
+        roomId: 'r',
+        certifier: SYSTEM as unknown as typeof ALICE,
+        certifiedAt: AT,
+      }),
+    ).toBeNull();
+  });
+
+  it('a model certifier ⇒ null (never a row)', () => {
+    const doc = sampleDoc();
+    expect(
+      certifyAnchor(doc, {
+        objectId: 'o',
+        roomId: 'r',
+        certifier: MODEL as unknown as typeof ALICE,
+        certifiedAt: AT,
+      }),
+    ).toBeNull();
+  });
+
+  it('the anchor SCHEMA itself refuses a non-human certifier (type-level, no row)', () => {
+    const base = anchorFor(sampleDoc());
+    for (const machine of [AGENT, SYSTEM, MODEL]) {
+      const parsed = CovenantAnchor.safeParse({ ...base, certifier: machine });
+      expect(parsed.success).toBe(false);
+    }
+    // HumanCertifier is exactly the human variant, and nothing else.
+    expect(HumanCertifier.safeParse(ALICE).success).toBe(true);
+    expect(HumanCertifier.safeParse(AGENT).success).toBe(false);
+  });
+
+  it('a HUMAN certifier still produces a row (the guard is not a blanket refusal)', () => {
+    const anchor = anchorFor(sampleDoc());
+    expect(anchor.certifier).toEqual(ALICE);
+  });
+});
+
+describe('certifyAnchor — derive-and-sign: caller-supplied context cannot produce a row', () => {
+  // #188 / #181 req 2: revision/stateVector/deleteSet are SIGNED from the
+  // authoritative live-doc HEAD, never from the selection's (caller-influenceable)
+  // claim. A selection captured against an EARLIER revision is refused, so a
+  // caller-supplied earlier-revision context can never reach an anchor — hence
+  // never resolve `ok`.
+  const meta = { objectId: 'o_span', roomId: 'room_1', certifier: ALICE, certifiedAt: AT };
+
+  /** A reader whose selection CLAIMS an earlier revision than the authoritative head. */
+  function staleSelectionReader(): CovenantDocReader {
+    return {
+      captureSelection: () => ({
+        revision: 5, // caller-supplied EARLIER revision (a genuine prefix)
+        relStart: 'rel-start',
+        relEnd: 'rel-end',
+        stateVector: 'sv-old',
+        deleteSet: 'ds-old',
+        fragment: sampleFragment(),
+        enclosedItems: [
+          { id: 'i_text', kind: 'text' },
+          { id: 'i_mention', kind: 'embed' },
+          { id: 'i_image', kind: 'embed' },
+        ],
+      }),
+      // The doc's TRUE head is revision 7 — what an honest capture would see.
+      authoritativeContext: () => ({ revision: 7, stateVector: 'sv-base', deleteSet: 'ds-base' }),
+      resolveSpan: () => null,
+    };
+  }
+
+  it('a caller-supplied earlier-revision context ⇒ null (no anchor, so never `ok`)', () => {
+    expect(certifyAnchor(staleSelectionReader(), meta)).toBeNull();
+  });
+
+  it('a mismatched state vector / delete set alone ⇒ null (each field is derived)', () => {
+    const svOnly: CovenantDocReader = {
+      ...staleSelectionReader(),
+      captureSelection: () => ({
+        revision: 7, // revision agrees…
+        relStart: 'rel-start',
+        relEnd: 'rel-end',
+        stateVector: 'sv-forged', // …but the SV is a caller-supplied inset
+        deleteSet: 'ds-base',
+        fragment: sampleFragment(),
+        enclosedItems: [
+          { id: 'i_text', kind: 'text' },
+          { id: 'i_mention', kind: 'embed' },
+          { id: 'i_image', kind: 'embed' },
+        ],
+      }),
+    };
+    expect(certifyAnchor(svOnly, meta)).toBeNull();
+  });
+
+  it('the signed context comes from the AUTHORITATIVE head, not the selection', () => {
+    // Honest reader: selection and authority agree on all three (the StubDoc holds
+    // ONE snapshot), so the anchor's context equals the authoritative head.
+    const doc = sampleDoc();
+    const anchor = anchorFor(doc);
+    expect(anchor.revision).toBe(doc.authoritativeContext()?.revision);
+    expect(anchor.stateVector).toBe(doc.authoritativeContext()?.stateVector);
+    expect(anchor.deleteSet).toBe(doc.authoritativeContext()?.deleteSet);
+  });
+
+  it('no authoritative context (unavailable doc) ⇒ null, even with a valid selection', () => {
+    const noHead: CovenantDocReader = {
+      ...staleSelectionReader(),
+      authoritativeContext: () => null,
+    };
+    expect(certifyAnchor(noHead, meta)).toBeNull();
+  });
+
+  it('GAUNTLET flip: forged human-looking non-human certifier + stale context ⇒ fail closed', () => {
+    // Both attacks at once: an agent wearing a human-shaped userId, AND a
+    // genuine-but-stale earlier-revision selection. Must produce no row.
+    const forged = { kind: 'agent', userId: 'u_alice' } as unknown as typeof ALICE;
+    expect(certifyAnchor(staleSelectionReader(), { ...meta, certifier: forged })).toBeNull();
   });
 });
 
@@ -396,6 +548,7 @@ describe('fail-closed on throw — a reader that throws yields DRIFT, never OK (
   it('a reader whose resolveSpan throws ⇒ DRIFT, not an unhandled exception', () => {
     const throwing: CovenantDocReader = {
       captureSelection: () => null,
+      authoritativeContext: () => null,
       resolveSpan: () => {
         throw new Error('boom (a _item.id deref on a root type)');
       },
@@ -408,6 +561,7 @@ describe('fail-closed on throw — a reader that throws yields DRIFT, never OK (
   it('a reader that returns a malformed fragment ⇒ DRIFT (renderedDigestOf parses it)', () => {
     const malformed: CovenantDocReader = {
       captureSelection: () => null,
+      authoritativeContext: () => null,
       // `nodes` is not an array — RenderedFragment.parse throws inside renderedDigestOf.
       resolveSpan: () => ({
         fragment: { ancestors: [], nodes: undefined as unknown as RenderedFragment['nodes'] },

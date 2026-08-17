@@ -1,5 +1,5 @@
 import { z } from 'zod';
-import { Actor, Id, Timestamp } from './common.js';
+import { Id, Timestamp } from './common.js';
 
 /**
  * THE COVENANT ANCHOR — the record a human `✓` binds to on the object/span axis,
@@ -454,6 +454,29 @@ export function renderedDigestOf(fragment: RenderedFragment): string {
 // ─────────────────────────────────────────────────────────────────────────────
 
 /**
+ * MACHINE NEVER CERTIFIES — enforced at the core type, not only the DB CHECK
+ * (`covenant_anchors_certifier_is_human`, schema.ts / migration 0050). The
+ * covenant's whole claim is that a HUMAN vouched for this exact content; an
+ * `agent`/`system`/`model` actor carries a `users` row and speaks over the same
+ * socket a person does (see `Actor` in common.ts), so "who has an identity" is
+ * NOT "who may certify". `Actor` answers the first question and MUST NOT be the
+ * type of a certifier — a non-human certifier would only ever be rejected at the
+ * DB backstop, one layer too late and invisible to the pure core.
+ *
+ * `HumanCertifier` is the human variant of `Actor`, and nothing else. Using it as
+ * the type of {@link CovenantAnchor.certifier} and of {@link certifyAnchor}'s
+ * `meta.certifier` makes "machine never certifies" a compile-time refusal AND a
+ * runtime one: `HumanCertifier.parse` (via `CovenantAnchor.parse`, and the
+ * explicit guard in {@link certifyAnchor}) turns an `agent`/`system`/`model`
+ * certifier that reaches core as untyped data into `null`/throw — never a row.
+ */
+export const HumanCertifier = z.object({
+  kind: z.literal('human'),
+  userId: Id,
+});
+export type HumanCertifier = z.infer<typeof HumanCertifier>;
+
+/**
  * THE COVENANT ANCHOR, complete form (#163). A gated Postgres ledger row (persisted
  * by migration 0050), never a CRDT field: the `✓` is authority, and authority
  * lives on the ledger the room reads read-only, not inside the substrate agents
@@ -483,8 +506,12 @@ export const CovenantAnchor = z.object({
   renderedDigest: z
     .string()
     .regex(/^[0-9a-f]{64}$/, 'a rendered digest is 64 lower-case hex chars'),
-  /** Who certified. Only a human may (enforced upstream); recorded for the receipt. */
-  certifier: Actor,
+  /**
+   * Who certified. Only a human may — refused at the TYPE here (see
+   * {@link HumanCertifier}), not only by the DB CHECK. A non-human certifier
+   * fails `CovenantAnchor.parse`, so no row with a machine certifier can exist.
+   */
+  certifier: HumanCertifier,
   certifiedAt: Timestamp,
 });
 export type CovenantAnchor = z.infer<typeof CovenantAnchor>;
@@ -505,7 +532,38 @@ export interface ResolvedSpan {
   snapshotVerified: boolean;
 }
 
-/** What a reader returns when it captures a fresh anchor from a live selection. */
+/**
+ * The AUTHORITATIVE resolution context — `revision`, `stateVector`, `deleteSet`
+ * derived by the reader DIRECTLY from the live document HEAD, independent of any
+ * selection or caller input. This is the authority's own view of "what the doc is
+ * right now", and it is the ONLY source {@link certifyAnchor} will sign these
+ * three fields from (derive-and-sign, enrichment req 2 on #181).
+ *
+ * Why a distinct capture from {@link CapturedSelection}'s copy of the same three
+ * fields: the selection's revision/state-vector/delete-set are a CLAIM made by
+ * whatever produced the selection, and a caller can produce a selection pinned to
+ * an EARLIER revision (a genuine prefix passes the reader's own prefix/boundary
+ * check — defense-in-depth, not a close). Signing the authoritative context, and
+ * REFUSING to sign when the selection's claimed context disagrees with it, is the
+ * real close: a caller-supplied earlier-revision context can never reach the
+ * persisted anchor, so it can never produce an `ok`.
+ */
+export interface AuthoritativeContext {
+  revision: number;
+  stateVector: string;
+  deleteSet: string;
+}
+
+/**
+ * What a reader returns when it captures a fresh anchor from a live selection.
+ *
+ * `revision`/`stateVector`/`deleteSet` here are the selection's CLAIMED context;
+ * they are UNTRUSTED. {@link certifyAnchor} signs the persisted anchor's context
+ * from {@link CovenantDocReader.authoritativeContext} instead and rejects a
+ * selection whose claim disagrees with the authoritative head. Only the span
+ * materials — `relStart`/`relEnd`/`fragment`/`enclosedItems` — are consumed as-is
+ * (the digest is still computed here from `fragment`, never accepted).
+ */
 export interface CapturedSelection {
   revision: number;
   relStart: string;
@@ -559,6 +617,14 @@ export interface CapturedSelection {
 export interface CovenantDocReader {
   /** Capture a fresh anchor's raw materials from the currently-selected span. */
   captureSelection(): CapturedSelection | null;
+  /**
+   * The AUTHORITATIVE resolution context, derived from the live document HEAD —
+   * NOT from a selection and NOT from any caller input. {@link certifyAnchor}
+   * signs the anchor's `revision`/`stateVector`/`deleteSet` from here, so a
+   * caller cannot inset an earlier-revision context. `null` ⇒ the doc is
+   * unavailable, and no anchor is signed (fail-closed).
+   */
+  authoritativeContext(): AuthoritativeContext | null;
   /** Re-resolve an existing anchor against the live document. `null` ⇒ fail-closed. */
   resolveSpan(anchor: CovenantAnchor): ResolvedSpan | null;
 }
@@ -568,32 +634,72 @@ export interface CovenantDocReader {
 // ─────────────────────────────────────────────────────────────────────────────
 
 /**
- * CERTIFY CAPTURE — build the complete anchor for a freshly-certified span. The
- * digest is computed HERE from the reader's rendered materials, so a reader
- * cannot supply a digest that does not match what it rendered (the round-2
- * "caller-supplied value is a well-formed lie" class, closed by construction).
+ * DERIVE-AND-SIGN — build the complete anchor for a freshly-certified span. Two
+ * things are refused HERE, at the core type, rather than trusted from the caller
+ * or the reader:
  *
- * Returns `null` when the selection cannot be captured — there is no anchor to
- * persist for a span that does not resolve even at certify time, and a `✓` is
- * never recorded over one.
+ *   1. **Machine never certifies.** `meta.certifier` is typed {@link HumanCertifier}
+ *      (compile-time), and an untyped `agent`/`system`/`model` certifier that
+ *      reaches this function as data is caught by the explicit `safeParse` guard
+ *      and yields `null` — never a row. This holds independent of the DB CHECK.
+ *   2. **The resolution context is DERIVED, not caller-supplied.** The anchor's
+ *      `revision`/`stateVector`/`deleteSet` are signed from
+ *      {@link CovenantDocReader.authoritativeContext} — the live document HEAD —
+ *      NOT from the selection's claimed copy of those fields. A selection whose
+ *      claimed context disagrees with the authoritative head (a caller-supplied
+ *      earlier-revision context) is REFUSED with `null`: it cannot be signed, so
+ *      it can never resolve `ok`. Only the span materials (relStart/relEnd/
+ *      fragment/enclosedItems) come from the selection, and the digest is still
+ *      computed HERE from the fragment (the round-2 "caller-supplied value is a
+ *      well-formed lie" class, closed by construction).
+ *
+ * Returns `null` when: the certifier is not human; the selection cannot be
+ * captured; the live doc has no authoritative context (unavailable); or the
+ * selection's claimed context disagrees with the authoritative head. A `✓` is
+ * never recorded over any of these.
  */
 export function certifyAnchor(
   doc: CovenantDocReader,
-  meta: { objectId: string; roomId: string; certifier: Actor; certifiedAt: Timestamp },
+  meta: { objectId: string; roomId: string; certifier: HumanCertifier; certifiedAt: Timestamp },
 ): CovenantAnchor | null {
+  // (1) Machine never certifies — refuse a non-human certifier before anything
+  // else, even one that reached here as untyped data past the compile-time type.
+  const certifier = HumanCertifier.safeParse(meta.certifier);
+  if (!certifier.success) return null;
+
   const captured = doc.captureSelection();
   if (captured === null) return null;
+
+  // (2) Derive the resolution context from the authoritative live-doc HEAD, never
+  // from the selection's (untrusted, caller-influenceable) claim.
+  const authoritative = doc.authoritativeContext();
+  if (authoritative === null) return null;
+
+  // Refuse a selection captured against a DIFFERENT (e.g. earlier) revision than
+  // the authoritative head: signing the head's context over a stale fragment, or
+  // letting a caller-supplied earlier-revision context through, is exactly the
+  // hole this closes. Same-instant honest capture agrees on all three, so this
+  // rejects only a divergent — caller-supplied or stale — context.
+  if (
+    captured.revision !== authoritative.revision ||
+    captured.stateVector !== authoritative.stateVector ||
+    captured.deleteSet !== authoritative.deleteSet
+  ) {
+    return null;
+  }
+
   return CovenantAnchor.parse({
     objectId: meta.objectId,
     roomId: meta.roomId,
-    revision: captured.revision,
+    // Signed from the authoritative head, not the selection's copy.
+    revision: authoritative.revision,
     relStart: captured.relStart,
     relEnd: captured.relEnd,
-    stateVector: captured.stateVector,
-    deleteSet: captured.deleteSet,
+    stateVector: authoritative.stateVector,
+    deleteSet: authoritative.deleteSet,
     enclosedItems: captured.enclosedItems,
     renderedDigest: renderedDigestOf(captured.fragment),
-    certifier: meta.certifier,
+    certifier: certifier.data,
     certifiedAt: meta.certifiedAt,
   });
 }
