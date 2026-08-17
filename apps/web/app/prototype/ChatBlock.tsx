@@ -22,7 +22,7 @@
  *     is why the design feed shell (scroll container, minimap, composer) stays. */
 
 import { useEffect, useMemo, useRef, useState } from 'react';
-import { fileText } from '@/src/components/model';
+import { type EpistemicState, fileText, systemStatement } from '@/src/components/model';
 import { AttributionLedger } from '@/src/components/model/ledger';
 import { MessageBody } from '@/src/components/primitives/MessageBody';
 import { SystemRow } from '@/src/components/timeline/SystemRow';
@@ -46,6 +46,16 @@ import {
   type TurnStep,
 } from './types';
 import { useConversationModel } from './use-conversation-model';
+
+/* The honest "conversation not wired" notice's state — a routine `·` system
+   notice (a status fact, not a failed action), used when a live room mounts with
+   no conversation transport (#183 round-2 SHIP-BLOCKER #3). */
+const NOT_DELIVERED_NOTICE: EpistemicState = {
+  kind: 'event',
+  verification: 'routine',
+  owedToViewer: false,
+  irreversible: false,
+};
 
 /* PRIMITIVE: a stream of diff hunks. Rendered identically whether it has the
    floor or is materialized inside a tree node — that sameness IS the algebra.
@@ -645,6 +655,7 @@ export function ChatBlock({
   draftComment,
   onSay,
   transport,
+  liveMount = false,
 }: {
   selected: Selection;
   echoes: readonly Echo[];
@@ -658,7 +669,19 @@ export function ChatBlock({
    * fixture route, where the composer keeps the local echo behaviour.
    */
   transport?: ConversationTransport;
+  /**
+   * Whether this is a LIVE room mount (a real control plane / room), as opposed
+   * to the `/prototype` fixture demo (#183 round-2 SHIP-BLOCKER #3). On a live
+   * mount with NO transport wired, the conversation must NOT seed the mock
+   * fixture — presenting mock history on a real room as its live conversation is
+   * a lie. The feed renders an honest "not wired yet" notice instead. The real
+   * shipped-surface + Electric wiring is the filed follow-up.
+   */
+  liveMount?: boolean;
 }) {
+  // A live room whose conversation source is not wired: no transport, but not the
+  // fixture demo either. The feed is honestly empty + a notice, never mock seed.
+  const unwired = liveMount && transport === undefined;
   const [value, setValue] = useState('');
   const inputRef = useRef<HTMLTextAreaElement>(null);
   const logRef = useRef<HTMLDivElement>(null);
@@ -684,7 +707,10 @@ export function ChatBlock({
      is byte-identical to the prior `conversationModel(shownSel)`. Echoes
      (locally-sent lines) are the viewer typing — real typed records on the SAME
      register, so they render as shipped rows too. */
-  const { model, version, say } = useConversationModel(shownSel, transport);
+  const { model, version, say } = useConversationModel(shownSel, transport, {
+    // Live room without a transport ⇒ do NOT seed the mock fixture (honest empty).
+    seedFixture: !liveMount,
+  });
   const { records, items } = useMemo(() => {
     const echoes_ = echoes.map((echo, index) => echoItem(echo, index, model.room));
     return {
@@ -721,6 +747,29 @@ export function ChatBlock({
             {items.map((item) => (
               <FeedItem key={item.id} item={item} />
             ))}
+            {/* HONEST UNWIRED STATE (#183 round-2 SHIP-BLOCKER #3). On a live room
+                with no conversation transport wired, the feed does not fabricate a
+                converging conversation from mock seed — it says, plainly, that the
+                live conversation is not yet on this surface. A typed line here is
+                a local draft, not delivered (see the composer + MoldingSurface). */}
+            {unwired ? (
+              <div className={styles.chatRow} data-kind="system">
+                <Avatar kind="system" />
+                <div className={styles.chatContent}>
+                  <SystemRow
+                    entry={{
+                      type: 'system',
+                      id: 'conversation-unwired',
+                      at: 'now',
+                      statement: systemStatement(
+                        'the live conversation is not yet wired to this surface — messages typed here are local drafts, not delivered to the room',
+                      ),
+                      state: NOT_DELIVERED_NOTICE,
+                    }}
+                  />
+                </div>
+              </div>
+            ) : null}
           </div>
           {/* the comment being composed in the artifact pane, portaled here live */}
           {draftComment ? <DraftComment draft={draftComment} /> : null}

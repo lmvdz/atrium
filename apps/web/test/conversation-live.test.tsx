@@ -86,6 +86,29 @@ describe('F3 — a live client is unseeded (catches up, never re-seeds the fixtu
   });
 });
 
+describe('R2 SHIP-BLOCKER 3 — a live room without a transport is honest, not fixture-seeded', () => {
+  const FIXTURE_LINE = 'can we do streaming totals without a running mutable';
+
+  it('the /prototype fixture demo DOES render the mock conversation (control)', () => {
+    const { container } = render(
+      <ChatBlock selected={LIVE} echoes={[]} draftComment={null} onSay={() => {}} />,
+    );
+    // Without liveMount (the fixture route), the mock seam still seeds the demo.
+    expect(container.textContent ?? '').toContain(FIXTURE_LINE);
+  });
+
+  it('a liveMount with no transport shows the honest "not wired" notice and NO mock seed', () => {
+    const { container } = render(
+      <ChatBlock selected={LIVE} echoes={[]} draftComment={null} onSay={() => {}} liveMount />,
+    );
+    const text = container.textContent ?? '';
+    // The honest notice is present…
+    expect(text).toContain('not yet wired');
+    // …and the mock fixture conversation is NOT presented as the room's own.
+    expect(text).not.toContain(FIXTURE_LINE);
+  });
+});
+
 describe('F6 — a Strict-Mode remount never reuses a destroyed Y.Doc', () => {
   it('the doc stays live through mount → cleanup → mount, and a peer update still lands', async () => {
     const hub = new InMemoryConversationHub(new ConversationDoc().doc);

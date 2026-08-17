@@ -32,6 +32,7 @@
  * ═════════════════════════════════════════════════════════════════════════ */
 
 import { Doc as YDoc } from 'yjs';
+import { z } from 'zod';
 import type { ParticipantSummary } from '@/src/components/model';
 import { buildConversationModel, type ConversationModel } from './conversation-model';
 import type { ConversationTransport } from './conversation-transport';
@@ -63,6 +64,21 @@ export class ConversationDoc {
    */
   private readonly certifiedIds = new Set<string>();
 
+  /**
+   * THE TRUST FINGERPRINTS (#183 round-2 — closes the executed id-collision
+   * forgery). Round 1 keyed `✓` by message id alone, so a peer could append a
+   * message with a SEEDED id (or delete the original and keep forged content
+   * under it) and inherit the trusted line's `✓`/provenance. This binds trust to
+   * the CONTENT of each SEEDED message — id → its canonical durable payload —
+   * held OUTSIDE the `Y.Doc`. A message projects authenticated who/kind/`✓` only
+   * if its content fingerprint matches the trusted one recorded at {@link seed};
+   * a forgery under a colliding id has different content, so it fails the match
+   * and projects as UNVERIFIED (`authorKind:'unknown'`, no `✓`). Nothing that
+   * arrives over the wire is in this map, so on a live (unseeded) doc EVERYTHING
+   * is unverified until #181's gated read supplies the real envelope.
+   */
+  private readonly trustedFingerprints = new Map<string, string>();
+
   constructor(doc: YDoc = new YDoc()) {
     this.doc = doc;
   }
@@ -86,6 +102,11 @@ export class ConversationDoc {
   seed(messages: readonly ChatMsg[]): this {
     if (this.array.length > 0) return this;
     for (const message of messages) {
+      // Record the trusted CONTENT fingerprint for EVERY seeded message (so its
+      // who/kind project authentically), and the certified ids for the `✓`. Both
+      // are keyed to the exact trusted content, so a later peer append under a
+      // colliding id cannot inherit either — its fingerprint will not match.
+      this.trustedFingerprints.set(message.id, encodeMessage(message));
       if (message.certified === true) this.certifiedIds.add(message.id);
     }
     this.doc.transact(() => {
@@ -108,9 +129,20 @@ export class ConversationDoc {
     return this;
   }
 
-  /** The current messages, in the doc's converged order (never carrying authority). */
+  /**
+   * The current messages, in the doc's converged order (never carrying
+   * authority). Every element is VALIDATED and QUARANTINED (#183 round-2): a
+   * peer-inserted raw object, malformed JSON, or a shape-invalid element is
+   * dropped, never thrown on — so a hostile write cannot crash `messages()` (and
+   * therefore the projection) and converge that crash to every client.
+   */
   messages(): ChatMsg[] {
-    return this.array.toArray().map((element) => decodeMessage(element));
+    const out: ChatMsg[] = [];
+    for (const element of this.array.toArray()) {
+      const message = decodeElement(element);
+      if (message !== null) out.push(message);
+    }
+    return out;
   }
 
   /** Whether this doc is torn down — guards the hook against reusing a dead instance. */
@@ -126,7 +158,16 @@ export class ConversationDoc {
    * glyph comes from the non-CRDT {@link certifiedIds} authority, NEVER the doc.
    */
   model(room: string, participants: readonly ParticipantSummary[]): ConversationModel {
-    return buildConversationModel(this.messages(), room, participants, this.certifiedIds);
+    return buildConversationModel(this.messages(), room, participants, {
+      // A message is TRUSTED only if its content fingerprint matches the one
+      // recorded from a trusted {@link seed}. Anything appended locally or arriving
+      // over a transport — including a forgery under a seeded id — fails this match
+      // and projects as UNVERIFIED (`authorKind:'unknown'`, no `✓`). The `✓`
+      // authority stays keyed by id, but is only ever CONSULTED for a trusted
+      // message, so a peer-keyed id can never source one (#183 round-2, #162).
+      trusts: (message) => this.trustedFingerprints.get(message.id) === encodeMessage(message),
+      certifiedIds: this.certifiedIds,
+    });
   }
 
   /**
@@ -199,8 +240,11 @@ export function conversationModelFromDoc(
    an allowlist fails closed — a new field is absent from the wire until it is
    deliberately added to `DURABLE_FIELDS`, which is a diff a reviewer sees. */
 
-/** The conversation-content fields that are allowed onto the peer-writable doc. */
-const DURABLE_FIELDS = ['id', 'time', 'kind', 'who', 'text', 'turn', 'image', 'reply'] as const;
+/** The conversation-content fields that are allowed onto the peer-writable doc.
+ *  `reply` was dropped in #183 round-2: it was durable but NEVER projected (the
+ *  feed reads `turn.conclusion.reply`, a nested field, not a top-level one), so
+ *  it was an ornamental durable field — off the wire now, no reader lost. */
+const DURABLE_FIELDS = ['id', 'time', 'kind', 'who', 'text', 'turn', 'image'] as const;
 
 /** The content-only projection of a `ChatMsg` — carries zero authority state. */
 type DurableMessage = Pick<ChatMsg, (typeof DURABLE_FIELDS)[number]>;
@@ -214,8 +258,46 @@ function encodeMessage(message: ChatMsg): string {
   return JSON.stringify(durable);
 }
 
-function decodeMessage(element: string): ChatMsg {
-  // The decoded message carries only content fields — `certified` is absent by
-  // construction, so a projection reading it off the doc gets `undefined`.
-  return JSON.parse(element) as ChatMsg;
+/* ── the decode validator (#183 round-2 — closes the executed DoS) ───────────
+   Round 1 decoded with `JSON.parse(...) as ChatMsg` and NO validation: a peer
+   could insert a raw object (crashing `JSON.parse`) or a shape-invalid element,
+   and `messages()` threw — a crash that converged to every client (a DoS). This
+   validates every element through zod, over the SAME allowlist `encodeMessage`
+   writes, so it ALSO closes the asymmetric-decode residual (a raw object smuggled
+   past the codec has its non-content keys — `certified` and anything else — strip-
+   ped by the schema). `kind` must be a real `ChatKind`; `id`/`time` are required;
+   the structured `turn`/`image` shapes pass through losslessly (they are design-
+   shell content, only rendered for TRUSTED messages). An element that fails is
+   QUARANTINED (decode returns `null`), never thrown on. */
+const DURABLE_MESSAGE_SCHEMA = z.object({
+  id: z.string(),
+  time: z.string(),
+  kind: z.enum(['system', 'agent', 'human']),
+  who: z.string().optional(),
+  text: z.string().optional(),
+  // `turn` / `image` are structured content shells: validate that each is an
+  // object and preserve every nested key verbatim (a lossless round-trip), rather
+  // than re-deriving a deep schema the fixture would have to track field-for-field.
+  turn: z.looseObject({}).optional(),
+  image: z.looseObject({}).optional(),
+});
+
+/**
+ * Decode one durable array element to a `ChatMsg`, or `null` if it is not a valid
+ * content message. Accepts a hostile input of any type: a non-string (a raw peer
+ * object) is validated as-is; a string is `JSON.parse`d first (malformed JSON ⇒
+ * `null`). Unknown top-level keys (e.g. a forged `certified`) are stripped by the
+ * schema, so the decode side enforces the same content allowlist as encode.
+ */
+function decodeElement(element: unknown): ChatMsg | null {
+  let raw: unknown = element;
+  if (typeof element === 'string') {
+    try {
+      raw = JSON.parse(element);
+    } catch {
+      return null;
+    }
+  }
+  const parsed = DURABLE_MESSAGE_SCHEMA.safeParse(raw);
+  return parsed.success ? (parsed.data as ChatMsg) : null;
 }

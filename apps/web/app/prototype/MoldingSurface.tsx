@@ -205,6 +205,12 @@ export function MoldingSurface({
      handed down, so a mutated column moves the rendered cell (nav-tree.test.tsx
      and molding-mount.test.tsx). */
   const tree = useMemo(() => liveTree ?? treeData(), [liveTree]);
+  /* A LIVE mount is any real control plane (a room route or live data), as opposed
+     to the `/prototype` fixture demo (which passes no `tree`). It gates the honest
+     conversation surface (#183 round-2 SHIP-BLOCKER #3): a live room does not seed
+     the mock conversation and does not present a typed line as delivered, because
+     the per-session conversation source is not wired to a durable transport yet. */
+  const liveMount = liveTree !== undefined;
   /* the right split — an artifact host (diff / plan / doc) you comment on.
      SEAM(#155/#168 B1): on a LIVE room the pane shows the REAL diff of the
      currently-selected session (`liveArtifactsFor` maps `session.artifact.diff`
@@ -291,6 +297,22 @@ export function MoldingSurface({
   const say = (raw: string) => {
     const text = raw.trim();
     if (text.length === 0) return;
+    /* HONEST COMPOSER ON A LIVE ROOM (#183 round-2 SHIP-BLOCKER #3). On a live
+       mount the per-session conversation is not wired to a durable transport yet,
+       so a typed line reaches no room — presenting it as a delivered, authored
+       message would be the fake-delivery this covenant forbids (the same rule the
+       comment path already follows). Render it as a NOT-delivered notice instead;
+       the `/prototype` fixture demo keeps its local `said` echo, unchanged. */
+    if (liveMount) {
+      setEchoes((e) => [
+        ...e,
+        {
+          delivery: 'refused',
+          text: `not delivered — the live conversation is not yet wired to this surface: “${text}”`,
+        },
+      ]);
+      return;
+    }
     const low = text.toLowerCase();
     const isDelegation =
       text.startsWith('@') || /^(hexi|mira|vale|dane|iris|omar|noor)\b/.test(low);
@@ -403,6 +425,7 @@ export function MoldingSurface({
               echoes={echoes}
               draftComment={draftComment}
               onSay={say}
+              liveMount={liveMount}
             />
             {/* the status strip is the CHAT's footer — contained to this column,
                 it stops at the split rather than running under the artifact.

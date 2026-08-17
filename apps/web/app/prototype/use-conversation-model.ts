@@ -13,13 +13,19 @@
  * component change. "Components do not know the difference" — this hook is where
  * that promise is kept.
  *
- * ## Two source modes (#183 F3)
- *   - NO transport → the `/prototype` fixture route: the doc is SEEDED from the
- *     mock seam and renders exactly as before, a local design demo.
+ * ## Three source modes (#183 F3 + round-2 honest-surface)
  *   - A transport → the live/production path: the doc is UNSEEDED and CATCHES UP
  *     from the durable stream. It must not seed, or two clients each seeding the
  *     same fixture would duplicate the whole history in the shared stream (Yjs
  *     keeps same-id insertions as distinct — idempotency by id does not dedupe).
+ *   - NO transport, `seedFixture` true → the `/prototype` fixture route: the doc
+ *     is SEEDED from the mock seam and renders exactly as before, a local demo.
+ *   - NO transport, `seedFixture` false → a LIVE room whose conversation source
+ *     is not wired yet (round-2 SHIP-BLOCKER #3). The doc is EMPTY — it must NOT
+ *     seed the mock, because presenting fixture history on a real authenticated
+ *     room as if it were that room's live conversation is a lie. The surface
+ *     renders an honest "not wired" state instead (see ChatBlock). The real
+ *     shipped-surface + Electric wiring is the filed follow-up.
  *
  * ## Doc lifecycle (#183 F6)
  * The doc is owned in a ref, recreated only when the thread changes or the
@@ -75,7 +81,12 @@ function clockLabel(): string {
 export function useConversationModel(
   selection: Selection,
   transport?: ConversationTransport,
+  options: { readonly seedFixture?: boolean } = {},
 ): ConversationHandle {
+  // Seed the mock fixture only when explicitly allowed (the `/prototype` route).
+  // A live room without a transport passes `seedFixture:false` so it renders an
+  // honest empty state rather than mock history masquerading as the room's own.
+  const seedFixture = options.seedFixture ?? true;
   const key = `${selection.kind}:${selection.id}`;
   const live = transport !== undefined;
 
@@ -84,11 +95,17 @@ export function useConversationModel(
   // was torn down — and never hand back a destroyed doc. The outgoing instance is
   // no longer active by the time we replace it, so destroying it is safe; the
   // ACTIVE instance is never destroyed by this hook.
-  const holder = useRef<{ key: string; live: boolean; doc: ConversationDoc } | null>(null);
+  const holder = useRef<{
+    key: string;
+    live: boolean;
+    seedFixture: boolean;
+    doc: ConversationDoc;
+  } | null>(null);
   if (
     holder.current === null ||
     holder.current.key !== key ||
     holder.current.live !== live ||
+    holder.current.seedFixture !== seedFixture ||
     holder.current.doc.isDestroyed()
   ) {
     if (holder.current !== null && !holder.current.doc.isDestroyed()) {
@@ -97,8 +114,11 @@ export function useConversationModel(
     holder.current = {
       key,
       live,
-      // Live path catches up from the stream (unseeded, F3); fixture path seeds.
-      doc: live ? new ConversationDoc() : conversationDocFor(selection),
+      seedFixture,
+      // Live path catches up from the stream (unseeded, F3). Otherwise the
+      // fixture route SEEDS the mock demo; a live room without a transport stays
+      // EMPTY (honest — no mock history on a real room).
+      doc: live || !seedFixture ? new ConversationDoc() : conversationDocFor(selection),
     };
   }
   const doc = holder.current.doc;

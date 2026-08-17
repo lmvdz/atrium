@@ -263,6 +263,11 @@ function authorKindOf(kind: ChatKind): ParticipantKind {
 /** The default certification authority — nothing is certified (every line `~`). */
 const EMPTY_AUTHORITY: ReadonlySet<string> = new Set();
 
+/** A neutral, non-viewer author label for UNTRUSTED (peer-writable CRDT) content.
+ *  It can never equal {@link VIEWER}, so an unverified line can never be rendered
+ *  as the viewer's own speech (no self-forgery from a peer-written `who:'you'`). */
+const UNVERIFIED_ACTOR = 'unverified';
+
 /**
  * The certified-message ids in a TRUSTED message list — the non-CRDT authority a
  * caller hands {@link buildConversationModel}. Read off `certified` here, at the
@@ -276,6 +281,91 @@ export function certifiedIdsOf(messages: readonly ChatMsg[]): ReadonlySet<string
     if (message.certified === true) ids.add(message.id);
   }
   return ids;
+}
+
+/* ── the trust boundary (#183 round-2, map #162) ────────────────────────────
+   The round-1 fix stripped `certified` from the wire, but the round-2 gauntlet
+   (executed) proved that was not enough: `id`, `who` and `kind` remained
+   peer-writable channels — a peer forged a `✓` by colliding with a trusted id,
+   or a trusted-agent / system voice by writing `who`/`kind`. The governing
+   decision (#162): the CRDT carries CONTENT and projects ZERO authenticated
+   authority; the trust envelope — server-minted identity, authorship/kind,
+   certification — comes from the gated ledger via #181's read authority, keyed
+   to #180's anchor, NEVER a peer id.
+
+   So the projection reads a `ProjectionAuthority`. A message it does NOT trust is
+   projected as UNVERIFIED: a plain content row with `authorKind:'unknown'` (the
+   fail-closed, visibly-not-a-person register from `model/kind.ts`), a neutral
+   non-viewer actor, no system voice, no agent/turn shell, and no `✓`. Only a
+   TRUSTED source (the mock fixture today, #181's gated read tomorrow) projects
+   authenticated who/kind/certification. */
+
+/** Where a message's authority comes from — the trust boundary the projection reads. */
+export interface ProjectionAuthority {
+  /**
+   * Whether THIS message came from a trusted, non-peer source. `false` ⇒ the
+   * peer-writable CRDT: its `who`/`kind`/`id` are forgeable and are projected as
+   * unverified content, never as authenticated provenance or a `✓`.
+   */
+  readonly trusts: (message: ChatMsg) => boolean;
+  /** ids the trusted source certified — consulted ONLY for trusted messages. */
+  readonly certifiedIds: ReadonlySet<string>;
+}
+
+/**
+ * The authority for a TRUSTED message list (the mock fixture, or #181's gated
+ * read): every message is trusted, and its `certified` fields are the `✓`
+ * authority. This is what the mock `conversationModel` hands the projection.
+ */
+export function trustedAuthority(messages: readonly ChatMsg[]): ProjectionAuthority {
+  return { trusts: () => true, certifiedIds: certifiedIdsOf(messages) };
+}
+
+/**
+ * The FAIL-CLOSED default: trust nothing's authority. A caller that forgets to
+ * declare a trust source gets every line projected as unverified content — never
+ * a silent authenticated projection of peer-writable data.
+ */
+const UNTRUSTED_AUTHORITY: ProjectionAuthority = {
+  trusts: () => false,
+  certifiedIds: EMPTY_AUTHORITY,
+};
+
+/**
+ * An UNVERIFIED (peer-writable CRDT) message → a plain content row. It carries
+ * `authorKind:'unknown'` so it renders in the fail-closed register (neither a
+ * person nor an agent, excluded from the mention filter and the people count),
+ * a neutral non-viewer actor, and the routine `·` state — never a `✓`, never a
+ * system voice, never an agent/turn shell. Contentless peer writes (no text)
+ * are quarantined (returns `null`) so an empty forgery renders nothing and
+ * cannot crash the projection. Authenticated provenance is #181's envelope.
+ */
+function unverifiedItem(
+  message: ChatMsg,
+  room: string,
+): { readonly record: MessageRecord; readonly item: ConversationItem } | null {
+  const text = (message.text ?? '').trim();
+  if (text.length === 0) return null;
+  const body = messageBody(message.text ?? '');
+  const excerpt = text.replace(/[`=*]/g, '').trim();
+  const record: MessageRecord = {
+    id: message.id,
+    at: message.time,
+    actor: UNVERIFIED_ACTOR,
+    text: bodyText(body),
+    origin: 'seeded',
+    authorKind: 'unknown',
+    room,
+  };
+  return {
+    record,
+    item: {
+      kind: 'message',
+      id: message.id,
+      mm: { who: '', kind: 'unknown', excerpt },
+      entry: messageEntry(record, { state: TALK, body, viewer: VIEWER }),
+    },
+  };
 }
 
 /**
@@ -292,12 +382,26 @@ export function buildConversationModel(
   messages: readonly ChatMsg[],
   room: string,
   participants: readonly ParticipantSummary[],
-  certifiedIds: ReadonlySet<string> = EMPTY_AUTHORITY,
+  authority: ProjectionAuthority = UNTRUSTED_AUTHORITY,
 ): ConversationModel {
   const records: MessageRecord[] = [];
   const items: ConversationItem[] = [];
+  const { certifiedIds } = authority;
 
   for (const message of messages) {
+    // UNTRUSTED (peer-writable CRDT) content projects ZERO authenticated
+    // authority (#183 round-2, #162): no `✓` from a peer-keyed id, no
+    // authenticated actor/authorKind from peer `who`/`kind`, no system voice. It
+    // renders as an unverified content row; contentless writes are quarantined.
+    if (!authority.trusts(message)) {
+      const uv = unverifiedItem(message, room);
+      if (uv !== null) {
+        records.push(uv.record);
+        items.push(uv.item);
+      }
+      continue;
+    }
+
     const mm = mmFor(message);
 
     if (message.kind === 'system') {
@@ -382,10 +486,11 @@ export function conversationModel(selection: Selection): ConversationModel {
     messages,
     sessionFor(selection).agent.room,
     participantsFor(selection),
-    // The mock seam IS the trusted source on the fixture route, so its `certified`
-    // fields are the certification authority — read here, off the fixture, not off
-    // the doc. This keeps the seam's `✓` while the durable path forges none.
-    certifiedIdsOf(messages),
+    // The mock seam IS the trusted source on the fixture route, so every message
+    // is trusted and its `certified` fields are the certification authority —
+    // read here, off the fixture, not off the peer-writable doc. This keeps the
+    // seam's authenticated who/kind/`✓` while the durable CRDT path forges none.
+    trustedAuthority(messages),
   );
 }
 

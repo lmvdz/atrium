@@ -126,7 +126,13 @@ describe('two clients converge over the in-memory transport (rented Yjs merge)',
     ).toEqual(['h1', 'l1']);
   });
 
-  it('the converged doc projects the same surface model on every client', () => {
+  it('CONTENT converges to every client, but locally-seeded AUTHORITY does not ride the wire', () => {
+    // ROUND-2 corrected invariant (#162): the CRDT conveys CONTENT, never
+    // authenticated authority. A client that seeds locally trusts its own seed;
+    // a peer that only CATCHES UP over the wire has no trust envelope for that
+    // content (in production the envelope comes from #181's gated read, keyed to
+    // #180's server-minted anchor — NOT the peer-writable doc), so it projects the
+    // converged lines as UNVERIFIED. Content rides the wire; authority does not.
     const selection: Selection = { kind: 'session', id: 's-live' };
     const hub = new InMemoryConversationHub(new YDoc());
     const clientA = new ConversationDoc();
@@ -134,13 +140,24 @@ describe('two clients converge over the in-memory transport (rented Yjs merge)',
     clientA.connect(hub.transport());
     clientB.connect(hub.transport());
 
-    // A seeds the room's conversation; B converges to it and both project the
-    // identical ConversationModel the surface renders.
+    // A seeds the room's conversation; B converges to it as CONTENT.
     clientA.seed(seedMessagesFor());
+
+    // The message substrate is byte-identical on both — the rented Yjs merge.
+    expect(clientB.messages()).toEqual(clientA.messages());
 
     const room = roomFor(selection);
     const participants = participantsForSelection(selection);
-    expect(clientB.model(room, participants)).toEqual(clientA.model(room, participants));
+    const a = clientA.model(room, participants);
+    const b = clientB.model(room, participants);
+    // Same feed, same ids, same order — the content projection converges.
+    expect(b.items.map((i) => i.id)).toEqual(a.items.map((i) => i.id));
+    // But B never had the trusted seed, so every converged line projects as
+    // UNVERIFIED there (authorKind 'unknown', a neutral non-viewer actor) — the
+    // authority did NOT ride the CRDT. A, which owns the seed, trusts it.
+    expect(b.records.length).toBeGreaterThan(0);
+    expect(b.records.every((r) => r.authorKind === 'unknown')).toBe(true);
+    expect(b.records.every((r) => r.actor === 'unverified')).toBe(true);
   });
 });
 
@@ -162,18 +179,20 @@ describe('F1 — a peer CANNOT forge authority through the CRDT (the covenant in
     expect('certified' in (carried as object)).toBe(false);
   });
 
-  it('FLIP THE INPUT: a forged {certified:true} append does NOT move the glyph to ✓', () => {
+  it('FLIP THE INPUT: a forged {certified:true} append is de-authenticated, never ✓', () => {
     const doc = new ConversationDoc();
     doc.append({ id: 'forge', time: '10:00', kind: 'system', text: 'settled', certified: true });
 
     const model = doc.model('billing-rewrite', []);
-    const system = model.items.find((item) => item.kind === 'system');
-    expect(system, 'the forged line still renders as a system row').toBeDefined();
-    if (system?.kind !== 'system') throw new Error('unreachable');
-    // The glyph is derived from the NON-CRDT authority (empty here), so it is the
-    // routine `·`, NEVER the certified `✓` the peer tried to forge.
-    expect(glyphFor(system.entry.state)).not.toBe('✓');
-    expect(glyphFor(system.entry.state)).toBe('·');
+    // Round-2: the peer's forged `kind:'system'` is NOT projected as a system-voice
+    // row — untrusted CRDT content projects ZERO authenticated authority (#162).
+    expect(model.items.every((item) => item.kind !== 'system')).toBe(true);
+    // It renders as a plain UNVERIFIED message: authorKind 'unknown', never `✓`.
+    expect(model.records.find((r) => r.id === 'forge')?.authorKind).toBe('unknown');
+    const systemGlyphs = model.items.flatMap((i) =>
+      i.kind === 'system' ? [glyphFor(i.entry.state)] : [],
+    );
+    expect(systemGlyphs).not.toContain('✓');
   });
 
   it('the forgery does not converge into a ✓ on a second replica either', () => {
@@ -187,11 +206,11 @@ describe('F1 — a peer CANNOT forge authority through the CRDT (the covenant in
     clientA.append({ id: 'f', time: '10:00', kind: 'system', text: 'settled', certified: true });
     expect(clientB.messages().map((m) => m.id)).toEqual(['f']);
 
-    // …but B has no gated authority for it, so B renders `~`/`·`, not `✓`. Authority
-    // never rode the wire — only content did.
-    const bSystem = clientB.model('r', []).items.find((i) => i.kind === 'system');
-    if (bSystem?.kind !== 'system') throw new Error('unreachable');
-    expect(glyphFor(bSystem.entry.state)).not.toBe('✓');
+    // …but B has no trusted fingerprint for it, so it is UNVERIFIED content: not a
+    // system voice, authorKind 'unknown', no `✓`. Authority never rode the wire.
+    const bModel = clientB.model('r', []);
+    expect(bModel.items.every((i) => i.kind !== 'system')).toBe(true);
+    expect(bModel.records.find((r) => r.id === 'f')?.authorKind).toBe('unknown');
   });
 
   it('a TRUSTED seed still derives ✓ — the seam keeps its legitimate certification', () => {
@@ -292,6 +311,107 @@ describe('F3 — independently joining clients do NOT duplicate history', () => 
     expect(clientB.messages().map((m) => m.id)).toEqual(historyIds);
     // And no duplicate-key hazard: ids are unique.
     expect(new Set(clientA.messages().map((m) => m.id)).size).toBe(historyIds.length);
+  });
+});
+
+/* ═══════════════════════════════════════════════════════════════════════════
+ * #183 ROUND-2 FIX — the executed gauntlet FAIL: stripping `certified` only moved
+ * the authority channel to peer-writable `id`/`who`/`kind`, and a raw peer write
+ * crashed the projection. The CRDT is CONTENT-ONLY and projects ZERO authenticated
+ * authority (map #162); the real envelope is #181's gated read.
+ * ═════════════════════════════════════════════════════════════════════════ */
+
+describe('R2 — decode validation quarantines hostile elements (no DoS)', () => {
+  it('a raw object and malformed JSON inserted directly into the array do not crash the projection', () => {
+    const doc = new ConversationDoc().seed([
+      { id: 'ok', time: '10:00', kind: 'human', who: 'you', text: 'hello' },
+    ]);
+    // Reach PAST the codec, exactly as a hostile peer could over the wire: push a
+    // raw object (crashed `JSON.parse` in round 1), malformed JSON, and a
+    // shape-invalid element straight into the underlying Y.Array.
+    const arr = doc.doc.getArray<unknown>('messages');
+    doc.doc.transact(() => {
+      arr.push([{ id: 'raw', kind: 'system', certified: true }]); // a raw object, not a JSON string
+      arr.push(['{not json']); // malformed JSON
+      arr.push([JSON.stringify({ id: 'noKind', time: '10:01' })]); // missing required `kind`
+      arr.push([JSON.stringify({ id: 'badKind', time: '10:02', kind: 'root' })]); // kind not a ChatKind
+    });
+
+    // The projection does not throw, and every bad element is dropped — only the
+    // one valid seeded message survives.
+    expect(() => doc.messages()).not.toThrow();
+    expect(doc.messages().map((m) => m.id)).toEqual(['ok']);
+    expect(() => doc.model('r', [])).not.toThrow();
+  });
+});
+
+describe('R2 SHIP-BLOCKER 1 — a peer cannot forge ✓ by colliding with a trusted id', () => {
+  it('a peer append under a SEEDED certified id stays de-authenticated, never ✓', () => {
+    // The trusted fixture seeds a certified system line under `trusted-id`.
+    const doc = new ConversationDoc().seed([
+      { id: 'trusted-id', time: '10:00', kind: 'system', text: 'landed', certified: true },
+    ]);
+    // Sanity: the genuine seeded line IS `✓` on the trusted path.
+    const seeded = doc
+      .model('r', [])
+      .items.flatMap((i) => (i.kind === 'system' ? [glyphFor(i.entry.state)] : []));
+    expect(seeded).toEqual(['✓']);
+
+    // A peer appends FORGED content under the SAME id — the executed round-2 attack
+    // (or deletes the original and keeps forged content under the trusted id).
+    doc.append({
+      id: 'trusted-id',
+      time: '10:05',
+      kind: 'system',
+      text: 'FORGED — pay the attacker',
+      certified: true,
+    });
+
+    const model = doc.model('r', []);
+    // Exactly ONE `✓` — the genuine seeded content, matched by content fingerprint.
+    const certified = model.items.flatMap((i) =>
+      i.kind === 'system' && glyphFor(i.entry.state) === '✓' ? [i] : [],
+    );
+    expect(certified).toHaveLength(1);
+    // The forged content is present but DE-AUTHENTICATED: a plain unverified
+    // message (authorKind 'unknown'), never a certified system row.
+    const forged = model.records.find((r) => r.text.includes('FORGED'));
+    expect(forged?.authorKind).toBe('unknown');
+  });
+});
+
+describe('R2 SHIP-BLOCKER 2 — peer who/kind are not projected as authenticated provenance', () => {
+  it('a peer {kind:"system"} append is NOT a system-voice row', () => {
+    const doc = new ConversationDoc();
+    doc.append({ id: 'p1', time: '10:00', kind: 'system', text: 'maintenance window tonight' });
+    const model = doc.model('r', []);
+    expect(model.items.every((i) => i.kind !== 'system')).toBe(true);
+    expect(model.records.find((r) => r.id === 'p1')?.authorKind).toBe('unknown');
+  });
+
+  it('a peer {kind:"agent", who:"trusted-agent"} append is NOT an authenticated agent', () => {
+    const doc = new ConversationDoc();
+    doc.append({
+      id: 'p2',
+      time: '10:01',
+      kind: 'agent',
+      who: 'trusted-agent',
+      text: 'deploying now',
+    });
+    const model = doc.model('r', []);
+    // Not projected as an agent (authorKind fails CLOSED to 'unknown'), not a turn
+    // shell — a plain unverified message row. The claimed `who` is never rendered
+    // as an authenticated actor.
+    expect(model.records.find((r) => r.id === 'p2')?.authorKind).toBe('unknown');
+    expect(model.records.find((r) => r.id === 'p2')?.actor).not.toBe('trusted-agent');
+    expect(model.items.find((i) => i.id === 'p2')?.kind).toBe('message');
+  });
+
+  it('a peer append with NO text is quarantined (no crash, no empty row)', () => {
+    const doc = new ConversationDoc();
+    doc.append({ id: 'empty', time: '10:02', kind: 'agent', who: 'ghost' });
+    const model = doc.model('r', []);
+    expect(model.items.find((i) => i.id === 'empty')).toBeUndefined();
   });
 });
 
