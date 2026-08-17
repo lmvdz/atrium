@@ -12,6 +12,7 @@ import {
   CoreEvent as CoreEventSchema,
   type CoreState,
   type CorrectionAction,
+  epistemicStateFromAcceptance,
   epistemicStateOf,
   Proposal as ProposalSchema,
   type ProvenanceMessage,
@@ -1698,6 +1699,175 @@ describe('authority matrix — relation_added, every actor × kind × retired ty
       }
     }
   }
+});
+
+/**
+ * ─── SL-5 PREDICATE-CARVE — provenance is byte-frozen at the KEEP sites (#192) ──────────
+ *
+ * #181 (SL-6) will migrate the DISPLAY readers that emit `✓`/`~` to compute the glyph
+ * through the covenant read authority `resolveCovenant(doc, anchor)` — "does the certified
+ * CONTENT still resolve." But the KEEP sites enumerated in `COVENANT-PREDICATE-PARTITION.md`
+ * read the predicate for a *provenance* question — "did a HUMAN take responsibility" — which
+ * `resolveCovenant` deliberately does NOT answer. A blind grep-migrate typechecks green and
+ * silently changes which supersession refusal a room hears (or whether a machine-signed
+ * landing renders certified).
+ *
+ * These pins lock the CURRENT provenance behavior of the KEEP sites byte-for-byte, so that
+ * when SL-6 migrates the display readers, any accidental change to a KEEP site's predicate
+ * — routing `reduce.ts:2031` / `commands.ts:2293`'s reason-selection or `control/state.ts`'s
+ * `!isHuman` certifier/armer gates through the content authority — FAILS here.
+ *
+ * The reason strings are written out LITERALLY (not built from `humanOnlyRefusal`): a pin
+ * that reconstructed the expected message from the same function under test would move both
+ * sides together and see nothing. These are the frozen current bytes; a wrong reason
+ * selection at `reduce.ts:2031` produces a different string and this suite goes red.
+ */
+describe('SL-5 predicate-carve — provenance is byte-frozen at the KEEP sites (#192)', () => {
+  // ── Pin 1: the predicate provenance truth table. ──────────────────────────────────────
+  //
+  // KEEP sites #1–#4 all rest on the same fact: the predicate is `isHuman(kind) ||
+  // humanTouchedAt !== null`. `control/state.ts:120/135` call it with `humanTouchedAt = null`,
+  // which reduces it to `isHuman(kind)` — a pure provenance gate. This pins the full table so
+  // that swapping the predicate for a content-resolution authority (which cannot see actor
+  // kind) is caught at the root every KEEP site depends on.
+  const KINDS: Actor['kind'][] = ['human', 'model', 'agent', 'system'];
+
+  it('freezes the `!isHuman` gate: with humanTouchedAt=null, only a human is confirmed', () => {
+    // This is exactly `control/state.ts`'s call form: `epistemicStateFromAcceptance(kind, null)`.
+    // A machine-signed / machine-armed landing must NEVER read confirmed. Provenance, not content.
+    expect(epistemicStateFromAcceptance('human', null)).toBe('confirmed');
+    expect(epistemicStateFromAcceptance('model', null)).toBe('unconfirmed');
+    expect(epistemicStateFromAcceptance('agent', null)).toBe('unconfirmed');
+    expect(epistemicStateFromAcceptance('system', null)).toBe('unconfirmed');
+  });
+
+  it('freezes the full predicate table over every kind × humanTouchedAt', () => {
+    const touchedAt = '2026-01-01T00:00:00.000Z';
+    for (const kind of KINDS) {
+      const human = kind === 'human';
+      // humanTouchedAt=null → confirmed iff the acceptor is a human kind (the `!isHuman` gate).
+      expect(
+        epistemicStateOf({ acceptedBy: { kind }, humanTouchedAt: null }),
+        `${kind} accept, untouched`,
+      ).toBe(human ? 'confirmed' : 'unconfirmed');
+      // humanTouchedAt set → a human has corrected it, so ALWAYS confirmed regardless of kind.
+      expect(
+        epistemicStateOf({ acceptedBy: { kind }, humanTouchedAt: touchedAt }),
+        `${kind} accept, human-touched`,
+      ).toBe('confirmed');
+      // The two call forms agree (the read-model adapter delegates to the predicate).
+      expect(epistemicStateFromAcceptance(kind, null)).toBe(
+        epistemicStateOf({ acceptedBy: { kind }, humanTouchedAt: null }),
+      );
+    }
+  });
+
+  // The frozen current bytes of the two supersession refusals. A non-human (`model`) actor
+  // superseding an accepted `auto_accept` object (a claim) reaches `reduce.ts:2031`, where
+  // `epistemicStateOf(target) === 'confirmed'` selects which of these the room hears.
+  const CONFIRMED_SUPERSESSION_REASON =
+    'relation "rel_pin_confirmed" retires an object a person has already confirmed, on a model actor\'s word — a non-human may never retire anything the room has confirmed (#95), whatever its type: the ✓ is a person\'s judgement and unmaking it is the same act as making it; a model actor may draft a superseding reading (~) and let a person retire the old one';
+  const UNCONFIRMED_SUPERSESSION_REASON =
+    'relation "rel_pin_unconfirmed" supersedes an accepted claim on a model actor\'s word — a non-human may never retire a standing accepted object by superseding it (#95), even an unconfirmed reading another machine accepted; a model actor may draft a superseding reading (~) and let a person retire the old one';
+
+  /** Build a `supersedes` relation event by the given non-human actor. */
+  const supersedeRelation = (relId: string, fromId: string, toId: string, actor: ActorKind) =>
+    row(
+      {
+        id: `ev_${relId}`,
+        at: nextAt(),
+        type: 'relation_added',
+        relation: {
+          id: relId,
+          roomId: ROOM,
+          kind: 'supersedes',
+          fromObjectId: fromId,
+          to: { kind: 'object', objectId: toId },
+          createdAt: nextAt(),
+        },
+      },
+      actor,
+    );
+
+  const reasonFor = (state: CoreState, eventId: string): string => {
+    const issues = state.issues.filter((entry) => entry.eventId === eventId);
+    // Exactly one refusal for this event, or the pin is reading the wrong thing.
+    expect(issues.map((entry) => entry.reason)).toHaveLength(1);
+    const issue = issues[0];
+    if (!issue) throw new Error('no refusal for the supersession event');
+    return issue.reason;
+  };
+
+  // ── Pin 2: `reduce.ts:2031` selects `confirmed_supersession` byte-identically. ─────────
+  it('freezes the confirmed_supersession reason (KEEP: reduce.ts:2031)', () => {
+    // Retire a HUMAN-accepted claim (confirmed). `claim` is `auto_accept`, so it passes the
+    // `requires_human` type gate above and reaches the epistemic-state reason-selector.
+    const events: AuthoredEvent[] = [
+      acceptEvent({
+        id: 'pin_c_from',
+        objectId: 'obj_pin_c_from',
+        type: 'claim',
+        actor: 'human',
+        proposalId: null,
+        setup: true,
+      }),
+      acceptEvent({
+        id: 'pin_c_to',
+        objectId: 'obj_pin_c_to',
+        type: 'claim',
+        actor: 'human',
+        proposalId: null,
+        setup: true,
+      }),
+      supersedeRelation('rel_pin_confirmed', 'obj_pin_c_from', 'obj_pin_c_to', 'model_other'),
+    ];
+    const state = reduce(events);
+    // The retired object is confirmed — the provenance fact the reason keys on.
+    const retired = state.objects['obj_pin_c_to'];
+    if (!retired) throw new Error('setup did not produce the confirmed target');
+    expect(epistemicStateOf(retired)).toBe('confirmed');
+    // The frozen reason, byte-for-byte.
+    expect(reasonFor(state, 'ev_rel_pin_confirmed')).toBe(CONFIRMED_SUPERSESSION_REASON);
+    // And the refusal actually held: the object stays standing.
+    expect(retired.supersededById).toBe(null);
+  });
+
+  // ── Pin 3: `reduce.ts:2031` selects `unconfirmed_supersession` byte-identically. ───────
+  it('freezes the unconfirmed_supersession reason (KEEP: reduce.ts:2031)', () => {
+    // Retire a MODEL-accepted claim (unconfirmed): a model staged it and accepted its own at θ.
+    const events: AuthoredEvent[] = [
+      acceptEvent({
+        id: 'pin_u_from',
+        objectId: 'obj_pin_u_from',
+        type: 'claim',
+        actor: 'human',
+        proposalId: null,
+        setup: true,
+      }),
+      proposalEvent({
+        id: 'prop_pin_u',
+        type: 'claim',
+        proposer: 'model_a',
+        confidence: 0.95,
+        recordedBy: 'model_proposer',
+      }),
+      acceptEvent({
+        id: 'pin_u_to',
+        objectId: 'obj_pin_u_to',
+        type: 'claim',
+        actor: 'model_proposer',
+        proposalId: 'prop_pin_u',
+      }),
+      supersedeRelation('rel_pin_unconfirmed', 'obj_pin_u_from', 'obj_pin_u_to', 'model_other'),
+    ];
+    const state = reduce(events);
+    const retired = state.objects['obj_pin_u_to'];
+    if (!retired) throw new Error('setup did not produce the unconfirmed target');
+    // The retired object is unconfirmed — the OTHER branch of the provenance selector.
+    expect(epistemicStateOf(retired)).toBe('unconfirmed');
+    expect(reasonFor(state, 'ev_rel_pin_unconfirmed')).toBe(UNCONFIRMED_SUPERSESSION_REASON);
+    expect(retired.supersededById).toBe(null);
+  });
 });
 
 describe('the matrix as a whole', () => {
