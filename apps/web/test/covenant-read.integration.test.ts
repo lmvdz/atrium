@@ -151,3 +151,70 @@ describe('covenant read authority × production reader — async fail-closed end
     expect(second.read('o_span').covenantStatus).not.toBe('ok');
   });
 });
+
+/**
+ * SL-4 gauntlet FIX (#191), THE cardinal rule end-to-end over the REAL production
+ * reader + a live `Y.Doc`: a cached `ok` must NEVER outlive the content it vouched
+ * for. This is the SAME-authority warm-cache case the blind gauntlet caught (the
+ * flip-input tests above only used FRESH authorities, which is why they missed it).
+ * Each runs on the shipped `webCovenantReadAuthority` signature, so it is a genuine
+ * not-theater proof — it FAILS on base 9cab798 (which serves the stale `✓`) and
+ * passes here, where the sync state-vector freshness check demotes it to `~`.
+ */
+describe('covenant read authority × production reader — the cardinal rule: no stale `ok` (#191 fix)', () => {
+  it('resolve→ok, then DRIFT the live span: the SAME authority’s sync read is `~`/drift, NEVER the stale `ok`', async () => {
+    const { doc, body } = makeDoc();
+    const reader = capturingReader(doc);
+    const anchor = certify(reader);
+    const authority = webCovenantReadAuthority({ loadAnchor: async () => anchor, reader });
+
+    // Warm the cache with a genuine `ok` over unchanged content.
+    expect((await authority.resolve('o_span')).covenantStatus).toBe('ok');
+    expect(authority.read('o_span').covenantStatus).toBe('ok'); // fresh — SV still matches
+
+    // A peer edits the certified span AFTER the `✓` was cached — the live state vector advances.
+    body.insert(9, 'X');
+
+    // THE CARDINAL RULE: the sync read must NOT keep painting the stale `✓`.
+    const afterDrift = authority.read('o_span');
+    expect(afterDrift.covenantStatus).not.toBe('ok'); // FAILS on base (serves stale ok)
+    expect(afterDrift.covenantStatus).toBe('unresolved'); // demoted to `~`, re-resolve kicked
+    expect(afterDrift.renderedFragment).toBeNull();
+
+    // The kicked re-resolve concludes the real, current verdict: drift.
+    await authority.resolve('o_span');
+    expect(authority.read('o_span').covenantStatus).toBe('drift');
+  });
+
+  it('peek() over the same authority also refuses a stale `ok` once the span drifts', async () => {
+    const { doc, body } = makeDoc();
+    const reader = capturingReader(doc);
+    const anchor = certify(reader);
+    const authority = webCovenantReadAuthority({ loadAnchor: async () => anchor, reader });
+    expect((await authority.resolve('o_span')).covenantStatus).toBe('ok');
+    body.insert(9, 'Q'); // drift
+    expect(authority.peek('o_span').covenantStatus).not.toBe('ok');
+    expect(authority.peek('o_span').covenantStatus).toBe('unresolved');
+  });
+
+  it('staleness bound: once the live handle drops, a cached `ok` degrades to `~` (never an indefinite stale `✓`)', async () => {
+    const { doc } = makeDoc();
+    const reader = capturingReader(doc);
+    const anchor = certify(reader);
+    const authority = webCovenantReadAuthority({ loadAnchor: async () => anchor, reader });
+    expect((await authority.resolve('o_span')).covenantStatus).toBe('ok');
+    reader.makeUnavailable(); // the stream / doc handle is gone — freshness unprovable
+    expect(authority.read('o_span').covenantStatus).not.toBe('ok');
+    expect(authority.read('o_span').covenantStatus).toBe('unresolved');
+  });
+
+  it('explicit invalidate() (the SL-6 / #182 hook) drops a cached `ok` synchronously', async () => {
+    const { doc } = makeDoc();
+    const reader = capturingReader(doc);
+    const anchor = certify(reader);
+    const authority = webCovenantReadAuthority({ loadAnchor: async () => anchor, reader });
+    expect((await authority.resolve('o_span')).covenantStatus).toBe('ok');
+    authority.invalidate('o_span');
+    expect(authority.read('o_span').covenantStatus).toBe('unresolved');
+  });
+});

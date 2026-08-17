@@ -73,9 +73,15 @@ export async function readCovenantAnchor(
     deleteSet: row.deleteSet,
     enclosedItems: row.enclosedItems,
     renderedDigest: row.renderedDigest,
-    // certifier_kind is 'human' by the DB CHECK (covenant_anchors_certifier_is_human);
-    // HumanCertifier.parse (inside CovenantAnchor.parse) re-refuses anything else.
-    certifier: { kind: 'human', userId: row.certifierId },
+    // HONEST certifier kind (SL-4 gauntlet HIGH): feed the row's ACTUAL
+    // `certifier_kind` through the schema — never hard-code `{ kind: 'human' }`. The
+    // DB CHECK (`covenant_anchors_certifier_is_human`) is a backstop, not a licence to
+    // launder: a corrupted / machine (`agent`/`model`/`system`) row that slipped past
+    // it must NOT be minted into a human certification. `HumanCertifier.parse` (inside
+    // `CovenantAnchor.parse`) REFUSES any non-`human` kind, so such a row THROWS here
+    // ⇒ the authority catches it ⇒ `drift`, fail-closed. This is the read-side defence
+    // that pairs with SL-3's migration 0052 human-at-write enforcement.
+    certifier: { kind: row.certifierKind, userId: row.certifierId },
     // The ledger stores a timestamptz (a Date); core wants the canonical UTC spelling
     // Date#toISOString produces, which is exactly what the Timestamp type admits.
     certifiedAt: row.certifiedAt.toISOString(),
@@ -96,6 +102,12 @@ export function serverCovenantReadAuthority(input: {
 }): CovenantReadAuthority {
   const loadAnchor: AnchorLoader = (objectId) =>
     readCovenantAnchor(input.db, input.roomId, objectId);
-  const options: CovenantReadAuthorityOptions = { loadAnchor, resolveSpan: input.resolveSpan };
+  const options: CovenantReadAuthorityOptions = {
+    loadAnchor,
+    resolveSpan: input.resolveSpan,
+    // Bind the authority to its room: an anchor loaded for a different room fails
+    // closed (defence-in-depth over the `(room_id, object_id)`-keyed query).
+    expectedRoomId: input.roomId,
+  };
   return new CovenantReadAuthority(options);
 }

@@ -78,6 +78,29 @@ describe('readCovenantAnchor — ledger row → CovenantAnchor mapping (fail-clo
       readCovenantAnchor(fakeDb([goodRow({ renderedDigest: 'not-a-sha256' })]), 'room_1', 'o_span'),
     ).rejects.toThrow();
   });
+
+  // SL-4 gauntlet HIGH — HONEST certifier kind. The mapper must feed the row's ACTUAL
+  // `certifier_kind` through the schema, never hard-code `{ kind: 'human' }`. A machine
+  // certifier row that slipped past the DB CHECK must NOT be laundered into a human `✓`.
+  it('a MACHINE (agent) certifier row ⇒ fails closed (throws ⇒ drift), never a laundered human `✓`', async () => {
+    // not-theater: base hard-codes `kind: 'human'` and returns a laundered anchor here;
+    // the fix passes `row.certifierKind` through, so `HumanCertifier.parse` refuses it.
+    await expect(
+      readCovenantAnchor(fakeDb([goodRow({ certifierKind: 'agent' })]), 'room_1', 'o_span'),
+    ).rejects.toThrow();
+  });
+
+  it('a `model` certifier row is refused exactly the same way', async () => {
+    await expect(
+      readCovenantAnchor(fakeDb([goodRow({ certifierKind: 'model' })]), 'room_1', 'o_span'),
+    ).rejects.toThrow();
+  });
+
+  it('a `system` certifier row is refused exactly the same way', async () => {
+    await expect(
+      readCovenantAnchor(fakeDb([goodRow({ certifierKind: 'system' })]), 'room_1', 'o_span'),
+    ).rejects.toThrow();
+  });
 });
 
 describe('serverCovenantReadAuthority — the authority wired to the ledger read', () => {

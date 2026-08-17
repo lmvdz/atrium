@@ -7,6 +7,7 @@ import {
   certifyAnchor,
   type EnclosedItem,
   type RenderedFragment,
+  type RenderedNode,
   type ResolvedSpan,
 } from '../src/index.js';
 
@@ -312,5 +313,201 @@ describe('CovenantReadAuthority — cross-call consistency + flip-the-input (#19
     const [a, b] = await Promise.all([authority.resolve('o_span'), authority.resolve('o_span')]);
     expect(resolverCalls).toBe(1); // deduped
     expect(a).toBe(b); // identical result object
+  });
+});
+
+/**
+ * SL-4 gauntlet FIX (#191): the WARM-cache holes both foreign lineages converged on.
+ * The COLD-cache paths above are correct and must not regress; these pin the four
+ * defects the FAIL enumerated. The first two run on the SHIPPED (pre-fix) API and so
+ * are the not-theater proofs — each FAILS on base 9cab798 (which stamps the wrong `✓`
+ * / leaves the fragment mutable) and passes here.
+ */
+describe('CovenantReadAuthority — SL-4 warm-cache defects (#191 fix)', () => {
+  // ── HIGH: bind the requested object to the loaded anchor ─────────────────────
+  it('object mismatch: a loaded anchor for a DIFFERENT object ⇒ drift, never stamps the requested `✓`', async () => {
+    const doc = sampleDoc();
+    // The loader hands back an anchor whose objectId is `o_other` (a loader / cache /
+    // cross-room mix-up), but the caller asked about `o_span`.
+    const anchorForOther = anchorFor(doc, 'o_other');
+    const authority = new CovenantReadAuthority({
+      loadAnchor: async () => anchorForOther,
+      resolveSpan: resolverFor(doc),
+    });
+    const r = await authority.resolve('o_span');
+    // not-theater: base stamps `o_span` `ok` (resolveCovenant ignores provenance ids);
+    // the fix binds objectId at the authority boundary ⇒ drift.
+    expect(r.covenantStatus).toBe('drift');
+    expect(r.covenantStatus).not.toBe('ok');
+    expect(r.objectId).toBe('o_span');
+  });
+
+  it('room mismatch: `expectedRoomId` set + a foreign-room anchor ⇒ drift', async () => {
+    const doc = sampleDoc();
+    const anchor = anchorFor(doc); // roomId 'room_1'
+    const authority = new CovenantReadAuthority({
+      loadAnchor: async () => anchor,
+      resolveSpan: resolverFor(doc),
+      expectedRoomId: 'room_2', // the authority is bound to a DIFFERENT room
+    });
+    expect((await authority.resolve('o_span')).covenantStatus).toBe('drift');
+  });
+
+  // ── MEDIUM: deep-freeze the returned fragment ────────────────────────────────
+  it('the returned renderedFragment is DEEP-frozen — a consumer mutation cannot rewrite every reader’s `✓`', async () => {
+    const doc = sampleDoc();
+    const anchor = anchorFor(doc);
+    const authority = new CovenantReadAuthority({
+      loadAnchor: async () => anchor,
+      resolveSpan: resolverFor(doc),
+    });
+    const r = await authority.resolve('o_span');
+    expect(r.covenantStatus).toBe('ok');
+    expect(r.renderedFragment).not.toBeNull();
+    const frag = r.renderedFragment as RenderedFragment;
+    // not-theater: base `Object.freeze`s the RESULT shallowly and never freezes the
+    // fragment, so `.nodes` / `.ancestors` / a node stay mutable under status `ok`.
+    expect(Object.isFrozen(frag)).toBe(true);
+    expect(Object.isFrozen(frag.nodes)).toBe(true);
+    expect(Object.isFrozen(frag.ancestors)).toBe(true);
+    expect(Object.isFrozen(frag.nodes[0])).toBe(true);
+    expect(() => {
+      (frag.nodes as RenderedNode[]).push({ kind: 'text', text: 'evil', marks: [] });
+    }).toThrow();
+    expect(() => {
+      (frag.nodes[0] as { text: string }).text = 'evil';
+    }).toThrow();
+  });
+
+  // ── CRITICAL: read() must NEVER serve a stale `ok` (sync SV-freshness) ────────
+  it('SV-freshness: a cached `ok` whose live token advances ⇒ read() returns `~` (never the stale `ok`)', async () => {
+    const doc = sampleDoc();
+    const anchor = anchorFor(doc);
+    let token = 'sv-1';
+    const authority = new CovenantReadAuthority({
+      loadAnchor: async () => anchor,
+      resolveSpan: resolverFor(doc),
+      liveFreshness: () => token,
+    });
+    expect((await authority.resolve('o_span')).covenantStatus).toBe('ok');
+    // Fresh: the live token still matches the one captured at resolve time.
+    expect(authority.read('o_span').covenantStatus).toBe('ok');
+    // The live span advances under the `✓` (a peer edit): the token moves.
+    token = 'sv-2';
+    // THE CARDINAL RULE: the sync read must NOT serve the stale `ok`.
+    expect(authority.read('o_span').covenantStatus).toBe('unresolved');
+    expect(authority.read('o_span').covenantStatus).not.toBe('ok');
+  });
+
+  it('SV-freshness then re-resolve: the kicked re-resolve concludes the REAL (drifted) verdict', async () => {
+    const doc = sampleDoc();
+    const anchor = anchorFor(doc);
+    let token = 'sv-1';
+    const authority = new CovenantReadAuthority({
+      loadAnchor: async () => anchor,
+      resolveSpan: resolverFor(doc),
+      liveFreshness: () => token,
+    });
+    await authority.resolve('o_span');
+    // Drift the actual content AND advance the token, as a real edit would.
+    doc.fragment = {
+      ancestors: doc.fragment.ancestors,
+      nodes: [{ kind: 'text', text: 'x', marks: [] }],
+    };
+    token = 'sv-2';
+    // read() demotes to `~` and kicks a re-resolve; awaiting it concludes drift.
+    expect(authority.read('o_span').covenantStatus).toBe('unresolved');
+    await authority.resolve('o_span');
+    expect(authority.read('o_span').covenantStatus).toBe('drift');
+  });
+
+  it('staleness bound: a `null` freshness sample (doc gone / cannot prove) ⇒ read() returns `~`, never the stale `✓`', async () => {
+    const doc = sampleDoc();
+    const anchor = anchorFor(doc);
+    let token: string | null = 'sv-1';
+    const authority = new CovenantReadAuthority({
+      loadAnchor: async () => anchor,
+      resolveSpan: resolverFor(doc),
+      liveFreshness: () => token,
+    });
+    expect((await authority.resolve('o_span')).covenantStatus).toBe('ok');
+    token = null; // the live handle dropped — freshness is unprovable
+    expect(authority.read('o_span').covenantStatus).not.toBe('ok');
+    expect(authority.read('o_span').covenantStatus).toBe('unresolved');
+  });
+
+  it('staleness bound: a STALLED re-resolve keeps read() at `~` — it never reverts to the stale `✓`', async () => {
+    const doc = sampleDoc();
+    const anchor = anchorFor(doc);
+    let token = 'sv-1';
+    let calls = 0;
+    const stall = deferred<ResolvedSpan | null>();
+    const authority = new CovenantReadAuthority({
+      loadAnchor: async () => anchor,
+      resolveSpan: () => {
+        calls += 1;
+        // First resolve returns `ok`; the kicked refresh (call 2) STALLS forever.
+        return calls === 1 ? Promise.resolve(doc.resolveSpan(anchor)) : stall.promise;
+      },
+      liveFreshness: () => token,
+    });
+    expect((await authority.resolve('o_span')).covenantStatus).toBe('ok');
+    token = 'sv-2'; // drift; the refresh this read kicks will stall
+    expect(authority.read('o_span').covenantStatus).toBe('unresolved');
+    // Even after the microtask queue drains, the stalled refresh has not settled — and
+    // the read stays `~`, never the indefinite stale `✓`.
+    await Promise.resolve();
+    await Promise.resolve();
+    expect(authority.read('o_span').covenantStatus).toBe('unresolved');
+    expect(authority.read('o_span').covenantStatus).not.toBe('ok');
+  });
+
+  // ── CRITICAL: generation guard — a pre-drift compute cannot recache a stale `ok` ─
+  it('invalidate(objectId) drops the cached `✓` synchronously ⇒ read() returns `~`', async () => {
+    const doc = sampleDoc();
+    const anchor = anchorFor(doc);
+    const authority = new CovenantReadAuthority({
+      loadAnchor: async () => anchor,
+      resolveSpan: resolverFor(doc),
+    });
+    expect((await authority.resolve('o_span')).covenantStatus).toBe('ok');
+    authority.invalidate('o_span');
+    expect(authority.read('o_span').covenantStatus).toBe('unresolved');
+    expect(authority.read('o_span').covenantStatus).not.toBe('ok');
+  });
+
+  it('generation guard: a resolve that JOINED a pre-invalidate in-flight compute cannot recache the stale `ok`', async () => {
+    const doc = sampleDoc();
+    const anchor = anchorFor(doc);
+    const gate = deferred<ResolvedSpan | null>();
+    const authority = new CovenantReadAuthority({
+      loadAnchor: async () => anchor,
+      resolveSpan: () => gate.promise, // held pending until the drift lands
+    });
+    const inflight = authority.resolve('o_span'); // compute starts at generation 0
+    const joined = authority.resolve('o_span'); // JOINS the same in-flight (generation 0)
+    expect(joined).toBe(inflight);
+    // The span drifts and SL-6 / #182 invalidates BEFORE the in-flight compute settles.
+    authority.invalidate('o_span');
+    // The pre-drift compute now settles `ok` — it must NOT repopulate the cache.
+    gate.resolve(doc.resolveSpan(anchor));
+    await inflight;
+    expect(authority.read('o_span').covenantStatus).toBe('unresolved');
+    expect(authority.read('o_span').covenantStatus).not.toBe('ok');
+  });
+
+  it('generation guard: a FRESH resolve after invalidate does repopulate (the guard only drops the pre-drift one)', async () => {
+    const doc = sampleDoc();
+    const anchor = anchorFor(doc);
+    const authority = new CovenantReadAuthority({
+      loadAnchor: async () => anchor,
+      resolveSpan: resolverFor(doc),
+    });
+    await authority.resolve('o_span');
+    authority.invalidate('o_span');
+    expect(authority.read('o_span').covenantStatus).toBe('unresolved'); // dropped
+    // A fresh resolve under the new generation caches again (content still unchanged ⇒ ok).
+    expect((await authority.resolve('o_span')).covenantStatus).toBe('ok');
+    expect(authority.read('o_span').covenantStatus).toBe('ok');
   });
 });
