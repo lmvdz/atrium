@@ -2,6 +2,7 @@
 
 import { useEffect, useMemo, useRef, useState } from 'react';
 import { authoredBody } from '@/lib/authored-body';
+import { precomputedGlyphResolver } from '../../../../lib/covenant-read';
 import type { ReplayData } from '../../../../lib/replay-data';
 import {
   applyReplayTransitions,
@@ -46,18 +47,25 @@ export function ReplaySession({ data, viewerId }: { data: ReplayData; viewerId?:
   const [cursor, setCursor] = useState(data.messages.length);
   const snapshot = useMemo(() => replayAt(data, cursor), [cursor, data]);
   /**
-   * The covenant read authority the migrated glyph readers (#181 / SL-6) source
-   * `✓` through. The REPLAY surface is a static historical reconstruction with no
-   * live Yjs doc and no ledger read wired to it, so it has no authority to supply
-   * and passes `undefined` — every glyph then fails CLOSED to `~`, the honest
-   * answer for content this surface cannot re-resolve. Binding a real
-   * `webCovenantReadAuthority` (a room ledger read + the surface's doc reader) is
-   * the follow-up surface-wiring step; #182 owns invalidate-on-drift.
+   * The covenant read authority the migrated glyph readers (#181 / SL-6) source `✓`
+   * through — now WIRED (#198, P6F-4). The verdicts are resolved on the SERVER
+   * (`roomCovenantReads`) against the room's authoritative live replica, because the
+   * document covenant resolves against is server-side (P6F-2 made it so — resolving
+   * against client bytes would reintroduce the authorship-blindness P6F-2 closed).
+   * `precomputedGlyphResolver` wraps that `{ objectId → status }` map as the sync
+   * `ObjectGlyphResolver` the readers consume: a resolved `ok` is `✓`, everything else
+   * (`drift` / no anchor / an object absent from the map / a fixture with no reads) is
+   * `~`, fail-closed. A drift re-resolves on the next server read; #182 owns the
+   * explicit invalidate-on-update sweep (P6F-5).
    */
-  const glyphResolver = undefined;
-  // `glyphResolver` is an invariant `undefined` today, so it is not a memo dep;
-  // when a real `webCovenantReadAuthority` is wired here it must join this list.
-  const view = useMemo(() => replayView(snapshot, viewerId, glyphResolver), [snapshot, viewerId]);
+  const glyphResolver = useMemo(
+    () => precomputedGlyphResolver(data.covenantReads),
+    [data.covenantReads],
+  );
+  const view = useMemo(
+    () => replayView(snapshot, viewerId, glyphResolver),
+    [snapshot, viewerId, glyphResolver],
+  );
   const [binding, setBinding] = useState<ComposerBinding>({ mode: 'free' });
   const [draft, setDraft] = useState('');
   const [actedOn, setActedOn] = useState<readonly string[]>([]);

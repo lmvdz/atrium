@@ -1,5 +1,6 @@
 import { randomUUID } from 'node:crypto';
 import { roomMemberIds } from '@atrium/auth';
+import type { CovenantReadStatus } from '@atrium/core';
 import type { Database } from '@atrium/db';
 import {
   acceptedObjects,
@@ -21,6 +22,7 @@ import {
   workspaces,
 } from '@atrium/db';
 import { and, asc, desc, eq, inArray } from 'drizzle-orm';
+import { roomCovenantReads } from './room-covenant-reads';
 
 /**
  * The persisted input to replay.
@@ -257,8 +259,17 @@ async function loadReplayDataSnapshot(database: Database, roomId: string) {
           .orderBy(asc(objectSources.objectId), asc(objectSources.messageId)),
   ]);
 
+  // The object `✓`/`~` glyphs, resolved on the SERVER through the ONE fail-closed
+  // read authority against the room's server-authoritative live replica (#198,
+  // P6F-4). Both surfaces (live + replay) read the SAME map through
+  // `precomputedGlyphResolver`, so replay and the live current-state pane agree.
+  // Fail-closed by construction: no replica / no anchor / a drifted span all resolve
+  // `drift` (`~`); only a live span byte-identical to its anchor is `ok` (`✓`).
+  const covenantReads = await roomCovenantReads(database, roomId, objectIds);
+
   return {
     loadReceipt: randomUUID(),
+    covenantReads,
     room,
     participants,
     messages: roomMessages,
@@ -295,7 +306,16 @@ export type ReplayData = Omit<
   | 'attention'
   | 'participants'
   | 'sessions'
+  | 'covenantReads'
 > & {
+  /**
+   * The object `✓`/`~` verdicts resolved on the server through the read authority
+   * (#198, P6F-4), keyed by object id. Optional only for hand-built fixtures that
+   * have no live document to resolve against — an absent map wires no resolver, so
+   * every glyph fails closed to `~`, exactly as before this surface was wired. A real
+   * load always computes it.
+   */
+  readonly covenantReads?: Readonly<Record<string, CovenantReadStatus>>;
   /**
    * Optional `principalKind` only for hand-built fixtures created before an
    * identity carried a kind; a real load always selects it (the column is NOT

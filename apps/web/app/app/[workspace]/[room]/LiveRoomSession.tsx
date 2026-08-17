@@ -2,8 +2,9 @@
 
 import { parseSemanticCommand, payloadText } from '@atrium/core';
 import { useRouter } from 'next/navigation';
-import { useEffect, useRef, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import { authoredBody } from '@/lib/authored-body';
+import { precomputedGlyphResolver } from '@/lib/covenant-read';
 import { type LiveUnreadWindow, liveRoomView, shouldRefreshLiveRoute } from '@/lib/live-room-view';
 import {
   type PendingSupersession,
@@ -248,7 +249,17 @@ export function LiveRoomSession({ data, viewerId }: { data: ReplayData; viewerId
   }, [roomId, router, viewerId]);
 
   const frozenUnreadWindow = unreadWindow?.roomId === roomId ? unreadWindow : undefined;
-  const view = liveRoomView(data, viewerId, live, frozenUnreadWindow);
+  // The object `✓`/`~` glyphs, resolved on the SERVER through the ONE read authority
+  // against the room's authoritative live replica (#198, P6F-4) and read here through
+  // the sync `ObjectGlyphResolver`. `✓` only for a live span byte-identical to its
+  // anchor; `drift` / no-anchor / foreign-room / a fixture with no reads ⇒ `~`,
+  // fail-closed. Resolving server-side is not incidental: P6F-2 made the authoritative
+  // doc server-side, so a client-doc resolve would trust bytes a peer can drift.
+  const glyphResolver = useMemo(
+    () => precomputedGlyphResolver(data.covenantReads),
+    [data.covenantReads],
+  );
+  const view = liveRoomView(data, viewerId, live, frozenUnreadWindow, glyphResolver);
   const contextualAttentionIds = new Set(
     view.referenceAttention.map((reference) => reference.attentionId),
   );

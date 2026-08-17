@@ -1,4 +1,5 @@
-import type { CovenantAnchor } from '@atrium/core';
+import { CovenantAnchor } from '@atrium/core';
+import { and, eq } from 'drizzle-orm';
 import type { Database } from './client.js';
 import { covenantAnchors } from './schema.js';
 
@@ -71,4 +72,55 @@ export async function insertCovenantAnchor(
   // `returning` yields exactly one row for a single-row insert; the table's
   // constraints/triggers RAISE (rejecting the write) rather than return zero rows.
   return { id: (row as { id: string }).id };
+}
+
+/**
+ * THE COVENANT ANCHOR READ — the ledger side of the read authority's
+ * {@link import('@atrium/core').AnchorLoader} port (#198, P6F-4). The write above
+ * (`insertCovenantAnchor`) puts the ONE core-signed anchor into the table; this
+ * fetches it back so `webCovenantReadAuthority` can re-resolve the certified span
+ * against the live document and decide `✓`/`~`. It is deliberately its own function
+ * (explicitly OUT of SL-4's scope, owned by the resolver-wiring here) so the read
+ * path is as narrow and typed as the write.
+ *
+ * ROOM-SCOPED, and re-VALIDATED. The `(room_id, object_id)` lookup rides the unique
+ * index (0050): it returns the room's live anchor for the object, or `null`. Scoping
+ * by room is the first of the two foreign-room guards — an anchor that carries the
+ * requested `object_id` but lives in a DIFFERENT room is simply not selected here, so
+ * it can never paint this room's `✓` (the second guard is the authority's
+ * `expectedRoomId`, defence-in-depth). The row is reconstructed into the core shape
+ * and run through `CovenantAnchor.parse`, so a row that cannot form a valid anchor —
+ * a non-human `certifier_kind`, a `certifier_id` nulled by a user delete
+ * (`onDelete: 'set null'`), a non-canonical timestamp — fails CLOSED to `null` (⇒
+ * `drift` ⇒ `~`) rather than being trusted. `certified_at` is re-spelled through
+ * `Date#toISOString()`, the exact canonical form `Timestamp` admits.
+ */
+export async function loadCovenantAnchor(
+  db: Pick<Database, 'select'>,
+  params: { readonly roomId: string; readonly objectId: string },
+): Promise<CovenantAnchor | null> {
+  const [row] = await db
+    .select()
+    .from(covenantAnchors)
+    .where(
+      and(eq(covenantAnchors.roomId, params.roomId), eq(covenantAnchors.objectId, params.objectId)),
+    )
+    .limit(1);
+  if (!row) return null;
+  const parsed = CovenantAnchor.safeParse({
+    objectId: row.objectId,
+    roomId: row.roomId,
+    revision: row.revision,
+    relStart: row.relStart,
+    relEnd: row.relEnd,
+    stateVector: row.stateVector,
+    deleteSet: row.deleteSet,
+    enclosedItems: row.enclosedItems,
+    renderedDigest: row.renderedDigest,
+    // Only a human is a valid certifier; a row that somehow carries another kind, or
+    // whose certifier_id was nulled by a user delete, fails the parse ⇒ `null` ⇒ `~`.
+    certifier: { kind: row.certifierKind, userId: row.certifierId },
+    certifiedAt: row.certifiedAt.toISOString(),
+  });
+  return parsed.success ? parsed.data : null;
 }

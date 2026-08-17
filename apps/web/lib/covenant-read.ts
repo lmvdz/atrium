@@ -53,6 +53,34 @@ export interface ObjectGlyphResolver {
 }
 
 /**
+ * The CLIENT-side {@link ObjectGlyphResolver} over verdicts already resolved on the
+ * SERVER (#198, P6F-4). The read authority resolves against the room's
+ * server-authoritative replica (`roomCovenantReads`, `'server-only'`); its
+ * `{ objectId → status }` map is serialized into the surface's props, and this wraps
+ * it so the migrated readers source `✓`/`~` through the SAME `anchorCertifies` seam
+ * they always have — no client-side live `Y.Doc` (there is none; P6F-2 made the
+ * authoritative doc server-side), no `await` in a render.
+ *
+ * `peek` is a pure map read: a resolved `ok` is `✓`, anything else — a `drift`, or an
+ * object absent from the map — is `~`, fail-closed. When no reads were computed
+ * (`reads === undefined`, e.g. a hand-built fixture with no live doc), this returns
+ * `undefined`, so the surface stays exactly as fail-closed as an unwired resolver:
+ * every glyph is `~`. `anchorCertifies` only ever reads `covenantStatus`, so the
+ * `revision`/`renderedFragment` a full authority carries are not reconstructed.
+ */
+export function precomputedGlyphResolver(
+  reads: Readonly<Record<string, CovenantReadStatus>> | undefined,
+): ObjectGlyphResolver | undefined {
+  if (reads === undefined) return undefined;
+  return {
+    peek(objectId: string): CovenantReadResult {
+      const covenantStatus: CovenantReadStatus = reads[objectId] ?? 'drift';
+      return { objectId, revision: null, renderedFragment: null, covenantStatus };
+    },
+  };
+}
+
+/**
  * The ONE place the migrated display readers turn a covenant read into the boolean
  * `certified` gate (#193 / SL-6). `✓` ONLY when the authority positively resolves
  * the object's certified content (`covenantStatus === 'ok'`); `~` for `drift` /
