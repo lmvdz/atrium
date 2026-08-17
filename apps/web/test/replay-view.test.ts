@@ -23,6 +23,7 @@ import type { StateObject } from '../src/components';
 import { needsViewer, withFilter } from '../src/components';
 import { glyphFor } from '../src/components/model';
 import type { RoomView } from '../src/lib/realtime';
+import { glyphResolver } from './support/glyph-resolver';
 import { workspacePath } from './support/workspace-path';
 
 const at = new Date('2026-08-02T12:00:00.000Z');
@@ -517,24 +518,27 @@ describe('persisted replay view', () => {
     expect(view.entries.find((entry) => entry.id === 'm1')).toMatchObject({ tag: null });
   });
   /**
-   * H5/H6, M5/M7 — the rendered ✓ IS core's one certification predicate, for the
-   * TWO types a machine can actually accept.
+   * H5/H6, M5/M7 — the rendered ✓ is the ONE covenant read authority's verdict
+   * (#181 / SL-6), for the TWO types a machine can actually accept.
    *
    * `modelMintingGate` lets a machine accept exactly a `claim` and an
    * `open_question` — and those were the two types whose glyph `stateForObject`
    * read from their own payload (`claim.verification`, `question.status`) in a
-   * branch that returned before the predicate. So the round-1 M5 test was a
-   * false-green: it used a machine-accepted DECISION, a state the reducer
-   * refuses, which fell through to the predicate and could never have exposed
-   * the bug. This exercises the reachable ones.
+   * branch that returned before the predicate. This exercises the reachable ones,
+   * now through the migrated read path.
    *
-   * MUTATION (M5): flip `epistemic.ts`'s `epistemicStateOf` to `return
-   * 'confirmed'` and BOTH machine acceptances below render ✓ — every `~`
-   * assertion here fails. The character a user sees moves with the predicate,
-   * for a claim and for an answered question, off the projected
-   * `accepted_by_kind`/`human_touched_at` columns and nothing else.
+   * The glyph's MEANING migrated: `✓` no longer comes from
+   * `accepted_by_kind`/`human_touched_at` (a human touched it) but from the
+   * authority positively RESOLVING the object's certified content. The fixture's
+   * authority (`anchors`) models the real ledger invariant — an anchor exists, and
+   * resolves, exactly for a HUMAN certification (`human_touched_at` set); a machine
+   * acceptance has no human anchor, so it resolves `drift` ⇒ `~`.
+   *
+   * MUTATION anchor: the `~`/`✓` here comes SOLELY from the authority. Point the
+   * `anchors` resolver at `drift` for a human-certified id and its `✓` falls to `~`
+   * (proven directly in the flip-the-input test below); nothing reads the predicate.
    */
-  it('renders a machine-accepted claim and answered question ~, and the predicate moves the glyph', () => {
+  it('renders a machine-accepted claim and answered question ~, and the read authority moves the glyph', () => {
     const snapshot = data();
     // Every row below is FOLDED THROUGH THE REDUCER (see foldObjectRow): the
     // machine acceptances cite a same-model staged proposal, exactly as the
@@ -560,15 +564,19 @@ describe('persisted replay view', () => {
     expect(machineQuestion.proposalId).not.toBeNull();
     expect((machineQuestion.payload as { status?: string }).status).toBe('answered');
 
-    const view = replayView(snapshot, 'alice');
+    // The authority resolves `ok` exactly for a human-certified anchor (the real
+    // ledger invariant), `drift` otherwise. `✓` now flows from THIS, not the column.
+    const anchors = glyphResolver((id) =>
+      snapshot.objects.find((object) => object.id === id)?.humanTouchedAt != null ? 'ok' : 'drift',
+    );
+    const view = replayView(snapshot, 'alice', anchors);
     const glyph = (id: string) => {
       const object = view.objects.find((candidate) => candidate.id === id);
       if (!object) throw new Error(`object ${id} must render`);
       return glyphFor(object.state);
     };
 
-    // ── Covenant, DIRECTION ONE: a human-confirmed claim renders ✓ (was ~,
-    //    finding 3: the fold said `confirmed`, replay emitted `self_reported`).
+    // ── Covenant, DIRECTION ONE: a human-certified claim whose anchor resolves is ✓.
     expect(glyph('claim-by-person')).toBe('✓');
     // ── Covenant, DIRECTION TWO: an unconfirmed ANSWERED question renders ~ (was
     //    ✓, finding 2: `status='answered'` minted the tick with no human touch).
@@ -577,12 +585,25 @@ describe('persisted replay view', () => {
     expect(glyph('answer-by-person')).toBe('✓');
     expect(glyph('claim-by-machine')).toBe('~');
 
-    // MUTATION anchor: these two `~` come SOLELY from `epistemicStateOf`
-    // returning `unconfirmed`. Flip it to `confirmed` and both become `✓`.
+    // MUTATION anchor: these two `~` come SOLELY from the authority resolving
+    // non-`ok`. The read-model still carries the machine provenance (unchanged),
+    // but it no longer sources the glyph — the authority does.
     const machineClaim = view.objects.find((object) => object.id === 'claim-by-machine');
     const machineAnswer = view.objects.find((object) => object.id === 'answer-by-machine');
     expect(machineClaim?.state.verification).toBe('self_reported');
     expect(machineAnswer?.state.verification).toBe('proposed');
+
+    // FLIP-THE-INPUT (#193 not-theater): the SAME human-certified claim, with its
+    // anchor now DRIFTED, falls to `~`. On BASE (provenance-sourced glyph) this row
+    // showed `✓` off `human_touched_at` alone — the dishonest tick #181 kills.
+    const drifted = replayView(snapshot, 'alice', glyphResolver('drift'));
+    const driftedClaim = drifted.objects.find((object) => object.id === 'claim-by-person');
+    if (!driftedClaim) throw new Error('claim-by-person must render');
+    expect(glyphFor(driftedClaim.state)).toBe('~');
+    // A pending/stalled resolve is `~` too — never a stale `✓`.
+    const pending = replayView(snapshot, 'alice', glyphResolver('unresolved'));
+    const pendingClaim = pending.objects.find((object) => object.id === 'claim-by-person');
+    expect(pendingClaim && glyphFor(pendingClaim.state)).toBe('~');
   });
 
   /**
@@ -839,7 +860,9 @@ describe('persisted replay view', () => {
       },
     );
 
-    const view = replayView(snapshot, 'alice');
+    // The persisted question/answers are human-certified; a resolving anchor makes
+    // them `✓` (`accepted`), which the reopen transition requires as its precondition.
+    const view = replayView(snapshot, 'alice', glyphResolver('ok'));
     const question = view.objects.find((object) => object.id === 'question');
     if (!question) throw new Error('question view missing');
     /** CATCHES: marking a question answered while omitting the accepted answer's exact source. */
@@ -1826,7 +1849,8 @@ describe('the receipt exposes certify + remove for a `~` reading', () => {
       createdAt: at,
       updatedAt: at,
     } as unknown as ReplayData['objects'][number]);
-    const view = replayView(snapshot, 'alice');
+    // Human-certified with a resolving anchor ⇒ `✓` (the migrated glyph source).
+    const view = replayView(snapshot, 'alice', glyphResolver('ok'));
     const claim = view.objects.find((object) => object.id === 'claim-verified');
     if (!claim) throw new Error('the verified claim did not reach the view');
     expect(glyphFor(claim.state)).toBe('✓');
@@ -1862,7 +1886,7 @@ describe('the receipt exposes certify + remove for a `~` reading', () => {
       createdAt: at,
       updatedAt: at,
     } as unknown as ReplayData['objects'][number]);
-    const view = replayView(snapshot, 'alice');
+    const view = replayView(snapshot, 'alice', glyphResolver('ok'));
     const claim = view.objects.find((object) => object.id === 'claim-accepted');
     if (!claim) throw new Error('the accepted claim did not reach the view');
     expect(glyphFor(claim.state)).toBe('✓');
@@ -1896,7 +1920,7 @@ describe('the receipt exposes certify + remove for a `~` reading', () => {
       createdAt: at,
       updatedAt: at,
     } as unknown as ReplayData['objects'][number]);
-    const view = replayView(snapshot, 'alice');
+    const view = replayView(snapshot, 'alice', glyphResolver('ok'));
     const question = view.objects.find((object) => object.id === 'q-certified');
     if (!question) throw new Error('the certified question did not reach the view');
     expect(glyphFor(question.state)).toBe('✓');

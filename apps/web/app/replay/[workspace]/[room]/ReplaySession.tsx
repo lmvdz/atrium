@@ -45,7 +45,19 @@ function clockNow(): string {
 export function ReplaySession({ data, viewerId }: { data: ReplayData; viewerId?: string }) {
   const [cursor, setCursor] = useState(data.messages.length);
   const snapshot = useMemo(() => replayAt(data, cursor), [cursor, data]);
-  const view = useMemo(() => replayView(snapshot, viewerId), [snapshot, viewerId]);
+  /**
+   * The covenant read authority the migrated glyph readers (#181 / SL-6) source
+   * `✓` through. The REPLAY surface is a static historical reconstruction with no
+   * live Yjs doc and no ledger read wired to it, so it has no authority to supply
+   * and passes `undefined` — every glyph then fails CLOSED to `~`, the honest
+   * answer for content this surface cannot re-resolve. Binding a real
+   * `webCovenantReadAuthority` (a room ledger read + the surface's doc reader) is
+   * the follow-up surface-wiring step; #182 owns invalidate-on-drift.
+   */
+  const glyphResolver = undefined;
+  // `glyphResolver` is an invariant `undefined` today, so it is not a memo dep;
+  // when a real `webCovenantReadAuthority` is wired here it must join this list.
+  const view = useMemo(() => replayView(snapshot, viewerId, glyphResolver), [snapshot, viewerId]);
   const [binding, setBinding] = useState<ComposerBinding>({ mode: 'free' });
   const [draft, setDraft] = useState('');
   const [actedOn, setActedOn] = useState<readonly string[]>([]);
@@ -92,10 +104,12 @@ export function ReplaySession({ data, viewerId }: { data: ReplayData; viewerId?:
       acceptedSubjects.includes(object.id) && object.kind !== 'claim'
         ? {
             ...object,
-            // A person clicked accept here — represent it as a `human`
-            // acceptance and let the ONE predicate derive the tick, rather than
-            // hand-setting `verification: 'accepted'` (a second `✓` source).
-            state: locallyAcceptedState(object.state, new Date().toISOString()),
+            // A person clicked accept here — the optimistic tick is now sourced
+            // through the ONE covenant read authority (#181 / SL-6), so it is `✓`
+            // only when the object's certified content resolves and fails closed
+            // to `~` otherwise, rather than a hand-set (or predicate-derived)
+            // second `✓` source.
+            state: locallyAcceptedState(object.state, object.id, glyphResolver),
             objectives:
               object.objectives.length === 0
                 ? view.objectives.map((objective) => objective.id)
@@ -142,7 +156,7 @@ export function ReplaySession({ data, viewerId }: { data: ReplayData; viewerId?:
         : [],
     ),
   ]);
-  const receiptObject = replayReceiptSubject(data, objects, receiptId);
+  const receiptObject = replayReceiptSubject(data, objects, receiptId, glyphResolver);
   const receiptCorrection = corrections.findLast(
     (correction) => correction.objectId === receiptObject?.id,
   );
@@ -318,7 +332,7 @@ export function ReplaySession({ data, viewerId }: { data: ReplayData; viewerId?:
             if (object)
               setCorrections((current) => [
                 ...current.filter((transition) => transition.objectId !== objectId),
-                retypeAsClaim(object, clockNow()),
+                retypeAsClaim(object, clockNow(), glyphResolver),
               ]);
             focusReceipt();
           },

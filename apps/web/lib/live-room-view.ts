@@ -1,6 +1,7 @@
 import type { MessageRecord, ParticipantSummary, TimelineEntry } from '../src/components';
 import { messageEntry, sinceYouLeft, systemStatement } from '../src/components';
 import type { RoomView } from '../src/lib/realtime';
+import type { ObjectGlyphResolver } from './covenant-read';
 import type { ReplayData } from './replay-data';
 import { replayView, typedReferenceBody } from './replay-view';
 
@@ -56,8 +57,13 @@ export function liveRoomView(
   viewerId: string,
   live: RoomView,
   unreadWindow?: LiveUnreadWindow,
+  glyphResolver?: ObjectGlyphResolver,
 ) {
-  const base = replayView(data, viewerId);
+  // The live surface shares the ONE migrated glyph path (#181 / SL-6): `✓` is
+  // sourced through the covenant read authority (`glyphResolver`), fail-closed to
+  // `~` when it is absent / drifted / pending. The authority is bound by the caller
+  // (a room ledger read + the live doc reader); #182 owns invalidate-on-drift.
+  const base = replayView(data, viewerId, glyphResolver);
   const participantName = new Map(base.participants.map((person) => [person.id, person.name]));
   /**
    * The committed row claims its own echo, here, in the same render.

@@ -4,6 +4,7 @@ import { locallyAcceptedState } from '../lib/replay-view';
 import { ClaimText, StateLens } from '../src/components';
 import type { EpistemicState, StateObject } from '../src/components/model';
 import { glyphFor, slot, trailerFor, truthUnchecked } from '../src/components/model';
+import { glyphResolver } from './support/glyph-resolver';
 
 afterEach(cleanup);
 
@@ -34,7 +35,6 @@ afterEach(cleanup);
  */
 
 const CLAIM_TEXT = 'the deploy cleared the canary';
-const AT = '2026-08-05T12:00:00.000Z';
 
 /** A machine's reading of a claim — no person has touched it. `~`, truth unchecked. */
 const machineReading: EpistemicState = {
@@ -45,12 +45,18 @@ const machineReading: EpistemicState = {
 };
 
 /**
- * A person certified that same claim — through the ONE predicate. `✓`, and its
- * truth is STILL unchecked (a person taking a claim is not a fact-check). Flip
- * `epistemicStateOf` and this reverts to the machine reading, so certification
- * here is genuinely predicate-derived, not hand-set.
+ * A person certified that same claim, whose certified content RESOLVES — sourced
+ * through the ONE covenant read authority (#181 / SL-6). `✓`, and its truth is
+ * STILL unchecked (a person taking a claim is not a fact-check). Point the
+ * authority at a drifted anchor instead and this reverts to the machine reading
+ * (see the flip-the-input test below), so certification here is genuinely
+ * authority-derived, not hand-set.
  */
-const personCertified: EpistemicState = locallyAcceptedState(machineReading, AT);
+const personCertified: EpistemicState = locallyAcceptedState(
+  machineReading,
+  'claim-1',
+  glyphResolver('ok'),
+);
 
 /** The same certified claim, now checked by something other than the claimant. `✓`, truth checked. */
 const personCertifiedAndChecked: EpistemicState = { ...personCertified, verification: 'verified' };
@@ -88,6 +94,21 @@ describe('the rendered ✓ and "unchecked" derive from one predicate each, for e
     // Consumer 2 — the lens's "settled" count.
     expect(lensCounts([object(machineReading)])).toContain('0 settled');
     expect(lensCounts([object(personCertified)])).toContain('1 settled');
+  });
+
+  it('FLIP-THE-INPUT: the same human accept over a DRIFTED anchor reverts to ~ (never a stale ✓)', () => {
+    // The optimistic overlay is `✓` ONLY when the authority resolves the content.
+    // Point it at a drifted anchor and the tick is gone — the glyph and the settled
+    // count both fall back to the machine reading. On BASE this same human accept
+    // hand-derived `accepted` and would have painted `✓` over drifted content.
+    const drifted = locallyAcceptedState(machineReading, 'claim-1', glyphResolver('drift'));
+    expect(drifted.verification).toBe('self_reported');
+    expect(glyphFor(drifted)).toBe('~');
+    expect(lensCounts([object(drifted)])).toContain('0 settled');
+    // A pending resolve is `~` too — a sync render never blocks on a stale `✓`.
+    expect(
+      glyphFor(locallyAcceptedState(machineReading, 'claim-1', glyphResolver('unresolved'))),
+    ).toBe('~');
   });
 
   it('TRUTH flip (certified-unverified → certified-verified), certification HELD at ✓: only the truth consumers move', () => {

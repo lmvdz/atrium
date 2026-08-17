@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import { applyReplayTransitions, reopenQuestion, retypeAsClaim } from '../lib/replay-transitions';
 import type { StateObject } from '../src/components';
+import { glyphResolver } from './support/glyph-resolver';
 
 const decision: StateObject = {
   id: 'decision',
@@ -37,18 +38,39 @@ describe('replay correction transitions', () => {
    * view can no longer agree on identity and kind.
    */
   it('records decision → claim once and derives the view from that record', () => {
-    const transition = retypeAsClaim(decision, '12:00');
+    // SL-6 (#181/#193): the optimistic retype tick is now sourced through the ONE
+    // covenant read authority. `✓` (`accepted`) requires the object's certified
+    // content to RESOLVE (`ok`) — a human retype whose anchor resolves is `✓`,
+    // with claim-truth the separate unverified axis (kept in the facts and the
+    // dotted underline).
+    const transition = retypeAsClaim(decision, '12:00', glyphResolver('ok'));
     expect(transition).toMatchObject({
       action: 'retype',
       objectId: decision.id,
       before: { id: decision.id, kind: 'decision' },
-      // A human retype CERTIFIES (`✓`): `accepted` is the tick, with claim-truth
-      // the separate unverified axis (kept in the facts and the dotted underline).
-      // Was `unverified` — the pre-split framing that de-certified a human touch.
       after: { id: decision.id, kind: 'claim', state: { verification: 'accepted' } },
     });
     expect(transition.after.facts).toContain('claim truth remains unverified');
     expect(applyReplayTransitions([decision], [transition])[0]).toBe(transition.after);
+  });
+
+  /**
+   * FLIP-THE-INPUT (#193 not-theater). The SAME human retype whose anchor DRIFTS
+   * (or is pending, or has no authority wired) must NOT mint the optimistic `✓`:
+   * it falls back to the `self_reported` truth axis. On BASE — before the glyph's
+   * meaning migrated — this same retype hand-derived `accepted` from the human
+   * touch alone and would have shown `✓` over drifted content. Three fail-closed
+   * inputs, one honest `~`.
+   */
+  it('fails the optimistic retype tick closed to ~ when the anchor does not resolve', () => {
+    expect(retypeAsClaim(decision, '12:00', glyphResolver('drift')).after.state.verification).toBe(
+      'self_reported',
+    );
+    expect(
+      retypeAsClaim(decision, '12:00', glyphResolver('unresolved')).after.state.verification,
+    ).toBe('self_reported');
+    // No authority wired at all — still `~`, never a provenance-only `✓`.
+    expect(retypeAsClaim(decision, '12:00').after.state.verification).toBe('self_reported');
   });
 
   /**

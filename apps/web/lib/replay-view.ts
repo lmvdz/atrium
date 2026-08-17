@@ -3,7 +3,6 @@ import {
   ClaimPayload,
   CommitmentPayload,
   DecisionPayload,
-  epistemicStateFromAcceptance,
   ObjectivePayload,
   OpenQuestionPayload,
 } from '@atrium/core';
@@ -37,6 +36,7 @@ import {
 } from '../src/components';
 import type { MessageReference, MessageReferenceKind } from '../src/lib/typed-references';
 import { contextualReferenceAttention } from './contextual-reference-attention';
+import { anchorCertifies, type ObjectGlyphResolver } from './covenant-read';
 import type { ReplayData } from './replay-data';
 import type { ReplayCorrectionTransition } from './replay-transitions';
 
@@ -128,7 +128,11 @@ export function replayAt(data: ReplayData, messageCount: number): ReplayData {
  * Every human-voice string originates in `data.messages`. Semantic text is
  * rendered as system state, never as something a participant said.
  */
-export function replayView(data: ReplayData, viewerId?: string) {
+export function replayView(
+  data: ReplayData,
+  viewerId?: string,
+  glyphResolver?: ObjectGlyphResolver,
+) {
   const participantName = new Map(data.participants.map((person) => [person.id, person.name]));
   const defaultViewerId = data.attention.find((item) => item.status === 'pending')?.userId;
   const viewer =
@@ -200,6 +204,8 @@ export function replayView(data: ReplayData, viewerId?: string) {
         object.payload,
         pendingBySubject.has(object.id),
         acceptanceOf(object),
+        object.id,
+        glyphResolver,
       ),
       text: payloadText(object.type, object.payload),
       facts: [
@@ -219,6 +225,8 @@ export function replayView(data: ReplayData, viewerId?: string) {
         proposal.payload,
         pendingBySubject.has(proposal.id),
         null,
+        proposal.id,
+        glyphResolver,
       ),
       text: payloadText(proposal.type, proposal.payload),
       facts: [
@@ -370,13 +378,22 @@ export function replayView(data: ReplayData, viewerId?: string) {
             acceptedFromProposal.payload,
             true,
             acceptanceOf(acceptedFromProposal),
+            acceptedFromProposal.id,
+            glyphResolver,
           )
         : subject
           ? { ...subject.state, owedToViewer: true }
           : proposalSubject
             ? // A proposal still staged here (its accepted object, if any, was
               // caught by `acceptedFromProposal` above): a machine's reading, `~`.
-              stateForObject(proposalSubject.type, proposalSubject.payload, true, null)
+              stateForObject(
+                proposalSubject.type,
+                proposalSubject.payload,
+                true,
+                null,
+                proposalSubject.id,
+                glyphResolver,
+              )
             : undefined) ??
       ({
         kind: item.class === 'blocking_question' ? 'question' : 'decision',
@@ -739,6 +756,7 @@ export function replayReceiptSubject(
   data: ReplayData,
   objects: readonly StateObject[],
   subjectId: string | null,
+  glyphResolver?: ObjectGlyphResolver,
 ): StateObject | (Omit<StateObject, 'kind'> & { readonly kind: 'objective' }) | undefined {
   if (subjectId === null) return undefined;
   const ordinary = objects.find((object) => object.id === subjectId);
@@ -757,6 +775,8 @@ export function replayReceiptSubject(
           acceptedFromProposal.payload,
           false,
           acceptanceOf(acceptedFromProposal),
+          acceptedFromProposal.id,
+          glyphResolver,
         ),
         text: payloadText('objective', acceptedFromProposal.payload),
         facts: objectFacts(
@@ -779,7 +799,7 @@ export function replayReceiptSubject(
     return {
       id: proposal.id,
       kind: 'objective',
-      state: stateForObject('objective', proposal.payload, false, null),
+      state: stateForObject('objective', proposal.payload, false, null, proposal.id, glyphResolver),
       text: payloadText('objective', proposal.payload),
       facts: [
         proposal.proposerKind === 'model'
@@ -796,7 +816,14 @@ export function replayReceiptSubject(
   return {
     id: accepted.id,
     kind: 'objective',
-    state: stateForObject('objective', accepted.payload, false, acceptanceOf(accepted)),
+    state: stateForObject(
+      'objective',
+      accepted.payload,
+      false,
+      acceptanceOf(accepted),
+      accepted.id,
+      glyphResolver,
+    ),
     text: payloadText('objective', accepted.payload),
     facts: objectFacts('objective', accepted.payload, participantName, accepted.createdAt),
     objectives: [],
@@ -918,20 +945,34 @@ function acceptanceOf(object: ReplayData['objects'][number]): ObjectAcceptance {
 }
 
 /**
- * `~` vs `✓` — CERTIFICATION — is core's one predicate for EVERY type, read off
- * the projected columns via `epistemicStateFromAcceptance`, which delegates to
- * `epistemicStateOf`, the SAME function the reducer's supersession gate enforces.
- * A machine's acceptance is `~` (unconfirmed) and stays `~` until a person
- * touches it; a thing with no acceptance (`null`, a staged proposal) is a
- * machine's reading, `~`. `confirmed` is derived here FIRST, before any type
- * branches, so it governs the glyph uniformly.
+ * `~` vs `✓` — CERTIFICATION — for EVERY type, now sourced through the ONE
+ * fail-closed covenant read authority (#181 / SL-6, was `epistemicStateOf` off
+ * the projected `human_touched_at` column). The glyph's MEANING migrated: `✓` no
+ * longer means "a human touched this" but "the certified content STILL RESOLVES
+ * to the exact certified fragment" — decided by {@link anchorCertifies} reading
+ * the authority (`read()/peek()`), never by `humanTouchedAt`/`acceptedByKind`
+ * alone. Fail-closed everywhere else: a thing no acceptance ever touched
+ * (`null`, a staged proposal) has no anchor and is `~` WITHOUT a resolve; a
+ * drifted / pending / unresolvable anchor is `~`; and an object whose surface
+ * has not wired an authority (`resolver === undefined`) is `~`, because
+ * provenance alone must never mint `✓`. `confirmed` is derived here FIRST,
+ * before any type branches, so it governs the glyph uniformly.
+ *
+ * The sync-kick (`peek` inside {@link anchorCertifies}) means a synchronous
+ * render gets a safe `~` on the first frame and the real glyph on the re-render
+ * after the async resolve settles. INVALIDATE-on-drift (dropping a cached `✓`
+ * the instant a certified span mutates) is #182's drift scheduler; the web
+ * authority's always-wired sync freshness token already demotes a stale `✓` to
+ * `~` on the next `read()` even before that explicit hook arrives, so a stale
+ * `✓` is unreachable in the interim.
  */
-function certified(acceptance: ObjectAcceptance | null): boolean {
-  return (
-    acceptance !== null &&
-    epistemicStateFromAcceptance(acceptance.acceptedByKind, acceptance.humanTouchedAt) ===
-      'confirmed'
-  );
+function certified(
+  acceptance: ObjectAcceptance | null,
+  objectId: string,
+  resolver: ObjectGlyphResolver | undefined,
+): boolean {
+  if (acceptance === null) return false;
+  return anchorCertifies(resolver, objectId);
 }
 
 /**
@@ -960,8 +1001,10 @@ function stateForObject(
   payload: ReplayData['objects'][number]['payload'],
   owedToViewer: boolean,
   acceptance: ObjectAcceptance | null,
+  objectId: string,
+  resolver: ObjectGlyphResolver | undefined,
 ): EpistemicState {
-  const confirmed = certified(acceptance);
+  const confirmed = certified(acceptance, objectId, resolver);
   if (type === 'open_question') {
     const question = OpenQuestionPayload.parse(payload);
     // A question with no answer is `?` — that is question-STATUS, not the tick.
@@ -1002,15 +1045,22 @@ function stateForObject(
 }
 
 /**
- * A human's local, optimistic acceptance in the replay UI, run through the ONE
- * predicate so the rendered `✓` has a single source. `ReplaySession` used to
- * hand-set `verification: 'accepted'` on accept — a second tick source that
- * agreed with the covenant only by luck. Routing an explicit `human` acceptance
- * through `epistemicStateFromAcceptance` means a mutation of `epistemicStateOf`
- * moves this glyph the same way it moves every other.
+ * A human's local, optimistic acceptance in the replay UI, now sourced through
+ * the ONE covenant read authority (#181 / SL-6) so the optimistic `✓` carries the
+ * same honest meaning as the durable one. `ReplaySession` used to hand-set
+ * `verification: 'accepted'` on accept, then (round 4) derived it from the
+ * `epistemicStateOf` predicate — both minted a `✓` the instant a person clicked,
+ * before any anchor resolved. The tick now requires the object's certified content
+ * to RESOLVE ({@link anchorCertifies}): a stalled / pending / unresolvable anchor
+ * stays `~` — never a stale optimistic `✓`. When no authority is wired
+ * (`resolver === undefined`) it fails closed to the row's existing verification.
  */
-export function locallyAcceptedState(state: EpistemicState, at: string): EpistemicState {
-  const confirmed = epistemicStateFromAcceptance('human', at) === 'confirmed';
+export function locallyAcceptedState(
+  state: EpistemicState,
+  objectId: string,
+  resolver: ObjectGlyphResolver | undefined,
+): EpistemicState {
+  const confirmed = anchorCertifies(resolver, objectId);
   return {
     ...state,
     verification: confirmed ? 'accepted' : state.verification,

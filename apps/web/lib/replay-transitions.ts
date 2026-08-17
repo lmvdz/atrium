@@ -1,5 +1,5 @@
-import { epistemicStateFromAcceptance } from '@atrium/core';
 import type { StateObject } from '../src/components';
+import { anchorCertifies, type ObjectGlyphResolver } from './covenant-read';
 
 export type ReplayCorrectionTransition =
   | {
@@ -28,6 +28,7 @@ export type ReplayCorrectionTransition =
 export function retypeAsClaim(
   object: StateObject,
   at: string,
+  glyphResolver?: ObjectGlyphResolver,
 ): Extract<ReplayCorrectionTransition, { readonly action: 'retype' }> {
   if (object.kind !== 'decision' || object.state.verification !== 'accepted') {
     throw new Error('replay retype: only an accepted decision can be retyped as a claim');
@@ -52,17 +53,18 @@ export function retypeAsClaim(
          * honestly visible — in the fact below, and in the dotted underline
          * `ClaimText` keeps on a certified-but-unverified claim.
          *
-         * ROUND 4 (#98): the tick is DERIVED from `epistemicStateFromAcceptance`
-         * — the one predicate — rather than the literal `'accepted'` this used to
-         * hand-set. A human correction is a human acceptance, so the predicate
-         * returns `confirmed`; routing it here means a mutation of
-         * `epistemicStateOf` moves this optimistic glyph the same way it moves
-         * the persisted one, closing the last hand-set tick (was #110's purity
-         * gap). Truth is the separate `self_reported` axis until something checks
-         * it, so a de-certified predicate falls back to that, never a stray `✓`.
+         * ROUND 4 (#98) derived the tick from the `epistemicStateOf` predicate
+         * rather than a hand-set `'accepted'`. SL-6 (#181/#193) migrates it one
+         * step further, to the ONE fail-closed covenant read authority: the
+         * optimistic retype tick is `✓` only when the object's certified content
+         * still RESOLVES (`anchorCertifies` → the authority's `read()/peek()`),
+         * never from `humanTouchedAt`/`acceptedByKind` alone. A retype is an
+         * OPTIMISTIC local correction: until (and unless) its anchor resolves —
+         * pending, drifted, or no authority wired — it stays the separate
+         * `self_reported` truth axis, never a stale `✓`. The same authority moves
+         * this glyph exactly as it moves the durable one (cross-surface identity).
          */
-        verification:
-          epistemicStateFromAcceptance('human', at) === 'confirmed' ? 'accepted' : 'self_reported',
+        verification: anchorCertifies(glyphResolver, object.id) ? 'accepted' : 'self_reported',
         owedToViewer: false,
         irreversible: false,
       },
