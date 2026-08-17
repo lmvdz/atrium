@@ -37,6 +37,40 @@ export const SHAPE_TABLES: ReadonlySet<string> = new Set(['ydoc_updates', 'ydoc_
  * An ALLOWLIST, and that is the load-bearing word: the next Electric release's
  * new parameter is one nobody here has reasoned about, so it is dropped by
  * default rather than relayed by default.
+ *
+ * ## Why forwarding `handle` does not leak another room's document (#201)
+ *
+ * A `handle` names a shape INSTANCE, and the worry is a handle-replay: a member
+ * of room A who once had room B's shape `handle` replays it here, hoping Electric
+ * honours the handle over the `where` and streams B's bytes. It does not, for a
+ * reason this proxy controls and a reason Electric guarantees, and both had to
+ * hold:
+ *
+ *   1. THIS PROXY re-pins `table`, `where` and `params[1]` from the authorized
+ *      room on EVERY request, including one that carries a `handle` — the handle
+ *      is forwarded, but never in place of the pinned definition. So a replayed
+ *      B-handle always reaches Electric ALONGSIDE room A's `where`. (Asserted in
+ *      `test/electric-shape.test.ts` — a handle for another room does not
+ *      displace the pinned predicate.)
+ *   2. ELECTRIC treats the handle as an opaque, server-assigned instance id and
+ *      validates it against the shape DEFINITION on the request. A handle whose
+ *      stored definition does not match the sent `where`/`table`/`params` gets a
+ *      409, not the old shape's data. VERIFIED against the installed
+ *      `@electric-sql/client` 1.5.26 protocol contract: on a 409 the client marks
+ *      the stale handle expired, adopts the new handle from the `electric-handle`
+ *      response header, resets to `offset=-1`, emits a `must-refetch`, and
+ *      refetches from scratch — it never streams the mismatched handle's bytes
+ *      (`dist/chunk-*.mjs`: the 409 branch in the live and snapshot fetch paths;
+ *      `canonicalShapeKey` keys shape identity on the definition, not the handle).
+ *      The handle is not a client-computed hash of the definition, so the client
+ *      cannot forge a matching one; the server owns the mapping.
+ *
+ * The 409 itself is emitted by the Electric SERVER, whose source is not in this
+ * repo, so (2) is a contract read off the client rather than a branch we can
+ * unit-test here. (1) is ours and is tested. If a future Electric ever changed
+ * (2) — honouring a handle over a mismatched `where` — the room boundary would
+ * then rest on (1) plus binding the handle to the session room; that is the note
+ * left for whoever bumps the Electric major.
  */
 export const FORWARDED_PARAMS = ['offset', 'handle', 'live', 'cursor', 'replica'] as const;
 

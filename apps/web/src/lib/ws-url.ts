@@ -58,6 +58,14 @@ export const DEFAULT_ELECTRIC_SHAPE_PATH = '/electric/v1/shape';
  * proxy authorizes the read against the session cookie, and a cross-origin URL
  * would send the request without one. Pure, like `resolveWsUrl`, so the rule is
  * testable rather than merely asserted.
+ *
+ * NOT YET WIRED. As of #201 this function has no product caller — the Yjs
+ * transport that reads through it lands with E2/E4 (`app/prototype/
+ * electric-transport.ts` is the prototype, not a mounted client). Only
+ * `test/ws-url.test.ts` exercises it today, so its absolute-URL refusal is a
+ * guarantee kept ready, not an active guard standing in a live request path.
+ * When E2/E4 mount the transport, this becomes the one place the browser learns
+ * the shape origin, and the refusal starts doing its job.
  */
 export function resolveElectricShapeUrl(
   config: RuntimeConfig = {},

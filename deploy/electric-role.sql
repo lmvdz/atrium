@@ -38,6 +38,23 @@
 --
 -- No INSERT, UPDATE or DELETE anywhere. Electric is a READ-path sync engine; a
 -- write privilege here would be one nothing uses and everything inherits.
+--
+-- ## THE EXISTING-VOLUME CAVEAT, STATED RATHER THAN LEFT IMPLIED
+--
+-- This script is idempotent for the grants it MAKES — CONNECT, USAGE, SELECT on
+-- the two ydoc tables — but it is not a full reconciler of the role's TOTAL
+-- privilege set. On a clean install that is a distinction without a difference:
+-- the role is created here and has nothing else. On a REUSED cluster where an
+-- `atrium_electric` already existed, a SELECT it was granted on some other table
+-- by an earlier version of this file — or by hand — is NOT revoked here, because
+-- this script does not enumerate every object it might have touched. If the set
+-- of tables Electric may read is ever narrowed, the removed table's grant has to
+-- be revoked explicitly; re-running this file will not do it. What this file DOES
+-- guarantee on any volume is the floor: the role holds SELECT on exactly the two
+-- ydoc tables and no write anywhere on them, re-asserted every run. The security
+-- ceiling those two facts give is real; the caveat is only that a stale grant on
+-- a third table from a prior life is the operator's to remove, not this script's
+-- to discover.
 -- ═════════════════════════════════════════════════════════════════════════════
 
 \set ON_ERROR_STOP on

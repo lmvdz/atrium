@@ -105,6 +105,25 @@ describe('the cursor parameters are an allowlist, not a denylist', () => {
   });
 
   /**
+   * HANDLE-REPLAY ISOLATION (#201). A `handle` names a shape instance, and the
+   * attack is: a member of room A replays room B's shape handle here after losing
+   * B. This proxy's half of the defence is that a forwarded handle NEVER displaces
+   * the server-pinned definition — so the replayed handle always reaches Electric
+   * beside room A's `where`, and Electric's handle-vs-definition check answers 409
+   * rather than streaming B's bytes (see the FORWARDED_PARAMS docblock for the
+   * verified client-side contract). Here we prove the half we own: even with a
+   * hostile handle AND a hostile where naming the other room, table/where/params
+   * are still room A's.
+   */
+  it('forwards a client handle but never lets it displace the pinned definition', () => {
+    const url = target(`handle=someone-elses-shape&where=room+%3D+%241&params%5B1%5D=${OTHER}`);
+    expect(url.searchParams.get('handle')).toBe('someone-elses-shape');
+    expect(url.searchParams.get('where')).toBe('room = $1');
+    expect(url.searchParams.get('params[1]')).toBe(ROOM);
+    expect(url.searchParams.get('table')).toBe('ydoc_updates');
+  });
+
+  /**
    * The default direction. A parameter nobody here has reasoned about — the next
    * Electric release's, or one invented by a caller — is dropped, so widening
    * what the proxy relays takes an edit to `FORWARDED_PARAMS` rather than an
