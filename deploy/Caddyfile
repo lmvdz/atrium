@@ -107,6 +107,32 @@ http://localhost:2019 {
 		reverse_proxy app:3000
 	}
 
+	# The Yjs write door (#202). A Yjs update is small; the app caps the body at
+	# 4 MiB on the actual read, but the proxy caps it FIRST so an oversize or
+	# unbounded (chunked, no Content-Length) body is refused before it ever
+	# occupies the app process. `max_size` is enforced on the streamed body, not
+	# a trusted header. Must precede the catch-all `handle` below — Caddy's
+	# `handle` blocks are first-match, and this path is a subset of it.
+	#
+	# This matcher is deliberately narrow (PUT + exact path), and it does not need
+	# to be exhaustive: the app-level `readBodyBounded` is the backstop, not this
+	# cap. A trailing-slash or otherwise-shaped path falls to the catch-all and
+	# still reaches `route.ts`, whose PUT handler caps the body on the actual read;
+	# a non-PUT verb never has its body read at all — Next answers 405 for the
+	# unimplemented method before any body is consumed. So the only thing this
+	# proxy cap adds is refusing an oversize body one hop earlier for the common,
+	# exactly-matched request; it is defence in depth, not the load-bearing guard.
+	@ydoc_write {
+		method PUT
+		path /api/rooms/*/ydoc
+	}
+	handle @ydoc_write {
+		request_body {
+			max_size 4MB
+		}
+		reverse_proxy app:3000
+	}
+
 	# Everything else is the Next.js app: pages, Server Actions, the auth
 	# catch-all route.
 	handle {

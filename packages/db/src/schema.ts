@@ -35,6 +35,7 @@ import {
   real,
   text,
   timestamp,
+  unique,
   uniqueIndex,
   uuid,
 } from 'drizzle-orm/pg-core';
@@ -350,6 +351,19 @@ export const actorKind = pgEnum('actor_kind', ['human', 'agent', 'model', 'syste
  * identities and must not be spellable here.
  */
 export const principalKind = pgEnum('principal_kind', ['human', 'agent']);
+
+/**
+ * Who wrote a Yjs document update (#202, drizzle/0054).
+ *
+ * `human`/`agent` are a `principal_kind` — an authenticated author who wrote
+ * through the `sendUrl` door, stamped from their immutable `users.principal_kind`
+ * and never from anything the client said. `system` is the third value and names
+ * a write that carried NO session (a direct owner INSERT, a migration, a future
+ * compactor); the door never produces it, and DETECT reads it as unattributed.
+ * A separate enum from `principal_kind` because it has a value — `system` —
+ * that an identity may not.
+ */
+export const ydocWriterKind = pgEnum('ydoc_writer_kind', ['human', 'agent', 'system']);
 
 /** Typed payload union stored in `accepted_objects.payload` / `proposals.payload`. */
 export type ObjectPayload =
@@ -2552,10 +2566,36 @@ export const ydocUpdates = pgTable(
     /** The Yjs update, as y-electric names and reads it. */
     op: bytea('op').notNull(),
     appendedAt: timestamp('appended_at', { withTimezone: true }).notNull().defaultNow(),
+    /**
+     * The authenticated author (#202, drizzle/0054), stamped by
+     * `atrium_append_ydoc_update` from the server-authenticated session and from
+     * nothing a client can name. NULL only for a `writer_kind = 'system'` write.
+     */
+    writerUserId: uuid('writer_user_id').references(() => users.id, { onDelete: 'restrict' }),
+    /**
+     * The author's kind, looked up from the immutable `users.principal_kind` — so
+     * an agent claiming to be human is stamped `agent`. Defaults to `system`, the
+     * honest stamp for a write that carried no session (never the door's path).
+     */
+    writerKind: ydocWriterKind('writer_kind').notNull().default('system'),
+    /**
+     * `sha256(op)`, generated so it always summarises the stored bytes and can
+     * never be supplied by a caller. The replay-dedupe key with the unique
+     * constraint below.
+     */
+    opDigest: bytea('op_digest').generatedAlwaysAs(sql`sha256("op")`),
   },
   (t) => [
     index('ydoc_updates_room_idx').on(t.room, t.appendedAt),
     check('ydoc_updates_op_not_empty', sql`octet_length(${t.op}) > 0`),
+    // The stamp is internally consistent: `system` XOR a named user is refused.
+    check(
+      'ydoc_updates_writer_stamp_consistent',
+      sql`(${t.writerKind} = 'system') = (${t.writerUserId} IS NULL)`,
+    ),
+    // Replay dedupe: one byte-identical update per room, so a replay collides
+    // with the original row rather than re-attributing it.
+    unique('ydoc_updates_room_op_digest_key').on(t.room, t.opDigest),
   ],
 );
 

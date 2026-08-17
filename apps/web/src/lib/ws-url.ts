@@ -81,6 +81,34 @@ export function resolveElectricShapeUrl(
   return `${here.protocol}//${here.host}${path}`;
 }
 
+/** The app route the Yjs write door (#202) is mounted at, per room. */
+export const ELECTRIC_SEND_PATH_PREFIX = '/api/rooms';
+
+/**
+ * Resolve the endpoint the Yjs transport PUTs a room's updates to (#202).
+ *
+ * Same-origin by construction, and for a sharper reason than the shape read: the
+ * write is authorized by the session COOKIE, and a cookie only rides a
+ * same-origin request. A cross-origin send would arrive with no session and be
+ * refused 401 — so, unlike the socket URL, there is no configurable absolute
+ * form here at all. The door is a Next route in THIS app; it is not remountable
+ * elsewhere the way the read proxy can be, so the path is a fixed template around
+ * the room id rather than a runtime-config value.
+ *
+ * Pure, like `resolveWsUrl` — hand it a room and a location and it answers the
+ * same anywhere, so the same-origin rule is testable rather than merely stated.
+ * NOT YET WIRED into a mounted client: `electric-transport.ts` is the transport
+ * this feeds, and it lands mounted with E4; this is the one place the browser
+ * will learn the write origin when it does.
+ */
+export function resolveElectricSendUrl(room: string, location?: LocationLike): string {
+  const here = location ?? currentLocation();
+  if (!here.host) {
+    throw new WsUrlError('cannot derive a same-origin send URL: the location has no host');
+  }
+  return `${here.protocol}//${here.host}${ELECTRIC_SEND_PATH_PREFIX}/${encodeURIComponent(room)}/ydoc`;
+}
+
 /** The subset of `window.location` this needs. Keeps the function testable. */
 export interface LocationLike {
   protocol: string;
