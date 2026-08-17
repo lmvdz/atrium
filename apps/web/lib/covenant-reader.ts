@@ -299,6 +299,50 @@ export function canonicalizeLeafValue(value: unknown): string {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
+// SAFE ATTRIBUTE ADAPTER (#189 round-4 / consolidation, finding: `__proto__` is an
+// INVISIBLE ancestor attribute). `Y.XmlElement.getAttributes()` materializes a PLAIN
+// object with `obj[key] = value`. When `key` is `__proto__` (or any other prototype
+// setter), that assignment mutates the object's PROTOTYPE instead of creating an own
+// key, so the attribute is SILENTLY DROPPED from the returned record — an invisible
+// mutation that leaves the digest unchanged (a false `✓`: an anchor minted over
+// `__proto__:'INNOCENT'` resolves `ok` against a live `__proto__:'EVIL'`).
+//
+// This reads the element's attributes through a GUARDED enumeration instead: Yjs
+// stores them in the element's own `_map` (a real `Map`, immune to the prototype
+// hazard). We enumerate the live (non-deleted) keys there, read each value with the
+// per-key `getAttribute` (also hazard-free), and CROSS-CHECK against the materialized
+// `getAttributes()` record: if the plain object is MISSING any live key the map
+// carries, materialization dropped it ⇒ FAIL CLOSED (throw ⇒ DRIFT). An honest doc
+// (no prototype-hazard keys) enumerates identically to `getAttributes()` and never
+// throws. Entries land in the caller's null-prototype record, so the reader never
+// re-introduces the same hazard when it rebuilds the canonical attrs map.
+// ─────────────────────────────────────────────────────────────────────────────
+
+interface AttrMapItem {
+  deleted?: boolean;
+}
+
+function safeElementAttrs(el: Y.XmlElement): Array<[string, unknown]> {
+  const map = (el as unknown as { _map?: Map<string, AttrMapItem> })._map;
+  if (!(map instanceof Map)) {
+    // A foreign element shape with no attribute map — cannot enumerate safely.
+    reject('ancestor element has no attribute map (foreign shape)');
+  }
+  const materialized = el.getAttributes() as Record<string, unknown>;
+  const entries: Array<[string, unknown]> = [];
+  for (const [key, item] of map.entries()) {
+    if (item?.deleted) continue; // a deleted attribute is not live content
+    // If the plain-object materialization dropped this live key (a prototype-hazard
+    // key such as `__proto__`), the record is lossy and any digest over it is a lie.
+    if (!Object.hasOwn(materialized, key)) {
+      reject(`ancestor attribute key dropped by materialization (${JSON.stringify(key)})`);
+    }
+    entries.push([key, el.getAttribute(key)]);
+  }
+  return entries;
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
 // The reader.
 // ─────────────────────────────────────────────────────────────────────────────
 
@@ -378,34 +422,73 @@ export class CovenantDocReaderProd implements CovenantDocReader {
    * forever — the hang the hardening prevents, which the not-theater test observes.
    */
   private async acquireAsync(signal?: AbortSignal): Promise<Y.Doc | null> {
-    const start = this.monotonicNow();
+    // DEADLINE-SCOPED AbortController (#189 round-4 point 6). Round-3 forwarded the
+    // caller's `signal` into `poll` but never aborted anything on TIMEOUT — a source
+    // that kicked off background acquisition on `poll(signal)` was left running (a
+    // leaked task / listeners) after the deadline gave up. We own a controller here,
+    // COMBINE it with the caller's signal (a caller abort aborts ours), pass OUR
+    // combined signal into `poll`/`delay`, and abort it in `finally` — so a timed-out
+    // OR normally-completed acquire actually cancels any in-flight work exactly once.
+    const controller = new AbortController();
+    const combined = controller.signal;
+    const onCallerAbort = () => controller.abort();
+    if (signal) {
+      if (signal.aborted) controller.abort();
+      else signal.addEventListener('abort', onCallerAbort, { once: true });
+    }
     // Poll cadence: small enough to be prompt, non-zero so a stalled source cannot
     // starve the loop. Never longer than the remaining budget.
     const pollEveryMs = 1;
-    for (;;) {
-      if (signal?.aborted) return null;
-      const elapsed = this.monotonicNow() - start;
-      // Deadline FIRST: a doc that only just became ready AT/AFTER the deadline is
-      // a late arrival and must NOT be accepted (the false-`ok` codex found).
-      if (this.deadlineEnabled && elapsed >= this.deadlineMs) return null;
-      // The signal flows INTO poll so a cancellable source abandons in-flight work.
-      const doc = this.source.poll(signal);
-      if (doc) {
-        // RE-CHECK after poll returns (#189 round-2, codex's 10.001ms window): a
-        // slow poll can itself straddle the deadline or an abort, so re-sample the
-        // monotonic clock AND the signal before ACCEPTING the doc. Without this, a
-        // poll that returned a doc just past the deadline would still be accepted.
-        if (signal?.aborted) return null;
-        if (this.deadlineEnabled && this.monotonicNow() - start >= this.deadlineMs) return null;
-        return doc;
+    const start = this.monotonicNow();
+    try {
+      for (;;) {
+        if (combined.aborted) return null;
+        const elapsed = this.monotonicNow() - start;
+        // Deadline FIRST: a doc that only just became ready AT/AFTER the deadline is
+        // a late arrival and must NOT be accepted (the false-`ok` codex found).
+        if (this.deadlineEnabled && elapsed >= this.deadlineMs) return null;
+        // OUR combined signal flows INTO poll so a cancellable source abandons in-flight
+        // work when either the caller aborts OR the deadline fires (via `finally`).
+        const doc = this.source.poll(combined);
+        if (doc) {
+          // RE-CHECK after poll returns (#189 round-2, codex's 10.001ms window): a
+          // slow poll can itself straddle the deadline or an abort, so re-sample the
+          // monotonic clock AND the signal before ACCEPTING the doc.
+          if (combined.aborted) return null;
+          if (this.deadlineEnabled && this.monotonicNow() - start >= this.deadlineMs) return null;
+          return doc;
+        }
+        const remaining = this.deadlineEnabled ? this.deadlineMs - elapsed : pollEveryMs;
+        await delay(Math.min(pollEveryMs, Math.max(0, remaining)), combined);
       }
-      const remaining = this.deadlineEnabled ? this.deadlineMs - elapsed : pollEveryMs;
-      await delay(Math.min(pollEveryMs, Math.max(0, remaining)), signal);
+    } finally {
+      // Timed-out / aborted / resolved — cancel any in-flight acquisition the source
+      // started against `combined`, and drop the caller-forwarding listener (no leak).
+      controller.abort();
+      if (signal) signal.removeEventListener('abort', onCallerAbort);
     }
   }
 
   private rootOf(doc: Y.Doc): Y.XmlFragment | Y.XmlElement | null {
     return this.resolveRoot(doc);
+  }
+
+  /**
+   * Is `body` contained under `root` (the configured content share)? Ascends the
+   * parent chain from the body and requires it to pass through `root` by IDENTITY
+   * (`===`). Used to enforce {@link resolveRoot} on RESOLUTION (#189 round-4 point 5),
+   * so a span whose relative positions resolve into a DIFFERENT share (an anchor minted
+   * under another root, or a planted share divorced from conversation content) is
+   * rejected — capture-time root enforcement alone let such an anchor resolve `ok`.
+   */
+  private bodyUnderRoot(body: Y.XmlText, root: Y.XmlFragment | Y.XmlElement): boolean {
+    let node: { parent?: unknown } | null = body as { parent?: unknown };
+    while (node) {
+      if ((node as unknown) === (root as unknown)) return true;
+      const parent: unknown = node.parent;
+      node = parent && typeof parent === 'object' ? (parent as { parent?: unknown }) : null;
+    }
+    return false;
   }
 
   /** Follow a path of child indices from the content root to a `Y.XmlText` body. */
@@ -441,31 +524,30 @@ export class CovenantDocReaderProd implements CovenantDocReader {
    */
   private marksOf(attributes: Record<string, unknown> | undefined): Mark[] {
     if (!attributes) return [];
-    return Object.keys(attributes)
-      .sort()
-      .map((type) => {
-        const raw = attributes[type];
-        const isPlainObject =
-          raw !== null &&
-          typeof raw === 'object' &&
-          !Array.isArray(raw) &&
-          !(raw instanceof Date) &&
-          !(raw instanceof Map) &&
-          !(raw instanceof Set);
-        let attrs: Record<string, string>;
-        if (isPlainObject) {
-          // The WHOLE object through the allowlist encoder — a non-plain / typed-array
-          // / NFC-dup payload throws here (fail-closed), never a coerced `f:` map.
-          attrs = { '#object': this.canonicalizeLeaf(raw) };
-        } else if (raw === true || raw === false || raw === null || raw === undefined) {
-          attrs = { '#flag': this.canonicalizeLeaf(raw) }; // true ≠ false ≠ null ≠ undefined
-        } else {
-          // A scalar / dense-array payload — a single tagged value; the tag encodes the
-          // TYPE, so a scalar can never collide with an object field.
-          attrs = { '#scalar': this.canonicalizeLeaf(raw) };
-        }
-        return { type, attrs, straddles: 'none' as const };
+    // NFC-UNIQUE mark NAMES (#189 round-4 point 4). Mark names are a KEY SURFACE just
+    // like object keys / ancestor attr names: two raw names normalizing NFC-equal are
+    // ambiguous (a last-wins map would silently drop one) ⇒ fail closed. Round-3
+    // normalized object keys but NOT mark names — the same class in a sibling location.
+    const seenNames = new Set<string>();
+    const marks: Mark[] = [];
+    for (const rawName of Object.keys(attributes)) {
+      const type = rawName.normalize('NFC');
+      if (seenNames.has(type)) reject('NFC-duplicate mark names');
+      seenNames.add(type);
+      // ONE canonicalizer: the WHOLE payload through {@link canonicalizeLeaf}. Its type
+      // tag already discriminates every shape — a scalar `"x"` (`s:"x"`) from an object
+      // `{value:"x"}` (`o:{…}`) from a flag `true` (`b:true`) from `null` (`z:null`) —
+      // so a single `#v` slot is injective; no per-shape `#object`/`#flag`/`#scalar`
+      // fork (which could itself drift out of sync) is needed. A non-compliant payload
+      // (typed array, NFC-dup keys, non-plain proto) throws here ⇒ DRIFT.
+      marks.push({
+        type,
+        attrs: { '#v': this.canonicalizeLeaf(attributes[rawName]) },
+        straddles: 'none',
       });
+    }
+    marks.sort((a, b) => (a.type < b.type ? -1 : a.type > b.type ? 1 : 0));
+    return marks;
   }
 
   /**
@@ -488,27 +570,39 @@ export class CovenantDocReaderProd implements CovenantDocReader {
     embedType: string;
     identity: Record<string, string>;
   } {
-    // The embed's TYPE lives in a DEDICATED TAGGED CHANNEL that a string value can
-    // never impersonate (grok's round-2 finding 1): a string type becomes `s:…`, a
-    // non-string type its allowlist encoding (`o:{…}` / `n:…`), so a caller-supplied
-    // string `"o:{}"` can never collide with a non-string type that canonicalizes to
-    // `o:{}`. `embedType` is preferred over `type` as the channel source; when BOTH
-    // are present, `type` is NOT dropped — it flows through as a normal `a:type`
-    // passthrough (grok's finding 2), so two embeds differing only in `type` differ.
-    const hasEmbedType = 'embedType' in embed;
-    const rawType: unknown = hasEmbedType ? embed.embedType : (embed.type ?? 'embed');
-    const embedType =
-      typeof rawType === 'string'
-        ? `s:${rawType.normalize('NFC')}`
-        : this.canonicalizeLeaf(rawType);
+    // EXPLICIT TYPE-SOURCE + PRESENCE (#189 round-4 point 3) — NO `?? default` folding.
+    // Round-3 computed `embed.type ?? 'embed'`, which folded THREE distinct embeds onto
+    // one channel: `{k}` (type absent), `{type:'embed',k}`, and `{type:null,k}` all
+    // became `s:embed` (a false `✓`, and mutating `type` in place left the digest put).
+    // The channel now encodes BOTH which field supplied the type (`embedType` vs `type`
+    // vs neither) AND its exact value through the ONE canonicalizer, so:
+    //   - type ABSENT → `none`; `type:'embed'` → `type:s:"embed"`; `type:null` →
+    //     `type:z:null` — three DISTINCT channels;
+    //   - a string can't impersonate a non-string (`embedType:'o:{}'` → `embedType:s:"o:{}"`
+    //     vs `embedType:{}` → `embedType:o:{}`), nor forge the other field's prefix;
+    //   - mutating the channel field in place MOVES the channel (⇒ digest moves).
+    const hasEmbedType = Object.hasOwn(embed, 'embedType');
+    const hasType = Object.hasOwn(embed, 'type');
+    let embedType: string;
+    let channelField: 'embedType' | 'type' | null;
+    if (hasEmbedType) {
+      embedType = `embedType:${this.canonicalizeLeaf(embed.embedType)}`;
+      channelField = 'embedType';
+    } else if (hasType) {
+      embedType = `type:${this.canonicalizeLeaf(embed.type)}`;
+      channelField = 'type';
+    } else {
+      embedType = 'none';
+      channelField = null;
+    }
 
-    const identity: Record<string, string> = {};
+    const identity: Record<string, string> = Object.create(null);
     const seenKeys = new Set<string>();
     for (const [k, v] of Object.entries(embed)) {
-      // Consume ONLY the field used as the type channel — never both. If `embedType`
-      // is present it is consumed and `type` passes through; otherwise `type` is the
-      // channel and is consumed.
-      if (hasEmbedType ? k === 'embedType' : k === 'type') continue;
+      // Consume ONLY the field used as the type channel — never both. When `embedType`
+      // is the channel, a sibling `type` is NOT dropped: it flows through as a normal
+      // `a:type` passthrough, so two embeds differing only in `type` differ.
+      if (channelField !== null && k === channelField) continue;
       if (k === 'child' || k === 'children') {
         // Reader-OWNED reserved key, computed from the CHILD `v` (never a sibling).
         // Every passthrough attr is `a:`-namespaced, so nothing a peer writes can
@@ -539,7 +633,9 @@ export class CovenantDocReaderProd implements CovenantDocReader {
       const len = typeof op.insert === 'string' ? op.insert.length : 1;
       if (offset >= pos && offset < pos + len) {
         const attrs = op.attributes;
-        if (!attrs || !(type in attrs)) return null;
+        if (!attrs) return null;
+        // Reconstruct through `marksOf` so the mark NAME is compared in its NFC-normalized
+        // form (a raw `type in attrs` shortcut would miss a normalizing-equal name).
         const m = this.marksOf(attrs).find((x) => x.type === type);
         return m ? m.attrs : null;
       }
@@ -561,15 +657,15 @@ export class CovenantDocReaderProd implements CovenantDocReader {
     const chain: RenderedFragment['ancestors'] = [];
     let parent: Y.AbstractType<unknown> | null = body.parent;
     while (parent && parent instanceof Y.XmlElement) {
-      const attrs: Record<string, string> = {};
+      const attrs: Record<string, string> = Object.create(null);
       const seenKeys = new Set<string>();
-      // An ancestor attribute value (y-prosemirror stores a node's `attrs` here) can
-      // be a nested OBJECT — `setAttribute('meta', { v: 2 })`. `String(v)` collapsed
-      // every such object to "[object Object]", so `{v:2}` and `{v:1}` shared a digest
-      // (#189 CRITICAL). Serialize it through the ALLOWLIST — a nested object goes
-      // field-by-field, an exotic (typed array / Date …) fails closed — and NFC-dedup
-      // the attribute keys so two normalizing-equal keys cannot last-wins-overwrite.
-      for (const [k, v] of Object.entries(parent.getAttributes())) {
+      // An ancestor attribute value (y-prosemirror stores a node's `attrs` here) can be
+      // a nested OBJECT — `setAttribute('meta', { v: 2 })` — serialized through the ONE
+      // canonicalizer (a nested object field-by-field, an exotic fails closed). Keys are
+      // read through the SAFE adapter (never a `getAttributes()` plain object that drops
+      // a `__proto__` key ⇒ invisible mutation) and NFC-deduped (two normalizing-equal
+      // keys cannot last-wins-overwrite).
+      for (const [k, v] of safeElementAttrs(parent)) {
         const key = k.normalize('NFC');
         if (seenKeys.has(key)) reject('NFC-duplicate ancestor attribute keys');
         seenKeys.add(key);
@@ -877,6 +973,13 @@ export class CovenantDocReaderProd implements CovenantDocReader {
     if (!(body instanceof Y.XmlText) || absEnd.type !== body) return null;
     const item = (body as unknown as { _item: { deleted: boolean } | null })._item;
     if (item?.deleted) return null;
+
+    // ENFORCE `resolveRoot` ON RESOLUTION (#189 round-4 point 5). The resolved body
+    // must ascend to the SAME content share the reader is configured to watch; an
+    // anchor whose positions resolve into a different / planted share is DRIFT, not a
+    // false `ok`. An absent configured root (`null`) also fails closed.
+    const configuredRoot = this.rootOf(doc);
+    if (!configuredRoot || !this.bodyUnderRoot(body, configuredRoot)) return null;
 
     const start = Math.min(absStart.index, absEnd.index);
     const end = Math.max(absStart.index, absEnd.index);

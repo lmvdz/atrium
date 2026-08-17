@@ -125,30 +125,57 @@ function canonicalizeLeafValue(value: unknown): string {
     .join(',')}}`;
 }
 
-/** The marks a text op carries, INJECTIVELY (allowlist-encoded; exotic ⇒ fail closed). */
+/**
+ * SAFELY read a Y.XmlElement's attributes (kept in step with the production reader's
+ * `safeElementAttrs`). `getAttributes()` materializes a plain object with `obj[key]=v`,
+ * so a `__proto__` (or other prototype-setter) key is SILENTLY DROPPED — an invisible
+ * mutation. We enumerate the element's own `_map` (a real `Map`, hazard-free), read
+ * each via `getAttribute`, and fail closed (throw ⇒ DRIFT) if the materialized record
+ * is missing any live key the map carries.
+ */
+interface AttrMapItem {
+  deleted?: boolean;
+}
+
+function safeElementAttrs(el: Y.XmlElement): Array<[string, unknown]> {
+  const map = (el as unknown as { _map?: Map<string, AttrMapItem> })._map;
+  if (!(map instanceof Map)) {
+    reject('ancestor element has no attribute map (foreign shape)');
+  }
+  const materialized = el.getAttributes() as Record<string, unknown>;
+  const entries: Array<[string, unknown]> = [];
+  for (const [key, item] of map.entries()) {
+    if (item?.deleted) continue;
+    if (!Object.hasOwn(materialized, key)) {
+      reject(`ancestor attribute key dropped by materialization (${JSON.stringify(key)})`);
+    }
+    entries.push([key, el.getAttribute(key)]);
+  }
+  return entries;
+}
+
+/**
+ * The marks a text op carries, INJECTIVELY (allowlist-encoded; exotic ⇒ fail closed).
+ * Mark NAMES are NFC-unique-enforced (a key surface like object keys) and the WHOLE
+ * payload routes through the ONE `canonicalizeLeafValue`, whose type tag alone
+ * discriminates scalar/object/flag — a single `#v` slot, no per-shape fork.
+ */
 function marksOf(attributes: Record<string, unknown> | undefined): Mark[] {
   if (!attributes) return [];
-  return Object.keys(attributes)
-    .sort()
-    .map((type) => {
-      const raw = attributes[type];
-      const isPlainObject =
-        raw !== null &&
-        typeof raw === 'object' &&
-        !Array.isArray(raw) &&
-        !(raw instanceof Date) &&
-        !(raw instanceof Map) &&
-        !(raw instanceof Set);
-      let attrs: Record<string, string>;
-      if (isPlainObject) {
-        attrs = { '#object': canonicalizeLeafValue(raw) };
-      } else if (raw === true || raw === false || raw === null || raw === undefined) {
-        attrs = { '#flag': canonicalizeLeafValue(raw) };
-      } else {
-        attrs = { '#scalar': canonicalizeLeafValue(raw) };
-      }
-      return { type, attrs, straddles: 'none' as const };
+  const seenNames = new Set<string>();
+  const marks: Mark[] = [];
+  for (const rawName of Object.keys(attributes)) {
+    const type = rawName.normalize('NFC');
+    if (seenNames.has(type)) reject('NFC-duplicate mark names');
+    seenNames.add(type);
+    marks.push({
+      type,
+      attrs: { '#v': canonicalizeLeafValue(attributes[rawName]) },
+      straddles: 'none',
     });
+  }
+  marks.sort((a, b) => (a.type < b.type ? -1 : a.type > b.type ? 1 : 0));
+  return marks;
 }
 
 /** The identity of an embed — allowlist-encoded fields + a reserved child digest. */
@@ -156,17 +183,30 @@ function embedIdentity(embed: Record<string, unknown>): {
   embedType: string;
   identity: Record<string, string>;
 } {
-  // The type in a DEDICATED TAGGED CHANNEL a string value cannot impersonate; `type`
-  // is NOT dropped when `embedType` is present (it flows through as `a:type`).
-  const hasEmbedType = 'embedType' in embed;
-  const rawType: unknown = hasEmbedType ? embed.embedType : (embed.type ?? 'embed');
-  const embedType =
-    typeof rawType === 'string' ? `s:${rawType.normalize('NFC')}` : canonicalizeLeafValue(rawType);
+  // EXPLICIT TYPE-SOURCE + PRESENCE — NO `?? default` folding (kept in step with the
+  // production reader). The channel encodes which field supplied the type (`embedType`
+  // vs `type` vs neither) AND its exact value, so `{k}` (absent), `{type:'embed',k}`,
+  // and `{type:null,k}` are three DISTINCT channels; a string can't impersonate a
+  // non-string; mutating the channel field in place moves the channel.
+  const hasEmbedType = Object.hasOwn(embed, 'embedType');
+  const hasType = Object.hasOwn(embed, 'type');
+  let embedType: string;
+  let channelField: 'embedType' | 'type' | null;
+  if (hasEmbedType) {
+    embedType = `embedType:${canonicalizeLeafValue(embed.embedType)}`;
+    channelField = 'embedType';
+  } else if (hasType) {
+    embedType = `type:${canonicalizeLeafValue(embed.type)}`;
+    channelField = 'type';
+  } else {
+    embedType = 'none';
+    channelField = null;
+  }
 
-  const identity: Record<string, string> = {};
+  const identity: Record<string, string> = Object.create(null);
   const seenKeys = new Set<string>();
   for (const [k, v] of Object.entries(embed)) {
-    if (hasEmbedType ? k === 'embedType' : k === 'type') continue;
+    if (channelField !== null && k === channelField) continue;
     if (k === 'child' || k === 'children') {
       // Reader-OWNED reserved key computed from the CHILD (never a sibling field).
       identity[k === 'children' ? '#children' : '#child'] = sha256Hex(canonicalizeLeafValue(v));
@@ -200,7 +240,8 @@ function markActiveAt(
     const len = typeof op.insert === 'string' ? op.insert.length : 1;
     if (offset >= pos && offset < pos + len) {
       const attrs = op.attributes;
-      if (!attrs || !(type in attrs)) return null;
+      if (!attrs) return null;
+      // Reconstruct through `marksOf` so the mark NAME is compared NFC-normalized.
       const m = marksOf(attrs).find((x) => x.type === type);
       return m ? m.attrs : null;
     }
@@ -257,12 +298,13 @@ export class YjsCovenantDocReader implements CovenantDocReader {
     const chain: RenderedFragment['ancestors'] = [];
     let parent: Y.AbstractType<unknown> | null = body.parent;
     while (parent && parent instanceof Y.XmlElement) {
-      const attrs: Record<string, string> = {};
+      const attrs: Record<string, string> = Object.create(null);
       const seenKeys = new Set<string>();
       // Allowlist-encode each ancestor attribute value (a nested object goes
-      // field-by-field, an exotic fails closed) and NFC-dedup the keys, exactly as
-      // the production reader does — never `String(obj)`.
-      for (const [k, v] of Object.entries(parent.getAttributes())) {
+      // field-by-field, an exotic fails closed) and NFC-dedup the keys, reading through
+      // the SAFE adapter (never a `getAttributes()` plain object that drops `__proto__`),
+      // exactly as the production reader does — never `String(obj)`.
+      for (const [k, v] of safeElementAttrs(parent)) {
         const key = k.normalize('NFC');
         if (seenKeys.has(key)) reject('NFC-duplicate ancestor attribute keys');
         seenKeys.add(key);

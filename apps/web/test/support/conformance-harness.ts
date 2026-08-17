@@ -460,6 +460,52 @@ export function runReaderConformance(label: string, make: ReaderFactory): void {
     }
   };
 
+  /** Certify a one-char text span carrying `attrs` as its mark set; digest or DRIFT. */
+  const markResult = (attrs: Record<string, unknown>): string => {
+    const doc = new Y.Doc();
+    const frag = doc.getXmlFragment('doc');
+    const para = new Y.XmlElement('paragraph');
+    const bodyEl = new Y.XmlText();
+    frag.insert(0, [para]);
+    para.insert(0, [bodyEl]);
+    bodyEl.insert(0, 'x');
+    bodyEl.format(0, 1, attrs);
+    try {
+      const anchor = certifyAnchor(make(doc, { path: [0, 0], start: 0, end: 1 }), {
+        objectId: 'o_mark',
+        roomId: 'room_1',
+        certifier: ALICE,
+        certifiedAt: AT,
+      });
+      return anchor === null ? 'DRIFT:null' : `digest:${anchor.renderedDigest}`;
+    } catch {
+      return 'DRIFT:throw';
+    }
+  };
+
+  /** Certify a span under a block carrying one ancestor attribute; digest or DRIFT. */
+  const ancestorAttrResult = (attrName: string, attrValue: unknown): string => {
+    const doc = new Y.Doc();
+    const frag = doc.getXmlFragment('doc');
+    const para = new Y.XmlElement('paragraph');
+    para.setAttribute(attrName, attrValue as string);
+    const bodyEl = new Y.XmlText();
+    frag.insert(0, [para]);
+    para.insert(0, [bodyEl]);
+    bodyEl.insert(0, 'shipit');
+    try {
+      const anchor = certifyAnchor(make(doc, { path: [0, 0], start: 0, end: 6 }), {
+        objectId: 'o_anc',
+        roomId: 'room_1',
+        certifier: ALICE,
+        certifiedAt: AT,
+      });
+      return anchor === null ? 'DRIFT:null' : `digest:${anchor.renderedDigest}`;
+    } catch {
+      return 'DRIFT:throw';
+    }
+  };
+
   it(L("collision: a typed array (Uint8Array) can NEVER share a plain object's encoding"), () => {
     // Base: `Uint8Array([1])` and `{0:1}` both serialize to `o:{"0":n:1}` → one digest
     // (a false ✓). A Uint8Array is a real Yjs/lib0 wire value; it must fail closed.
@@ -501,6 +547,53 @@ export function runReaderConformance(label: string, make: ReaderFactory): void {
     expect(embedResult({ embedType: 'img', meta: { w: 1 } })).not.toBe(
       embedResult({ embedType: 'img', meta: { w: 2 } }),
     );
+  });
+
+  // ════════════════════════════════════════════════════════════════════════════
+  // #189 round-4 CONSOLIDATION — the SAME classes in sibling locations. Run against
+  // BOTH readers. On base `31aab6d` (round-3) each of these gives a false convergence
+  // (or an invisible mutation); after, distinct-or-DRIFT.
+  // ════════════════════════════════════════════════════════════════════════════
+
+  it(L('type-channel: type ABSENT ≠ type:"embed" ≠ type:null (no `?? default` fold)'), () => {
+    // Base folds all three onto embedType `s:embed` via `embed.type ?? 'embed'` — one
+    // digest (a false ✓; mutating `type` in place left the digest put). Three distinct.
+    const absent = embedResult({ k: 1 });
+    const strEmbed = embedResult({ type: 'embed', k: 1 });
+    const nul = embedResult({ type: null, k: 1 });
+    expect(new Set([absent, strEmbed, nul]).size).toBe(3);
+  });
+  it(L('type-channel: mutating embed.type in place MOVES the digest'), () => {
+    expect(embedResult({ type: 'note', k: 1 })).not.toBe(embedResult({ type: 'quote', k: 1 }));
+  });
+
+  it(L('mark-name-NFC: two mark names normalizing NFC-equal ⇒ fail closed'), () => {
+    // Round-3 NFC-normalized OBJECT keys but NOT mark NAMES — the same class in a
+    // sibling location. Two raw mark names normalizing equal are ambiguous (last-wins
+    // drops one) ⇒ DRIFT, never a silent drop.
+    const attrs: Record<string, unknown> = {};
+    attrs['café'] = 'a'; // composed
+    attrs['café'] = 'b'; // decomposed
+    expect(Object.keys(attrs).length).toBe(2); // genuinely two raw mark names
+    expect(markResult(attrs).startsWith('DRIFT')).toBe(true);
+  });
+  it(L('mark-name: a scalar mark value ≠ an object mark value (single canonicalizer)'), () => {
+    expect(markResult({ hi: 'x' })).not.toBe(markResult({ hi: { value: 'x' } }));
+  });
+
+  it(
+    L('__proto__ ancestor attr: a prototype-hazard attribute is NOT invisible ⇒ fail closed'),
+    () => {
+      // Base reads ancestor attrs via `getAttributes()`, a plain object; a `__proto__`
+      // key is SILENTLY DROPPED (mutates the prototype), so the digest is unchanged — an
+      // invisible mutation (`__proto__:'INNOCENT'` and `__proto__:'EVIL'` both resolve ok
+      // against each other). The safe adapter fails closed.
+      expect(ancestorAttrResult('__proto__', 'INNOCENT').startsWith('DRIFT')).toBe(true);
+    },
+  );
+  it(L('__proto__ ancestor attr: an honest ancestor attribute still resolves to a digest'), () => {
+    // The safe adapter must not over-reject: a normal ancestor attribute is fine.
+    expect(ancestorAttrResult('data-note', 'hello').startsWith('digest:')).toBe(true);
   });
 
   // ── provenance is intentionally NOT a drift input ───────────────────────────

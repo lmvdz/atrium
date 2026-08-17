@@ -720,9 +720,12 @@ describe('HARDENING (c): a genuinely async, cancellable, monotonic deadline → 
 // window — a slow poll that itself crosses the deadline must not be accepted).
 // ═════════════════════════════════════════════════════════════════════════════
 describe('ASYNC round-3: no listener leak, signal into poll, post-poll recheck', () => {
-  const neverReady = (): DocSource => ({ poll: () => null });
-
-  it('the AbortSignal is passed INTO poll (cancellable acquisition, not merely ignored)', async () => {
+  it('a deadline-scoped signal is passed INTO poll and ABORTED on timeout (in-flight acquisition cancelled)', async () => {
+    // #189 round-4 point 6. Round-3 forwarded the caller signal into poll but never
+    // aborted anything on TIMEOUT, so a source that started background acquisition on
+    // `poll(signal)` was left running after the deadline gave up. The fix passes a
+    // deadline-scoped COMBINED signal and aborts it in `finally`, so after a timed-out
+    // acquire the signal poll saw is ABORTED — the source can cancel its in-flight work.
     const anchor = certify(capturingReader(makeDoc().doc));
     let received: AbortSignal | undefined | 'unset' = 'unset';
     const source: DocSource = {
@@ -731,12 +734,32 @@ describe('ASYNC round-3: no listener leak, signal into poll, post-poll recheck',
         return null;
       },
     };
-    const reader = new CovenantDocReaderProd(source, undefined, { deadlineMs: 5 });
+    const reader = new CovenantDocReaderProd(source, undefined, { deadlineMs: 15 });
+    await reader.resolveSpanAsync(anchor); // no caller signal — timeout is the only trigger
+    // Base passes `undefined` into poll (no caller) and aborts nothing on timeout ⇒ the
+    // received value is `undefined`, not an aborted signal. The fix threads a real,
+    // now-aborted signal.
+    expect(received).not.toBe('unset');
+    expect(received).toBeInstanceOf(AbortSignal);
+    expect((received as unknown as AbortSignal).aborted).toBe(true);
+  });
+
+  it('a caller abort propagates to the deadline-scoped signal poll receives (combined)', async () => {
+    const anchor = certify(capturingReader(makeDoc().doc));
+    let received: AbortSignal | undefined | 'unset' = 'unset';
+    const source: DocSource = {
+      poll: (sig?: AbortSignal) => {
+        received = sig;
+        return null;
+      },
+    };
+    const reader = new CovenantDocReaderProd(source, undefined, { deadlineMs: 5000 });
     const ac = new AbortController();
+    setTimeout(() => ac.abort(), 15);
     await reader.resolveSpanAsync(anchor, ac.signal);
-    // Base calls `poll()` with no argument (received === undefined); the fix threads
-    // the signal through so an acquisition can cancel its own in-flight work.
-    expect(received).toBe(ac.signal);
+    // The combined signal reflects the caller: aborting the caller aborts what poll saw.
+    expect(received).toBeInstanceOf(AbortSignal);
+    expect((received as unknown as AbortSignal).aborted).toBe(true);
   });
 
   it('a poll that itself crosses the deadline → the doc is REFUSED (codex 10.001ms window)', async () => {
@@ -771,29 +794,120 @@ describe('ASYNC round-3: no listener leak, signal into poll, post-poll recheck',
     expect(await reader.resolveSpanAsync(anchor, ac.signal)).toBeNull();
   });
 
-  it('a stalled acquire does NOT leak abort listeners (~250-callback leak closed)', async () => {
+  it('a stalled acquire does NOT leak abort listeners on the signal poll receives', async () => {
     const anchor = certify(capturingReader(makeDoc().doc));
-    const ac = new AbortController();
+    // Monitor the signal poll actually RECEIVES — on base that is the caller signal
+    // (delay uses it directly), after the fix it is the deadline-scoped combined signal
+    // (delay uses that). Either way, each poll's `delay(ms, sig)` registers one abort
+    // listener and removes it on its timer; a stalled acquire polls many times but the
+    // net registered-and-not-removed count never accumulates.
     let added = 0;
     let removed = 0;
-    const origAdd = ac.signal.addEventListener.bind(ac.signal);
-    const origRemove = ac.signal.removeEventListener.bind(ac.signal);
-    ac.signal.addEventListener = ((type: string, ...rest: unknown[]) => {
-      if (type === 'abort') added++;
-      return (origAdd as (t: string, ...r: unknown[]) => void)(type, ...rest);
-    }) as typeof ac.signal.addEventListener;
-    ac.signal.removeEventListener = ((type: string, ...rest: unknown[]) => {
-      if (type === 'abort') removed++;
-      return (origRemove as (t: string, ...r: unknown[]) => void)(type, ...rest);
-    }) as typeof ac.signal.removeEventListener;
-
-    const reader = new CovenantDocReaderProd(neverReady(), undefined, { deadlineMs: 60 });
+    let wrapped: AbortSignal | null = null;
+    const source: DocSource = {
+      poll: (sig?: AbortSignal) => {
+        if (sig && wrapped !== sig) {
+          wrapped = sig;
+          const origAdd = sig.addEventListener.bind(sig);
+          const origRemove = sig.removeEventListener.bind(sig);
+          sig.addEventListener = ((type: string, ...rest: unknown[]) => {
+            if (type === 'abort') added++;
+            return (origAdd as (t: string, ...r: unknown[]) => void)(type, ...rest);
+          }) as typeof sig.addEventListener;
+          sig.removeEventListener = ((type: string, ...rest: unknown[]) => {
+            if (type === 'abort') removed++;
+            return (origRemove as (t: string, ...r: unknown[]) => void)(type, ...rest);
+          }) as typeof sig.removeEventListener;
+        }
+        return null;
+      },
+    };
+    const ac = new AbortController();
+    const reader = new CovenantDocReaderProd(source, undefined, { deadlineMs: 60 });
     expect(await reader.resolveSpanAsync(anchor, ac.signal)).toBeNull();
-    // Base registers one abort listener PER poll and removes NONE on normal completion
-    // (~60 accrue on this stalled acquire); the fix removes each on its timer, so the
-    // net registered-and-not-removed count never accumulates.
     expect(added).toBeGreaterThan(3); // many polls actually happened
     expect(added - removed).toBeLessThanOrEqual(1);
+  });
+});
+
+// ═════════════════════════════════════════════════════════════════════════════
+// resolveRoot ENFORCED ON RESOLUTION (#189 round-4 point 5). Round-3 checked the
+// configured content share only at CAPTURE; an anchor whose persisted relative
+// positions resolve into a DIFFERENT share (minted under another root / a planted
+// share divorced from conversation content) still resolved `ok`. The reader now
+// ascends from the resolved body and requires identity with the configured root.
+// ═════════════════════════════════════════════════════════════════════════════
+describe('resolveRoot on RESOLUTION: an anchor minted under a different share → DRIFT', () => {
+  const rootA = (d: Y.Doc) => d.getXmlFragment('contentA');
+  const rootB = (d: Y.Doc) => d.getXmlFragment('contentB');
+
+  function twoShareDoc(): Y.Doc {
+    const doc = new Y.Doc();
+    const shareA = doc.getXmlFragment('contentA');
+    const shareB = doc.getXmlFragment('contentB');
+    const pa = new Y.XmlElement('paragraph');
+    const ba = new Y.XmlText();
+    shareA.insert(0, [pa]);
+    pa.insert(0, [ba]);
+    ba.insert(0, 'ourcontent'); // the share the reader is CONFIGURED to watch
+    const pb = new Y.XmlElement('paragraph');
+    const bb = new Y.XmlText();
+    shareB.insert(0, [pb]);
+    pb.insert(0, [bb]);
+    bb.insert(0, 'shipit'); // a foreign / planted share
+    return doc;
+  }
+
+  it('the SAME body resolves OK under its own root but DRIFT under a different root', () => {
+    const doc = twoShareDoc();
+    // Mint the anchor over the body in share B (its relative positions point into B).
+    const minter = new CovenantDocReaderProd(
+      doc,
+      { path: [0, 0], start: 0, end: 6 },
+      {
+        resolveRoot: rootB,
+      },
+    );
+    const anchor = certifyAnchor(minter, {
+      objectId: 'o_share',
+      roomId: 'room_1',
+      certifier: ALICE,
+      certifiedAt: AT,
+    });
+    if (anchor === null) throw new Error('capture failed');
+
+    // A reader configured for the SAME share (B) resolves OK — the positions and the
+    // configured root agree.
+    const readerB = new CovenantDocReaderProd(doc, undefined, { resolveRoot: rootB });
+    expect(resolveCovenant(readerB, anchor).covenantStatus).toBe('ok');
+
+    // A reader configured for a DIFFERENT share (A) must DRIFT: the body resolves into
+    // B, which does not ascend to A. Base (capture-only root check) returned OK — the
+    // positions still resolve to B and the digest matches — a false ✓.
+    const readerA = new CovenantDocReaderProd(doc, undefined, { resolveRoot: rootA });
+    const res = resolveCovenant(readerA, anchor);
+    expect(res.covenantStatus).toBe('drift');
+    expect(res.renderedFragment).toBeNull();
+  });
+
+  it('an absent configured root (resolveRoot → null) fails closed on resolution', () => {
+    const doc = twoShareDoc();
+    const minter = new CovenantDocReaderProd(
+      doc,
+      { path: [0, 0], start: 0, end: 6 },
+      {
+        resolveRoot: rootB,
+      },
+    );
+    const anchor = certifyAnchor(minter, {
+      objectId: 'o_share',
+      roomId: 'room_1',
+      certifier: ALICE,
+      certifiedAt: AT,
+    });
+    if (anchor === null) throw new Error('capture failed');
+    const readerNull = new CovenantDocReaderProd(doc, undefined, { resolveRoot: () => null });
+    expect(resolveCovenant(readerNull, anchor).covenantStatus).toBe('drift');
   });
 });
 
