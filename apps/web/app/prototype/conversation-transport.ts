@@ -85,8 +85,21 @@ export class InMemoryConversationHub {
     const origin = Symbol('conversation-transport');
     this.origins.set(doc, origin);
 
-    // 1. Catch the joiner up to the shared stream.
-    applyUpdate(doc, encodeStateAsUpdate(this.server), origin);
+    // A destroyed member is a dead member — `applyUpdate` into a torn-down `Y.Doc`
+    // aborts, and before this guard a member destroyed DURING render (a Strict-Mode
+    // remount, a transport-identity swap) that was still in `members` could abort
+    // the fan-out and starve a LIVE peer of the update (#183 round-3). Skip it and
+    // evict it, so one dead member can never break another member's delivery.
+    const deliver = (target: YDoc, update: Uint8Array): void => {
+      if (target.isDestroyed) {
+        this.members.delete(target);
+        return;
+      }
+      applyUpdate(target, update, this.origins.get(target));
+    };
+
+    // 1. Catch the joiner up to the shared stream (unless it was already torn down).
+    if (!doc.isDestroyed) applyUpdate(doc, encodeStateAsUpdate(this.server), origin);
 
     // 2. FULL-MESH SYNC ON JOIN (#183 F2). The joiner may hold local work it made
     //    before connecting (a fresh client with unsent edits, or one that edited
@@ -98,18 +111,18 @@ export class InMemoryConversationHub {
     //    origin so the write does not echo back out through that peer's handler.
     const joinerState = encodeStateAsUpdate(doc);
     applyUpdate(this.server, joinerState);
-    for (const peer of this.members) {
-      applyUpdate(peer, joinerState, this.origins.get(peer));
-    }
+    for (const peer of this.members) deliver(peer, joinerState);
 
     const onUpdate = (update: Uint8Array, updateOrigin: unknown) => {
       // Ignore echoes of updates WE just applied to this doc.
       if (updateOrigin === origin) return;
-      // Fold the local update into the shared stream and fan it out to peers.
+      // Fold the local update into the shared stream and fan it out to peers. A
+      // destroyed peer is skipped and evicted (see `deliver`), never allowed to
+      // abort the loop and starve the live peers.
       applyUpdate(this.server, update);
       for (const peer of this.members) {
         if (peer === doc) continue;
-        applyUpdate(peer, update, this.origins.get(peer));
+        deliver(peer, update);
       }
     };
 

@@ -11,6 +11,7 @@ import {
   roomFor,
 } from '../app/prototype/yjs-conversation';
 import { glyphFor } from '../src/components/model/glyph';
+import { messageLedger } from '../src/components/model/quotation';
 
 /**
  * #183 — the conversation re-seated on a Yjs document over a rented transport.
@@ -39,10 +40,29 @@ describe('the Yjs-backed model equals the mock model (components do not know the
     it(`matches conversationModel for ${selection.id}`, () => {
       const fromMock = conversationModel(selection);
       const fromDoc = conversationModelFromDoc(conversationDocFor(selection), selection);
-      // Deep equality across room, records, items, and participants — the whole
-      // surface contract. If the Yjs round-trip dropped or reshaped any field,
-      // this fails.
-      expect(fromDoc).toEqual(fromMock);
+      // Deep equality across room, records, and participants — the whole surface
+      // contract. Records carry authenticated who/kind/actor/origin, so this proves
+      // the Yjs round-trip drops or reshapes NO content field and keeps the seeded
+      // fixture's authorship.
+      expect(fromDoc.room).toEqual(fromMock.room);
+      expect(fromDoc.participants).toEqual(fromMock.participants);
+      expect(fromDoc.records).toEqual(fromMock.records);
+      // Items are identical in id and kind and order…
+      expect(fromDoc.items.map((i) => [i.id, i.kind])).toEqual(
+        fromMock.items.map((i) => [i.id, i.kind]),
+      );
+      // …with ONE intended divergence (#183 round-3): the CRDT path derives NO `✓`.
+      // Certification is #181's gated read (bound to #180's server-minted anchor),
+      // never a value the peer-writable doc can mint. A mock `✓` on a certified
+      // line becomes a `~` on the doc — the honest "settled, not certified".
+      const docSystemGlyphs = fromDoc.items.flatMap((i) =>
+        i.kind === 'system' ? [glyphFor(i.entry.state)] : [],
+      );
+      expect(docSystemGlyphs).not.toContain('✓');
+      // Every non-system item is byte-identical (turn/image/message shells intact).
+      expect(fromDoc.items.filter((i) => i.kind !== 'system')).toEqual(
+        fromMock.items.filter((i) => i.kind !== 'system'),
+      );
     });
   }
 
@@ -213,18 +233,20 @@ describe('F1 — a peer CANNOT forge authority through the CRDT (the covenant in
     expect(bModel.records.find((r) => r.id === 'f')?.authorKind).toBe('unknown');
   });
 
-  it('a TRUSTED seed still derives ✓ — the seam keeps its legitimate certification', () => {
-    // seed() is the trusted local source (the fixture route), so its certification
-    // is honoured through the non-CRDT authority — proving the fix strips forgery,
-    // not legitimate certification.
+  it('a TRUSTED seed projects ~ (settled), NEVER ✓ — the CRDT cannot certify (#183 round-3)', () => {
+    // Round 2 derived a `✓` from a seeded certification. Round 3's gauntlet proved
+    // the content-fingerprint basis is unsound (an exact-content replay inherits
+    // it), so the CRDT path now grants NO `✓` at all — a seeded settlement is the
+    // honest `~` (self-reported), and a real `✓` is #181's gated read.
     const doc = new ConversationDoc().seed([
       { id: 'settled', time: '10:00', kind: 'system', text: 'landed', certified: true },
     ]);
     const system = doc.model('r', []).items.find((i) => i.kind === 'system');
     if (system?.kind !== 'system') throw new Error('unreachable');
-    expect(glyphFor(system.entry.state)).toBe('✓');
-    // …and even so, the DURABLE payload carries no authority — a peer replicating
-    // this doc receives content only.
+    expect(glyphFor(system.entry.state)).toBe('~');
+    expect(glyphFor(system.entry.state)).not.toBe('✓');
+    // …and the DURABLE payload carries no authority — a peer replicating this doc
+    // receives content only.
     expect('certified' in (doc.messages()[0] as object)).toBe(false);
   });
 });
@@ -346,16 +368,16 @@ describe('R2 — decode validation quarantines hostile elements (no DoS)', () =>
 });
 
 describe('R2 SHIP-BLOCKER 1 — a peer cannot forge ✓ by colliding with a trusted id', () => {
-  it('a peer append under a SEEDED certified id stays de-authenticated, never ✓', () => {
-    // The trusted fixture seeds a certified system line under `trusted-id`.
+  it('a peer append under a SEEDED id is QUARANTINED, and the genuine line is ~ never ✓', () => {
+    // The trusted fixture seeds a settlement line under `trusted-id`.
     const doc = new ConversationDoc().seed([
       { id: 'trusted-id', time: '10:00', kind: 'system', text: 'landed', certified: true },
     ]);
-    // Sanity: the genuine seeded line IS `✓` on the trusted path.
+    // The genuine seeded line is `~` on the trusted path — the CRDT cannot mint `✓`.
     const seeded = doc
       .model('r', [])
       .items.flatMap((i) => (i.kind === 'system' ? [glyphFor(i.entry.state)] : []));
-    expect(seeded).toEqual(['✓']);
+    expect(seeded).toEqual(['~']);
 
     // A peer appends FORGED content under the SAME id — the executed round-2 attack
     // (or deletes the original and keeps forged content under the trusted id).
@@ -368,15 +390,16 @@ describe('R2 SHIP-BLOCKER 1 — a peer cannot forge ✓ by colliding with a trus
     });
 
     const model = doc.model('r', []);
-    // Exactly ONE `✓` — the genuine seeded content, matched by content fingerprint.
-    const certified = model.items.flatMap((i) =>
-      i.kind === 'system' && glyphFor(i.entry.state) === '✓' ? [i] : [],
+    // NO `✓` anywhere — certification never comes from the CRDT (#183 round-3).
+    const certifiedGlyphs = model.items.flatMap((i) =>
+      i.kind === 'system' ? [glyphFor(i.entry.state)] : [],
     );
-    expect(certified).toHaveLength(1);
-    // The forged content is present but DE-AUTHENTICATED: a plain unverified
-    // message (authorKind 'unknown'), never a certified system row.
-    const forged = model.records.find((r) => r.text.includes('FORGED'));
-    expect(forged?.authorKind).toBe('unknown');
+    expect(certifiedGlyphs).not.toContain('✓');
+    // The forged element re-used a live id, so it is QUARANTINED by id-uniqueness:
+    // its content never reaches the projection (no colliding record, no ledger throw).
+    expect(model.records.find((r) => r.text.includes('FORGED'))).toBeUndefined();
+    // Exactly the genuine seeded settlement survives, still `~`.
+    expect(certifiedGlyphs).toEqual(['~']);
   });
 });
 
@@ -412,6 +435,181 @@ describe('R2 SHIP-BLOCKER 2 — peer who/kind are not projected as authenticated
     doc.append({ id: 'empty', time: '10:02', kind: 'agent', who: 'ghost' });
     const model = doc.model('r', []);
     expect(model.items.find((i) => i.id === 'empty')).toBeUndefined();
+  });
+});
+
+/* ═══════════════════════════════════════════════════════════════════════════
+ * #183 ROUND-3 FIX — the executed gauntlet FAIL: the r2 decode-fix MOVED the crash
+ * rather than closing the class. A well-shaped hostile element (empty id, colliding
+ * id) still crashed `model()`/`AttributionLedger` on every replica; the CRDT still
+ * granted `✓` to a fingerprint-matched replay. Close it: quarantine any element
+ * that is not a fully-valid, unique-id message; make the projection + ledger TOTAL;
+ * grant NO `✓` from the CRDT; give untrusted content an honest origin.
+ * ═════════════════════════════════════════════════════════════════════════ */
+
+/** Push raw elements PAST the codec, exactly as a hostile peer could over the wire. */
+function pushRaw(doc: ConversationDoc, ...elements: unknown[]): void {
+  const arr = doc.doc.getArray<unknown>('messages');
+  doc.doc.transact(() => {
+    for (const el of elements) arr.push([el]);
+  });
+}
+
+describe('R3 — input-robustness: a well-shaped hostile element cannot crash a replica', () => {
+  it('an EMPTY id is quarantined — model() and the AttributionLedger stay total', () => {
+    const doc = new ConversationDoc().seed([
+      { id: 'ok', time: '10:00', kind: 'human', who: 'you', text: 'hello' },
+    ]);
+    // `z.string()` admitted `""`; an empty-id row flows into messageEntry→
+    // quotationFrom (null) and threw "page-authored … no body of its own".
+    pushRaw(doc, JSON.stringify({ id: '', time: '10:01', kind: 'human', who: 'x', text: 'boom' }));
+
+    expect(() => doc.messages()).not.toThrow();
+    expect(doc.messages().map((m) => m.id)).toEqual(['ok']); // empty-id dropped
+    const model = doc.model('r', []);
+    expect(() => doc.model('r', [])).not.toThrow();
+    // The ledger the AttributionLedger builds is total — no throw on the record set.
+    expect(() => messageLedger(model.records)).not.toThrow();
+  });
+
+  it('two elements with the SAME id, DIFFERENT content — the later is quarantined (no ledger throw)', () => {
+    const doc = new ConversationDoc().seed([
+      { id: 'dup', time: '10:00', kind: 'human', who: 'you', text: 'the original' },
+    ]);
+    // A second element re-uses the id with different content — two MessageRecords
+    // under one id made `messageLedger` throw "two different records claim id" on
+    // every client in the room (a converged DoS).
+    pushRaw(
+      doc,
+      JSON.stringify({ id: 'dup', time: '10:05', kind: 'human', who: 'you', text: 'IMPOSTER' }),
+    );
+
+    const model = doc.model('r', []);
+    // First-wins: exactly one record for the id, the original content; imposter gone.
+    expect(model.records.filter((r) => r.id === 'dup')).toHaveLength(1);
+    expect(model.records.find((r) => r.id === 'dup')?.text).toBe('the original');
+    expect(model.records.some((r) => r.text.includes('IMPOSTER'))).toBe(false);
+    expect(() => messageLedger(model.records)).not.toThrow();
+  });
+
+  it('malformed nested turn/image shapes are quarantined, not thrown on', () => {
+    const doc = new ConversationDoc().seed([
+      { id: 'ok', time: '10:00', kind: 'human', who: 'you', text: 'hi' },
+    ]);
+    pushRaw(
+      doc,
+      JSON.stringify({ id: 'badturn', time: '10:01', kind: 'agent', who: 'a', turn: 'not-an-object' }),
+      JSON.stringify({ id: 'badimg', time: '10:02', kind: 'human', who: 'you', image: 42 }),
+    );
+    expect(() => doc.model('r', [])).not.toThrow();
+    // The two malformed nested shapes are dropped; only the valid seed survives.
+    expect(doc.messages().map((m) => m.id)).toEqual(['ok']);
+  });
+
+  it('a fuzz-ish batch of hostile elements: projection renders, all bad ones quarantined, NO throw on any replica', () => {
+    const hub = new InMemoryConversationHub(new YDoc());
+    const clientA = new ConversationDoc();
+    const clientB = new ConversationDoc();
+    clientA.connect(hub.transport());
+    clientB.connect(hub.transport());
+
+    // One genuinely valid line, then a barrage of well-shaped hostile elements.
+    clientA.append({ id: 'good', time: '10:00', kind: 'human', who: 'you', text: 'legit' });
+    pushRaw(
+      clientA,
+      { id: 'raw-obj', kind: 'system', certified: true }, // a raw object, not JSON
+      '{ not json at all', // malformed JSON
+      JSON.stringify({ id: '', time: '1', kind: 'human', text: 'empty id' }), // empty id
+      JSON.stringify({ id: 'good', time: '2', kind: 'human', text: 'id collision' }), // dup id
+      JSON.stringify({ id: 'nk', time: '3' }), // missing kind
+      JSON.stringify({ id: 'bk', time: '4', kind: 'root' }), // bad kind
+      JSON.stringify({ id: 'bt', time: '5', kind: 'agent', turn: 7 }), // bad nested turn
+      JSON.stringify(null), // a bare null
+      JSON.stringify([1, 2, 3]), // a bare array
+    );
+
+    // Every replica projects without throwing, and only the one valid line survives.
+    for (const client of [clientA, clientB]) {
+      expect(() => client.messages()).not.toThrow();
+      expect(() => client.model('r', [])).not.toThrow();
+      expect(client.messages().map((m) => m.id)).toEqual(['good']);
+      expect(() => messageLedger(client.model('r', []).records)).not.toThrow();
+    }
+  });
+});
+
+describe('R3 — the CRDT grants NO ✓ (certification is #181); untrusted content is honestly-provenanced', () => {
+  it('a peer replays EXACT certified content under a stolen id → glyph is ~, never ✓', () => {
+    // Seed a genuine certified settlement, then have a peer replay the EXACT bytes
+    // under the same id — the round-3 codex finding (an exact-content replay matched
+    // the trust fingerprint and inherited the `✓`).
+    const doc = new ConversationDoc().seed([
+      { id: 'anchor', time: '10:00', kind: 'system', text: 'settled by the server', certified: true },
+    ]);
+    doc.append({ id: 'anchor', time: '10:00', kind: 'system', text: 'settled by the server', certified: true });
+
+    const glyphs = doc
+      .model('r', [])
+      .items.flatMap((i) => (i.kind === 'system' ? [glyphFor(i.entry.state)] : []));
+    // The replay is deduped, and the surviving line derives `~` — NEVER `✓`.
+    expect(glyphs).toEqual(['~']);
+    expect(glyphs).not.toContain('✓');
+  });
+
+  it('an unseeded live doc grants no ✓ to any converged content', () => {
+    const hub = new InMemoryConversationHub(new YDoc());
+    const clientA = new ConversationDoc();
+    const clientB = new ConversationDoc();
+    clientA.connect(hub.transport());
+    clientB.connect(hub.transport());
+    clientA.append({ id: 'c', time: '10:00', kind: 'system', text: 'looks official', certified: true });
+
+    for (const client of [clientA, clientB]) {
+      const glyphs = client
+        .model('r', [])
+        .items.flatMap((i) => (i.kind === 'system' ? [glyphFor(i.entry.state)] : []));
+      expect(glyphs).not.toContain('✓');
+    }
+  });
+
+  it('untrusted CRDT content carries an HONEST origin — "unverified", never "seeded"', () => {
+    const doc = new ConversationDoc();
+    doc.append({ id: 'p', time: '10:00', kind: 'human', who: 'you', text: 'a peer line' });
+    const record = doc.model('r', []).records.find((r) => r.id === 'p');
+    expect(record?.origin).toBe('unverified');
+    expect(record?.origin).not.toBe('seeded');
+  });
+});
+
+describe('R3 — lifecycle hardening: a destroyed member does not disturb the live peers', () => {
+  // MEASURED FINDING (not fail-on-base): in this Yjs version `applyUpdate` into a
+  // destroyed `Y.Doc` is a silent no-op, so grok's "a dead member may ABORT a
+  // peer's update" does NOT reproduce as a delivery break here. The `isDestroyed`
+  // guard on the hub fan-out is retained as cheap defense-in-depth (it also EVICTS
+  // the dead member so the set does not grow unbounded, and it is correct if a
+  // future Yjs makes the write throw). This test pins that the hub stays total and
+  // the bystander keeps receiving — a regression guard, not reproduced-crash
+  // evidence (the observable lifecycle defect is the cross-room leak below).
+  it('an author still reaches the live bystander after another member was destroyed mid-flight', () => {
+    const hub = new InMemoryConversationHub(new YDoc());
+    const switcher = new ConversationDoc();
+    const bystander = new ConversationDoc();
+    const author = new ConversationDoc();
+    switcher.connect(hub.transport());
+    bystander.connect(hub.transport());
+    author.connect(hub.transport());
+
+    // The switcher changes threads mid-render: its doc is destroyed but still
+    // registered in the hub's member set (destroy raced the disconnect).
+    switcher.doc.destroy();
+
+    expect(() =>
+      author.append({ id: 'x', time: '10:00', kind: 'human', who: 'you', text: 'delivered' }),
+    ).not.toThrow();
+    expect(bystander.messages().map((m) => m.id)).toContain('x');
+    // The dead member was evicted by the guarded fan-out (defense-in-depth).
+    author.append({ id: 'y', time: '10:01', kind: 'human', who: 'you', text: 'again' });
+    expect(bystander.messages().map((m) => m.id)).toContain('y');
   });
 });
 

@@ -109,6 +109,42 @@ describe('R2 SHIP-BLOCKER 3 — a live room without a transport is honest, not f
   });
 });
 
+describe('R3 — lifecycle isolation: a transport (stream) swap does NOT leak room A into room B', () => {
+  it("swapping the hook's transport A→B gives a FRESH doc — room B never receives room A's content", () => {
+    // Two hubs = two rooms = two streams. Room A carries a secret line.
+    const serverA = new ConversationDoc();
+    const serverB = new ConversationDoc();
+    const hubA = new InMemoryConversationHub(serverA.doc);
+    const hubB = new InMemoryConversationHub(serverB.doc);
+    const tA = hubA.transport();
+    const tB = hubB.transport();
+
+    const SECRET = 'ROOM A ONLY — must never reach room B';
+    const peerA = new ConversationDoc();
+    peerA.connect(tA);
+    peerA.append({ id: 'a-secret', time: '10:00', kind: 'human', who: 'you', text: SECRET });
+
+    // Mount the probe on room A; its doc catches the secret up from A's stream.
+    const view = render(<Probe transport={tA} />);
+    // (the join is synchronous over the in-memory hub; the effect has committed)
+
+    // The operator switches the surface to room B (a transport-identity swap). The
+    // doc keyed only by selection/live/seed would be REUSED — still holding A's
+    // content — and would upload it into B on connect. Keying by transport identity
+    // gives a fresh, empty doc instead.
+    view.rerender(<Probe transport={tB} />);
+
+    // Room B's server never received room A's content — no cross-room leak.
+    expect(serverB.messages().some((m) => m.text === SECRET)).toBe(false);
+    expect(serverB.messages().map((m) => m.id)).not.toContain('a-secret');
+
+    // A fresh reader that joins room B likewise sees nothing from room A.
+    const readerB = new ConversationDoc();
+    readerB.connect(tB);
+    expect(readerB.messages().some((m) => m.text === SECRET)).toBe(false);
+  });
+});
+
 describe('F6 — a Strict-Mode remount never reuses a destroyed Y.Doc', () => {
   it('the doc stays live through mount → cleanup → mount, and a peer update still lands', async () => {
     const hub = new InMemoryConversationHub(new ConversationDoc().doc);

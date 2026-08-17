@@ -91,37 +91,55 @@ export function useConversationModel(
   const live = transport !== undefined;
 
   // The doc is owned here, NOT in the effect (F6). Recreate it only when the
-  // thread changes, when the seed/live mode flips, or when the current instance
-  // was torn down — and never hand back a destroyed doc. The outgoing instance is
-  // no longer active by the time we replace it, so destroying it is safe; the
-  // ACTIVE instance is never destroyed by this hook.
+  // thread changes, when the seed/live mode flips, when the TRANSPORT IDENTITY
+  // changes, or when the current instance was torn down — and never hand back a
+  // destroyed doc. The outgoing instance is no longer active by the time we replace
+  // it, so destroying it is safe; the ACTIVE instance is never destroyed here.
+  //
+  // KEYING BY TRANSPORT IDENTITY (#183 round-3 — lifecycle isolation). A doc keyed
+  // only by selection/live/seed is REUSED across a transport swap (room A's stream
+  // → room B's), so room A's content — already in the doc — gets fanned into room
+  // B on connect (a cross-room leak). Keying by the transport object identity too
+  // means a stream change gets a FRESH, empty doc that catches up from B alone,
+  // never the old doc reconnected. The disposer for the outgoing connection is run
+  // BEFORE the outgoing doc is destroyed (disconnect-before-destroy), so a torn-down
+  // doc is never left registered in a hub's member set.
   const holder = useRef<{
     key: string;
     live: boolean;
     seedFixture: boolean;
+    transport: ConversationTransport | undefined;
     doc: ConversationDoc;
+    disconnect?: () => void;
   } | null>(null);
   if (
     holder.current === null ||
     holder.current.key !== key ||
     holder.current.live !== live ||
     holder.current.seedFixture !== seedFixture ||
+    holder.current.transport !== transport ||
     holder.current.doc.isDestroyed()
   ) {
-    if (holder.current !== null && !holder.current.doc.isDestroyed()) {
-      holder.current.doc.destroy();
+    if (holder.current !== null) {
+      // Disconnect the outgoing doc from its fabric BEFORE destroying it, so it is
+      // never a destroyed member still registered in a hub (which a fan-out would
+      // otherwise try to write into). Then destroy it if it is still alive.
+      holder.current.disconnect?.();
+      if (!holder.current.doc.isDestroyed()) holder.current.doc.destroy();
     }
     holder.current = {
       key,
       live,
       seedFixture,
+      transport,
       // Live path catches up from the stream (unseeded, F3). Otherwise the
       // fixture route SEEDS the mock demo; a live room without a transport stays
       // EMPTY (honest — no mock history on a real room).
       doc: live || !seedFixture ? new ConversationDoc() : conversationDocFor(selection),
     };
   }
-  const doc = holder.current.doc;
+  const holderRef = holder.current;
+  const doc = holderRef.doc;
 
   // A version tick that bumps whenever the CRDT converges (local or remote).
   const [version, setVersion] = useState(0);
@@ -129,13 +147,20 @@ export function useConversationModel(
   useEffect(() => {
     const offChange = doc.onChange(() => setVersion((current) => current + 1));
     const offTransport = transport ? doc.connect(transport) : undefined;
+    // Record the live disposer on the holder so a doc swap can disconnect this doc
+    // from its fabric BEFORE destroying it (disconnect-before-destroy), even though
+    // that swap happens during render, before this effect's own cleanup runs.
+    if (holderRef.doc === doc) holderRef.disconnect = offTransport;
     // NOTE: no doc.destroy() here — that is what let a Strict-Mode remount reuse a
     // dead doc (F6). The doc's life is owned by the ref above, not this effect.
     return () => {
       offChange();
       offTransport?.();
+      if (holderRef.doc === doc && holderRef.disconnect === offTransport) {
+        holderRef.disconnect = undefined;
+      }
     };
-  }, [doc, transport]);
+  }, [doc, transport, holderRef]);
 
   const say = useCallback(
     (text: string) => {

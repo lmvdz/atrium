@@ -42,6 +42,10 @@ import type { ChatMsg, Selection } from './types';
 /** The Yjs array key the conversation's messages live under, within the doc. */
 const MESSAGES_KEY = 'messages';
 
+/** The empty certification authority — the CRDT path NEVER sources a `✓` (#183
+ *  round-3). Certification is #181's gated read, bound to #180's anchor. */
+const NO_CERTIFICATION: ReadonlySet<string> = new Set();
+
 /**
  * A conversation as a live Yjs document. Wraps a `Y.Doc`; its `Y.Array` of
  * messages is the CRDT that converges across peers. Everything the surface reads
@@ -53,16 +57,20 @@ export class ConversationDoc {
   readonly doc: YDoc;
 
   /**
-   * THE NON-CRDT AUTHORITY SOURCE (#183 F1). Which message ids carry a certified
-   * `✓`, keyed by id — held OUTSIDE the `Y.Doc`, so it never rides the
-   * peer-writable wire and a peer can never forge a settlement. A message that is
-   * not in this set projects `~`/routine, never `✓`. It is populated ONLY from a
-   * trusted local source ({@link seed} on the fixture route, or #181's gated read
-   * authority in production), never from an inbound CRDT update. Until #181 lands
-   * the production default is empty — every live line is `~` until a gated door
-   * says otherwise, which is the covenant-correct default.
+   * SEEDED SETTLEMENT CLAIMS (#183 round-3 — `✓` is no longer sourced here).
+   * Which SEEDED ids reported a settlement, keyed by id, held OUTSIDE the `Y.Doc`.
+   *
+   * Round 2 keyed a certified `✓` off this set. Round 3's gauntlet proved the
+   * content-fingerprint basis is unsound in principle — a peer that replays the
+   * EXACT certified bytes under a stolen id matches the fingerprint and inherits
+   * the `✓`. So the CRDT path now grants NO `✓` at all: a real certification is
+   * #181's gated read, bound to #180's server-minted anchor, never anything the
+   * doc can derive. The most this set now projects is `~` (SYSTEM_SETTLED — the
+   * machine's own "this settled", not a human-certified `✓`), and only for a
+   * TRUSTED seeded line. A peer append can never populate it (only {@link seed}
+   * does), and even a matched-fingerprint replay tops out at `~`, never `✓`.
    */
-  private readonly certifiedIds = new Set<string>();
+  private readonly settledIds = new Set<string>();
 
   /**
    * THE TRUST FINGERPRINTS (#183 round-2 — closes the executed id-collision
@@ -70,12 +78,13 @@ export class ConversationDoc {
    * message with a SEEDED id (or delete the original and keep forged content
    * under it) and inherit the trusted line's `✓`/provenance. This binds trust to
    * the CONTENT of each SEEDED message — id → its canonical durable payload —
-   * held OUTSIDE the `Y.Doc`. A message projects authenticated who/kind/`✓` only
-   * if its content fingerprint matches the trusted one recorded at {@link seed};
-   * a forgery under a colliding id has different content, so it fails the match
-   * and projects as UNVERIFIED (`authorKind:'unknown'`, no `✓`). Nothing that
-   * arrives over the wire is in this map, so on a live (unseeded) doc EVERYTHING
-   * is unverified until #181's gated read supplies the real envelope.
+   * held OUTSIDE the `Y.Doc`. A message projects authenticated who/kind only if
+   * its content fingerprint matches the trusted one recorded at {@link seed}; a
+   * forgery under a colliding id has different content, so it fails the match and
+   * projects as UNVERIFIED (`authorKind:'unknown'`). Nothing that arrives over the
+   * wire is in this map, so on a live (unseeded) doc EVERYTHING is unverified until
+   * #181's gated read supplies the real envelope. (Certification is separate and
+   * never sourced here — see {@link model}: the CRDT grants no `✓`.)
    */
   private readonly trustedFingerprints = new Map<string, string>();
 
@@ -93,21 +102,23 @@ export class ConversationDoc {
    * client that connects before seeding never doubles the history.
    *
    * The fixture is a TRUSTED local source (the `/prototype` design route, not a
-   * peer over the wire), so its `certified` fields are recorded into the non-CRDT
-   * {@link certifiedIds} authority — this is the ONE place a `✓` originates on the
-   * fixture route. The durable payload itself still carries zero authority
-   * ({@link encodeMessage} strips it): the authority lives beside the doc, never
-   * inside it.
+   * peer over the wire), so its content fingerprints (authenticated who/kind) and
+   * settlement claims are recorded beside the doc ({@link trustedFingerprints} /
+   * {@link settledIds}). A seeded settlement projects `~`, never `✓` — even the
+   * fixture route cannot mint certification, which is #181's. The durable payload
+   * itself carries zero authority ({@link encodeMessage} strips it): what little
+   * the seed records lives beside the doc, never inside it.
    */
   seed(messages: readonly ChatMsg[]): this {
     if (this.array.length > 0) return this;
     for (const message of messages) {
       // Record the trusted CONTENT fingerprint for EVERY seeded message (so its
-      // who/kind project authentically), and the certified ids for the `✓`. Both
-      // are keyed to the exact trusted content, so a later peer append under a
-      // colliding id cannot inherit either — its fingerprint will not match.
+      // who/kind project authentically), and note which seeded lines reported a
+      // settlement (they project `~`, never `✓` — certification is #181's). Both
+      // are keyed to the exact trusted content the seed inserted, and neither is
+      // ever populated by a peer append.
       this.trustedFingerprints.set(message.id, encodeMessage(message));
-      if (message.certified === true) this.certifiedIds.add(message.id);
+      if (message.certified === true) this.settledIds.add(message.id);
     }
     this.doc.transact(() => {
       this.array.push(messages.map((message) => encodeMessage(message)));
@@ -118,9 +129,9 @@ export class ConversationDoc {
   /**
    * Append one message as an atomic, mergeable array element. This is the
    * PEER-WRITABLE path: whatever authority field the caller sets is STRIPPED by
-   * {@link encodeMessage} and is NOT recorded into {@link certifiedIds}, so an
-   * appended line — local or arriving over a transport — can never forge a `✓`.
-   * Certification only ever comes from the gated non-CRDT source.
+   * {@link encodeMessage} and nothing about it is recorded into the trust maps, so
+   * an appended line — local or arriving over a transport — can never forge a `✓`
+   * or authenticated who/kind. Certification only ever comes from #181's gated read.
    */
   append(message: ChatMsg): this {
     this.doc.transact(() => {
@@ -131,16 +142,30 @@ export class ConversationDoc {
 
   /**
    * The current messages, in the doc's converged order (never carrying
-   * authority). Every element is VALIDATED and QUARANTINED (#183 round-2): a
-   * peer-inserted raw object, malformed JSON, or a shape-invalid element is
-   * dropped, never thrown on — so a hostile write cannot crash `messages()` (and
-   * therefore the projection) and converge that crash to every client.
+   * authority). Every element is VALIDATED and QUARANTINED: a peer-inserted raw
+   * object, malformed JSON, a shape-invalid element, or one with an EMPTY id is
+   * dropped, never thrown on (#183 round-2 + round-3) — so a hostile write cannot
+   * crash `messages()` (and therefore the projection) and converge that crash to
+   * every client.
+   *
+   * ID UNIQUENESS IS ENFORCED HERE (#183 round-3, defect b). Two elements sharing
+   * one id — a later peer append re-using a seeded id, whether replaying it or
+   * forging different content under it — would otherwise reach the projection as
+   * two `MessageRecord`s under one id and make the `AttributionLedger` throw "two
+   * different records claim id" on EVERY replica (a converged DoS). The FIRST
+   * element for an id wins (the seeded/original one, since seed precedes any
+   * append); every later element re-using that id is QUARANTINED, so the CRDT-
+   * sourced set the projection sees carries at most one message per id.
    */
   messages(): ChatMsg[] {
     const out: ChatMsg[] = [];
+    const seen = new Set<string>();
     for (const element of this.array.toArray()) {
       const message = decodeElement(element);
-      if (message !== null) out.push(message);
+      if (message === null) continue;
+      if (seen.has(message.id)) continue; // a colliding id: quarantine the later element
+      seen.add(message.id);
+      out.push(message);
     }
     return out;
   }
@@ -154,19 +179,25 @@ export class ConversationDoc {
    * Project the doc to the `ConversationModel` the surface renders — the SAME
    * transform the mock path uses. `room` and `participants` are the selection's
    * projection (the covenant/registry concerns that are not conversation content
-   * and so are not in the doc); the messages come live from the CRDT; the `✓`/`~`
-   * glyph comes from the non-CRDT {@link certifiedIds} authority, NEVER the doc.
+   * and so are not in the doc); the messages come live from the CRDT.
+   *
+   * NO `✓` IS EVER SOURCED FROM THE CRDT PATH (#183 round-3). `certifiedIds` is
+   * empty here on purpose: certification is #181's gated read, bound to #180's
+   * server-minted anchor, never anything the peer-writable doc can derive. A
+   * seeded settlement line projects `~` ({@link settledIds} → SYSTEM_SETTLED), the
+   * honest "this settled" the substrate can claim; a human-certified `✓` is not.
    */
   model(room: string, participants: readonly ParticipantSummary[]): ConversationModel {
     return buildConversationModel(this.messages(), room, participants, {
-      // A message is TRUSTED only if its content fingerprint matches the one
-      // recorded from a trusted {@link seed}. Anything appended locally or arriving
-      // over a transport — including a forgery under a seeded id — fails this match
-      // and projects as UNVERIFIED (`authorKind:'unknown'`, no `✓`). The `✓`
-      // authority stays keyed by id, but is only ever CONSULTED for a trusted
-      // message, so a peer-keyed id can never source one (#183 round-2, #162).
+      // A message keeps its authenticated who/kind only if its content fingerprint
+      // matches the one recorded from a trusted {@link seed}. Anything appended
+      // locally or arriving over a transport — including a forgery under a seeded
+      // id — fails this match and projects as UNVERIFIED (`authorKind:'unknown'`).
       trusts: (message) => this.trustedFingerprints.get(message.id) === encodeMessage(message),
-      certifiedIds: this.certifiedIds,
+      // The CRDT NEVER grants a `✓`. Certification is #181's; the doc cannot mint it.
+      certifiedIds: NO_CERTIFICATION,
+      // A trusted seeded settlement projects `~` (self-reported), never `✓`.
+      settledIds: this.settledIds,
     });
   }
 
@@ -270,7 +301,12 @@ function encodeMessage(message: ChatMsg): string {
    shell content, only rendered for TRUSTED messages). An element that fails is
    QUARANTINED (decode returns `null`), never thrown on. */
 const DURABLE_MESSAGE_SCHEMA = z.object({
-  id: z.string(),
+  // A NON-EMPTY id is mandatory (#183 round-3, defect a). `z.string()` alone
+  // admits `""`, and an empty-id message flows into `messageEntry`→`quotationFrom`
+  // (which returns null for an id-less record) and throws "page-authored … has no
+  // body of its own" — a peer-triggered crash on every replica. An empty id is a
+  // shape violation: quarantine it at decode, never project it.
+  id: z.string().min(1),
   time: z.string(),
   kind: z.enum(['system', 'agent', 'human']),
   who: z.string().optional(),

@@ -68,13 +68,19 @@ export type MessageId = string;
  * `chosen` — the interface authored it on the person's behalf: the statement
  *            behind a one-click answer. Recorded verbatim, attributed to the
  *            *act* of choosing, never to the person as their words.
+ * `unverified` — content that arrived over the peer-writable CRDT (#183). Its
+ *            author is unknown and its words are nobody's proven speech, so it is
+ *            attributed to no real person (actor `'unverified'`). It is quotable
+ *            for the same mechanical reason `seeded` is — a citation resolves to a
+ *            real record — but that record honestly names no one. It must NOT
+ *            claim `'seeded'`, which would read as trusted replayed history.
  */
-export type MessageOrigin = 'typed' | 'seeded' | 'chosen';
+export type MessageOrigin = 'typed' | 'seeded' | 'chosen' | 'unverified';
 
-/** The two origins that may be quoted. `chosen` is deliberately absent. */
-export type QuotableOrigin = Extract<MessageOrigin, 'typed' | 'seeded'>;
+/** The origins that may be quoted. `chosen` is deliberately absent. */
+export type QuotableOrigin = Extract<MessageOrigin, 'typed' | 'seeded' | 'unverified'>;
 
-const ORIGINS: readonly MessageOrigin[] = ['typed', 'seeded', 'chosen'];
+const ORIGINS: readonly MessageOrigin[] = ['typed', 'seeded', 'chosen', 'unverified'];
 
 export interface MessageRecord {
   readonly id: MessageId;
@@ -243,7 +249,7 @@ export interface Attribution {
 }
 
 export function isQuotableOrigin(origin: MessageOrigin): origin is QuotableOrigin {
-  return origin === 'typed' || origin === 'seeded';
+  return origin === 'typed' || origin === 'seeded' || origin === 'unverified';
 }
 
 /**

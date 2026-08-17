@@ -308,8 +308,21 @@ export interface ProjectionAuthority {
    * unverified content, never as authenticated provenance or a `✓`.
    */
   readonly trusts: (message: ChatMsg) => boolean;
-  /** ids the trusted source certified — consulted ONLY for trusted messages. */
+  /**
+   * ids a `✓` may be derived for — consulted ONLY for trusted messages. This is
+   * the covenant `✓`, and it is set ONLY by a source that can actually certify:
+   * the non-CRDT mock fixture ({@link trustedAuthority}) today, #181's gated read
+   * tomorrow. The CRDT/doc path leaves this EMPTY — a peer-writable document can
+   * never mint certification (#183 round-3).
+   */
   readonly certifiedIds: ReadonlySet<string>;
+  /**
+   * ids that reported a SETTLEMENT but are NOT certified — consulted ONLY for
+   * trusted messages, and only when {@link certifiedIds} does not already grant a
+   * `✓`. They project `~` (SYSTEM_SETTLED, "the machine's own account"), the
+   * honest register the CRDT path uses for a seeded settlement it cannot certify.
+   */
+  readonly settledIds?: ReadonlySet<string>;
 }
 
 /**
@@ -318,6 +331,10 @@ export interface ProjectionAuthority {
  * authority. This is what the mock `conversationModel` hands the projection.
  */
 export function trustedAuthority(messages: readonly ChatMsg[]): ProjectionAuthority {
+  // The mock fixture is the one non-peer source that CAN certify, so its
+  // `certified` fields are the real `✓` authority here. (The CRDT/doc path never
+  // uses this; it passes an empty `certifiedIds` and its settlement claims via
+  // `settledIds`, so it projects `~`, never `✓` — #183 round-3.)
   return { trusts: () => true, certifiedIds: certifiedIdsOf(messages) };
 }
 
@@ -353,7 +370,12 @@ function unverifiedItem(
     at: message.time,
     actor: UNVERIFIED_ACTOR,
     text: bodyText(body),
-    origin: 'seeded',
+    // PROVENANCE HONESTY (#183 round-3, defect 4). This content came off the peer-
+    // writable CRDT — it is NOT seeded history and NOT the viewer's own typing, so
+    // it must not claim `'seeded'` (which would read as trusted replayed history).
+    // `'unverified'` is the honest origin: quotable (so the row still renders), but
+    // attributed to no real person — an honest citation names 'unverified'.
+    origin: 'unverified',
     authorKind: 'unknown',
     room,
   };
@@ -387,8 +409,19 @@ export function buildConversationModel(
   const records: MessageRecord[] = [];
   const items: ConversationItem[] = [];
   const { certifiedIds } = authority;
+  const settledIds = authority.settledIds ?? EMPTY_AUTHORITY;
+
+  // TOTALITY: at most ONE item/record per id (#183 round-3, defect b/c). The CRDT
+  // decode already quarantines colliding ids, but the projection is the boundary
+  // that feeds the `AttributionLedger` — and two records under one id make it
+  // throw "two different records claim id" on every replica. Deduping here makes
+  // `buildConversationModel` (and therefore `model()`) TOTAL for any input, from
+  // any source: a second message re-using an id is dropped, never a crash.
+  const emitted = new Set<string>();
 
   for (const message of messages) {
+    if (emitted.has(message.id)) continue; // a colliding id: quarantine the later one
+    emitted.add(message.id);
     // UNTRUSTED (peer-writable CRDT) content projects ZERO authenticated
     // authority (#183 round-2, #162): no `✓` from a peer-keyed id, no
     // authenticated actor/authorKind from peer `who`/`kind`, no system voice. It
@@ -410,11 +443,17 @@ export function buildConversationModel(
         id: message.id,
         at: message.time,
         statement: systemStatement((message.text ?? '').trim()),
-        // The tick is DERIVED from the NON-CRDT certification authority keyed by
-        // id (#183 F1), NEVER from a `certified` field on the message — that field
-        // is peer-writable and forgeable, so it must not source a `✓`. A message
-        // whose id is not in the gated authority set is `~`/routine.
-        state: certifiedIds.has(message.id) ? SYSTEM_CERTIFIED : SYSTEM_ROUTINE,
+        // The tick is DERIVED from the NON-CRDT authority keyed by id (#183 F1),
+        // NEVER from a `certified` field on the message — that field is peer-
+        // writable and forgeable. A `✓` is granted ONLY by a source that can
+        // certify ({@link certifiedIds}: the mock fixture / #181, never the CRDT).
+        // A trusted settlement the CRDT reports gets `~` ({@link settledIds}); a
+        // plain notice is `·`/routine.
+        state: certifiedIds.has(message.id)
+          ? SYSTEM_CERTIFIED
+          : settledIds.has(message.id)
+            ? SYSTEM_SETTLED
+            : SYSTEM_ROUTINE,
       };
       items.push({ kind: 'system', id: message.id, mm, entry });
       continue;
