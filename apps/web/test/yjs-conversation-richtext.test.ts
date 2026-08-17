@@ -485,6 +485,119 @@ describe('P6F-1 MEDIUM — deterministic identity-bound resolution, not position
     expect(projected?.time).toBe('10:00');
     expect(convo.messages().filter((m) => m.id === 't')).toHaveLength(1); // still id-unique
   });
+
+  it('P6F-1 HIGH (index identity) — delete-genuine-index + reinsert IDENTICAL bytes DEMOTES', () => {
+    // The round-1 index guard was VALUE-bound (string equality), so a peer that deleted the
+    // genuine index element and inserted one with byte-identical serialized metadata was
+    // treated as the same seat and KEPT trusted authorship (executed HIGH). The fingerprint
+    // now binds the genuine index element's Yjs ITEM IDENTITY: the reinsert is a different
+    // item (a new clock) → the fingerprint moves → the line demotes to unverified.
+    const convo = seedTrustedAgent('the honest reading'); // baseline: authorKind 'agent'
+    const arr = convo.doc.getArray<string>('messages');
+    const genuineBytes = arr.get(0); // the seeded metadata string
+    convo.doc.transact(() => {
+      arr.delete(0, 1); // remove the genuine index element
+      arr.insert(0, [genuineBytes]); // reinsert BYTE-IDENTICAL metadata — a NEW item
+    });
+    // Still projects (the id resolves to the reinserted element, body unchanged)…
+    expect(convo.messages().find((m) => m.id === 't')?.who).toBe('hexi');
+    expect(convo.messages().find((m) => m.id === 't')?.text).toBe('the honest reading');
+    // …but as UNVERIFIED — item-identity binding refuses to inherit the genuine seat.
+    // (Remove the index-item-id half of the fingerprint → this reads 'agent' and fails.)
+    expect(authorKindOf(convo, 't')).toBe('unknown');
+  });
+});
+
+// ─────────────────────────────────────────────────────────────────────────────
+// 8. P6F-1 CRITICAL (CRDT-CORRECTNESS) — GENUINE-SEAT RESOLUTION IS A DETERMINISTIC
+//    FUNCTION OF SHARED CRDT STATE, so every replica CONVERGES.
+//
+// The round-1 fix kept genuine-seat provenance in per-INSTANCE Maps, so the seating
+// instance resolved by item-identity while a late joiner / remote-only client / two
+// merged offline clients resolved by document order — DIVERGENCE, which a CRDT must
+// never do. Resolution is now the earliest Yjs item identity for the id, computed
+// identically on every replica. Each assertion below FAILS on base ec38bdc (the late
+// joiner / the other offline client sees a DIFFERENT model than the seeder) and passes now.
+// ─────────────────────────────────────────────────────────────────────────────
+
+const textOfId = (convo: ConversationDoc, id: string) =>
+  convo.messages().find((m) => m.id === id)?.text;
+
+/** Merge every doc's full state into every other — an all-to-all offline reconcile. */
+function mergeAll(docs: readonly Y.Doc[]): void {
+  const updates = docs.map((d) => Y.encodeStateAsUpdate(d));
+  for (const target of docs) for (const u of updates) Y.applyUpdate(target, u);
+}
+
+describe('P6F-1 CRITICAL — genuine-seat resolution converges across replicas (shared-state, not wrapper-local)', () => {
+  it('a LATE JOINER projects the GENUINE body, not a colliding block@0 — it matches the author', () => {
+    // The author seeds a trusted line. A LOW clientID makes its item identity the earliest,
+    // so the deterministic winner is the genuine seat (the convergent-but-not-secure rule).
+    const author = new ConversationDoc(new Y.Doc());
+    author.doc.clientID = 1;
+    author.seed([{ id: 't', time: '10:00', kind: 'agent', who: 'hexi', text: 'the genuine reading' }]);
+
+    // A separate attacker (a HIGHER clientID) catches up, then seats a colliding body AND a
+    // colliding index element BOTH at document POSITION 0 — the "hide the genuine content" attack.
+    const attacker = new ConversationDoc(new Y.Doc());
+    attacker.doc.clientID = 9;
+    Y.applyUpdate(attacker.doc, Y.encodeStateAsUpdate(author.doc));
+    attacker.doc.transact(() => {
+      const frag = attacker.contentFragment();
+      const block = new Y.XmlElement('message');
+      const xtext = new Y.XmlText();
+      frag.insert(0, [block]); // FRONT
+      block.setAttribute('mid', 't');
+      block.insert(0, [xtext]);
+      xtext.insert(0, 'HIDDEN IMPOSTER BODY');
+      attacker.doc
+        .getArray<string>('messages')
+        .insert(0, [JSON.stringify({ id: 't', time: '99:99', kind: 'agent', who: 'MALLORY' })]);
+    });
+
+    // A LATE joiner boots and catches up from the MERGED hub state (author ⊕ attacker).
+    // On base its per-instance maps are EMPTY, so it falls to first-in-document-order → the
+    // imposter@0. After the fix it resolves the earliest item identity → the genuine seat.
+    const late = new ConversationDoc(new Y.Doc());
+    late.doc.clientID = 42;
+    mergeAll([author.doc, attacker.doc, late.doc]);
+
+    // CONVERGENCE: every replica projects the IDENTICAL genuine content — never the imposter.
+    for (const replica of [author, attacker, late]) {
+      expect(textOfId(replica, 't')).toBe('the genuine reading');
+      expect(replica.messages().find((m) => m.id === 't')?.who).toBe('hexi'); // genuine metadata
+      expect(replica.messages().filter((m) => m.id === 't')).toHaveLength(1); // id-unique
+      expect(replica.messages().some((m) => m.text?.includes('HIDDEN'))).toBe(false);
+    }
+    // The SHARED-STATE message projection is byte-identical across the late joiner and the
+    // author — no divergence. (Trust flags are DELIBERATELY local-seed-only: a late joiner
+    // shows everything unverified until P6F-2's authenticated transport supplies authorship;
+    // convergence here is a property of the CONTENT model, not of the local trust map.)
+    expect(late.messages()).toEqual(author.messages());
+  });
+
+  it('two OFFLINE clients that seat the SAME id converge to ONE identical model on merge', () => {
+    // Both clients seat the same id OFFLINE with DIFFERENT bodies (no network yet). On base,
+    // each resolves its OWN seated block via its per-instance map → DIVERGENT models after
+    // merge. The shared-state rule makes both pick the earliest item identity (client 1).
+    const a = new ConversationDoc(new Y.Doc());
+    a.doc.clientID = 1;
+    const b = new ConversationDoc(new Y.Doc());
+    b.doc.clientID = 2;
+    a.seed([{ id: 'x', time: '10:00', kind: 'agent', who: 'hexi', text: 'A-side body' }]);
+    b.seed([{ id: 'x', time: '10:00', kind: 'agent', who: 'hexi', text: 'B-side body' }]);
+
+    mergeAll([a.doc, b.doc]);
+
+    // CONVERGENCE: identical SHARED-STATE message projection on both replicas — no divergence.
+    // (Only the CONTENT model converges; b projects A-side content but marks it unverified,
+    // since its local trust map fingerprinted its OWN B-side seed — the convergent-but-not-
+    // secure boundary. Cross-replica authorship is P6F-2's authenticated transport, not this.)
+    expect(a.messages()).toEqual(b.messages());
+    expect(textOfId(a, 'x')).toBe('A-side body'); // earliest item identity (client 1), everywhere
+    expect(a.messages().filter((m) => m.id === 'x')).toHaveLength(1);
+    expect(b.messages().filter((m) => m.id === 'x')).toHaveLength(1);
+  });
 });
 
 // A convenience so the append-only ChatMsg shape stays honest under type-checking.

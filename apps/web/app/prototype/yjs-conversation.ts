@@ -52,7 +52,7 @@
  * read-only (#181) — a certified `✓` is never a value inside this Yjs doc.
  * ═════════════════════════════════════════════════════════════════════════ */
 
-import type { XmlFragment as YXmlFragment } from 'yjs';
+import type { Array as YArray, XmlFragment as YXmlFragment } from 'yjs';
 import { Doc as YDoc, XmlElement as YXmlElement, XmlText as YXmlText } from 'yjs';
 import { z } from 'zod';
 import { CovenantDocReaderProd } from '@/lib/covenant-reader';
@@ -122,26 +122,33 @@ export class ConversationDoc {
    */
   private readonly trustedFingerprints = new Map<string, string>();
 
-  /**
-   * GENUINE BODY ORIGIN (P6F-1 fix, the content-hiding closer). id → the Yjs item id
-   * (`client:clock`) of the body block THIS doc seated for that id. Body/index
-   * resolution keys off this identity, NOT document position, so a peer inserting a
-   * COLLIDING `mid` block — at position 0 or anywhere — cannot preempt or hide the
-   * genuine seated body ({@link genuineBodyBlock}). Populated only when this instance
-   * seats a body ({@link seatBody}); a doc that only received content over the wire
-   * (a late joiner) records none and, trusting nothing, falls back to first-in-order —
-   * consistent with the trust map's "only the local seed establishes provenance".
+  /* GENUINE-SEAT RESOLUTION IS A DETERMINISTIC FUNCTION OF SHARED CRDT STATE (P6F-1
+   * round-2 fix — the CRDT-correctness closer). There is NO wrapper-local memory of
+   * "which block/element this instance seated": the round-1 fix kept that provenance in
+   * per-instance Maps, so the seating instance resolved by identity while a late joiner /
+   * remote-only client / two merged offline clients resolved by document order — a
+   * DIVERGENCE (replicas project different models from the same shared state), which a
+   * CRDT must never do (executed: a colliding body+index at position 0 hid the genuine
+   * body on a late joiner only; two offline seats of one id merged to divergent models).
+   *
+   * Instead, for a given message id the GENUINE seat is defined, identically on every
+   * replica, as the block ({@link genuineBodyBlock}) / index element ({@link messages})
+   * with the EARLIEST Yjs item identity (`client:clock`, {@link itemIdLess}) among those
+   * carrying that id. Yjs item ids are globally unique and preserved across sync, so this
+   * min is the SAME on every replica — a late joiner, a remote-only client, and two
+   * merged offline clients all project the identical model. It also defeats the positional
+   * "insert a colliding block at position 0" hide, since a later insert has a later clock,
+   * not an earlier document position.
+   *
+   * SECURITY SCOPE — CONVERGENT, NOT SECURE. A peer with CRDT write access cannot be
+   * *cryptographically* prevented from crafting a colliding seat with an earlier item id
+   * (a lower `client`); the earliest-item-id winner is therefore a CONVERGENCE rule, not
+   * an authorship proof. When the winner is a forgery its content no longer matches the
+   * trusted seed fingerprint, so authorship FAILS CLOSED to unverified (never a forged
+   * authenticated line). SECURE authorship authentication — binding each update to its
+   * authenticated writer — is the AUTHENTICATED TRANSPORT's job, P6F-2 (#196). This layer
+   * owns CONVERGENCE + item-identity binding + honest fail-closed; it does NOT own crypto.
    */
-  private readonly genuineBodyOrigin = new Map<string, string>();
-
-  /**
-   * GENUINE INDEX METADATA (P6F-1 fix, the index half of the content-hiding closer).
-   * id → the exact authority-stripped metadata string this doc seated for that id. When
-   * present, only the index element equal to it may represent the id ({@link messages}),
-   * so a peer inserting a colliding index element BEFORE the original cannot hide the
-   * genuine metadata by winning array order. Populated only on a local seat ({@link insert}).
-   */
-  private readonly genuineIndexMeta = new Map<string, string>();
 
   constructor(doc: YDoc = new YDoc()) {
     this.doc = doc;
@@ -209,23 +216,26 @@ export class ConversationDoc {
   private insert(message: ChatMsg): void {
     const meta = encodeDurable(message);
     this.array.push([meta]);
-    // Remember the genuine metadata this doc seated for the id (first local seat wins),
-    // so a peer's colliding index element cannot hide it by winning array order.
-    if (!this.genuineIndexMeta.has(message.id)) this.genuineIndexMeta.set(message.id, meta);
+    // No wrapper-local "genuine metadata" is recorded: {@link messages} resolves the
+    // genuine index element from shared CRDT state (earliest item identity), identically
+    // on every replica, so a peer's colliding element cannot hide it by winning array
+    // order AND a late joiner resolves the same element the seeder does.
     if (typeof message.text === 'string') this.seatBody(message.id, message.text);
   }
 
   /**
-   * Seat a rich-text body for a message id, unless THIS doc already seated one for it
-   * (first LOCAL seat wins). The block is recorded as the id's GENUINE ORIGIN by its
-   * Yjs item id, so a peer re-using a seeded id cannot replace or HIDE the trusted body
-   * by seating a second block — {@link genuineBodyBlock} keys off this identity, not
-   * document position (the P6F-1 MEDIUM: "position 0 wins" is closed). The block is
+   * Seat a rich-text body for a message id, unless a body block for it is ALREADY visible
+   * in the shared content share (don't seat a duplicate). The genuine seat is NOT recorded
+   * in wrapper-local memory: {@link genuineBodyBlock} resolves it from shared CRDT state
+   * (the earliest item identity among blocks carrying the id), identically on every
+   * replica — so a peer re-using a seeded id cannot replace or HIDE the trusted body by
+   * seating a second block at document position 0 (the P6F-1 MEDIUM), AND a late joiner
+   * resolves the same block the seeder does (the CRDT-correctness closer). The block is
    * `<message mid=id> Y.XmlText </message>` — the y-prosemirror shape the SL-2 reader
    * resolves against.
    */
   private seatBody(id: string, text: string): void {
-    if (this.genuineBodyOrigin.has(id)) return; // this doc already seated the genuine body
+    if (this.bodyBlockFor(id) !== null) return; // a body for this id already exists (shared state)
     const frag = this.contentFragment();
     const block = new YXmlElement(BODY_BLOCK);
     const xtext = new YXmlText();
@@ -233,33 +243,30 @@ export class ConversationDoc {
     block.setAttribute(MID_ATTR, id);
     block.insert(0, [xtext]);
     if (text.length > 0) xtext.insert(0, text);
-    const origin = blockOriginKey(block);
-    if (origin !== null) this.genuineBodyOrigin.set(id, origin);
   }
 
   /**
-   * The GENUINE content block for `id` and its live index, or `null` if none. When
-   * this doc seated the body ({@link genuineBodyOrigin} has the id), resolution is by
-   * that block's Yjs ITEM IDENTITY — so a peer's colliding `mid` block, inserted at
-   * ANY document position (position 0 included), is skipped and cannot preempt or hide
-   * the genuine content; edits to the genuine block itself still show (and demote via
-   * the trust fingerprint). For an id this doc never seated (unseeded / remote-only,
-   * which trusts nothing), it falls back to first-in-document-order.
+   * The GENUINE content block for `id` and its live index, or `null` if none. Resolution
+   * is a DETERMINISTIC FUNCTION OF SHARED CRDT STATE: among every block carrying `mid=id`,
+   * the one with the EARLIEST Yjs item identity ({@link blockItemId} / {@link itemIdLess})
+   * wins. Because Yjs item ids are globally unique and preserved across sync, every replica
+   * — the seeder, a late joiner, a remote-only client, two merged offline clients — picks
+   * the SAME block and projects the SAME content (convergence). It also defeats the
+   * positional hide: a colliding `mid` block inserted at document position 0 has a LATER
+   * clock than the genuine seat, so it does not win. A forged block that DOES win (an
+   * earlier item id a peer could craft) carries content that fails the trust fingerprint,
+   * so authorship fails closed — the convergent-but-not-secure boundary (auth is P6F-2).
    */
   private genuineBodyBlock(id: string): { block: YXmlElement; index: number } | null {
-    const origin = this.genuineBodyOrigin.get(id);
-    let firstMatch: { block: YXmlElement; index: number } | null = null;
+    let best: { block: YXmlElement; index: number; id: ItemId | null } | null = null;
     const children = this.contentFragment().toArray();
     for (let i = 0; i < children.length; i++) {
       const child = children[i];
       if (!(child instanceof YXmlElement) || child.getAttribute(MID_ATTR) !== id) continue;
-      if (origin !== undefined) {
-        if (blockOriginKey(child) === origin) return { block: child, index: i };
-        continue; // a colliding block that is NOT the genuine seated one — skip it
-      }
-      if (firstMatch === null) firstMatch = { block: child, index: i };
+      const iid = blockItemId(child);
+      if (best === null || itemIdLess(iid, best.id)) best = { block: child, index: i, id: iid };
     }
-    return firstMatch;
+    return best === null ? null : { block: best.block, index: best.index };
   }
 
   /** The GENUINE content block whose `mid` matches `id` (identity-bound first-wins). */
@@ -296,33 +303,72 @@ export class ConversationDoc {
    * dropped, never thrown on (#183 round-2 + round-3) — so a hostile write cannot
    * crash the projection and converge that crash to every client.
    *
-   * ID UNIQUENESS IS ENFORCED HERE (#183 round-3, defect b). At most one element per
-   * id survives; every later element re-using that id is QUARANTINED. When this doc
-   * seated a GENUINE metadata for the id (P6F-1 fix), only the element EQUAL to it may
-   * represent the id — so a peer's colliding index element cannot hide the genuine
-   * metadata by winning array order (position 0); for an unseeded id, first-in-order
-   * wins. Each surviving message's TEXT is read LIVE from its rich-text body
-   * ({@link body}) — the single source of truth for body content, so a peer cannot
-   * smuggle competing text through the metadata channel (the schema strips it) and a
-   * body edit is genuinely reflected.
+   * ID UNIQUENESS IS ENFORCED HERE (#183 round-3, defect b). At most one element per id
+   * survives. Which one is a DETERMINISTIC FUNCTION OF SHARED CRDT STATE (P6F-1 round-2
+   * fix): the element whose backing Yjs item has the EARLIEST identity ({@link
+   * indexItemKeys} / {@link itemIdLess}) among those decoding to the id represents it;
+   * every other element for that id is QUARANTINED. Because Yjs item ids are preserved
+   * across sync, every replica selects the SAME element — a peer's colliding index element
+   * inserted at position 0 has a later clock and does not win, AND a late joiner resolves
+   * the same element the seeder does (no divergence). Each surviving message's TEXT is read
+   * LIVE from its rich-text body ({@link body}) — the single source of truth for body
+   * content, so a peer cannot smuggle competing text through the metadata channel (the
+   * schema strips it) and a body edit is genuinely reflected.
    */
   messages(): ChatMsg[] {
+    const elements = this.array.toArray();
+    const keys = this.indexItemKeys(); // item identity per array position, aligned to `elements`
+    const metas = elements.map(decodeElement);
+    // The genuine (winning) array position per id: the one with the earliest item identity.
+    const winner = new Map<string, number>();
+    for (let i = 0; i < metas.length; i++) {
+      const meta = metas[i];
+      if (meta == null) continue;
+      const cur = winner.get(meta.id);
+      if (cur === undefined || itemIdLess(keys[i] ?? null, keys[cur] ?? null)) winner.set(meta.id, i);
+    }
     const out: ChatMsg[] = [];
-    const seen = new Set<string>();
-    for (const element of this.array.toArray()) {
-      const meta = decodeElement(element);
-      if (meta === null) continue;
-      if (seen.has(meta.id)) continue; // a colliding id: quarantine the later element
-      // GENUINE-INDEX GUARD: if this doc seated a metadata for the id, only that exact
-      // element represents it — skip a colliding forgery (keep scanning for the genuine
-      // one) so a peer cannot hide the genuine metadata by winning array order.
-      const genuine = this.genuineIndexMeta.get(meta.id);
-      if (genuine !== undefined && element !== genuine) continue;
-      seen.add(meta.id);
+    for (let i = 0; i < metas.length; i++) {
+      const meta = metas[i];
+      if (meta == null) continue;
+      if (winner.get(meta.id) !== i) continue; // a colliding id: quarantine the non-genuine element
       const bodyText = this.bodyText(meta.id);
       out.push(bodyText === null ? meta : { ...meta, text: bodyText });
     }
     return out;
+  }
+
+  /**
+   * The Yjs item identity (`{client, clock}`) backing each live element of the message
+   * index, ALIGNED positionally to {@link array}'s `toArray()`. Walking the array's item
+   * list (skipping deleted, offsetting the clock within a run-length item) recovers a
+   * stable, replica-identical identity per element — the key the genuine-seat resolution
+   * and the index half of the trust fingerprint ({@link trustFingerprint}) bind to, so a
+   * delete-genuine + insert-identical-bytes is a DIFFERENT item (a new clock) and cannot
+   * silently inherit the genuine seat.
+   */
+  private indexItemKeys(): (ItemId | null)[] {
+    return arrayItemIds<string>(this.array);
+  }
+
+  /** The item identity of the GENUINE (earliest-item-id) index element for `id`, as a
+   *  stable `client:clock` key, or a sentinel when the id has no live index element. Bound
+   *  into the trust fingerprint so a delete-genuine + reinsert-identical-bytes demotes. */
+  private genuineIndexItemKey(id: string): string {
+    const elements = this.array.toArray();
+    const keys = this.indexItemKeys();
+    let best: ItemId | null = null;
+    let found = false;
+    for (let i = 0; i < elements.length; i++) {
+      const meta = decodeElement(elements[i]);
+      if (meta === null || meta.id !== id) continue;
+      const key = keys[i] ?? null;
+      if (!found || itemIdLess(key, best)) {
+        best = key;
+        found = true;
+      }
+    }
+    return found ? itemIdKey(best) : NO_INDEX;
   }
 
   /** The plain text of a message's rich-text body, or `null` if it has none. */
@@ -372,17 +418,25 @@ export class ConversationDoc {
   }
 
   /**
-   * The trust fingerprint of a message: its authority-stripped METADATA bound to its
-   * FULL-CONTENT fingerprint (P6F-1 fix). The content half is the SL-2 reader's rendered
-   * digest — text + inline marks + embeds + body/ancestor attrs, gauntlet-proven
-   * injective — bound with the body's CRDT item identity, so EVERY meaning-bearing edit
-   * (format, embed, in-place text, or a structural delete-all + reinsert of identical
-   * plaintext) moves it. This replaces #183's plaintext-only reconstruction, which the
-   * codex gauntlet showed kept a trusted line's authenticated authorship across a link
-   * mark, a mention/embed insertion, or a delete+reinsert.
+   * The trust fingerprint of a message: its authority-stripped METADATA bound to (a) the
+   * genuine INDEX element's CRDT item identity and (b) its FULL-CONTENT fingerprint.
+   *
+   * The content half (P6F-1 round-1, gauntlet-confirmed SOUND) is the SL-2 reader's
+   * rendered digest — text + inline marks + embeds + body/ancestor attrs, proven injective
+   * — bound with the body's CRDT item identity, so every meaning-bearing body edit (format,
+   * embed, in-place text, or a delete-all + reinsert of identical plaintext) moves it.
+   *
+   * The index-identity half (P6F-1 round-2) binds the trust to the genuine index element's
+   * Yjs ITEM IDENTITY, not just its serialized VALUE ({@link genuineIndexItemKey}). The
+   * round-1 index guard was value-bound (string equality), so a peer that DELETED the
+   * genuine index element and INSERTED one with identical serialized bytes kept the trusted
+   * authorship (executed HIGH). Binding the item identity closes it: the reinserted element
+   * is a different item (a new clock) → the fingerprint moves → the line demotes to
+   * unverified (fail-closed). The metadata half is {@link encodeDurable} (the index's own
+   * allowlist).
    */
   private trustFingerprint(message: ChatMsg): string {
-    return `${encodeDurable(message)}\n${this.contentFingerprint(message.id)}`;
+    return `${encodeDurable(message)}\n${this.genuineIndexItemKey(message.id)}\n${this.contentFingerprint(message.id)}`;
   }
 
   /**
@@ -532,12 +586,75 @@ const NO_BODY = ' no-body';
  *  real `digest|signature`, so the line fails CLOSED to unverified (fail-closed). */
 const DRIFT_BODY = ' drift-body';
 
-/** The Yjs item id (`client:clock`) backing an integrated block, or `null` if it has
- *  no item (a top-level type). Used as the GENUINE-ORIGIN key so a later colliding
- *  block — at any document position — cannot preempt the genuine seated body. */
-function blockOriginKey(el: YXmlElement): string | null {
-  const item = (el as unknown as { _item?: { id: { client: number; clock: number } } })._item;
-  return item ? `${item.id.client}:${item.id.clock}` : null;
+/* ── genuine-seat resolution: earliest Yjs item identity (shared CRDT state) ──────────
+   Genuine-seat resolution ({@link ConversationDoc.genuineBodyBlock},
+   {@link ConversationDoc.messages}) is a DETERMINISTIC FUNCTION OF SHARED CRDT STATE — the
+   block / index element with the earliest Yjs item identity for an id. Yjs item ids
+   (`{client, clock}`) are globally unique and preserved across sync, so the min is the SAME
+   on every replica: a late joiner, a remote-only client, and two merged offline clients all
+   resolve the identical seat (convergence), and a colliding insert at document position 0
+   cannot win (it has a later clock, not an earlier position). It is CONVERGENT, not SECURE:
+   a peer could craft a lower `client` — real authorship auth is P6F-2 (#196); here a forged
+   winner fails the trust fingerprint and demotes (fail-closed). */
+
+/** A message with no live index element (an id that isn't projected) — a STABLE sentinel
+ *  for the index-identity half of the fingerprint. It contains a space, so it can never
+ *  equal a real `client:clock` key (digits and a colon only) — fail-closed if the genuine
+ *  index element is deleted outright. */
+const NO_INDEX = ' no-index';
+
+/** A Yjs item identity — the `{client, clock}` of the item backing a CRDT value. */
+type ItemId = { client: number; clock: number };
+
+/** A stable `client:clock` string for an item identity (or the {@link NO_INDEX} sentinel
+ *  when there is none) — the form bound into the trust fingerprint. */
+function itemIdKey(id: ItemId | null): string {
+  return id === null ? NO_INDEX : `${id.client}:${id.clock}`;
+}
+
+/** Total order on item identities: `client` then `clock`, ascending. A `null` identity
+ *  (a not-yet-integrated / item-less value) sorts LAST, so a real identity always wins and
+ *  two nulls keep first-encountered order. Returns true iff `a` strictly precedes `b`. */
+function itemIdLess(a: ItemId | null, b: ItemId | null): boolean {
+  if (a === null) return false; // null is never strictly earlier
+  if (b === null) return true; // a real identity precedes a null one
+  return a.client !== b.client ? a.client < b.client : a.clock < b.clock;
+}
+
+/** The Yjs item identity backing an integrated block, or `null` if it has no item (a
+ *  top-level type / not yet integrated). The genuine-seat key for the body channel. */
+function blockItemId(el: YXmlElement): ItemId | null {
+  const item = (el as unknown as { _item?: { id: ItemId } | null })._item;
+  return item ? { client: item.id.client, clock: item.id.clock } : null;
+}
+
+/**
+ * The Yjs item identity backing each LIVE element of a `Y.Array`, ALIGNED positionally to
+ * `arr.toArray()`. Yjs coalesces a run of same-client inserts into one item of length > 1;
+ * walking the item list (skipping deleted, offsetting the clock by the value's position
+ * within its item) recovers a per-element identity that is stable and replica-identical.
+ * Reaches into `_start` / `Item` internals — the same internal surface the block channel
+ * uses via `_item`; kept in one place so the coupling is auditable.
+ */
+function arrayItemIds<T>(arr: YArray<T>): (ItemId | null)[] {
+  type YItem = {
+    id: ItemId;
+    length: number;
+    deleted: boolean;
+    countable: boolean;
+    right: YItem | null;
+  };
+  const out: (ItemId | null)[] = [];
+  let item = (arr as unknown as { _start?: YItem | null })._start ?? null;
+  while (item) {
+    if (!item.deleted && item.countable) {
+      for (let j = 0; j < item.length; j++) {
+        out.push({ client: item.id.client, clock: item.id.clock + j });
+      }
+    }
+    item = item.right;
+  }
+  return out;
 }
 
 /* ── the decode validator (#183 round-2 — closes the executed DoS) ───────────
