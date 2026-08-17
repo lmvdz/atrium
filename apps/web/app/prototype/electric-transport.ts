@@ -46,10 +46,12 @@
  *
  * Rate limiting is the door's job (in-process, per writer and per IP, reusing the
  * proxy-hops plumbing) — a client cannot rate-limit itself honestly. What this
- * client does is BACK OFF correctly: `documentRetryHandler` retries a transient
- * refusal (429, 5xx, a dropped connection) and GIVES UP on a permanent one
- * (401/403/400/413), so a member whose access was revoked mid-session stops
- * hammering a door that will only ever refuse them.
+ * client does is FAIL SAFELY: `documentRetryHandler` never reports a failed send
+ * as landed, so the batch is preserved on any refusal — re-sent on reconnect
+ * after a transient refusal (429, 5xx, a dropped connection), inert after a
+ * permanent one (401/403/400/413) because the disconnect stops a member whose
+ * access was revoked mid-session from hammering a door that will only ever refuse
+ * them. See `documentRetryHandler` below for why `false`, not `true`, is safe.
  *
  * IMPORTANT — the durable stream carries CONVERSATION CONTENT ONLY. The covenant
  * ledger stays the gated Postgres store, synced read-only (#181); a `✓` is never
@@ -78,20 +80,34 @@ const sendFetch: typeof fetch = (input, init) =>
   fetch(input, { ...init, credentials: 'same-origin' });
 
 /**
- * Retry a TRANSIENT refusal, give up on a PERMANENT one (#202).
+ * Preserve the batch on ANY failed send (#202).
  *
- * 429 (rate limited) and 5xx (server hiccup) and a network error (no response)
- * are transient — retry. 401/403/400/413 are the door's final word: not signed
- * in, not a member, malformed, too large. Retrying those pins the append path for
- * a client that will only ever be refused; a revoked member should stop, not
- * spin. Returning `false` lets the provider disconnect rather than loop.
+ * The name `SendErrorRetryHandler` is a trap: it is not a "retry, yes/no" flag.
+ * y-electric's `send()` (node_modules/@electric-sql/y-electric/src/y-electric.ts
+ * ~459-489) returns THIS handler's value AS ITS OWN return value on any failure,
+ * and `sendOperations()` (~371-380) reads that boolean as "did the write land":
+ *
+ *   const success = await send(...)      // === this handler's return on failure
+ *   if (!success) { this.batch(sending); this.disconnect() }
+ *
+ * So `true` means "the write landed" — the batch (already nulled out of
+ * `pendingChanges` at ~366) is NOT restored and `stableStateVector` advances past
+ * it. Returning `true` on a FAILED send therefore silently DROPS the update. The
+ * handler is only ever called from `send()`'s catch — i.e. the write did not land
+ * — so `true` is never honest here.
+ *
+ * Returning `false` is the correct answer for every failure: it restores the
+ * batch into `pendingChanges` and disconnects. On a transient failure (429, 5xx,
+ * a dropped connection) the retained batch is re-sent when the provider
+ * reconnects — the update is preserved, not lost. On a permanent one
+ * (401/403/400/413) the disconnect is the point: a revoked member stops
+ * hammering a door that will only ever refuse them, and the retained batch is
+ * inert because nothing reconnects. Either way the update is never reported
+ * landed when it was not.
  */
-const documentRetryHandler: SendErrorRetryHandler = async ({ response }) => {
-  if (!response) return true; // network error — transient
-  if (response.status === 429) return true; // rate limited — back off and retry
-  if (response.status >= 500) return true; // server hiccup — transient
-  return false; // 4xx (401/403/400/413) — the door's final word
-};
+const documentRetryHandler: SendErrorRetryHandler = async () => false;
+
+export { documentRetryHandler as __documentRetryHandlerForTest };
 
 /**
  * The state vector of an EMPTY doc — "the stream has nothing of mine yet". Handed

@@ -18,6 +18,7 @@
 
 import { attemptWithIp, clientIp, createThrottle, type Throttle } from '@atrium/auth';
 import { headers } from 'next/headers';
+import { readBodyBounded } from '@/lib/bounded-body';
 import { db } from '@/lib/db';
 import { proxyStrategy } from '@/lib/env';
 import { currentSession } from '@/lib/session';
@@ -32,8 +33,14 @@ export const revalidate = 0;
  *
  * A Yjs update — even a batched one — is small; an unbounded body is a memory
  * DoS with a valid session behind it. 4 MiB is generous for any real edit and
- * far under what would hurt. A body over it is refused BEFORE it is read into
- * memory (the header is checked first) and again after, in case the header lied.
+ * far under what would hurt. The cap is enforced on the ACTUAL bytes as they
+ * arrive (`readBodyBounded`), which aborts the read once the running total
+ * crosses it — so a chunked request that omits Content-Length is capped exactly
+ * like one that declares it. A declared Content-Length over the cap is refused
+ * up front as a cheap early-out, but it is never the only guard: a header can
+ * lie or be absent, the streamed read cannot. The proxy caps it first too
+ * (`request_body` in `deploy/Caddyfile`), so an oversize body is refused before
+ * it reaches Next at all in production.
  */
 const MAX_OP_BYTES = 4 * 1024 * 1024;
 
@@ -88,14 +95,17 @@ export async function PUT(
     return refuse(429, 'too many document writes — slow down');
   }
 
-  // Refuse an oversized body before reading it, then guard against a lying
-  // Content-Length after.
+  // Reject an over-cap Content-Length up front (a cheap early-out), then enforce
+  // the cap on the ACTUAL bytes regardless of the header — a chunked request
+  // carries no Content-Length, and a declared one can lie. `readBodyBounded`
+  // aborts the read the moment the running total crosses the cap, so an
+  // unbounded body is never buffered whole.
   const declared = request.headers.get('content-length');
   if (declared !== null && Number(declared) > MAX_OP_BYTES) {
     return refuse(413, 'that document update is too large');
   }
-  const body = new Uint8Array(await request.arrayBuffer());
-  if (body.byteLength > MAX_OP_BYTES) {
+  const body = await readBodyBounded(request.body, MAX_OP_BYTES);
+  if (body === null) {
     return refuse(413, 'that document update is too large');
   }
 

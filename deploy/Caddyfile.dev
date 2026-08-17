@@ -67,6 +67,18 @@ localhost:80, 127.0.0.1:80, [::1]:80 {
 	handle /electric/* {
 		reverse_proxy app:3000
 	}
+	# The Yjs write door (#202) — cap the body at the proxy, before Next, exactly
+	# as deploy/Caddyfile does. Must precede the catch-all handle (first-match).
+	@ydoc_write {
+		method PUT
+		path /api/rooms/*/ydoc
+	}
+	handle @ydoc_write {
+		request_body {
+			max_size 4MB
+		}
+		reverse_proxy app:3000
+	}
 	handle {
 		reverse_proxy app:3000
 	}
