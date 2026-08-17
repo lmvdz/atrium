@@ -2,17 +2,17 @@ import { type CovenantAnchor, certifyAnchor, resolveCovenant } from '@atrium/cor
 import { describe, expect, it } from 'vitest';
 import * as Y from 'yjs';
 import {
-  CovenantDocReaderProd,
+  type CovenantDocReaderProd,
   type RootResolver,
   readerForLiveDoc,
 } from '@/lib/covenant-reader';
-import { conversationDocFor } from '../app/prototype/yjs-conversation';
 import { conversationModel } from '../app/prototype/conversation-model';
 import { InMemoryConversationHub } from '../app/prototype/conversation-transport';
 import type { ChatMsg, Selection } from '../app/prototype/types';
 import {
   ConversationDoc,
   conversationContentRoot,
+  conversationDocFor,
   conversationModelFromDoc,
 } from '../app/prototype/yjs-conversation';
 import { glyphFor } from '../src/components/model/glyph';
@@ -42,7 +42,11 @@ function readerFor(
   if (!path) throw new Error('no body path');
   const provider = () => (convo.isDestroyed() ? null : convo.doc);
   const root: RootResolver = conversationContentRoot;
-  return readerForLiveDoc(provider, { path, start: span.start, end: span.end }, { resolveRoot: root });
+  return readerForLiveDoc(
+    provider,
+    { path, start: span.start, end: span.end },
+    { resolveRoot: root },
+  );
 }
 
 function certify(reader: CovenantDocReaderProd): CovenantAnchor {
@@ -132,7 +136,8 @@ describe('two clients converge on an in-BODY rich-text edit over the in-memory h
 
     // Each end appends at a different edge of the shared body, concurrently.
     clientA.body('m')?.insert(0, 'A');
-    clientB.body('m')?.insert(clientB.body('m')!.length, 'B');
+    const bodyB = clientB.body('m');
+    bodyB?.insert(bodyB.length, 'B');
 
     const a = clientA.body('m')?.toString();
     const b = clientB.body('m')?.toString();
@@ -150,7 +155,13 @@ describe('two clients converge on an in-BODY rich-text edit over the in-memory h
 describe('the SL-2 production reader resolves a sub-message range against a rich-text body', () => {
   it('certifies a sub-range and reads OK, then DRIFTs when THAT range is edited', () => {
     const convo = new ConversationDoc();
-    convo.append({ id: 'm1', time: '10:00', kind: 'human', who: 'you', text: 'ship the migration' });
+    convo.append({
+      id: 'm1',
+      time: '10:00',
+      kind: 'human',
+      who: 'you',
+      text: 'ship the migration',
+    });
     const reader = readerFor(convo, 'm1', { start: 0, end: 4 }); // 'ship'
     const anchor = certify(reader);
     expect(status(reader, anchor)).toBe('ok');
@@ -162,7 +173,13 @@ describe('the SL-2 production reader resolves a sub-message range against a rich
 
   it('span precision: an edit OUTSIDE the certified sub-range does not de-certify it', () => {
     const convo = new ConversationDoc();
-    convo.append({ id: 'm1', time: '10:00', kind: 'human', who: 'you', text: 'ship the migration' });
+    convo.append({
+      id: 'm1',
+      time: '10:00',
+      kind: 'human',
+      who: 'you',
+      text: 'ship the migration',
+    });
     const reader = readerFor(convo, 'm1', { start: 0, end: 4 }); // 'ship'
     const anchor = certify(reader);
     expect(status(reader, anchor)).toBe('ok');
@@ -351,6 +368,122 @@ describe('the conversation transport relays rich-text body updates untouched', (
     // …and thereafter an in-body edit converges live in both directions.
     late.body('h1')?.insert(0, 'the ');
     expect(early.body('h1')?.toString()).toBe('the history body');
+  });
+});
+
+// ─────────────────────────────────────────────────────────────────────────────
+// 7. THE P6F-1 GAUNTLET FIX — FULL-RENDERED-CONTENT TRUST + DETERMINISTIC RESOLUTION.
+//
+// codex (executing) FAILed P6F-1 on two counts, both closed here (each not-theater:
+// the demotion / no-hiding assertions FAIL on base d2efc13 — where trust was
+// plaintext-only and resolution was positional — and pass now):
+//   HIGH   — the trust fingerprint bound only reconstructed PLAINTEXT, so a peer could
+//            apply a link mark, insert a mention/embed, or delete-all + reinsert
+//            identical plaintext and KEEP a trusted body's authenticated agent
+//            authorship. It now binds the FULL RENDERED body (the SL-2 reader's digest
+//            — text + marks + embeds + attrs) bound with the body's CRDT item identity.
+//   MEDIUM — body/index resolution was positional ("first in fragment/array order
+//            wins"), so a peer inserting a colliding block/element at position 0 could
+//            HIDE genuine content under an id. Resolution is now identity-bound.
+// ─────────────────────────────────────────────────────────────────────────────
+
+/** Seed one TRUSTED agent line and confirm it starts authenticated. */
+function seedTrustedAgent(text: string): ConversationDoc {
+  const convo = new ConversationDoc().seed([
+    { id: 't', time: '10:00', kind: 'agent', who: 'hexi', text },
+  ]);
+  const before = convo.model('r', []).records.find((r) => r.id === 't');
+  expect(before?.authorKind).toBe('agent'); // baseline: trusted before any edit
+  return convo;
+}
+
+const authorKindOf = (convo: ConversationDoc, id: string) =>
+  convo.model('r', []).records.find((r) => r.id === id)?.authorKind;
+
+describe('P6F-1 HIGH — the trust fingerprint covers FULL rendered content, not plaintext', () => {
+  it('a LINK MARK on a trusted body (plaintext unchanged) DEMOTES it to unverified', () => {
+    const convo = seedTrustedAgent('the honest reading');
+    // A peer stamps a link mark over the body — meaning-bearing, but the PLAINTEXT
+    // (toDelta string inserts) is unchanged, so the base plaintext fingerprint never
+    // saw it and kept trust. The rendered digest (which carries marks) moves → demote.
+    convo.body('t')?.format(0, 3, { link: 'https://evil.example' });
+    expect(authorKindOf(convo, 't')).toBe('unknown');
+  });
+
+  it('inserting a MENTION/EMBED into a trusted body DEMOTES it to unverified', () => {
+    const convo = seedTrustedAgent('the honest reading');
+    // An embed op carries insert:object, which the base plaintext reconstruction
+    // (string inserts only) discarded — so the forgery kept trust on base.
+    convo.body('t')?.insertEmbed(3, { kind: 'mention', target: 'u_mallory' });
+    expect(authorKindOf(convo, 't')).toBe('unknown');
+  });
+
+  it('DELETE-ALL + REINSERT of identical plaintext DEMOTES it to unverified', () => {
+    const convo = seedTrustedAgent('the honest reading');
+    const body = convo.body('t');
+    if (!body) throw new Error('no body');
+    const text = body.toString();
+    // Wipe the authored content and re-type the SAME words: the rendering is
+    // byte-identical (so a plaintext fingerprint kept trust on base), but the CRDT
+    // items are new — a structural replacement of authored content → the item-identity
+    // half of the fingerprint moves → demote.
+    convo.doc.transact(() => {
+      body.delete(0, body.length);
+      body.insert(0, text);
+    });
+    expect(convo.body('t')?.toString()).toBe('the honest reading'); // rendering identical
+    expect(authorKindOf(convo, 't')).toBe('unknown');
+  });
+
+  it('a PURE NO-OP keeps trust, and an edit to a DIFFERENT body does not demote this one', () => {
+    // The complement pins that the demotions above are EDIT-driven and BODY-LOCAL
+    // (span-precision), not a blanket loss of trust.
+    const convo = new ConversationDoc().seed([
+      { id: 't', time: '10:00', kind: 'agent', who: 'hexi', text: 'the honest reading' },
+      { id: 'other', time: '10:01', kind: 'agent', who: 'hexi', text: 'a second line' },
+    ]);
+    expect(authorKindOf(convo, 't')).toBe('agent');
+    expect(authorKindOf(convo, 't')).toBe('agent'); // re-project: still trusted (no-op)
+    // Editing a DIFFERENT body must not move t's body-local fingerprint.
+    convo.body('other')?.insert(0, 'EDITED ');
+    expect(authorKindOf(convo, 't')).toBe('agent');
+    expect(authorKindOf(convo, 'other')).toBe('unknown'); // the edited one demotes
+  });
+});
+
+describe('P6F-1 MEDIUM — deterministic identity-bound resolution, not positional first-wins', () => {
+  it('a colliding body block inserted at POSITION 0 cannot HIDE the genuine body', () => {
+    const convo = seedTrustedAgent('the genuine reading');
+    // A peer seats a SECOND body block for the same id at the FRONT of the fragment —
+    // the "position 0 wins" attack. Positional first-wins (base d2efc13) would surface
+    // this imposter; identity-bound resolution keeps the genuine seated block.
+    const frag = convo.contentFragment();
+    convo.doc.transact(() => {
+      const block = new Y.XmlElement('message');
+      const xtext = new Y.XmlText();
+      frag.insert(0, [block]); // FRONT, not the end
+      block.setAttribute('mid', 't');
+      block.insert(0, [xtext]);
+      xtext.insert(0, 'HIDDEN IMPOSTER BODY');
+    });
+    const record = convo.model('r', []).records.find((r) => r.id === 't');
+    expect(record?.text).toBe('the genuine reading'); // the genuine body, not the imposter
+    expect(convo.model('r', []).records.some((r) => r.text.includes('HIDDEN'))).toBe(false);
+  });
+
+  it('a colliding INDEX element inserted at POSITION 0 cannot HIDE the genuine metadata', () => {
+    const convo = seedTrustedAgent('the genuine reading');
+    // A peer inserts a colliding metadata element for the same id at the FRONT of the
+    // index array, with forged who/time. Positional first-wins (base) would project the
+    // imposter's metadata; the genuine-index guard keeps the seated metadata.
+    const arr = convo.doc.getArray<unknown>('messages');
+    convo.doc.transact(() => {
+      arr.insert(0, [JSON.stringify({ id: 't', time: '99:99', kind: 'agent', who: 'MALLORY' })]);
+    });
+    const projected = convo.messages().find((m) => m.id === 't');
+    expect(projected?.who).toBe('hexi'); // the genuine seated metadata, not the imposter
+    expect(projected?.time).toBe('10:00');
+    expect(convo.messages().filter((m) => m.id === 't')).toHaveLength(1); // still id-unique
   });
 });
 

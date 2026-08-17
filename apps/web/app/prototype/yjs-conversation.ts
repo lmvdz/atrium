@@ -52,9 +52,10 @@
  * read-only (#181) — a certified `✓` is never a value inside this Yjs doc.
  * ═════════════════════════════════════════════════════════════════════════ */
 
-import { Doc as YDoc, XmlElement as YXmlElement, XmlText as YXmlText } from 'yjs';
 import type { XmlFragment as YXmlFragment } from 'yjs';
+import { Doc as YDoc, XmlElement as YXmlElement, XmlText as YXmlText } from 'yjs';
 import { z } from 'zod';
+import { CovenantDocReaderProd } from '@/lib/covenant-reader';
 import type { ParticipantSummary } from '@/src/components/model';
 import { buildConversationModel, type ConversationModel } from './conversation-model';
 import type { ConversationTransport } from './conversation-transport';
@@ -104,21 +105,43 @@ export class ConversationDoc {
 
   /**
    * THE TRUST FINGERPRINTS (#183 round-2, EXTENDED for #194's mutable bodies).
-   * id → the canonical fingerprint of a seeded message's FULL content, INCLUDING
-   * its body text ({@link encodeMessage}), held OUTSIDE the `Y.Doc`. A message
-   * projects authenticated who/kind only if its RECONSTRUCTED content (metadata +
-   * live body text) still matches the fingerprint recorded at {@link seed}.
+   * id → the canonical fingerprint of a seeded message's FULL content ({@link
+   * ConversationDoc.trustFingerprint}), held OUTSIDE the `Y.Doc`. A message projects
+   * authenticated who/kind only if its RECONSTRUCTED content — metadata + the FULL
+   * RENDERED body + the body's CRDT item identity — still matches the fingerprint
+   * recorded at {@link seed}.
    *
-   * The extension over #183: because a `Y.XmlText` body mutates in place, the
-   * fingerprint must cover the body — otherwise a peer editing a seeded body would
-   * keep the trusted line's authenticated provenance while replacing its words. By
-   * binding trust to the live body text, an in-place edit of a trusted body fails
-   * the match and demotes to UNVERIFIED (fail-closed). Nothing that arrives over
-   * the wire is in this map, so on a live (unseeded) doc EVERYTHING is unverified
-   * until #181's gated read supplies the real envelope. (Certification is separate
-   * and never sourced here — see {@link model}: the CRDT grants no `✓`.)
+   * The extension over #183: because a `Y.XmlText` body mutates in place, the fingerprint
+   * must cover the body's RENDERED content (not just plaintext — the codex-gauntlet HIGH:
+   * marks, embeds, and body attrs are meaning-bearing and a plaintext fingerprint saw
+   * none of them) AND its item identity (so a delete-all + reinsert of identical plaintext
+   * also demotes). Any such edit of a trusted body fails the match and demotes to
+   * UNVERIFIED (fail-closed). Nothing that arrives over the wire is in this map, so on a
+   * live (unseeded) doc EVERYTHING is unverified until #181's gated read supplies the real
+   * envelope. (Certification is separate and never sourced here — see {@link model}.)
    */
   private readonly trustedFingerprints = new Map<string, string>();
+
+  /**
+   * GENUINE BODY ORIGIN (P6F-1 fix, the content-hiding closer). id → the Yjs item id
+   * (`client:clock`) of the body block THIS doc seated for that id. Body/index
+   * resolution keys off this identity, NOT document position, so a peer inserting a
+   * COLLIDING `mid` block — at position 0 or anywhere — cannot preempt or hide the
+   * genuine seated body ({@link genuineBodyBlock}). Populated only when this instance
+   * seats a body ({@link seatBody}); a doc that only received content over the wire
+   * (a late joiner) records none and, trusting nothing, falls back to first-in-order —
+   * consistent with the trust map's "only the local seed establishes provenance".
+   */
+  private readonly genuineBodyOrigin = new Map<string, string>();
+
+  /**
+   * GENUINE INDEX METADATA (P6F-1 fix, the index half of the content-hiding closer).
+   * id → the exact authority-stripped metadata string this doc seated for that id. When
+   * present, only the index element equal to it may represent the id ({@link messages}),
+   * so a peer inserting a colliding index element BEFORE the original cannot hide the
+   * genuine metadata by winning array order. Populated only on a local seat ({@link insert}).
+   */
+  private readonly genuineIndexMeta = new Map<string, string>();
 
   constructor(doc: YDoc = new YDoc()) {
     this.doc = doc;
@@ -147,16 +170,19 @@ export class ConversationDoc {
    */
   seed(messages: readonly ChatMsg[]): this {
     if (this.array.length > 0) return this;
-    for (const message of messages) {
-      // Record the TRUSTED full-content fingerprint for EVERY seeded message (its
-      // who/kind + body text project authentically only while unchanged), and note
-      // which seeded lines reported a settlement (they project `~`, never `✓`).
-      this.trustedFingerprints.set(message.id, encodeMessage(message));
-      if (message.certified === true) this.settledIds.add(message.id);
-    }
+    // Seat the two shares FIRST, so the trusted fingerprint below is taken over the
+    // LIVE seeded body (its rendered content + item identity), not a plaintext copy.
     this.doc.transact(() => {
       for (const message of messages) this.insert(message);
     });
+    for (const message of messages) {
+      // Record the TRUSTED full-content fingerprint for EVERY seeded message — its
+      // who/kind + the FULL RENDERED body (marks/embeds/attrs) + the body's CRDT item
+      // identity project authentically only while unchanged — and note which seeded
+      // lines reported a settlement (they project `~`, never `✓`).
+      this.trustedFingerprints.set(message.id, this.trustFingerprint(message));
+      if (message.certified === true) this.settledIds.add(message.id);
+    }
     return this;
   }
 
@@ -181,19 +207,25 @@ export class ConversationDoc {
    * field, keeping the byte-identical projection for the static fixtures.
    */
   private insert(message: ChatMsg): void {
-    this.array.push([encodeDurable(message)]);
+    const meta = encodeDurable(message);
+    this.array.push([meta]);
+    // Remember the genuine metadata this doc seated for the id (first local seat wins),
+    // so a peer's colliding index element cannot hide it by winning array order.
+    if (!this.genuineIndexMeta.has(message.id)) this.genuineIndexMeta.set(message.id, meta);
     if (typeof message.text === 'string') this.seatBody(message.id, message.text);
   }
 
   /**
-   * Seat a rich-text body for a message id, unless one already exists (id-quarantine:
-   * the FIRST body block for an id wins, so a peer re-using a seeded id cannot
-   * replace the trusted body by seating a second block — it is ignored by
-   * {@link bodyBlockFor}). The block is `<message mid=id> Y.XmlText </message>` — the
-   * rented y-prosemirror shape the SL-2 reader resolves against.
+   * Seat a rich-text body for a message id, unless THIS doc already seated one for it
+   * (first LOCAL seat wins). The block is recorded as the id's GENUINE ORIGIN by its
+   * Yjs item id, so a peer re-using a seeded id cannot replace or HIDE the trusted body
+   * by seating a second block — {@link genuineBodyBlock} keys off this identity, not
+   * document position (the P6F-1 MEDIUM: "position 0 wins" is closed). The block is
+   * `<message mid=id> Y.XmlText </message>` — the y-prosemirror shape the SL-2 reader
+   * resolves against.
    */
   private seatBody(id: string, text: string): void {
-    if (this.bodyBlockFor(id)) return;
+    if (this.genuineBodyOrigin.has(id)) return; // this doc already seated the genuine body
     const frag = this.contentFragment();
     const block = new YXmlElement(BODY_BLOCK);
     const xtext = new YXmlText();
@@ -201,14 +233,38 @@ export class ConversationDoc {
     block.setAttribute(MID_ATTR, id);
     block.insert(0, [xtext]);
     if (text.length > 0) xtext.insert(0, text);
+    const origin = blockOriginKey(block);
+    if (origin !== null) this.genuineBodyOrigin.set(id, origin);
   }
 
-  /** The FIRST content block whose `mid` matches `id` (first-wins id-quarantine). */
-  private bodyBlockFor(id: string): YXmlElement | null {
-    for (const child of this.contentFragment().toArray()) {
-      if (child instanceof YXmlElement && child.getAttribute(MID_ATTR) === id) return child;
+  /**
+   * The GENUINE content block for `id` and its live index, or `null` if none. When
+   * this doc seated the body ({@link genuineBodyOrigin} has the id), resolution is by
+   * that block's Yjs ITEM IDENTITY — so a peer's colliding `mid` block, inserted at
+   * ANY document position (position 0 included), is skipped and cannot preempt or hide
+   * the genuine content; edits to the genuine block itself still show (and demote via
+   * the trust fingerprint). For an id this doc never seated (unseeded / remote-only,
+   * which trusts nothing), it falls back to first-in-document-order.
+   */
+  private genuineBodyBlock(id: string): { block: YXmlElement; index: number } | null {
+    const origin = this.genuineBodyOrigin.get(id);
+    let firstMatch: { block: YXmlElement; index: number } | null = null;
+    const children = this.contentFragment().toArray();
+    for (let i = 0; i < children.length; i++) {
+      const child = children[i];
+      if (!(child instanceof YXmlElement) || child.getAttribute(MID_ATTR) !== id) continue;
+      if (origin !== undefined) {
+        if (blockOriginKey(child) === origin) return { block: child, index: i };
+        continue; // a colliding block that is NOT the genuine seated one — skip it
+      }
+      if (firstMatch === null) firstMatch = { block: child, index: i };
     }
-    return null;
+    return firstMatch;
+  }
+
+  /** The GENUINE content block whose `mid` matches `id` (identity-bound first-wins). */
+  private bodyBlockFor(id: string): YXmlElement | null {
+    return this.genuineBodyBlock(id)?.block ?? null;
   }
 
   /**
@@ -229,12 +285,8 @@ export class ConversationDoc {
    * has no body. Computed live, so it is stable across the converged block order.
    */
   bodyPath(id: string): number[] | null {
-    const children = this.contentFragment().toArray();
-    for (let i = 0; i < children.length; i++) {
-      const child = children[i];
-      if (child instanceof YXmlElement && child.getAttribute(MID_ATTR) === id) return [i, 0];
-    }
-    return null;
+    const genuine = this.genuineBodyBlock(id);
+    return genuine ? [genuine.index, 0] : null;
   }
 
   /**
@@ -244,12 +296,15 @@ export class ConversationDoc {
    * dropped, never thrown on (#183 round-2 + round-3) — so a hostile write cannot
    * crash the projection and converge that crash to every client.
    *
-   * ID UNIQUENESS IS ENFORCED HERE (#183 round-3, defect b). The FIRST element for
-   * an id wins; every later element re-using that id is QUARANTINED, so the
-   * projection sees at most one message per id. Each surviving message's TEXT is
-   * read LIVE from its rich-text body ({@link body}) — the single source of truth
-   * for body content, so a peer cannot smuggle competing text through the metadata
-   * channel (the schema strips it) and a body edit is genuinely reflected.
+   * ID UNIQUENESS IS ENFORCED HERE (#183 round-3, defect b). At most one element per
+   * id survives; every later element re-using that id is QUARANTINED. When this doc
+   * seated a GENUINE metadata for the id (P6F-1 fix), only the element EQUAL to it may
+   * represent the id — so a peer's colliding index element cannot hide the genuine
+   * metadata by winning array order (position 0); for an unseeded id, first-in-order
+   * wins. Each surviving message's TEXT is read LIVE from its rich-text body
+   * ({@link body}) — the single source of truth for body content, so a peer cannot
+   * smuggle competing text through the metadata channel (the schema strips it) and a
+   * body edit is genuinely reflected.
    */
   messages(): ChatMsg[] {
     const out: ChatMsg[] = [];
@@ -258,6 +313,11 @@ export class ConversationDoc {
       const meta = decodeElement(element);
       if (meta === null) continue;
       if (seen.has(meta.id)) continue; // a colliding id: quarantine the later element
+      // GENUINE-INDEX GUARD: if this doc seated a metadata for the id, only that exact
+      // element represents it — skip a colliding forgery (keep scanning for the genuine
+      // one) so a peer cannot hide the genuine metadata by winning array order.
+      const genuine = this.genuineIndexMeta.get(meta.id);
+      if (genuine !== undefined && element !== genuine) continue;
       seen.add(meta.id);
       const bodyText = this.bodyText(meta.id);
       out.push(bodyText === null ? meta : { ...meta, text: bodyText });
@@ -295,17 +355,59 @@ export class ConversationDoc {
    */
   model(room: string, participants: readonly ParticipantSummary[]): ConversationModel {
     return buildConversationModel(this.messages(), room, participants, {
-      // A message keeps its authenticated who/kind only if its RECONSTRUCTED content
-      // — metadata AND live body text — still matches the trusted seed fingerprint.
-      // A peer append, a wire arrival, OR an in-place edit of a seeded body all fail
-      // this match and project as UNVERIFIED (`authorKind:'unknown'`). The message
-      // handed to `trusts` already carries the live body text (see {@link messages}).
-      trusts: (message) => this.trustedFingerprints.get(message.id) === encodeMessage(message),
+      // A message keeps its authenticated who/kind only if its RECONSTRUCTED content —
+      // metadata AND the FULL RENDERED body (marks, embeds, body/ancestor attrs) AND
+      // the body's live CRDT item identity — still matches the trusted seed fingerprint.
+      // A peer append, a wire arrival, an in-place text edit, a link mark, a mention /
+      // embed insertion, OR a delete-all + reinsert of identical plaintext all fail this
+      // match and project as UNVERIFIED (`authorKind:'unknown'`) — the codex-gauntlet
+      // HIGH (a plaintext-only fingerprint saw none of the format/embed/structural edits).
+      trusts: (message) =>
+        this.trustedFingerprints.get(message.id) === this.trustFingerprint(message),
       // The CRDT NEVER grants a `✓`. Certification is #181's; the doc cannot mint it.
       certifiedIds: NO_CERTIFICATION,
       // A trusted seeded settlement projects `~` (self-reported), never `✓`.
       settledIds: this.settledIds,
     });
+  }
+
+  /**
+   * The trust fingerprint of a message: its authority-stripped METADATA bound to its
+   * FULL-CONTENT fingerprint (P6F-1 fix). The content half is the SL-2 reader's rendered
+   * digest — text + inline marks + embeds + body/ancestor attrs, gauntlet-proven
+   * injective — bound with the body's CRDT item identity, so EVERY meaning-bearing edit
+   * (format, embed, in-place text, or a structural delete-all + reinsert of identical
+   * plaintext) moves it. This replaces #183's plaintext-only reconstruction, which the
+   * codex gauntlet showed kept a trusted line's authenticated authorship across a link
+   * mark, a mention/embed insertion, or a delete+reinsert.
+   */
+  private trustFingerprint(message: ChatMsg): string {
+    return `${encodeDurable(message)}\n${this.contentFingerprint(message.id)}`;
+  }
+
+  /**
+   * The FULL-CONTENT fingerprint of a message's body, reusing the SL-2 production reader
+   * ({@link CovenantDocReaderProd.fullContentFingerprint}) over the GENUINE body block —
+   * the SAME rendering a `✓` binds to. A bodyless message (a turn/image shell) has a
+   * STABLE `NO_BODY` sentinel, so it stays trusted while it stays bodyless (and demotes
+   * if a peer later seats a body under its id). An unresolved / unrenderable body yields
+   * `DRIFT_BODY` — a sentinel that can never equal a real `digest|signature`, so it
+   * fails CLOSED to unverified rather than vouching for content it could not read.
+   */
+  private contentFingerprint(id: string): string {
+    const path = this.bodyPath(id);
+    const body = this.body(id);
+    if (path === null || body === null) return NO_BODY;
+    try {
+      const reader = new CovenantDocReaderProd(
+        this.doc,
+        { path, start: 0, end: body.length },
+        { resolveRoot: conversationContentRoot },
+      );
+      return reader.fullContentFingerprint() ?? DRIFT_BODY;
+    } catch {
+      return DRIFT_BODY;
+    }
   }
 
   /**
@@ -412,25 +514,30 @@ function encodeDurable(message: ChatMsg): string {
 
 /* ── the FULL-content fingerprint (trust) ────────────────────────────────────
    The trust fingerprint binds a seeded message's authenticated who/kind to its
-   ENTIRE content, INCLUDING its body text — the #194 extension of #183's
-   content-fingerprint that closes the in-place-mutable-body hole. It is computed
-   over the SAME allowlist plus `text`, so a body edit (or any metadata change)
-   moves the fingerprint and demotes the line to UNVERIFIED. This is used ONLY for
-   the trust map ({@link ConversationDoc.model}); the durable index element never
-   carries `text`. */
-const FINGERPRINT_FIELDS = [...DURABLE_FIELDS, 'text'] as const;
+   metadata AND the FULL RENDERED content of its body — closing the codex-gauntlet
+   HIGH (a plaintext-only fingerprint saw neither marks/embeds/attrs nor a structural
+   delete+reinsert). The body half is NOT reconstructed here: it REUSES the SL-2
+   production reader's rendering/digest bound with the body's CRDT item identity
+   ({@link ConversationDoc.contentFingerprint} →
+   {@link CovenantDocReaderProd.fullContentFingerprint}), so trust binds to the exact
+   same content a `✓` would. The metadata half is {@link encodeDurable} (the same
+   allowlist the index carries). The sentinels below stand in for a body that is
+   ABSENT (stable — a bodyless shell stays trusted) or UNRENDERABLE (fail-closed —
+   never equal to a real `digest|signature`). */
 
-function encodeMessage(message: ChatMsg): string {
-  const durable: Record<string, unknown> = {
-    id: message.id,
-    time: message.time,
-    kind: message.kind,
-  };
-  for (const field of FINGERPRINT_FIELDS) {
-    const value = message[field];
-    if (value !== undefined) durable[field] = value;
-  }
-  return JSON.stringify(durable);
+/** A message with no body (a turn/image shell) — a STABLE content component, so a
+ *  genuinely bodyless seeded line stays trusted while it stays bodyless. */
+const NO_BODY = ' no-body';
+/** An unresolved / unrenderable body — a content component that can NEVER equal a
+ *  real `digest|signature`, so the line fails CLOSED to unverified (fail-closed). */
+const DRIFT_BODY = ' drift-body';
+
+/** The Yjs item id (`client:clock`) backing an integrated block, or `null` if it has
+ *  no item (a top-level type). Used as the GENUINE-ORIGIN key so a later colliding
+ *  block — at any document position — cannot preempt the genuine seated body. */
+function blockOriginKey(el: YXmlElement): string | null {
+  const item = (el as unknown as { _item?: { id: { client: number; clock: number } } })._item;
+  return item ? `${item.id.client}:${item.id.clock}` : null;
 }
 
 /* ── the decode validator (#183 round-2 — closes the executed DoS) ───────────

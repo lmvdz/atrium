@@ -8,6 +8,7 @@ import {
   type RenderedFragment,
   type RenderedNode,
   type ResolvedSpan,
+  renderedDigestOf,
   sha256Hex,
 } from '@atrium/core';
 import * as Y from 'yjs';
@@ -432,6 +433,36 @@ function directDelta(body: Y.XmlText): DirectOp[] {
   }
   packStr();
   return ops;
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// BODY ITEM-IDENTITY SIGNATURE (P6F-1 fix, the trust-fingerprint's revert-detector).
+// The rendered digest is deliberately REVERT-STABLE — a byte-identical re-render
+// (delete-all + reinsert of identical plaintext) digests the same, which is correct
+// for a covenant `✓` (same meaning) but WRONG for TRUST/authorship: a peer that
+// wipes and re-types a trusted body's words has structurally REPLACED the authored
+// content and must lose the trusted line's provenance. So the trust fingerprint binds
+// the rendered digest AND this signature: the ordered CRDT identity (`client:clock:len`)
+// of the body's live (non-deleted) content items, which MOVES when the items are
+// re-seated even if the rendering is identical. It is BODY-LOCAL (only this body's
+// items), so an edit to a different body does not move it — span-precision holds.
+// The `_start` walk mirrors the reader's own guarded item walks (enclosedItemsOf).
+// ─────────────────────────────────────────────────────────────────────────────
+
+function bodyItemSignature(body: Y.XmlText): string {
+  const parts: string[] = [];
+  let item: unknown = (body as unknown as { _start: unknown })._start;
+  while (item) {
+    const it = item as {
+      id: { client: number; clock: number };
+      length: number;
+      deleted: boolean;
+      right: unknown;
+    };
+    if (!it.deleted) parts.push(`${it.id.client}:${it.id.clock}:${it.length}`);
+    item = it.right;
+  }
+  return parts.join(',');
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -1150,6 +1181,35 @@ export class CovenantDocReaderProd implements CovenantDocReader {
     const doc = this.acquire();
     if (!doc) return null; // unavailable / stalled ⇒ fail-closed
     return this.buildResolve(doc, anchor);
+  }
+
+  /**
+   * The FULL-CONTENT fingerprint of the reader's configured body (P6F-1 fix). The
+   * SAME SL-2 rendering a `✓` binds to — text + inline marks + embeds (identity and
+   * inline marks) + body/ancestor node attributes, gauntlet-proven injective — reduced
+   * to its rendered digest, BOUND with the body's live CRDT item identity
+   * ({@link bodyItemSignature}). This is what the conversation's TRUST layer fingerprints
+   * a seeded body against, so ANY meaning-bearing edit demotes an authenticated line:
+   *
+   *   - a link mark / a mention or embed insertion / a body-attr change / an in-place
+   *     text edit → moves the RENDERED DIGEST (the plaintext-only fingerprint the codex
+   *     gauntlet found could not see these);
+   *   - a delete-all + reinsert of identical plaintext (rendering unchanged) → moves the
+   *     ITEM SIGNATURE (new CRDT items), which a revert-stable digest deliberately misses.
+   *
+   * BODY-LOCAL and SYNCHRONOUS (single non-blocking poll): a mutation to a DIFFERENT
+   * body does not move it, and an unresolved body (absent share / bad path / stalled
+   * source) returns `null` — the caller treats that as a fail-closed non-match (demote),
+   * never as agreement. A hostile, unrenderable body throws out of `renderWindow`; the
+   * caller catches it and likewise demotes.
+   */
+  fullContentFingerprint(): string | null {
+    const doc = this.acquire();
+    if (!doc || !this.selection) return null;
+    const body = this.bodyAtPath(doc, this.selection.path);
+    if (!body) return null; // content share absent / path unresolved ⇒ fail-closed
+    const { fragment } = this.renderWindow(body, this.selection.start, this.selection.end);
+    return `${renderedDigestOf(fragment)}|${bodyItemSignature(body)}`;
   }
 
   // ── ASYNCHRONOUS port (deadline-bounded; the live/streaming read path, #191) ──
