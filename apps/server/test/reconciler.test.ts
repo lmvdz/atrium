@@ -32,6 +32,7 @@ const ROOM_B = 'room-b';
 
 function entry(roomId: string, roomSeq: number): LedgerEntry {
   return {
+    kind: 'event',
     seq: roomSeq,
     roomSeq,
     roomId,
@@ -96,7 +97,11 @@ describe('reconciliation delivers without a doorbell', () => {
     const h = harness();
     h.sync.mockResolvedValueOnce([entry(ROOM_A, 1)]);
     await h.reconciler.reconcile();
-    expect(h.delivered[0]?.actor).toEqual({ kind: 'human', userId: 'u1' });
+    const first = h.delivered[0];
+    expect(first?.kind === 'event' ? first.actor : undefined).toEqual({
+      kind: 'human',
+      userId: 'u1',
+    });
   });
 
   it('announces a room head that has moved past what subscribers were told', async () => {

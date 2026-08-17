@@ -134,6 +134,93 @@ const Envelope = z.object({
 /** One ledger row, as the wire carries it. */
 export type RoomEventEnvelope = z.infer<typeof Envelope>;
 
+/**
+ * A durable ledger *position* with no event — the #46 wire tombstone.
+ *
+ * The server emits this for a row whose payload it could not read back as a
+ * `RoomEvent` (a bad migration, a manual fix, a future non-participant writer;
+ * SQL runs no zod). The row is real — it holds a `room_seq`, which is this
+ * client's only cursor — but there is no event to render. The client applies the
+ * tombstone to advance its cursor **past** the bad position, so the valid rows
+ * after it are not stranded behind a hole it re-requests forever.
+ *
+ * It is the client twin of a refused row (`applied_with_issue`): journalled so
+ * `room_seq` stays a gap-free sequence and the durable cursor names the last
+ * position held, but never pushed to `room.events` because nothing happened
+ * there to show. No event is fabricated — that would be exactly the laundering
+ * #46 refuses; the tombstone renders nothing at all.
+ */
+const Tombstone = z.object({
+  roomId: z.string().min(1),
+  roomSeq: z.number().int().positive(),
+  seq: z.number().int().positive(),
+  malformed: z.literal(true),
+  /** Advisory, for diagnostics; never rendered. Defaulted for an older server. */
+  reason: z.string().default(''),
+});
+
+/**
+ * One wire position: a readable event, or a tombstone for a row that is not (#46).
+ *
+ * **`Envelope` is tried first, and the order is load-bearing (#46 round 4).**
+ * `Tombstone` is not `.strict()` — deliberately, so a newer server may add a
+ * field without a pre-parse failure discarding the journal — which means a valid
+ * envelope carrying a stray top-level `malformed: true` *also* satisfies the
+ * tombstone shape (its `event`/`issues` are simply stripped). With `Tombstone`
+ * first, zod matched that arm, dropped the real event, and skipped the row — a
+ * real event laundered into a tombstone. `Envelope` first makes the discrimination
+ * exclusive in the direction that matters: anything carrying a readable `event` is
+ * an event, full stop; the tombstone arm only ever sees an entry with no `event`
+ * (a genuine tombstone has none, so it still falls through correctly).
+ */
+const WireEntry = z.union([Envelope, Tombstone]);
+
+/**
+ * A catch-up page entry this client could not parse at all — skipped, not fatal
+ * (#46 round 3).
+ *
+ * A page is an array, and round 2 parsed it with `z.array(WireEntry)`: one entry
+ * the client cannot read failed the WHOLE `catchup` frame at `ServerFrame.safeParse`,
+ * so the page was dropped and `handleFrame`'s stall counter never ran. The client
+ * re-requested the identical page on every `head` and hammered `since` forever, in
+ * silence — a single bad entry became an infinite loop. Parsing each entry with
+ * `.catch` turns an unreadable one into this sentinel instead: the good entries in
+ * the page still apply, and because a skipped entry carries no `roomSeq` to advance
+ * the cursor past, the page makes no progress across it — which `handleFrame` reads
+ * as a stall, so `maxStalledCatchups` fires and the loop is bounded rather than
+ * infinite. (A tombstone is the graceful case, for a row the SERVER could not read;
+ * this sentinel is the last-resort case, for a row THIS client cannot read — a
+ * forward-incompatible entry from a newer server, say.)
+ */
+const SKIPPED_CATCHUP_ENTRY = { skipped: true } as const;
+type SkippedCatchupEntry = typeof SKIPPED_CATCHUP_ENTRY;
+// A readable event or tombstone wins; anything this client cannot parse falls
+// through the trailing arm to the skip sentinel (order matters — the `any` arm is
+// last, so it only catches what `Envelope`/`Tombstone` refused). `Envelope` also
+// precedes `Tombstone` for the exclusivity reason in `WireEntry`'s note (#46 r4):
+// a real event carrying a stray `malformed: true` is an event, not a tombstone.
+const CatchupEntry = z.union([
+  Envelope,
+  Tombstone,
+  z.any().transform((): SkippedCatchupEntry => SKIPPED_CATCHUP_ENTRY),
+]);
+
+/** Narrow a catch-up entry to the round-3 skip sentinel — an entry we could not read. */
+function isSkippedEntry(entry: RoomEntry | SkippedCatchupEntry): entry is SkippedCatchupEntry {
+  return 'skipped' in entry && entry.skipped === true;
+}
+
+/** A tombstone as this client holds it. */
+export type RoomTombstone = z.infer<typeof Tombstone>;
+
+/** One position this client applies: a readable event, or a tombstone (#46). */
+export type RoomEntry = RoomEventEnvelope | RoomTombstone;
+
+/** Narrow a held entry to the #46 tombstone — the one that carries no event. */
+export function isTombstone(entry: RoomEntry): entry is RoomTombstone {
+  return 'malformed' in entry && entry.malformed === true;
+}
+
 export const ServerFrame = z.discriminatedUnion('type', [
   z.object({
     type: z.literal('welcome'),
@@ -160,6 +247,14 @@ export const ServerFrame = z.discriminatedUnion('type', [
   }),
   z.object({ type: z.literal('unsubscribed'), roomId: z.string().min(1) }),
   z.object({ type: z.literal('event'), entry: Envelope }),
+  /**
+   * A malformed row on the LIVE path (#46 round 3), under its own discriminant so
+   * a live `event` frame stays a readable event. A subscriber live-at-head advances
+   * its cursor past the bad position the instant it is fanned out, instead of only
+   * recovering on the reconciler's next `head`→`since`. `applyEntry` renders it as
+   * nothing.
+   */
+  z.object({ type: z.literal('tombstone'), entry: Tombstone }),
   /**
    * "This room is at `head`" — unsolicited, from the server's reconciler.
    *
@@ -192,11 +287,17 @@ export const ServerFrame = z.discriminatedUnion('type', [
       to: z.number().int().min(0),
       head: z.number().int().min(0),
       more: z.boolean(),
-      entries: z.array(Envelope),
+      // Per-entry tolerant (#46 round 3): one unreadable entry becomes a skip
+      // sentinel rather than sinking the whole page — see `CatchupEntry`.
+      entries: z.array(CatchupEntry),
     })
-    .refine((frame) => frame.entries.every((entry) => entry.roomId === frame.roomId), {
-      message: 'a catch-up page carries an entry for a different room',
-    }),
+    .refine(
+      (frame) =>
+        frame.entries.every((entry) => isSkippedEntry(entry) || entry.roomId === frame.roomId),
+      {
+        message: 'a catch-up page carries an entry for a different room',
+      },
+    ),
   z.object({
     type: z.literal('ack'),
     commandId: z.string(),
@@ -318,6 +419,18 @@ interface PendingMessageBase {
    * been unnecessary collapses into the message that already landed.
    */
   retryable?: boolean;
+  /**
+   * The ledger position the server's `ack` assigned this send, once it has one
+   * (#46 round 3).
+   *
+   * A confirming `event` retires a pending echo by `clientMessageId`, which the
+   * event carries. A #46 tombstone carries no `clientMessageId` — there is no
+   * readable payload to carry one — so a send whose durable row turns out to be
+   * malformed would never be retired and would sit `pending` forever. Recording the
+   * assigned `roomSeq` here lets a tombstone landing at that exact position resolve
+   * the echo by position instead. Absent until the ack arrives.
+   */
+  roomSeq?: number;
 }
 
 export type PendingMessage = PendingMessageBase &
@@ -367,17 +480,26 @@ export type PendingMessage = PendingMessageBase &
  * client's `lastSeq` names an event it actually holds.
  */
 export interface RoomJournal {
-  /** Everything durably applied for this room, and the cursor that goes with it. */
-  load: (roomId: string) => { events: RoomEventEnvelope[]; lastSeq: number };
+  /**
+   * Everything durably applied for this room, and the cursor that goes with it.
+   *
+   * `events` holds every position the client walked past — folded events *and*
+   * #46 tombstones — because that is what makes the cursor meaningful. `view()`
+   * renders only the events; the tombstones are there so `room_seq` stays a
+   * gap-free sequence and the resumed cursor names a position actually held.
+   */
+  load: (roomId: string) => { events: RoomEntry[]; lastSeq: number };
   /**
    * Record one applied entry and the cursor it implies, **atomically**.
    *
    * `lastSeq` is always `entry.roomSeq`; it is a separate parameter rather than
    * derived so the contract is legible at the call site and an implementation
    * writing a compact record does not have to re-derive the client's own
-   * arithmetic. An implementation may not persist one without the other.
+   * arithmetic. An implementation may not persist one without the other. The
+   * entry may be a #46 tombstone — a position with no event — which is journalled
+   * for its cursor and never rendered.
    */
-  commit: (roomId: string, entry: RoomEventEnvelope, lastSeq: number) => void;
+  commit: (roomId: string, entry: RoomEntry, lastSeq: number) => void;
   /**
    * Throw this room's record away and start again from nothing.
    *
@@ -406,7 +528,7 @@ export interface RoomJournal {
  * one's bugs.
  */
 export function memoryJournal(): RoomJournal {
-  const rooms = new Map<string, { events: RoomEventEnvelope[]; lastSeq: number }>();
+  const rooms = new Map<string, { events: RoomEntry[]; lastSeq: number }>();
   const room = (roomId: string) => {
     let existing = rooms.get(roomId);
     if (!existing) {
@@ -520,7 +642,9 @@ function warnDegraded(roomId: string, reason: string): void {
  */
 const StoredRoom = z
   .object({
-    events: z.array(Envelope),
+    // Folded events and #46 tombstones alike: both carry a `roomSeq`, and the
+    // invariants below are stated over the position, not the payload.
+    events: z.array(WireEntry),
     lastSeq: z.number().int().min(0),
   })
   .superRefine((record, ctx) => {
@@ -678,7 +802,7 @@ export function localStorageJournal(
     }
   };
   /** Keep the newest `maxEvents`. The cursor names the last of them either way. */
-  const trim = (events: RoomEventEnvelope[]): RoomEventEnvelope[] =>
+  const trim = (events: RoomEntry[]): RoomEntry[] =>
     events.length <= maxEvents ? events : events.slice(events.length - maxEvents);
 
   /**
@@ -694,7 +818,7 @@ export function localStorageJournal(
    */
   const degrade = (
     roomId: string,
-    held: { events: RoomEventEnvelope[]; lastSeq: number },
+    held: { events: RoomEntry[]; lastSeq: number },
     reason: string,
   ): void => {
     if (degraded.has(roomId)) return;
@@ -709,7 +833,7 @@ export function localStorageJournal(
     }
   };
 
-  const readDurable = (roomId: string): { events: RoomEventEnvelope[]; lastSeq: number } => {
+  const readDurable = (roomId: string): { events: RoomEntry[]; lastSeq: number } => {
     const access = storage();
     if (!access.store) {
       // Not `{events: [], lastSeq: 0}`: "no history" is a legitimate answer that
@@ -769,7 +893,7 @@ export function localStorageJournal(
     }
   };
 
-  const readRoom = (roomId: string): { events: RoomEventEnvelope[]; lastSeq: number } => {
+  const readRoom = (roomId: string): { events: RoomEntry[]; lastSeq: number } => {
     if (degraded.has(roomId)) return fallback.load(roomId);
     // `readDurable` is the single place that decides whether a store exists and
     // says so. Asking `storage()` here as well was how the answer and the report
@@ -1138,6 +1262,21 @@ export interface RealtimeClient {
 const DEFAULT_RECONNECT = { initialDelayMs: 300, maxDelayMs: 10_000, factor: 2 };
 const DEFAULT_MAX_STALLED_CATCHUPS = 8;
 
+/**
+ * Bounded-backoff re-probe for a latched stall (#46 round 5).
+ *
+ * When a catch-up gap can't be crossed, round 4 latched it so the reconciler's
+ * ~2s `head` frame stopped re-driving the identical `since` at ~0.5 Hz. But it
+ * suppressed that re-drive *forever* — so a hole an operator later repairs was
+ * never rediscovered until reconnect. The fix keeps the hammer suppressed while
+ * still re-probing on a decaying schedule: the FIRST re-probe fires one
+ * reconcile interval past the latch, and each subsequent window doubles up to a
+ * ceiling, so a now-serveable row recovers within a few minutes without a
+ * reconnect while the steady-state request rate decays toward the cap.
+ */
+const STALL_REPROBE_BASE_MS = 4_000; // ≈ two ~2s reconcile intervals
+const STALL_REPROBE_CAP_MS = 180_000; // 3 minutes
+
 export function createRealtimeClient(options: RealtimeClientOptions): RealtimeClient {
   const now = options.now ?? (() => Date.now());
   const schedule = options.setTimeoutImpl ?? ((fn, ms) => setTimeout(fn, ms));
@@ -1160,6 +1299,24 @@ export function createRealtimeClient(options: RealtimeClientOptions): RealtimeCl
   const inFlight = new Map<string, { roomId: string; clientMessageId: string }>();
   /** Consecutive catch-up rounds that asked for a gap and got no closer to it. */
   const stalled = new Map<string, number>();
+  /**
+   * A latched stall (#46 round 4, re-shaped round 5): the `(from -> to)` gap
+   * catch-up hit the cap on and could not cross. `maxStalledCatchups` bounds the
+   * client's SELF-scheduled retries, but the reconciler's ~2s `head` frame
+   * re-drives `requestSince` unconditionally, so an un-crossable hole loops
+   * forever at ~0.5 Hz. Once latched, a head-driven `requestSince` for the
+   * identical `since` cursor (`from === room.lastSeq`) is suppressed while inside
+   * the current backoff window (`now() < nextProbeAt`); when the window elapses,
+   * exactly one re-probe is allowed and `interval` doubles toward the cap, so a
+   * hole that becomes serveable later (an operator repairs the row) is
+   * rediscovered WITHOUT a reconnect, and the loud stalled signal already fired.
+   * Cleared the moment the gap actually advances (a later catch-up crosses it, or
+   * `lastSeq` moves), on caught-up, on disconnect, and on `leave()`.
+   */
+  const stalledGap = new Map<
+    string,
+    { from: number; to: number; interval: number; nextProbeAt: number }
+  >();
 
   let socket: SocketLike | null = null;
   let status: ConnectionStatus = 'idle';
@@ -1180,7 +1337,9 @@ export function createRealtimeClient(options: RealtimeClientOptions): RealtimeCl
       // meaningful — and the room holds only the rows that took effect. A record
       // written by an older build has no `issues` on any entry and so resumes exactly
       // as it always did.
-      const resumedEvents = held.events.filter((entry) => entry.issues.length === 0);
+      const resumedEvents = held.events.filter(
+        (entry): entry is RoomEventEnvelope => !isTombstone(entry) && entry.issues.length === 0,
+      );
       // Seed the terminal set from the RESUMED events (#159 round-3, finding 4). A full
       // page reload rebuilds `room.events` straight from the journal without replaying
       // them through `applyEntry`, so the terminal wall would otherwise be empty after
@@ -1202,6 +1361,9 @@ export function createRealtimeClient(options: RealtimeClientOptions): RealtimeCl
         lastSeq: held.lastSeq,
         head: held.lastSeq,
         seenSeq: 0,
+        // `resumedEvents` (defined above) already applies the same filter
+        // `applyEntry` applies live — folded events only, excluding #46 tombstones
+        // and issue-bearing rows — and is reused to seed the #159 terminal wall.
         events: resumedEvents,
         pending: [],
         presence: {},
@@ -1256,7 +1418,7 @@ export function createRealtimeClient(options: RealtimeClientOptions): RealtimeCl
     return resolveWsUrl(config);
   }
 
-  function applyEntry(entry: RoomEventEnvelope): void {
+  function applyEntry(entry: RoomEntry): void {
     const room = view(entry.roomId);
     // Already applied. At-least-once delivery plus catch-up means a client sees
     // the same event twice routinely; applying it twice would double every
@@ -1278,6 +1440,36 @@ export function createRealtimeClient(options: RealtimeClientOptions): RealtimeCl
     // own cursor where it was, so the entry is simply re-delivered by the next
     // catch-up rather than skipped.
     journal.commit(entry.roomId, entry, entry.roomSeq);
+    // ── A malformed position is not an event either (#46, BLOCKER 1) ──────────
+    //
+    // A tombstone is a durable ledger row the server could not read back as an
+    // event. Journalled just above — so `room_seq` stays gap-free and the cursor
+    // names the last position held, exactly the reasons a refused row is
+    // journalled — but never shown and never reconciled against a pending echo:
+    // there is no event to render and nothing to confirm. It exists only to carry
+    // the cursor PAST the bad row so the valid rows after it land, instead of the
+    // client re-requesting the hole forever. No event is fabricated.
+    if (isTombstone(entry)) {
+      room.lastSeq = entry.roomSeq;
+      room.head = Math.max(room.head, entry.roomSeq);
+      // #46 round 3: if a message THIS client sent landed at this position and its
+      // durable row is the one that could not be read back, the tombstone is the
+      // only signal it will ever get — the confirming `event` that `reconcilePending`
+      // waits for is never coming. Retire the echo (matched by the `roomSeq` the ack
+      // recorded, since a tombstone carries no `clientMessageId`) as failed rather
+      // than leaving it spinning `pending` forever. Not retryable: the row is
+      // durably malformed and `clientMessageId` would dedup a resend onto it.
+      const stuck = room.pending.find(
+        (item) => item.roomSeq === entry.roomSeq && item.status === 'pending',
+      );
+      if (stuck) {
+        stuck.status = 'failed';
+        stuck.error = 'the message could not be read back from the ledger (malformed row)';
+        stuck.retryable = false;
+      }
+      changed(entry.roomId);
+      return;
+    }
     // ── A refused row is not an event that happened ──────────────────────────
     //
     // #22 r10, D4. The server appends a row whose business checks failed
@@ -1513,13 +1705,46 @@ export function createRealtimeClient(options: RealtimeClientOptions): RealtimeCl
       case 'event':
         applyEntry(frame.entry);
         return;
+      case 'tombstone':
+        // #46 round 3: a malformed row on the live path. `applyEntry` advances the
+        // cursor past it and renders nothing — the same handling the catch-up page
+        // gives a tombstone, so live and catch-up agree.
+        applyEntry(frame.entry);
+        return;
       case 'head': {
         // The server's reconciler saying where the room actually is, with no
         // frame required to have arrived. Same arithmetic as everywhere else:
         // behind the head means ask for the gap.
         const room = view(frame.roomId);
         room.head = Math.max(room.head, frame.head);
-        if (room.lastSeq < room.head) requestSince(frame.roomId);
+        if (room.lastSeq < room.head) {
+          // #46 round 4/5: a latched stall throttles the identical head-driven
+          // re-request. `maxStalledCatchups` caps the catch-up loop's own
+          // retries, but this ~2s head frame would otherwise re-drive the exact
+          // same `since(lastSeq)` forever on a hole catch-up already gave up on.
+          // The latch is keyed on the `since` cursor (`from`): while `lastSeq`
+          // sits where the stall latched, the request is byte-identical.
+          const latch = stalledGap.get(frame.roomId);
+          if (latch && latch.from === room.lastSeq) {
+            // Round 5: NOT a permanent suppression. Round 4 muted this re-drive
+            // forever, so a hole an operator later repairs was never rediscovered
+            // until reconnect. Instead, suppress only INSIDE the current backoff
+            // window; once it elapses, allow exactly one re-probe and grow the
+            // window (doubling, capped) so a now-serveable row recovers without a
+            // reconnect while the steady-state rate decays toward the cap. The
+            // loud stalled signal already fired at the cap; this stays quiet.
+            if (now() < latch.nextProbeAt) {
+              // throttled — inside the current backoff window, stay silent.
+            } else {
+              const interval = Math.min(latch.interval * 2, STALL_REPROBE_CAP_MS);
+              stalledGap.set(frame.roomId, { ...latch, interval, nextProbeAt: now() + interval });
+              requestSince(frame.roomId);
+            }
+          } else {
+            if (latch) stalledGap.delete(frame.roomId);
+            requestSince(frame.roomId);
+          }
+        }
         // Answered whether or not there was a gap. "I am at 37, you said 40" is
         // as useful to the server as "I have 40": both retire nothing until the
         // cursor reaches the head, and an unanswered frame is the server's cue
@@ -1536,7 +1761,25 @@ export function createRealtimeClient(options: RealtimeClientOptions): RealtimeCl
         // moved backwards would make the loop below ask for a gap that has
         // already been filled.
         room.head = Math.max(room.head, frame.head);
-        for (const entry of frame.entries) applyEntry(entry);
+        let skipped = 0;
+        for (const entry of frame.entries) {
+          // #46 round 3: an entry this client could not parse at all. Skipped —
+          // it carries no `roomSeq` to advance past — and reported, never applied.
+          // The hole it leaves is what the stall counter below turns into a bounded
+          // `maxStalledCatchups` failure instead of an infinite silent `since`.
+          if (isSkippedEntry(entry)) {
+            skipped += 1;
+            continue;
+          }
+          applyEntry(entry);
+        }
+        if (skipped > 0) {
+          fail(
+            `catch-up for room "${frame.roomId}" contained ${skipped} entr${
+              skipped === 1 ? 'y' : 'ies'
+            } this client could not read; they were skipped`,
+          );
+        }
 
         // The loop condition is this client's own arithmetic: am I at the head
         // I was told about? `more` is taken as a hint on top, not as the
@@ -1544,20 +1787,41 @@ export function createRealtimeClient(options: RealtimeClientOptions): RealtimeCl
         // `more: false` while `to < head`, and a client that believed it.
         if (room.lastSeq < room.head || frame.more) {
           const progressed = room.lastSeq > before;
+          // The gap advanced — any latch on the old cursor is obsolete (#46 r4).
+          if (progressed) stalledGap.delete(frame.roomId);
           const rounds = progressed ? 0 : (stalled.get(frame.roomId) ?? 0) + 1;
           stalled.set(frame.roomId, rounds);
           if (rounds >= maxStalledCatchups) {
-            // The server keeps naming a head it will not send. Stop asking and
-            // say so: an unbounded loop here would be a client hammering a room
-            // it can never finish, in silence.
-            fail(
-              `catch-up for room "${frame.roomId}" stalled at ${room.lastSeq} of ${room.head} after ${rounds} rounds with no progress`,
-            );
+            // #46 round 4/5: latch the un-crossable gap so the reconciler's ~2s
+            // `head` frame stops re-driving the identical `since` at 0.5 Hz —
+            // but on a bounded backoff (head handler / above), not forever.
+            //
+            // Only the FIRST latch on this cursor opens the window and emits the
+            // loud stalled signal. A re-probe answer that still can't cross
+            // re-enters here with the same `from` — it must NOT reset the window
+            // the head handler is growing (that would pin the re-probe at the
+            // base interval and re-hammer), nor re-spam the error every ~2s.
+            const existing = stalledGap.get(frame.roomId);
+            if (!existing || existing.from !== room.lastSeq) {
+              // The server keeps naming a head it will not send. Stop asking on
+              // the tight loop and say so: an unbounded loop here would be a
+              // client hammering a room it can never finish, in silence.
+              fail(
+                `catch-up for room "${frame.roomId}" stalled at ${room.lastSeq} of ${room.head} after ${rounds} rounds with no progress`,
+              );
+              stalledGap.set(frame.roomId, {
+                from: room.lastSeq,
+                to: room.head,
+                interval: STALL_REPROBE_BASE_MS,
+                nextProbeAt: now() + STALL_REPROBE_BASE_MS,
+              });
+            }
           } else {
             requestSince(frame.roomId);
           }
         } else {
           stalled.delete(frame.roomId);
+          stalledGap.delete(frame.roomId);
           // Caught up, and the server is told so. Without this the server would
           // keep repeating `head` every reconciliation pass for a client that
           // has everything — correct, and noisy forever.
@@ -1567,7 +1831,16 @@ export function createRealtimeClient(options: RealtimeClientOptions): RealtimeCl
         return;
       }
       case 'ack': {
+        const dispatched = inFlight.get(frame.commandId);
         inFlight.delete(frame.commandId);
+        // #46 round 3: remember the position the server assigned this send, so a
+        // tombstone that lands there (its durable row could not be read back) can
+        // retire the optimistic echo the confirming event never will.
+        if (dispatched && frame.roomSeq !== null) {
+          const room = view(dispatched.roomId);
+          const item = room.pending.find((p) => p.clientMessageId === dispatched.clientMessageId);
+          if (item) item.roomSeq = frame.roomSeq;
+        }
         if (frame.issues.length > 0) {
           fail(`the server accepted the command with issues: ${frame.issues.join('; ')}`);
         }
@@ -1706,6 +1979,9 @@ export function createRealtimeClient(options: RealtimeClientOptions): RealtimeCl
       // `sessions.progress` snapshot, reread on the next `projection_changed`.
       room.progress = {};
       stalled.delete(room.roomId);
+      // Drop any latched stall on disconnect (#46 r4): a reconnect re-`subscribe`s
+      // and re-reads from scratch, and the server may have fixed the row meanwhile.
+      stalledGap.delete(room.roomId);
       changed(room.roomId);
     }
   }
@@ -1811,6 +2087,11 @@ export function createRealtimeClient(options: RealtimeClientOptions): RealtimeCl
     leave: (roomId) => {
       send({ type: 'unsubscribe', roomId });
       rooms.delete(roomId);
+      // #46 round 5: drop this room's per-room reconciler bookkeeping too, or a
+      // rejoin inherits a stale latch/counter keyed on a cursor it no longer has.
+      // (The shipped disconnect path clears these; an explicit `leave()` didn't.)
+      stalled.delete(roomId);
+      stalledGap.delete(roomId);
     },
     room: (roomId) => view(roomId),
     rooms: () => [...rooms.keys()],

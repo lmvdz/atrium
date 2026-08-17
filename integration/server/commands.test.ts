@@ -16,6 +16,7 @@ import {
 import { and, count, eq, sql } from 'drizzle-orm';
 import { afterAll, afterEach, beforeEach, describe, expect, it } from 'vitest';
 import type { Command, ProposalDraft } from '../../apps/server/src/commands.js';
+import { isFoldedEntry } from '../../apps/server/src/ledger.js';
 import { projectRoomEvent } from '../../apps/server/src/projections.js';
 import {
   openDatabase,
@@ -117,14 +118,14 @@ async function ledgerCount(): Promise<number> {
  * `undefined is not an object` three lines later.
  */
 async function lastEvent<T>(roomId: string): Promise<T> {
-  const entry = (await server.ledger.since(roomId, 0)).at(-1);
+  const entry = (await server.ledger.since(roomId, 0)).filter(isFoldedEntry).at(-1);
   if (!entry) throw new Error(`room "${roomId}" has no events`);
   return entry.event as unknown as T;
 }
 
 /** The first event in a room, same reasoning. */
 async function firstEvent<T>(roomId: string): Promise<T> {
-  const [entry] = await server.ledger.since(roomId, 0);
+  const [entry] = (await server.ledger.since(roomId, 0)).filter(isFoldedEntry);
   if (!entry) throw new Error(`room "${roomId}" has no events`);
   return entry.event as unknown as T;
 }
@@ -206,7 +207,7 @@ describe('send_message', () => {
     const ack = await alice.command(send(room.roomId, 'hello room', 'client-1'));
     expect(ack).toMatchObject({ type: 'ack', roomSeq: 1, seq: 1 });
 
-    const entries = await server.ledger.since(room.roomId, 0);
+    const entries = (await server.ledger.since(room.roomId, 0)).filter(isFoldedEntry);
     expect(entries).toHaveLength(1);
     const event = entries[0]?.event;
     expect(event?.type).toBe('message_posted');
@@ -1185,7 +1186,9 @@ describe('the proposal → acceptance boundary, over the wire', () => {
     const ack = await alice.command(answerCommand);
     expect(ack).toMatchObject({ type: 'ack', roomSeq: before + 3 });
     await bob.waitFor((frame) => frame.type === 'event' && frame.entry.roomSeq === before + 3);
-    const batch = (await server.ledger.since(room.roomId, before)).slice(0, 3);
+    const batch = (await server.ledger.since(room.roomId, before))
+      .filter(isFoldedEntry)
+      .slice(0, 3);
     expect(batch.map((entry) => entry.event.type)).toEqual([
       'message_posted',
       'object_accepted',
@@ -1273,7 +1276,7 @@ describe('the proposal → acceptance boundary, over the wire', () => {
         eventId: left.type === 'ack' ? left.eventId : undefined,
       });
       expect(await ledgerCount()).toBe(before + 3);
-      const rows = await server.ledger.since(room.roomId, 0);
+      const rows = (await server.ledger.since(room.roomId, 0)).filter(isFoldedEntry);
       expect(rows.slice(-3).map((entry) => entry.event.type)).toEqual([
         'message_posted',
         'object_accepted',
