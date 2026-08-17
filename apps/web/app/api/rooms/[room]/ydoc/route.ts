@@ -18,7 +18,7 @@
 
 import { attemptWithIp, clientIp, createThrottle, type Throttle } from '@atrium/auth';
 import { headers } from 'next/headers';
-import { readBodyBounded } from '@/lib/bounded-body';
+import { BodyReadTimeoutError, readBodyBounded } from '@/lib/bounded-body';
 import { db } from '@/lib/db';
 import { proxyStrategy } from '@/lib/env';
 import { currentSession } from '@/lib/session';
@@ -99,12 +99,23 @@ export async function PUT(
   // the cap on the ACTUAL bytes regardless of the header — a chunked request
   // carries no Content-Length, and a declared one can lie. `readBodyBounded`
   // aborts the read the moment the running total crosses the cap, so an
-  // unbounded body is never buffered whole.
+  // unbounded body is never buffered whole; it also aborts a body that has not
+  // finished within its read deadline, so a trickle/stalled body cannot pin this
+  // handler and its file descriptor open (the rate limiter caps how many reads
+  // START per minute, not how many run at once).
   const declared = request.headers.get('content-length');
   if (declared !== null && Number(declared) > MAX_OP_BYTES) {
     return refuse(413, 'that document update is too large');
   }
-  const body = await readBodyBounded(request.body, MAX_OP_BYTES);
+  let body: Uint8Array | null;
+  try {
+    body = await readBodyBounded(request.body, MAX_OP_BYTES);
+  } catch (error) {
+    if (error instanceof BodyReadTimeoutError) {
+      return refuse(408, 'that document update took too long to send');
+    }
+    throw error;
+  }
   if (body === null) {
     return refuse(413, 'that document update is too large');
   }

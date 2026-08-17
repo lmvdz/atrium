@@ -1,5 +1,5 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
-import { readBodyBounded } from '@/lib/bounded-body';
+import { BodyReadTimeoutError, readBodyBounded } from '@/lib/bounded-body';
 
 /**
  * THE WRITE DOOR'S BODY CAP (#202, E2 fix) — enforced on the ACTUAL read.
@@ -73,6 +73,59 @@ describe('readBodyBounded', () => {
     const { stream } = countingStream(1, CAP);
     const body = await readBodyBounded(stream, CAP);
     expect(body?.byteLength).toBe(CAP);
+  });
+});
+
+/**
+ * A stream that emits `prefixChunks` small chunks and then STALLS forever — its
+ * `pull` returns a promise that never resolves, so `reader.read()` would await
+ * indefinitely. This is the trickle/slowloris body: never over the size cap,
+ * never `done`. Only the read DEADLINE can end it. `cancel()` records that the
+ * reader was released.
+ */
+function stallingStream(prefixChunks: number, chunkBytes: number) {
+  const counter = { pulled: 0, cancelled: false };
+  let emitted = 0;
+  const stream = new ReadableStream<Uint8Array>({
+    pull(controller) {
+      counter.pulled += 1;
+      if (emitted < prefixChunks) {
+        emitted += 1;
+        controller.enqueue(new Uint8Array(chunkBytes));
+        return;
+      }
+      // Never resolve, never close: the deadline must be what ends this read.
+      return new Promise<void>(() => {});
+    },
+    cancel() {
+      counter.cancelled = true;
+    },
+  });
+  return { stream, counter };
+}
+
+describe('readBodyBounded — the read deadline (slowloris guard, #202 round 2)', () => {
+  it('aborts a stalled body past the deadline without unbounded accumulation', async () => {
+    // Emits 2 KiB (well under the cap) then never completes. With a 50 ms
+    // deadline the read must abort, not await the never-arriving rest.
+    const { stream, counter } = stallingStream(2, 1024);
+    const started = Date.now();
+
+    await expect(readBodyBounded(stream, CAP, 50)).rejects.toBeInstanceOf(
+      BodyReadTimeoutError,
+    );
+
+    // It ended near the deadline, not by draining the (infinite) body.
+    expect(Date.now() - started).toBeLessThan(2000);
+    expect(counter.cancelled).toBe(true); // the reader/stream was released
+    // Only the finite prefix was ever pulled — no unbounded accumulation.
+    expect(counter.pulled).toBeLessThan(5);
+  });
+
+  it('does not abort a body that finishes within the deadline', async () => {
+    const { stream } = countingStream(3, 1024);
+    const body = await readBodyBounded(stream, CAP, 1000);
+    expect(body?.byteLength).toBe(3 * 1024);
   });
 });
 

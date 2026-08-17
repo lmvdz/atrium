@@ -46,12 +46,15 @@
  *
  * Rate limiting is the door's job (in-process, per writer and per IP, reusing the
  * proxy-hops plumbing) — a client cannot rate-limit itself honestly. What this
- * client does is FAIL SAFELY: `documentRetryHandler` never reports a failed send
- * as landed, so the batch is preserved on any refusal — re-sent on reconnect
- * after a transient refusal (429, 5xx, a dropped connection), inert after a
- * permanent one (401/403/400/413) because the disconnect stops a member whose
- * access was revoked mid-session from hammering a door that will only ever refuse
- * them. See `documentRetryHandler` below for why `false`, not `true`, is safe.
+ * client does on a failed send is the MINIMUM safe thing:
+ * `documentRetryHandler` returns `false`, which makes y-electric restore the
+ * in-memory batch into `pendingChanges` and disconnect, so a refused write is
+ * not immediately dropped and a revoked member stops hammering a door that will
+ * only ever refuse them. That is NOT at-least-once delivery. y-electric advances
+ * its resume baseline PAST the failed bytes and reconnects nobody (see
+ * `documentRetryHandler` below for the exact source line), so correct durable
+ * delivery — reconnecting, re-sending the restored pending, and not trusting a
+ * post-failure resume state — is unbuilt here and owned by E4 (#204).
  *
  * IMPORTANT — the durable stream carries CONVERSATION CONTENT ONLY. The covenant
  * ledger stays the gated Postgres store, synced read-only (#181); a `✓` is never
@@ -96,14 +99,31 @@ const sendFetch: typeof fetch = (input, init) =>
  * handler is only ever called from `send()`'s catch — i.e. the write did not land
  * — so `true` is never honest here.
  *
- * Returning `false` is the correct answer for every failure: it restores the
- * batch into `pendingChanges` and disconnects. On a transient failure (429, 5xx,
- * a dropped connection) the retained batch is re-sent when the provider
- * reconnects — the update is preserved, not lost. On a permanent one
- * (401/403/400/413) the disconnect is the point: a revoked member stops
- * hammering a door that will only ever refuse them, and the retained batch is
- * inert because nothing reconnects. Either way the update is never reported
- * landed when it was not.
+ * Returning `false` is therefore the only non-lossy answer AT THIS LAYER: it
+ * restores the batch into `pendingChanges` and disconnects, so the bytes survive
+ * in memory and a revoked member stops hammering a door that will only ever
+ * refuse them. `false`, not `true`, is what we return on every failure.
+ *
+ * But `false` does NOT get the update delivered, and two facts in the SAME
+ * `sendOperations()` make that plain:
+ *
+ *   1. After the send loop it runs UNCONDITIONALLY (~382-383):
+ *        this.resumeState.stableStateVector = Y.encodeStateVector(this.doc)
+ *        this.emit(`resumeState`, [this.resumeState])
+ *      The doc already holds the failed bytes, so the emitted resume baseline
+ *      advances PAST them — anyone who persists that resumeState and rebuilds a
+ *      provider from it computes ZERO pending for those bytes and never re-sends
+ *      them. The resume signal reports the update landed when it did not.
+ *   2. `false` calls `disconnect()`, and NOTHING here reconnects — there is no
+ *      reconnect loop in y-electric@0.1.52. The batch restored into
+ *      `pendingChanges` only re-sends if the app happens to call `connect()`
+ *      again on this same in-memory instance before it is destroyed; a fresh
+ *      instance resumed from the emitted state (the durable path) drops it.
+ *
+ * So this handler buys back-pressure and in-memory retention, not durability.
+ * Correct at-least-once delivery — reconnecting, re-sending the restored
+ * pending, and NOT trusting a post-failure resumeState — is unbuilt here and is
+ * required of E4 (#204). Do not read `false` as "the update is safe".
  */
 const documentRetryHandler: SendErrorRetryHandler = async () => false;
 
@@ -183,7 +203,9 @@ export function electricConversationTransport(
           sendUrl: config.sendUrl,
           // y-electric's documented column: the update bytea lives in `op`.
           getUpdateFromRow: (row) => row.op,
-          // Back off on a transient refusal, give up on a permanent one (#202).
+          // Return false on any failed send: restore the in-memory batch and
+          // disconnect. This is back-pressure, not durable delivery — see
+          // `documentRetryHandler` above; at-least-once is E4's (#204).
           sendErrorRetryHandler: documentRetryHandler,
         },
         // Carry the session cookie on every write, so the door can attribute it.
