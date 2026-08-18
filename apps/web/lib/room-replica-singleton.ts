@@ -1,5 +1,5 @@
 import 'server-only';
-import { listCovenantAnchorObjectIds, loadCovenantAnchor } from '@atrium/db';
+import { listCovenantAnchorObjectIds, loadCovenantAnchor, upsertCovenantStatus } from '@atrium/db';
 import { webCovenantReadAuthority } from './covenant-read';
 import { readerForLiveDoc } from './covenant-reader';
 import { db } from './db';
@@ -43,6 +43,18 @@ export function roomReplicaManager(): RoomReplicaManager {
         authority,
         // AUTHORITATIVE certified set from the ledger, not a caller list (Fix 1).
         loadCertifiedObjectIds: () => listCovenantAnchorObjectIds(db(), { roomId }),
+        // PROJECT every recompute to the durable read-only covenant_status table (E6,
+        // #206), as the OWNER/server path — a client can never author a verdict
+        // (migration 0056 REVOKEs client writes). Fire-and-forget and fail-safe: a
+        // persistence error must not break DETECT, so the promise is caught and
+        // swallowed (the in-process draft ledger + read-path overlay stay the
+        // load-bearing `~`; this table is the durable mirror clients sync).
+        onVerdict: (objectId, status) => {
+          void upsertCovenantStatus(db(), { roomId, objectId, status }).catch(() => {
+            // Projection write failed (transient DB error, evicted room). The verdict
+            // still stands in-process; the next recompute re-upserts it.
+          });
+        },
       });
     },
   });

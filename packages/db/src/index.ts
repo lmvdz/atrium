@@ -7,4 +7,5 @@
 export * from './auth-schema.js';
 export * from './client.js';
 export * from './covenant-anchors.js';
+export * from './covenant-status.js';
 export * from './schema.js';

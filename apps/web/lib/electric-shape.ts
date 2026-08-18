@@ -17,13 +17,22 @@ import 'server-only';
  * The two tables a room's live document is made of, and the only tables the
  * proxy will ever name.
  *
- * Electric's publication (migration 0053) is the second, independent copy of
- * this list, enforced by Postgres — a caller who somehow got past this set would
+ * Electric's publication (migrations 0053 + 0056) is the second, independent copy
+ * of this list, enforced by Postgres — a caller who somehow got past this set would
  * still be refused by the database, which answers `503 … missing from the
  * publication … and the ELECTRIC_MANUAL_TABLE_PUBLISHING setting prevents
  * Electric from adding it`. Two mechanisms, neither relying on the other.
+ *
+ * `covenant_status` (#206, E6) joins the two ydoc tables here: it is the READ-ONLY
+ * projection of the server's covenant verdict, scoped by the SAME `room = $1`
+ * predicate (its room column is named `room` for exactly that reason) and REVOKEd to
+ * clients so a synced verdict can never be client-authored (migration 0056).
  */
-export const SHAPE_TABLES: ReadonlySet<string> = new Set(['ydoc_updates', 'ydoc_awareness']);
+export const SHAPE_TABLES: ReadonlySet<string> = new Set([
+  'ydoc_updates',
+  'ydoc_awareness',
+  'covenant_status',
+]);
 
 /**
  * Electric's sync-protocol cursor parameters — everything a legitimate client

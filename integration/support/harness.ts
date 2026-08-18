@@ -54,6 +54,12 @@ const APP_TABLES = [
   // into the next test's document.
   'ydoc_updates',
   'ydoc_awareness',
+  // The E6 covenant-verdict projection (#206). Named explicitly for the same reason
+  // as the two ydoc tables above: it cascades from `rooms` (and from `accepted_objects`)
+  // today, and a table cleared only as somebody else's cascade is one FK refactor away
+  // from surviving a reset silently — which here would leak one test's verdicts into
+  // the next test's projection.
+  'covenant_status',
   'session_signals',
   'session_subscriptions',
   // The funded-arm claims (#128). Named for the same reason the two above are:

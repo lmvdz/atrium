@@ -138,14 +138,36 @@ describe('the cursor parameters are an allowlist, not a denylist', () => {
 });
 
 describe('the tables the proxy serves', () => {
-  it('is exactly the document stream and its presence table', () => {
-    expect([...SHAPE_TABLES].sort()).toEqual(['ydoc_awareness', 'ydoc_updates']);
+  it('is the document stream, its presence table, and the covenant-status projection', () => {
+    // `covenant_status` (#206, E6) is the read-only verdict projection, scoped by the
+    // same `room = $1` predicate and REVOKEd to clients (migration 0056).
+    expect([...SHAPE_TABLES].sort()).toEqual([
+      'covenant_status',
+      'ydoc_awareness',
+      'ydoc_updates',
+    ]);
   });
 
   it('does not include the ledger, which is the covenant’s own store', () => {
-    // Belt and braces with the publication (migration 0053): a `✓` is a row in
-    // the gated Postgres ledger and never travels on the sync wire.
+    // Belt and braces with the publication (migrations 0053/0056): a HUMAN `✓` is a
+    // row in the gated Postgres ledger (`covenant_anchors`) and never travels on the
+    // sync wire — only its SERVER-DERIVED verdict does, via `covenant_status`.
     expect(SHAPE_TABLES.has('core_events')).toBe(false);
     expect(SHAPE_TABLES.has('covenant_anchors')).toBe(false);
+  });
+
+  it('composes the pinned room predicate for the covenant-status shape too', () => {
+    // The projection scopes on a `room` column of that exact name, so the same
+    // server-pinned `where room = $1` composition serves it — no per-table branch.
+    const url = buildShapeTarget({
+      upstream: UPSTREAM,
+      table: 'covenant_status',
+      room: ROOM,
+      incoming: new URLSearchParams(`where=true+OR+1%3D1&params%5B1%5D=${OTHER}`),
+      secret: 'shh',
+    });
+    expect(url.searchParams.get('table')).toBe('covenant_status');
+    expect(url.searchParams.get('where')).toBe('room = $1');
+    expect(url.searchParams.get('params[1]')).toBe(ROOM);
   });
 });

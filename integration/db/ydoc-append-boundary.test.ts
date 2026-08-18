@@ -103,15 +103,26 @@ describe('the sync fabric is standing (#201 acceptance)', () => {
    * 1.7.11, which answers `503 … missing from the publication … and Electric
    * lacks privileges to add it`.
    *
-   * The negative is the half that matters: naming the two tables proves the
+   * The negative is the half that matters: naming the published tables proves the
    * shape works, and `core_events` being absent proves the ceiling is low.
+   *
+   * `covenant_status` (#206, E6) joined the publication in migration 0056 — the E6
+   * read-only verdict projection syncs over the same fabric. The human-`✓` ledger
+   * (`covenant_anchors`) is still absent: only the SERVER-DERIVED verdict travels the
+   * wire, never the signature itself.
    */
-  it('publishes exactly the two document tables to Electric, and nothing else', async () => {
+  it('publishes exactly the document + verdict tables to Electric, and nothing else', async () => {
     const rows = await handle.db.execute<{ tablename: string }>(
       sql`SELECT tablename FROM pg_publication_tables
           WHERE pubname = 'electric_publication_default' ORDER BY tablename`,
     );
-    expect(rows.map((row) => row.tablename)).toEqual(['ydoc_awareness', 'ydoc_updates']);
+    expect(rows.map((row) => row.tablename)).toEqual([
+      'covenant_status',
+      'ydoc_awareness',
+      'ydoc_updates',
+    ]);
+    expect(rows.map((row) => row.tablename)).not.toContain('covenant_anchors');
+    expect(rows.map((row) => row.tablename)).not.toContain('core_events');
   });
 
   /**

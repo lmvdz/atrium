@@ -133,6 +133,22 @@ export interface RoomDriftSweepOptions {
    * synchronous pass could not yet know (never removes coverage mid-tick).
    */
   readonly loadCertifiedObjectIds: () => Promise<Iterable<string>>;
+  /**
+   * PROJECT the verdict on every recompute (E6, #206). Called from {@link
+   * RoomDriftSweep.recordVerdict} with the DEFINITIVE, generation-current status the
+   * sweep just folded for an object — `ok` (the human `✓` still resolves) or
+   * `drift`/`unresolved` (a machine `~`). Production wires this to
+   * `upsertCovenantStatus`, so the durable `covenant_status` table (the read-only
+   * Electric projection) tracks the sweep as the OWNER/server path — a client can
+   * never author a verdict (migration 0056 REVOKEs client writes).
+   *
+   * Fire-and-forget and FAIL-SAFE: the sweep does not await it and a persistence
+   * failure must not break DETECT (the in-process draft ledger and the read-path
+   * overlay remain the load-bearing `~` signals; the projection is the durable mirror).
+   * Only ever called under the current sweep generation, so a superseded compute never
+   * projects a stale verdict.
+   */
+  readonly onVerdict?: (objectId: string, status: CovenantReadStatus) => void;
   /** The server clock stamped on a stale draft. Defaults to `() => new Date().toISOString()`. */
   readonly now?: () => string;
 }
@@ -145,6 +161,7 @@ export class RoomDriftSweep {
   private readonly doc: Y.Doc;
   private readonly authority: CovenantReadAuthority;
   private readonly loadCertifiedObjectIds: () => Promise<Iterable<string>>;
+  private readonly onVerdict?: (objectId: string, status: CovenantReadStatus) => void;
   private readonly now: () => string;
 
   /** The in-process stale-draft ledger: object → its (frozen) machine `~` draft. */
@@ -205,6 +222,7 @@ export class RoomDriftSweep {
     this.doc = options.doc;
     this.authority = options.authority;
     this.loadCertifiedObjectIds = options.loadCertifiedObjectIds;
+    this.onVerdict = options.onVerdict;
     this.now = options.now ?? (() => new Date().toISOString());
   }
 
@@ -445,6 +463,11 @@ export class RoomDriftSweep {
   private recordVerdict(objectId: string, status: CovenantReadStatus, generation: number): void {
     // Generation guard: only the LATEST sweep's resolve for this object may fold.
     if ((this.draftGeneration.get(objectId) ?? 0) !== generation) return;
+    // PROJECT the definitive, generation-current verdict to the durable read-only
+    // covenant_status table (E6, #206). Fire-and-forget and fail-safe — see onVerdict's
+    // docblock. Done here, under the generation guard, so a superseded compute never
+    // projects a stale verdict; the in-process ledger below stays the load-bearing `~`.
+    this.onVerdict?.(objectId, status);
     if (status === 'ok') {
       this.drafts.delete(objectId);
       // POSITIVELY confirm swept-clean (E7, #199 Fix 3): the read-path overlay may now

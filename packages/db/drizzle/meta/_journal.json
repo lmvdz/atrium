@@ -393,6 +393,13 @@
       "when": 1789036800000,
       "tag": "0055_the_document_stream_carries_a_monotone_sequence",
       "breakpoints": true
+    },
+    {
+      "idx": 56,
+      "version": "7",
+      "when": 1789123200000,
+      "tag": "0056_the_covenant_verdict_is_a_read_only_projection",
+      "breakpoints": true
     }
   ]
 }

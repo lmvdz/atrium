@@ -365,6 +365,19 @@ export const principalKind = pgEnum('principal_kind', ['human', 'agent']);
  */
 export const ydocWriterKind = pgEnum('ydoc_writer_kind', ['human', 'agent', 'system']);
 
+/**
+ * The three states a room's server-derived covenant verdict can be projected in
+ * (#206, E6). These are exactly `@atrium/core`'s `CovenantReadStatus` — `ok` is a
+ * standing human `✓` that still resolves to its certified bytes; `drift` is a `✓`
+ * whose content moved (the machine's `~`); `unresolved` is a span the anchor could
+ * not be located against (fail-closed to `~`). The projection stores the FULL
+ * status rather than a `✓`/`~` bit so a reader can tell a drifted covenant from an
+ * unresolvable one; the glyph collapses `drift`/`unresolved` to `~` at the surface.
+ * A separate enum from `ydoc_writer_kind` / `actor_kind` because its vocabulary is
+ * a read VERDICT, not a principal.
+ */
+export const covenantStatusKind = pgEnum('covenant_status_kind', ['ok', 'drift', 'unresolved']);
+
 /** Typed payload union stored in `accepted_objects.payload` / `proposals.payload`. */
 export type ObjectPayload =
   | DecisionPayload
@@ -2637,6 +2650,86 @@ export const ydocAwareness = pgTable(
     index('ydoc_awareness_room_idx').on(t.room, t.updated),
     check('ydoc_awareness_client_id_not_blank', sql`length(${t.clientId}) > 0`),
     check('ydoc_awareness_op_not_empty', sql`octet_length(${t.op}) > 0`),
+  ],
+);
+
+/**
+ * THE COVENANT-STATUS PROJECTION (#206, E6) — the durable, read-only mirror of the
+ * SERVER's covenant verdict for every certified object in a room, synced to clients
+ * via a per-room Electric shape exactly like `ydoc_updates`.
+ *
+ * The verdict SOURCE is the already-built server-side drift sweep (`room-drift-sweep`
+ * → the fail-closed read authority); E6 does NOT compute drift — it PROJECTS what the
+ * sweep decides so a client can render `✓`/`~` from a synced row rather than a
+ * server-baked SSR map + `router.refresh()`. The server (the table OWNER) upserts a
+ * row on every recompute (`upsertCovenantStatus`); a client can never author one.
+ *
+ * ## THE WRITE BOUNDARY — a projection nobody but the server may author
+ *
+ * A `✓`/`~` here is the covenant's server-derived reading of a human signature. If a
+ * client could write this table it could paint a `✓` over content a human never
+ * vouched for, or hide a `~` the sweep raised — the exact authorship-blindness the
+ * whole DETECT arm exists to close. So migration 0056 REVOKEs INSERT/UPDATE/DELETE
+ * from PUBLIC and from every application role (the 0053/0004 core_events-SELECT loop),
+ * granting them SELECT only — there is no client/app WRITE DOOR at all (unlike
+ * `ydoc_updates`, whose members legitimately append through a function). The only
+ * writer is the table OWNER, which is the server process in every deployment this repo
+ * ships; the durable app-as-non-owner boundary is #208's, and the REVOKE/role
+ * semantics on this covenant-authority table are DRAFTED for Lars's ratification.
+ *
+ * ## Why the room column is `room`, not `room_id`
+ *
+ * The Electric shape proxy pins its predicate as `where room = $1`
+ * (`apps/web/lib/electric-shape.ts` / the `/electric/v1/shape` route), the SAME
+ * predicate the two ydoc tables use — so the projection scopes on a `room` column of
+ * that exact name. `covenant_anchors` (the human-`✓` ledger, never synced) spells it
+ * `room_id`; this table is on the sync wire, so it takes the wire's column name.
+ */
+export const covenantStatus = pgTable(
+  'covenant_status',
+  {
+    /**
+     * The room whose verdict this row projects — the shape's whole predicate
+     * (`room = $1`). A `uuid` REFERENCES `rooms` ON DELETE CASCADE, exactly as the
+     * ydoc tables scope, so a deleted room's verdicts never outlive it.
+     */
+    room: uuid('room')
+      .notNull()
+      .references(() => rooms.id, { onDelete: 'cascade' }),
+    /** The accepted object whose covenant `✓`/`~` this row carries. */
+    objectId: uuid('object_id').notNull(),
+    /**
+     * The server's verdict, verbatim from the drift sweep's read authority
+     * (`CovenantReadStatus`). `ok` ⇒ `✓`; `drift`/`unresolved` ⇒ `~`.
+     */
+    status: covenantStatusKind('status').notNull(),
+    /**
+     * A per-row MONOTONE token bumped on every upsert (`generation + 1`), so a client
+     * folding out-of-order Electric deliveries can keep the newest verdict for a span
+     * and discard a stale one. Not a global sequence — it only has to be monotone per
+     * `(room, object_id)`, which the upsert's `generation + 1` guarantees.
+     */
+    generation: bigint('generation', { mode: 'number' }).notNull().default(1),
+    /** When the server last recomputed this verdict (server clock). */
+    updatedAt: timestamp('updated_at', { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [
+    /** One verdict row per certified span; the upsert REPLACES it on recompute. */
+    primaryKey({ name: 'covenant_status_pk', columns: [t.room, t.objectId] }),
+    /**
+     * Composite, like every reference out of a covenant row: the span is in THIS room,
+     * and is a real accepted object. ON DELETE CASCADE so a removed object drops its
+     * projected verdict (a `~`/`✓` over a span that no longer exists is meaningless).
+     */
+    foreignKey({
+      name: 'covenant_status_object_same_room_fk',
+      columns: [t.room, t.objectId],
+      foreignColumns: [acceptedObjects.roomId, acceptedObjects.id],
+    }).onDelete('cascade'),
+    /** The shape's initial snapshot scans `room = $1`; this index is that read path. */
+    index('covenant_status_room_idx').on(t.room),
+    /** The generation is a positive, monotone token — it starts at 1 and only grows. */
+    check('covenant_status_generation_positive', sql`${t.generation} >= 1`),
   ],
 );
 
