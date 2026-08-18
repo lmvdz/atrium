@@ -53,7 +53,13 @@
  * ═════════════════════════════════════════════════════════════════════════ */
 
 import type { Array as YArray, XmlFragment as YXmlFragment } from 'yjs';
-import { Doc as YDoc, XmlElement as YXmlElement, XmlText as YXmlText } from 'yjs';
+import {
+  createAbsolutePositionFromRelativePosition,
+  decodeRelativePosition,
+  Doc as YDoc,
+  XmlElement as YXmlElement,
+  XmlText as YXmlText,
+} from 'yjs';
 import { z } from 'zod';
 import { CovenantDocReaderProd } from '@/lib/covenant-reader';
 import type { ParticipantSummary } from '@/src/components/model';
@@ -362,6 +368,96 @@ export class ConversationDoc {
     if (!child) return null;
     const iid = nodeItemId(child.text);
     return iid ? { client: iid.client, clock: iid.clock } : null;
+  }
+
+  /**
+   * THE DISPLAY↔SIGN IDENTITY BINDING (#220 / T6 F1 — the covenant-soundness closer).
+   *
+   * A covenant `✓` for `objectId` renders over the body the CLIENT DISPLAYS for that
+   * message — `body(objectId)`, resolved by the mutable `mid` attribute. The anchor,
+   * however, SIGNED a specific `Y.XmlText` addressed by FROZEN relative positions, which
+   * follow the CRDT item identity and NEVER the `mid`. Those two resolutions can be made
+   * to name DIFFERENT `Y.XmlText`s by any member with ydoc write access: append a hostile
+   * block with `mid=objectId`, retarget the genuine block's `mid` away, and `body(objectId)`
+   * now returns the hostile text while the anchor still resolves the untouched genuine
+   * span — a `✓` painted over content the human never signed (the CRITICAL forge F1).
+   *
+   * This method is the invariant the resolve path enforces before it may serve `ok`: the
+   * `Y.XmlText` the anchor's relative positions resolve to MUST be the EXACT SAME item
+   * (`===`, same doc) that `body(objectId)` — the displayed body — resolves to. A `mid`
+   * remap that diverts the display to a different (or absent) `Y.XmlText` makes these
+   * diverge, so the resolve fails CLOSED to drift (`~`) rather than vouching for content
+   * the human never signed. It compares OBJECT IDENTITY on this doc, which is exact: the
+   * signed item and the displayed item are the same JS object iff they are the same CRDT
+   * item. An unresolvable anchor or an absent display body both fail closed (`false`).
+   */
+  displayBindsAnchor(objectId: string, anchor: { readonly relStart: string }): boolean {
+    const signed = this.resolveAnchorBody(anchor.relStart);
+    if (signed === null) return false;
+    const displayed = this.body(objectId);
+    if (displayed === null) return false;
+    return signed === displayed;
+  }
+
+  /**
+   * THE CERTIFY-TIME OBJECT↔BODYPATH BINDING (#220 / T6 F2 — the cross-certify closer).
+   *
+   * `certifyYjsSpanAction` receives a client `objectId` (the id the glyph is keyed by, so
+   * the `✓` paints on `body(objectId)`) and a client `bodyPath` (the `Y.XmlText` the anchor
+   * signs), INDEPENDENTLY. Nothing else checks that they name the same message, so a caller
+   * can certify `objectId=A` while signing message M's body: the anchor is minted over M's
+   * content but the `✓` paints on A's line (the HIGH forge F2).
+   *
+   * This binds them: the `Y.XmlText` at `bodyPath` MUST be the EXACT SAME item (`===`) that
+   * `body(objectId)` — the displayed body for the id the glyph is keyed by — resolves to. So
+   * the anchor can only ever be signed over the very body its `✓` will display, and a
+   * certify pointed at one object id while signing another block's content fails CLOSED. An
+   * absent body at either resolution fails closed (`false`).
+   */
+  bodyPathNamesDisplayBody(objectId: string, path: number[]): boolean {
+    const atPath = this.xmlTextAtPath(path);
+    if (atPath === null) return false;
+    const displayed = this.body(objectId);
+    if (displayed === null) return false;
+    return atPath === displayed;
+  }
+
+  /**
+   * Resolve an anchor's encoded relative start position to the live `Y.XmlText` body it
+   * addresses on THIS doc, or `null` if it does not resolve to a live `Y.XmlText` (a GC'd
+   * / deleted / foreign-shape position fails closed). This is the SAME resolution the SL-2
+   * reader performs in `buildResolve`; kept here so the display↔sign identity check owns
+   * both halves — the `mid`-resolved display and the relative-position-resolved signature —
+   * in one place, against one doc.
+   */
+  private resolveAnchorBody(relStart: string): YXmlText | null {
+    let abs: ReturnType<typeof createAbsolutePositionFromRelativePosition>;
+    try {
+      const rel = decodeRelativePosition(base64ToBytes(relStart));
+      abs = createAbsolutePositionFromRelativePosition(rel, this.doc);
+    } catch {
+      return null; // malformed / undecodable position ⇒ fail closed
+    }
+    if (!abs) return null;
+    return abs.type instanceof YXmlText ? abs.type : null;
+  }
+
+  /**
+   * The `Y.XmlText` reached by following a `[blockIndex, childIndex, …]` path of child
+   * indices from the content fragment, or `null` if the path does not land on a live
+   * `Y.XmlText`. Mirrors the SL-2 reader's `bodyAtPath` over the conversation content
+   * share — POSITIONAL, exactly as `certifyYjsSpanAction`'s reader captures against — so
+   * the F2 check compares the very body the anchor will be signed over.
+   */
+  private xmlTextAtPath(path: number[]): YXmlText | null {
+    let node: YXmlFragment | YXmlElement | YXmlText | null = this.contentFragment();
+    for (const idx of path) {
+      if (!node || node instanceof YXmlText) return null;
+      const child: unknown = node.get(idx);
+      if (child instanceof YXmlElement || child instanceof YXmlText) node = child;
+      else return null;
+    }
+    return node instanceof YXmlText ? node : null;
   }
 
   /**
@@ -674,6 +770,19 @@ const DRIFT_BODY = ' drift-body';
  *  equal a real `client:clock` key (digits and a colon only) — fail-closed if the genuine
  *  index element is deleted outright. */
 const NO_INDEX = ' no-index';
+
+/** Decode a base64 anchor position (relative-position bytes) to a `Uint8Array`. Mirrors
+ *  the reader's own `base64ToBytes`; kept module-local so the identity check decodes an
+ *  anchor's frozen positions without importing the reader's private codec. */
+function base64ToBytes(b64: string): Uint8Array {
+  if (typeof atob === 'function') {
+    const bin = atob(b64);
+    const out = new Uint8Array(bin.length);
+    for (let i = 0; i < bin.length; i++) out[i] = bin.charCodeAt(i);
+    return out;
+  }
+  return new Uint8Array(Buffer.from(b64, 'base64'));
+}
 
 /** A Yjs item identity — the `{client, clock}` of the item backing a CRDT value. */
 type ItemId = { client: number; clock: number };

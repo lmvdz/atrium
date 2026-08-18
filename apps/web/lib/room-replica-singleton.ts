@@ -1,11 +1,12 @@
 import 'server-only';
 import { listCovenantAnchorObjectIds, loadCovenantAnchor, upsertCovenantStatus } from '@atrium/db';
-import { webCovenantReadAuthority } from './covenant-read';
+import { identityGuardedSpanResolver, webCovenantReadAuthority } from './covenant-read';
 import { readerForLiveDoc } from './covenant-reader';
 import { db } from './db';
 import { liveCovenantDoc } from './live-covenant-doc';
 import { RoomDriftSweep } from './room-drift-sweep';
 import { dbYdocStreamSource, RoomReplicaManager } from './room-replica-manager';
+import { serverReplicaFor } from './server-room-replica';
 
 /**
  * THE PROCESS'S ONE room-replica manager (E3, #203). Lazy-starts a room's server-
@@ -37,6 +38,14 @@ export function roomReplicaManager(): RoomReplicaManager {
         loadAnchor: (objectId) => loadCovenantAnchor(db(), { roomId, objectId }),
         reader,
         expectedRoomId: roomId,
+        // F1 (#220 / T6): the sweep's re-verdict serves `✓` ONLY when the displayed body
+        // (`body(objectId)`, by `mid`) is the exact `Y.XmlText` the anchor signed — so a
+        // `mid` remap between edits drives the sweep to project `drift` (`~`), reaching
+        // both browsers over `covenant_status`. Same current-replica source as the reader.
+        spanResolver: identityGuardedSpanResolver(
+          reader,
+          () => serverReplicaFor(roomId)?.conversation ?? null,
+        ),
       });
       return new RoomDriftSweep({
         doc: replica.doc,

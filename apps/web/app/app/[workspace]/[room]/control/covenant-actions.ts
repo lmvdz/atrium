@@ -179,6 +179,21 @@ export async function certifyYjsSpanAction(raw: unknown): Promise<CertifyAnchorO
   const requiredPosition = await replicaManager.streamHead(room.id);
   await replicaManager.acquire(room.id);
 
+  /* F2 (#220 / T6) — THE OBJECT↔BODYPATH BINDING. The request carries `objectId` (the id
+     the glyph is keyed by, so the `✓` paints on `body(objectId)`) and `bodyPath` (the
+     `Y.XmlText` the anchor signs) INDEPENDENTLY. Refuse unless they name the SAME body:
+     the block at `bodyPath` must be the exact `Y.XmlText` that `body(objectId)` — the
+     displayed body for the id the glyph is keyed by — resolves to. Without this a caller
+     certifies `objectId=A` while signing message M's content and the `✓` paints on A's
+     line over M's signed content (the HIGH forge). Read the CURRENT authoritative replica
+     (the same one the reader resolves against); an absent replica / mismatch fails closed.
+     Belt-and-suspenders with F1's resolve-time guard, closed here at the mint source. */
+  const replica = serverReplicaFor(room.id);
+  if (replica === null) return { ok: false, reason: 'derive_failed' };
+  if (!replica.conversation.bodyPathNamesDisplayBody(objectId, bodyPath)) {
+    return { ok: false, reason: 'derive_failed' };
+  }
+
   const live = liveCovenantDoc(room.id);
   const selection: { path: BodyPath; start: number; end: number } = { path: bodyPath, start, end };
   const reader = readerForLiveDoc(live.provider, selection, live.options);

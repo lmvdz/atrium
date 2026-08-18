@@ -128,7 +128,13 @@ async function mintHumanSession(userId: string): Promise<string> {
 /** Seed a fresh yjs-substrate room with two human members. Returns ids + the ws slug. */
 async function seedYjsRoom(
   runId: string,
-): Promise<{ workspaceId: string; workspaceSlug: string; roomId: string; adaId: string; benId: string }> {
+): Promise<{
+  workspaceId: string;
+  workspaceSlug: string;
+  roomId: string;
+  adaId: string;
+  benId: string;
+}> {
   const [adaRow] = await db
     .insert(users)
     .values({ email: uniqueEmail(`t6-ada-${runId}`), displayName: 'Ada', emailVerified: true })
@@ -201,6 +207,7 @@ interface CovenantHook {
   messages(): Array<{ id: string; text: string }>;
   edit(messageId: string, index: number, text: string): boolean;
   deleteRange(messageId: string, index: number, len: number): boolean;
+  remapMid(victimId: string, hostile: string): boolean;
   certify(messageId: string, start: number, end: number): Promise<{ ok: boolean; reason?: string }>;
 }
 
@@ -209,7 +216,9 @@ async function waitForCovenantHook(page: Page): Promise<void> {
   await expect
     .poll(
       async () =>
-        page.evaluate(() => typeof (window as unknown as { __atriumYjsTest?: unknown }).__atriumYjsTest),
+        page.evaluate(
+          () => typeof (window as unknown as { __atriumYjsTest?: unknown }).__atriumYjsTest,
+        ),
       { message: 'the covenant-e2e harness seam to bind', timeout: 30_000 },
     )
     .toBe('object');
@@ -242,8 +251,24 @@ async function certifySpan(
   );
 }
 
+/** Drive the F1 mid-remap forge as a peer with ydoc write access (via the harness seam). */
+async function remapMid(page: Page, victimId: string, hostile: string): Promise<void> {
+  await page.evaluate(
+    ({ victimId, hostile }) => {
+      const hook = (window as unknown as { __atriumYjsTest?: CovenantHook }).__atriumYjsTest;
+      if (!hook?.remapMid(victimId, hostile)) throw new Error('mid-remap attack failed to apply');
+    },
+    { victimId, hostile },
+  );
+}
+
 /** A harness peer edit: insert `text` at char `index` inside a message body. */
-async function peerInsert(page: Page, messageId: string, index: number, text: string): Promise<void> {
+async function peerInsert(
+  page: Page,
+  messageId: string,
+  index: number,
+  text: string,
+): Promise<void> {
   await page.evaluate(
     ({ messageId, index, text }) => {
       const hook = (window as unknown as { __atriumYjsTest?: CovenantHook }).__atriumYjsTest;
@@ -254,7 +279,12 @@ async function peerInsert(page: Page, messageId: string, index: number, text: st
 }
 
 /** The exact undo of a harness insert: delete `len` chars at `index` (restores items). */
-async function peerDelete(page: Page, messageId: string, index: number, len: number): Promise<void> {
+async function peerDelete(
+  page: Page,
+  messageId: string,
+  index: number,
+  len: number,
+): Promise<void> {
   await page.evaluate(
     ({ messageId, index, len }) => {
       const hook = (window as unknown as { __atriumYjsTest?: CovenantHook }).__atriumYjsTest;
@@ -420,12 +450,8 @@ test.describe
         });
 
         // ── rubric 11: once quiescent, A and B render the IDENTICAL ordered set ──
-        await expect
-          .poll(async () => (await lineTexts(ben)).length, { timeout: 30_000 })
-          .toBe(2);
-        await expect
-          .poll(async () => (await lineTexts(ada)).length, { timeout: 30_000 })
-          .toBe(2);
+        await expect.poll(async () => (await lineTexts(ben)).length, { timeout: 30_000 }).toBe(2);
+        await expect.poll(async () => (await lineTexts(ada)).length, { timeout: 30_000 }).toBe(2);
         const adaLines = await lineTexts(ada);
         const benLines = await lineTexts(ben);
         expect(adaLines, 'A and B must agree on content once quiescent').toEqual(benLines);
@@ -444,9 +470,7 @@ test.describe
         const whileGone = `Run ${runId}: edit while B gone ${Date.now()}`;
         await typeLine(ada, whileGone);
         // The document A now holds — the target B must converge to on reconnect.
-        await expect
-          .poll(async () => (await lineTexts(ada)).length, { timeout: 30_000 })
-          .toBe(3);
+        await expect.poll(async () => (await lineTexts(ada)).length, { timeout: 30_000 }).toBe(3);
         const targetDoc = await lineTexts(ada);
 
         // B reconnects: a fresh page in the SAME context re-subscribes the shape.
@@ -541,7 +565,10 @@ test.describe
         // ── rubric 6/12: an EXACT UNDO restores the original items → ✓ in both ───
         await peerDelete(ben, messageId, 2, 1); // delete the exact inserted char
         await expectBothGlyph([ada, ben], messageId, '✓', 'the exact undo to restore ✓ in both');
-        testInfo.annotations.push({ type: 'rubric-12 flip', description: '✓→~→✓ converged in both browsers' });
+        testInfo.annotations.push({
+          type: 'rubric-12 flip',
+          description: '✓→~→✓ converged in both browsers',
+        });
 
         // ── rubric 16 (covenant half): disconnect B, drift the span, reconnect ──
         await ben.close();
@@ -570,7 +597,85 @@ test.describe
         // And the exact undo of the while-gone drift re-validates ✓ in both — the
         // covenant survives the transport interruption end to end.
         await peerDelete(ada, messageId, 1, 1);
-        await expectBothGlyph([ada, ben], messageId, '✓', 'the covenant to re-validate ✓ after resync');
+        await expectBothGlyph(
+          [ada, ben],
+          messageId,
+          '✓',
+          'the covenant to re-validate ✓ after resync',
+        );
+      } finally {
+        await Promise.all(contexts.map((c) => c.close().catch(() => {})));
+        await db.delete(workspaces).where(eq(workspaces.id, seed.workspaceId));
+        await db.delete(users).where(inArray(users.id, [seed.adaId, seed.benId]));
+      }
+    });
+
+    test('the F1 mid-remap forge cannot paint a ✓ over unsigned content: after a certified span is remapped to hostile text, BOTH browsers show ~ (never ✓) (#220 fix round)', async ({
+      browser,
+    }) => {
+      test.setTimeout(240_000);
+      const runId = randomUUID().slice(0, 8);
+      const contexts: BrowserContext[] = [];
+      const seed = await seedYjsRoom(runId);
+
+      try {
+        const adaSeat = await seat(browser, await mintHumanSession(seed.adaId));
+        contexts.push(adaSeat.context);
+        const ada = adaSeat.page;
+        const benSeat = await seat(browser, await mintHumanSession(seed.benId));
+        contexts.push(benSeat.context);
+        const ben = benSeat.page;
+
+        await openYjsRoom(ada, seed.workspaceSlug, { covenantE2e: true });
+        await openYjsRoom(ben, seed.workspaceSlug, { covenantE2e: true });
+        await assertNoFalseCertification([ada, ben]);
+
+        // A types + certifies a real span; the live ✓ converges to both browsers.
+        const body = `Ready ship it now ${runId}`;
+        await typeLine(ada, body);
+        await convergenceLatency(ben, body);
+        const messageId = await messageIdContaining(ada, body);
+        const certifyOutcome = await certifySpan(ada, messageId, 0, 5); // "Ready"
+        expect(certifyOutcome.ok, `certify: ${certifyOutcome.reason ?? 'ok'}`).toBe(true);
+        await expectBothGlyph([ada, ben], messageId, '✓', 'the certified span to show ✓ in both');
+
+        // THE FORGE (F1): a peer with ydoc write access appends hostile text with the
+        // victim's `mid` and retargets the genuine block's `mid` away — so `body(A)` now
+        // DISPLAYS hostile content while the anchor still resolves the untouched genuine
+        // span. Pre-fix this painted a `✓` over the hostile text in BOTH browsers.
+        const hostile = `DELETE PRODUCTION NOW ${runId}`;
+        await remapMid(ada, messageId, hostile);
+
+        // THE FIX: the display↔sign identity guard makes the server sweep project `drift`,
+        // and the client freshness gate withholds `✓` the instant the displayed body
+        // changes — so BOTH browsers converge to `~`, and no `✓` appears at ANY frame.
+        await expect
+          .poll(
+            async () => {
+              if ((await ada.locator('[data-glyph="✓"]').count()) > 0) return 'FALSE-CHECKMARK';
+              if ((await ben.locator('[data-glyph="✓"]').count()) > 0) return 'FALSE-CHECKMARK';
+              const glyphs = await Promise.all([
+                lineGlyph(ada, messageId),
+                lineGlyph(ben, messageId),
+              ]);
+              return glyphs.every((g) => g === '~') ? 'converged' : 'converging';
+            },
+            {
+              message: 'the mid-remap forge to show ~ in both browsers, never a ✓',
+              timeout: 45_000,
+            },
+          )
+          .toBe('converged');
+
+        // The hostile text really is what is displayed for the line now — proving the
+        // forge LANDED as content but could not steal the `✓` (it shows `~`, not `✓`).
+        await expect
+          .poll(async () => (await lineTexts(ada)).some((t) => t.includes(hostile)), {
+            message: 'the hostile remapped body to be what the line displays',
+            timeout: 30_000,
+          })
+          .toBe(true);
+        await assertNoFalseCertification([ada, ben]);
       } finally {
         await Promise.all(contexts.map((c) => c.close().catch(() => {})));
         await db.delete(workspaces).where(eq(workspaces.id, seed.workspaceId));

@@ -58,7 +58,11 @@ const ALICE: WriterIdentity = { userId: 'u_alice', principalKind: 'human' };
 const NO_LAZY_START = { acquire: async () => {} } as const;
 const CERT_ALICE = { kind: 'human', userId: 'u_alice' } as const;
 const AT = '2026-08-17T12:00:00.000Z';
-const OBJECT_ID = 'o_span';
+// The object id IS the message id (the #220 / T6 binding: the glyph is keyed by the
+// message id and the `✓` paints on `body(objectId)`). The F1 display↔sign identity guard
+// (`identityGuardedSpanResolver`) serves `ok` only when `body(objectId)` is the exact
+// `Y.XmlText` the anchor signed, so the fixture uses the seeded message's own id.
+const OBJECT_ID = 'm1';
 
 afterEach(() => clearServerReplicas());
 

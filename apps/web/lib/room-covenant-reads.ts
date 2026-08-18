@@ -1,10 +1,11 @@
 import 'server-only';
 import type { CovenantReadStatus } from '@atrium/core';
 import { type Database, loadCovenantAnchor } from '@atrium/db';
-import { webCovenantReadAuthority } from './covenant-read';
+import { identityGuardedSpanResolver, webCovenantReadAuthority } from './covenant-read';
 import { readerForLiveDoc } from './covenant-reader';
 import { liveCovenantDoc } from './live-covenant-doc';
 import { roomReplicaManager } from './room-replica-singleton';
+import { serverReplicaFor } from './server-room-replica';
 
 /**
  * RESOLVE A ROOM'S OBJECT `✓`/`~` GLYPHS — the server side of the display-glyph
@@ -125,6 +126,14 @@ export async function roomCovenantReads(
     loadAnchor: (objectId) => loadCovenantAnchor(db, { roomId, objectId }),
     reader,
     expectedRoomId: roomId,
+    // F1 (#220 / T6): serve `✓` ONLY when the displayed body (`body(objectId)`, by
+    // `mid`) is the exact `Y.XmlText` the anchor signed (frozen relative positions).
+    // Re-reads the current replica per resolve; a divergence (a `mid` remap) or an
+    // evicted replica fails closed to drift (`~`), never a `✓` over unsigned content.
+    spanResolver: identityGuardedSpanResolver(
+      reader,
+      () => serverReplicaFor(roomId)?.conversation ?? null,
+    ),
   });
   // De-dupe object ids so one object resolves once; the authority also dedupes
   // concurrent resolves of the same id, but the caller's list may repeat.

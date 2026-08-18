@@ -247,6 +247,49 @@ export function readerSpanResolver(reader: CovenantDocReaderProd): SpanResolver 
 }
 
 /**
+ * The DISPLAY↔SIGN identity binder the yjs surface enforces on resolution (#220 / T6
+ * F1) — structurally, `ConversationDoc.displayBindsAnchor`. It answers: does the body the
+ * client DISPLAYS for `objectId` (resolved by the mutable `mid`) resolve to the EXACT SAME
+ * `Y.XmlText` the anchor SIGNED (resolved by frozen relative positions)? The resolve path
+ * requires this before it may serve `ok`, so a `mid` remap that diverts the display away
+ * from the signed body can never paint a `✓` over content the human did not sign.
+ */
+export interface DisplayIdentityBinder {
+  displayBindsAnchor(objectId: string, anchor: CovenantAnchor): boolean;
+}
+
+/**
+ * Wrap a reader's async span resolve with the yjs DISPLAY↔SIGN identity guard (#220 / T6
+ * F1). After the reader resolves the anchor's span normally, this additionally requires
+ * that the body currently DISPLAYED for the anchor's object (`body(objectId)`, the mutable
+ * `mid` resolution) is the SAME `Y.XmlText` the anchor's relative positions resolve to. If
+ * they differ — an agent remapped `mid` so the displayed body is a different (or absent)
+ * block than the one the human signed — this returns `null`, which the core authority turns
+ * into `drift` (`~`), fail-closed. `convoProvider` is re-read on EVERY resolve (never
+ * captured once), so an evicted/replaced replica fails closed (`null` binder ⇒ drift),
+ * exactly as `liveCovenantDoc`'s provider does for the reader.
+ *
+ * Scoping: it only ever DEMOTES a would-be `ok` to `~` (a `null`/drift span passes through
+ * unchanged), and an `ok` is only ever produced for a conversation-content anchor over a
+ * live `Y.XmlText` — i.e. a yjs-surface certified span, where `objectId` IS the message id.
+ */
+export function identityGuardedSpanResolver(
+  reader: CovenantDocReaderProd,
+  convoProvider: () => DisplayIdentityBinder | null,
+): SpanResolver {
+  const base = readerSpanResolver(reader);
+  return async (anchor: CovenantAnchor): Promise<ResolvedSpan | null> => {
+    const span = await base(anchor);
+    if (span === null) return null; // already drift / unresolved — nothing to guard
+    const convo = convoProvider();
+    if (convo === null) return null; // no authoritative doc ⇒ fail closed
+    // The displayed body (mutable `mid`) MUST be the exact item the anchor signed
+    // (frozen relative positions). A divergence is a forge — fail closed to drift.
+    return convo.displayBindsAnchor(anchor.objectId, anchor) ? span : null;
+  };
+}
+
+/**
  * Adapt a production reader into the core {@link LiveFreshness} port — the SYNC
  * check that lets `read()` prove a cached `ok` is still fresh (SL-4 gauntlet FAIL:
  * `read()` must NEVER serve a stale `ok`).
@@ -301,6 +344,14 @@ export function webCovenantReadAuthority(input: {
   readonly loadAnchor: AnchorLoader;
   readonly reader: CovenantDocReaderProd;
   readonly expectedRoomId: string;
+  /**
+   * OPTIONAL span-resolve override (#220 / T6 F1). Defaults to the reader's plain async
+   * resolve ({@link readerSpanResolver}); the yjs surface passes an
+   * {@link identityGuardedSpanResolver} so a `✓` is served ONLY when the displayed body
+   * (`body(objectId)`, by `mid`) is the exact `Y.XmlText` the anchor signed. Fail-closed:
+   * the override can only ever DEMOTE a would-be `ok` to `~`.
+   */
+  readonly spanResolver?: SpanResolver;
 }): CovenantReadAuthority {
   if (!input.expectedRoomId) {
     // Fail-closed on an unbound room even if a JS caller defeats the required type:
@@ -309,7 +360,7 @@ export function webCovenantReadAuthority(input: {
   }
   return new CovenantReadAuthority({
     loadAnchor: input.loadAnchor,
-    resolveSpan: readerSpanResolver(input.reader),
+    resolveSpan: input.spanResolver ?? readerSpanResolver(input.reader),
     liveFreshness: readerLiveFreshness(input.reader),
     expectedRoomId: input.expectedRoomId,
   });

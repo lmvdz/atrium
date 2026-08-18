@@ -51,6 +51,7 @@ import { CertifyPassage } from '@/app/prototype/CertifyPassage';
 import type { ChatMsg } from '@/app/prototype/types';
 import type { ConversationDoc } from '@/app/prototype/yjs-conversation';
 import { anchorCertifies } from '@/lib/covenant-read';
+import { DisplayFreshnessGate } from '@/lib/display-freshness';
 import { useLiveGlyphResolver } from '@/lib/use-live-glyph-resolver';
 import { fileText } from '@/src/components/model';
 import { type Glyph, glyphFor } from '@/src/components/model/glyph';
@@ -155,10 +156,7 @@ export function LiveConversationDoc({
   // present (a real yjs room load). The read-only T1 mount passes none of these and
   // stays untouched. `write` is required too: certify is a human act on a writable doc.
   const covenant =
-    write &&
-    covenantReads !== undefined &&
-    workspaceSlug !== undefined &&
-    roomSlug !== undefined;
+    write && covenantReads !== undefined && workspaceSlug !== undefined && roomSlug !== undefined;
   // The live covenant glyph resolver (T4, #218) — subscribes the room's `covenant_status`
   // Electric shape and folds each streamed verdict, so a certified span's glyph flips
   // `✓`→`~` on a peer edit and back on an exact revert, liveness-gated fail-closed (`✓`
@@ -167,6 +165,25 @@ export function LiveConversationDoc({
   const glyphResolver = useLiveGlyphResolver(roomId, covenant ? covenantReads : undefined);
   // Which message's certify panel is open (at most one).
   const [openCertifyId, setOpenCertifyId] = useState<string | null>(null);
+
+  /* THE CLIENT FRESHNESS GATE (#220 / T6 — the stale-`✓` window closer; the durable
+     freshness-witness is #209/#211, referenced not duplicated). A verdict on the
+     `covenant_status` shape is computed against the content the server replica had caught
+     up to; the client's own doc can be AHEAD of it (a local/remote edit not yet re-swept),
+     so a live `✓` could stand over already-edited text for the sub-second window before the
+     poke → sweep → projection round-trips. {@link DisplayFreshnessGate} closes it: it binds
+     each folded verdict (a new `glyphResolver` identity) to the body text displayed at fold
+     time, and `✓` is served ONLY while the text shown now is byte-identical to it. An edit
+     changes the text with the SAME verdict token ⇒ the gate withholds `✓` (`~`) until a
+     genuinely newer verdict re-snapshots the current text. Snapshotted SYNCHRONOUSLY in
+     render, so the flip has no stale frame. */
+  const freshnessRef = useRef<DisplayFreshnessGate>(new DisplayFreshnessGate());
+  freshnessRef.current.onRender(glyphResolver, state.messages);
+  // POKE HEALTH (#220 / T6). The yjs surface has no `router.refresh()`; the poke is what
+  // drives the server re-verdict. If it FAILS, the verdict can no longer be trusted to be
+  // current — so a failed poke degrades every glyph to `~` (an error → not-live), rather
+  // than swallowing it and leaving a stale `✓` painted. Reset to healthy on a success.
+  const [pokeHealthy, setPokeHealthy] = useState(true);
 
   useEffect(() => {
     let disposed = false;
@@ -289,10 +306,21 @@ export function LiveConversationDoc({
     if (workspaceSlug === undefined || roomSlug === undefined) return;
     let stopped = false;
     const poke = () => {
-      void pokeCovenantSweepAction({ workspaceSlug, roomSlug }).catch(() => {
-        // A transient poke failure is harmless: the glyphs keep their last synced
-        // verdict and the next poke retries. Never surfaced as an error.
-      });
+      void pokeCovenantSweepAction({ workspaceSlug, roomSlug })
+        .then((outcome) => {
+          if (stopped) return;
+          // A refused poke (not signed in / not a member / torn-down room) means the
+          // server re-verdict is NOT running — treat it as a loss of verdict freshness
+          // and degrade every glyph to `~`, never leave a stale `✓` standing.
+          setPokeHealthy(outcome.ok);
+        })
+        .catch(() => {
+          // A THROWN poke (network / server error) is likewise a loss of freshness — the
+          // sweep did not run, so no glyph may keep its last `✓`. Fail-closed to `~` until
+          // a poke succeeds again. NOT swallowed (the gauntlet MEDIUM: a swallowed poke
+          // error let a live `✓` stand over already-edited text).
+          if (!stopped) setPokeHealthy(false);
+        });
     };
     poke(); // an immediate first pass so a fresh mount verdicts without waiting a tick
     const timer = setInterval(() => {
@@ -326,6 +354,59 @@ export function LiveConversationDoc({
         const body = doc.body(messageId);
         if (body === null) return false;
         body.insert(index, text);
+        return true;
+      },
+      /**
+       * THE F1 MID-REMAP FORGE, driven as a peer with ydoc write access (#220 / T6
+       * acceptance). Append a hostile block carrying `mid=victimId` with `hostile` text and
+       * retarget the genuine block's `mid` AWAY — so `body(victimId)` now displays the
+       * hostile text while the anchor's frozen relative positions still resolve the untouched
+       * genuine span. The FIX must make this show `~`, never a `✓` over unsigned content. Uses
+       * only the peer-writable content share + Yjs constructors reflected off live nodes (no
+       * privileged surface); gated behind `?covenant-e2e=1` exactly like `edit`/`deleteRange`.
+       */
+      remapMid: (victimId: string, hostile: string): boolean => {
+        // Loose structural views of the Yjs nodes — the harness reaches the peer-writable
+        // content share through the doc's public surface without importing Yjs.
+        interface YBlock {
+          getAttribute(k: string): unknown;
+          setAttribute(k: string, v: string): void;
+          insert(i: number, c: unknown[]): void;
+          toArray(): unknown[];
+          constructor: new (name?: string) => YBlock;
+        }
+        interface YFrag {
+          insert(i: number, c: unknown[]): void;
+          toArray(): unknown[];
+          length: number;
+        }
+        const frag = doc.contentFragment() as unknown as YFrag;
+        let victim: YBlock | undefined;
+        for (const child of frag.toArray() as YBlock[]) {
+          if (typeof child.getAttribute === 'function' && child.getAttribute('mid') === victimId) {
+            victim = child;
+            break;
+          }
+        }
+        if (victim === undefined) return false;
+        const seedChild = victim.toArray()[0] as
+          | { constructor: new () => { insert(i: number, s: string): void } }
+          | undefined;
+        if (seedChild === undefined) return false;
+        // Reflect the Yjs constructors off live nodes so the harness needs no Yjs import.
+        const XmlElementCtor = victim.constructor;
+        const XmlTextCtor = seedChild.constructor;
+        const victimBlock = victim;
+        doc.doc.transact(() => {
+          const block = new XmlElementCtor('message');
+          const xtext = new XmlTextCtor() as { insert(i: number, s: string): void };
+          frag.insert(frag.length, [block]);
+          block.setAttribute('mid', victimId);
+          block.insert(0, [xtext]);
+          if (hostile.length > 0) xtext.insert(0, hostile);
+          // Retarget the genuine block away: the ONLY `mid=victimId` block is now the hostile one.
+          victimBlock.setAttribute('mid', `${victimId}-evicted`);
+        });
         return true;
       },
       /** The exact undo of an insert: delete `len` chars at `index` (restores the items). */
@@ -427,9 +508,19 @@ export function LiveConversationDoc({
           // = message id (the T6 binding). Anything else — never certified, drifted,
           // not-yet-synced, or a dead shape — is `~`. The machine never mints `✓`; a peer
           // edit flips it to `~` within a render tick and an exact revert flips it back.
-          const certified = covenant && anchorCertifies(glyphResolver, message.id);
+          // `✓` requires ALL of: the covenant surface is on; the read authority resolves
+          // this object `ok` over a LIVE shape (`anchorCertifies`); the poke that drives the
+          // server re-verdict is HEALTHY; and the body displayed NOW is byte-identical to the
+          // body content the last folded verdict was captured against (the freshness gate —
+          // no `✓` over content newer than the verdict). Any miss ⇒ the honest `~`.
+          const fresh = freshnessRef.current.fresh(message.id, message.text ?? '');
+          const certified =
+            covenant && pokeHealthy && fresh && anchorCertifies(glyphResolver, message.id);
           const canCertify =
-            covenant && docInstance !== null && workspaceSlug !== undefined && roomSlug !== undefined;
+            covenant &&
+            docInstance !== null &&
+            workspaceSlug !== undefined &&
+            roomSlug !== undefined;
           const panelOpen = openCertifyId === message.id;
           return (
             <li
@@ -489,7 +580,9 @@ export function LiveConversationDoc({
                   <button
                     type="button"
                     data-live-doc-certify-toggle={message.id}
-                    onClick={() => setOpenCertifyId((current) => (current === message.id ? null : message.id))}
+                    onClick={() =>
+                      setOpenCertifyId((current) => (current === message.id ? null : message.id))
+                    }
                     style={{
                       fontSize: '0.8em',
                       padding: '0 0.4em',
