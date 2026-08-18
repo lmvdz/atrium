@@ -2,9 +2,8 @@
 
 import { parseSemanticCommand, payloadText } from '@atrium/core';
 import { useRouter } from 'next/navigation';
-import { useEffect, useMemo, useRef, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import { authoredBody } from '@/lib/authored-body';
-import { precomputedGlyphResolver } from '@/lib/covenant-read';
 import { type LiveUnreadWindow, liveRoomView, shouldRefreshLiveRoute } from '@/lib/live-room-view';
 import {
   type PendingSupersession,
@@ -18,6 +17,7 @@ import {
   replayReceipt,
   replayReceiptSubject,
 } from '@/lib/replay-view';
+import { useLiveGlyphResolver } from '@/lib/use-live-glyph-resolver';
 import type {
   AttentionClass,
   ComposerBinding,
@@ -263,14 +263,17 @@ export function LiveRoomSession({ data, viewerId }: { data: ReplayData; viewerId
   const frozenUnreadWindow = unreadWindow?.roomId === roomId ? unreadWindow : undefined;
   // The object `✓`/`~` glyphs, resolved on the SERVER through the ONE read authority
   // against the room's authoritative live replica (#198, P6F-4) and read here through
-  // the sync `ObjectGlyphResolver`. `✓` only for a live span byte-identical to its
-  // anchor; `drift` / no-anchor / foreign-room / a fixture with no reads ⇒ `~`,
-  // fail-closed. Resolving server-side is not incidental: P6F-2 made the authoritative
-  // doc server-side, so a client-doc resolve would trust bytes a peer can drift.
-  const glyphResolver = useMemo(
-    () => precomputedGlyphResolver(data.covenantReads),
-    [data.covenantReads],
-  );
+  // a LIVE `ObjectGlyphResolver` (#218 / T4 — the live flip). The verdict is no longer
+  // an SSR-static map refreshed only by `router.refresh()`: this hook subscribes the
+  // per-room `covenant_status` Electric shape and folds each streamed verdict in, so a
+  // peer's in-range edit flips the glyph `✓`→`~` within a render tick and an exact
+  // revert flips it back — with no route re-fetch. `data.covenantReads` seeds the first
+  // paint (the server's verdict, not a flash of all-`~`) until the shape syncs. `✓` only
+  // for a span the sweep resolved `ok`; `drift` / no-row / foreign-room / a not-yet-synced
+  // shape ⇒ `~`, fail-closed — provenance alone never mints a `✓`. Resolving server-side
+  // is not incidental: P6F-2 made the authoritative doc server-side, so a client-doc
+  // resolve would trust bytes a peer can drift; this only READS the server's projection.
+  const glyphResolver = useLiveGlyphResolver(roomId, data.covenantReads);
   const view = liveRoomView(data, viewerId, live, frozenUnreadWindow, glyphResolver);
   const contextualAttentionIds = new Set(
     view.referenceAttention.map((reference) => reference.attentionId),

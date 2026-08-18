@@ -122,9 +122,12 @@ describe('the live receipt subject is reconstructed through the covenant authori
   it('LiveRoomSession passes the SAME resolver to replayReceiptSubject that liveRoomView reads', () => {
     const session = readFileSync(liveRoomSession, 'utf8');
 
-    // One resolver, built once from the server-resolved read map.
+    // One resolver, now LIVE (#218 / T4): the client subscribes the covenant_status
+    // Electric shape and folds each verdict in, seeded from the server read map so the
+    // first paint is the server's verdict. The SAME binding still threads into both
+    // readers below — the #198 pairing this test guards is preserved through the T4 flip.
     expect(session).toContain(
-      'const glyphResolver = useMemo(\n    () => precomputedGlyphResolver(data.covenantReads),\n    [data.covenantReads],\n  );',
+      'const glyphResolver = useLiveGlyphResolver(roomId, data.covenantReads);',
     );
     // …threaded into BOTH readers, by that same binding.
     expect(session).toContain(

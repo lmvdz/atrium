@@ -2,7 +2,8 @@
 -- THE ELECTRIC REPLICATION ROLE (#201).
 --
 -- Run by the `electric-init` one-shot in docker-compose.yml, as the superuser
--- POSTGRES_USER, AFTER `migrate` has created the two ydoc tables and the
+-- POSTGRES_USER, AFTER `migrate` has created the three synced tables (the two
+-- ydoc tables plus the `covenant_status` verdict projection) and the
 -- publication. It is idempotent: re-running it re-asserts the same grants and
 -- rotates the password to whatever `:electric_password` currently is.
 --
@@ -19,7 +20,7 @@
 --
 -- Because then the ceiling on what the sync service can read is a config file.
 -- With this role it is Postgres: `atrium_electric` owns nothing, holds SELECT on
--- exactly two tables, and cannot alter the publication — so an Electric asked
+-- exactly three tables, and cannot alter the publication — so an Electric asked
 -- for `users` gets a refusal from the database rather than a filtered answer.
 -- Measured against electricsql/electric 1.7.11:
 --
@@ -42,7 +43,8 @@
 -- ## THE EXISTING-VOLUME CAVEAT, STATED RATHER THAN LEFT IMPLIED
 --
 -- This script is idempotent for the grants it MAKES — CONNECT, USAGE, SELECT on
--- the two ydoc tables — but it is not a full reconciler of the role's TOTAL
+-- the three synced tables (the two ydoc tables and `covenant_status`) — but it is
+-- not a full reconciler of the role's TOTAL
 -- privilege set. On a clean install that is a distinction without a difference:
 -- the role is created here and has nothing else. On a REUSED cluster where an
 -- `atrium_electric` already existed, a SELECT it was granted on some other table
@@ -50,10 +52,11 @@
 -- this script does not enumerate every object it might have touched. If the set
 -- of tables Electric may read is ever narrowed, the removed table's grant has to
 -- be revoked explicitly; re-running this file will not do it. What this file DOES
--- guarantee on any volume is the floor: the role holds SELECT on exactly the two
--- ydoc tables and no write anywhere on them, re-asserted every run. The security
+-- guarantee on any volume is the floor: the role holds SELECT on exactly the
+-- three synced tables (the two ydoc tables and the `covenant_status` verdict
+-- projection) and no write anywhere on them, re-asserted every run. The security
 -- ceiling those two facts give is real; the caveat is only that a stale grant on
--- a third table from a prior life is the operator's to remove, not this script's
+-- a further table from a prior life is the operator's to remove, not this script's
 -- to discover.
 -- ═════════════════════════════════════════════════════════════════════════════
 
@@ -80,15 +83,27 @@ ALTER ROLE "atrium_electric" PASSWORD :'electric_password';
 GRANT CONNECT ON DATABASE :"database_name" TO "atrium_electric";
 GRANT USAGE ON SCHEMA public TO "atrium_electric";
 
--- Exactly two tables, named one at a time. Not `GRANT SELECT ON ALL TABLES IN
+-- Exactly three tables, named one at a time. Not `GRANT SELECT ON ALL TABLES IN
 -- SCHEMA public`, which would be a grant that silently widens every time
 -- somebody adds a table — the allowlist has to be the compliant form, because a
 -- denylist of tables Electric may not read fails open for the next one written.
+--
+-- The two ydoc tables (#201) ARE the room's live document; `covenant_status`
+-- (#206/#218, E6) is the READ-ONLY projection of the server's covenant verdict —
+-- the `✓`/`~` a client renders — synced over the SAME per-room shape. Its WRITES
+-- are REVOKEd from every role at the schema (migration 0056: there is no client
+-- or app write door at all), so this SELECT hands Electric exactly a read of a
+-- projection nothing but the table owner can author. This grant is
+-- ORCHESTRATOR-ADJUDICATED on recorded authority (#206's whole purpose is an
+-- Electric-synced read-only verdict; it is NOT the #208 write-boundary role) and
+-- is REOPENABLE by Lars.
 GRANT SELECT ON TABLE "ydoc_updates" TO "atrium_electric";
 GRANT SELECT ON TABLE "ydoc_awareness" TO "atrium_electric";
+GRANT SELECT ON TABLE "covenant_status" TO "atrium_electric";
 
 -- Said out loud rather than left to the absence of a GRANT, so that a future
 -- `GRANT ALL ... TO PUBLIC` somewhere else cannot hand this role a write door
 -- by accident.
 REVOKE INSERT, UPDATE, DELETE, TRUNCATE ON TABLE "ydoc_updates" FROM "atrium_electric";
 REVOKE INSERT, UPDATE, DELETE, TRUNCATE ON TABLE "ydoc_awareness" FROM "atrium_electric";
+REVOKE INSERT, UPDATE, DELETE, TRUNCATE ON TABLE "covenant_status" FROM "atrium_electric";

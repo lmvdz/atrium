@@ -81,6 +81,103 @@ export function precomputedGlyphResolver(
 }
 
 /**
+ * One synced `covenant_status` row, as the client folds it off the Electric shape
+ * (#218 / T4). The column names are the WIRE names (snake_case) the shape streams —
+ * `object_id`, `status`, `generation` — NOT the camelCase the server binding uses:
+ * `apps/web/app/electric/v1/shape/route.ts` forwards no column mapper, so the rows
+ * arrive with their Postgres names. `generation` is a bigint on the wire and can
+ * surface as a number, a bigint, or a string depending on the client parser, so the
+ * fold coerces it through `Number` rather than assuming one.
+ */
+export interface SyncedCovenantStatusRow {
+  readonly object_id: string;
+  readonly status: CovenantReadStatus;
+  readonly generation?: number | bigint | string | null;
+}
+
+/**
+ * A LIVE {@link ObjectGlyphResolver} whose verdict map updates as the per-room
+ * `covenant_status` Electric shape streams (#218 / T4 — the live flip). It is the
+ * live twin of {@link precomputedGlyphResolver}: the SAME fail-closed `✓` gate
+ * (`✓` ONLY on `status === 'ok'`), sourced from a map that MUTATES in place as the
+ * shape emits, instead of a frozen SSR snapshot refreshed only by `router.refresh()`.
+ *
+ * `replace` folds the shape's CURRENT materialised rows into the map — the caller
+ * hands it `shape.currentRows` on every subscribe notification, and `@electric-sql`'s
+ * `Shape` has already collapsed the log to one row per primary key, so a re-render
+ * after an in-range peer edit sees the drifted verdict and the glyph flips `✓`→`~`
+ * within a render tick. A row DROPPED from the shape (an object pruned by cascade)
+ * simply vanishes from the rebuilt map and reads `~`, fail-closed.
+ */
+export interface LiveGlyphResolver extends ObjectGlyphResolver {
+  /** Rebuild the verdict map from the shape's current rows (newest generation wins). */
+  replace(rows: Iterable<SyncedCovenantStatusRow>): void;
+}
+
+/**
+ * Build a {@link LiveGlyphResolver} (#218 / T4). Optionally SEEDED from the SSR
+ * `{ objectId → status }` map (`data.covenantReads`) so the first client paint is the
+ * server's verdict rather than a flash of all-`~` while the shape connects; the shape's
+ * first up-to-date snapshot then `replace`s the seed and every live delta after it.
+ *
+ * `peek` is the SAME pure map read as {@link precomputedGlyphResolver}: a synced `ok`
+ * is `✓`; a `drift`/`unresolved`, an object absent from the map, or a not-yet-synced
+ * shape is `~`, fail-closed. NEVER treat "a row exists" as `✓` — only `status === 'ok'`
+ * certifies, and `anchorCertifies` remains the single gate that decides it. A status
+ * that is not one of the three known kinds is coerced to `drift`, so a corrupted wire
+ * value can never mint a `✓`.
+ *
+ * ## TODO (#218, DO NOT build here — reserved): the un-certify prune seam
+ *
+ * When un-certify lands (anchor-delete-WITHOUT-object-delete), a stranded verdict can
+ * outlive its anchor: the `covenant_status` row survives (its FK is to the OBJECT, not
+ * the anchor), and the sweep's logical `generation` RESETS to 1 on prune. A gen-1
+ * verdict then cannot overwrite a stored gen-N row (the `< excluded.generation` guard
+ * in `upsertCovenantStatus`, and the newest-wins fold here), so a stale `ok` could
+ * strand as a `✓` after the human signature that justified it is gone. This resolver
+ * folds newest-generation-wins on purpose; the guard for the reset seam belongs with
+ * un-certify, NOT here. Noted, not built (T4 scope boundary).
+ */
+export function liveGlyphResolver(
+  seed?: Readonly<Record<string, CovenantReadStatus>>,
+): LiveGlyphResolver {
+  const map = new Map<string, CovenantReadStatus>();
+  const generations = new Map<string, number>();
+  if (seed) {
+    for (const [objectId, status] of Object.entries(seed)) map.set(objectId, status);
+  }
+  return {
+    replace(rows: Iterable<SyncedCovenantStatusRow>): void {
+      map.clear();
+      generations.clear();
+      for (const row of rows) {
+        const objectId = row.object_id;
+        if (typeof objectId !== 'string' || objectId.length === 0) continue;
+        // A defensive newest-wins fold: `Shape` already collapses the log to one
+        // row per (room, object_id) PK, so a duplicate object_id here is not
+        // expected — but if one appears, the strictly-newer generation wins, the
+        // same monotone rule the durable `upsertCovenantStatus` guard enforces.
+        const generation = Number(row.generation ?? 0);
+        const seen = generations.get(objectId);
+        if (seen !== undefined && seen >= generation) continue;
+        generations.set(objectId, Number.isFinite(generation) ? generation : 0);
+        // Fail-closed on any status that is not a known kind: only `ok` ever
+        // certifies, so an unrecognised value must never survive as one.
+        const status: CovenantReadStatus =
+          row.status === 'ok' || row.status === 'drift' || row.status === 'unresolved'
+            ? row.status
+            : 'drift';
+        map.set(objectId, status);
+      }
+    },
+    peek(objectId: string): CovenantReadResult {
+      const covenantStatus: CovenantReadStatus = map.get(objectId) ?? 'drift';
+      return { objectId, revision: null, renderedFragment: null, covenantStatus };
+    },
+  };
+}
+
+/**
  * The ONE place the migrated display readers turn a covenant read into the boolean
  * `certified` gate (#193 / SL-6). `✓` ONLY when the authority positively resolves
  * the object's certified content (`covenantStatus === 'ok'`); `~` for `drift` /
