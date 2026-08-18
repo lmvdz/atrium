@@ -41,6 +41,7 @@ import {
 } from '@/src/lib/realtime';
 import { mentionCandidateTargets, type ReferenceTarget } from '@/src/lib/typed-references';
 import { RoomFrame } from '../../../gallery/RoomFrame';
+import { LiveConversationDoc } from './LiveConversationDoc';
 import styles from './live-room.module.css';
 
 function copyRoom(room: RoomView): RoomView {
@@ -110,6 +111,17 @@ export function LiveRoomSession({ data, viewerId }: { data: ReplayData; viewerId
   const [receiptId, setReceiptId] = useState<string | null>(null);
   const [targetMessageId, setTargetMessageId] = useState<string | null>(null);
   const [pendingSupersession, setPendingSupersession] = useState<PendingSupersession | null>(null);
+  // The E4 read-side mount (#215 / T1) is gated behind a dev/query flag so the
+  // existing ledger render path for normal rooms is untouched: append `?live-doc=1`
+  // to the room URL to mount a live client `ConversationDoc` over Electric beside
+  // it. Read from `window.location` in an effect (not at render) so the server and
+  // first client render agree. The durable substrate flag `rooms.conversation_substrate`
+  // is T2's (#216) — T1 deliberately does not add it.
+  const [liveDocGate, setLiveDocGate] = useState(false);
+  useEffect(() => {
+    if (typeof window === 'undefined') return;
+    setLiveDocGate(new URLSearchParams(window.location.search).get('live-doc') === '1');
+  }, []);
   const refreshTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   const refreshLeaseTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   const refreshInFlight = useRef(false);
@@ -732,6 +744,7 @@ export function LiveRoomSession({ data, viewerId }: { data: ReplayData; viewerId
         updatedAt={view.updatedAt}
         viewer={gatedViewer}
       />
+      {liveDocGate ? <LiveConversationDoc roomId={roomId} /> : null}
       {previewAttachment === null ? null : (
         <AttachmentPreview
           attachment={previewAttachment}

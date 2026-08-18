@@ -35,6 +35,46 @@ export const SHAPE_TABLES: ReadonlySet<string> = new Set([
 ]);
 
 /**
+ * The EXACT columns each table's shape selects — PINNED server-side, per table,
+ * the same allowlist discipline as `where` (#204/T1).
+ *
+ * ## Why this is required, not an optimisation (the generated-column trap)
+ *
+ * A shape read with NO `columns` list means "all columns", and Electric REFUSES
+ * that for `ydoc_updates` with a `400`: migration 0054 added `op_digest` as a
+ * `bytea GENERATED ALWAYS AS (sha256(op)) STORED` column, and Electric's shape
+ * snapshot cannot stream a generated column (measured against electricsql/electric
+ * 1.7.11 — an unqualified shape read of `ydoc_updates` answers 400, a read that
+ * names the real replicated columns answers 200). So the columns list is not a
+ * projection nicety here; it is what makes the read succeed at all. The list names
+ * exactly the columns y-electric reads (`op`) plus the primary key Electric
+ * requires the shape to carry (`id` for `ydoc_updates`; `client_id, room` for
+ * `ydoc_awareness`), and DELIBERATELY OMITS `op_digest` — the generated column —
+ * along with the writer stamp and stream_seq the client never reads.
+ *
+ * ## Why pinned SERVER-side rather than trusted from the client
+ *
+ * `@electric-sql/y-electric` can send its own `columns` (the transport at
+ * `app/prototype/electric-transport.ts` now does), so — exactly like `where` — a
+ * client value arrives and something has to be done with it. Composing it here
+ * from the authorized table is the allowlist form: there is no request shape that
+ * widens the projection beyond what this map names, and (unlike a generated
+ * column) a client cannot ask for a column that makes Electric 400 the whole
+ * stream for every reader of that room.
+ */
+export const SHAPE_COLUMNS: Readonly<Record<string, readonly string[]>> = {
+  // `id` is the primary key Electric requires the shape to carry; `op` is the Yjs
+  // update bytea y-electric folds. `op_digest` (generated), the writer stamp, and
+  // `stream_seq` are deliberately absent — the client reads none of them.
+  ydoc_updates: ['id', 'op'],
+  // Awareness has no generated column, so a bare read would not 400 — but the
+  // projection is pinned for the same reason as `where`: the client never widens
+  // it. `client_id, room` are the composite primary key; `op` is the presence
+  // payload; `updated` is its freshness.
+  ydoc_awareness: ['client_id', 'room', 'op', 'updated'],
+};
+
+/**
  * Electric's sync-protocol cursor parameters — everything a legitimate client
  * needs to say, and nothing that selects data.
  *
@@ -110,10 +150,18 @@ export function buildShapeTarget(options: {
   secret?: string | null;
 }): URL {
   const target = new URL(`${options.upstream}/v1/shape`);
-  // ── SERVER-PINNED, in three lines no request can reach ────────────────────
+  // ── SERVER-PINNED, in lines no request can reach ──────────────────────────
   target.searchParams.set('table', options.table);
   target.searchParams.set('where', 'room = $1');
   target.searchParams.set('params[1]', options.room);
+  // The columns projection is pinned too — see SHAPE_COLUMNS: for `ydoc_updates`
+  // it is REQUIRED (a bare read 400s on the generated `op_digest` column, 0054),
+  // and for both tables it is the allowlist form of `where` (a client `columns`
+  // is discarded, never merged). A table with no pinned list falls back to
+  // Electric's default (all columns), which is only safe for a table with no
+  // generated column — the two this proxy serves are both listed.
+  const columns = SHAPE_COLUMNS[options.table];
+  if (columns) target.searchParams.set('columns', columns.join(','));
 
   for (const name of FORWARDED_PARAMS) {
     const value = options.incoming.get(name);

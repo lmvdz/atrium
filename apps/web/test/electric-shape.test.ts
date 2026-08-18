@@ -65,8 +65,26 @@ describe('the predicate is the server’s, whatever the client sent', () => {
     expect(url.searchParams.get('table')).toBe('ydoc_updates');
   });
 
-  it('discards a client-supplied columns projection', () => {
-    expect(target('columns=op').searchParams.get('columns')).toBeNull();
+  it('pins the columns projection server-side and discards the client’s', () => {
+    // `columns` is now REQUIRED, not optional: `ydoc_updates.op_digest` is a
+    // GENERATED STORED column (migration 0054) and Electric 400s an all-columns
+    // read of a table that has one. So the proxy pins the exact list (the primary
+    // key plus the Yjs `op`, never the generated digest) and discards whatever the
+    // client sent — the same allowlist shape as `where`.
+    expect(target('columns=op').searchParams.get('columns')).toBe('id,op');
+    expect(target('columns=op,op_digest,writer_user_id').searchParams.get('columns')).toBe('id,op');
+    expect(target('').searchParams.get('columns')).toBe('id,op');
+  });
+
+  it('pins the awareness projection to its own real columns', () => {
+    const url = buildShapeTarget({
+      upstream: UPSTREAM,
+      table: 'ydoc_awareness',
+      room: ROOM,
+      incoming: new URLSearchParams('columns=op'),
+      secret: 'shh',
+    });
+    expect(url.searchParams.get('columns')).toBe('client_id,room,op,updated');
   });
 
   it('never lets a client overwrite the secret', () => {

@@ -189,6 +189,19 @@ export function electricConversationTransport(
             url: config.shapeUrl,
             params: {
               table: 'ydoc_updates',
+              // The EXACT columns this stream selects, and it is REQUIRED, not an
+              // optimisation: `ydoc_updates.op_digest` is `bytea GENERATED ALWAYS
+              // AS (sha256(op)) STORED` (migration 0054), and Electric answers 400
+              // to an all-columns read of a table that has a generated column
+              // (measured, electricsql/electric 1.7.11). So the shape names exactly
+              // the columns folded here — `op` (the Yjs update bytea, read by
+              // `getUpdateFromRow` below) plus `id`, the primary key Electric
+              // requires the shape to carry — and omits `op_digest`, the writer
+              // stamp, and `stream_seq`, which this client never reads. The app's
+              // shape proxy re-PINS this same list server-side (the authoritative
+              // copy, `lib/electric-shape.ts` `SHAPE_COLUMNS`); setting it here too
+              // keeps the transport correct when pointed straight at Electric.
+              columns: ['id', 'op'],
               // One room's stream — the durable filter Electric pushes down. The
               // room is a POSITIONAL parameter (`$1`), never interpolated into the
               // SQL string (#183 secondary): Electric binds it server-side, so a
