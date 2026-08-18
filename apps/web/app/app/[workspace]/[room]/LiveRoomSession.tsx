@@ -267,10 +267,13 @@ export function LiveRoomSession({ data, viewerId }: { data: ReplayData; viewerId
   // an SSR-static map refreshed only by `router.refresh()`: this hook subscribes the
   // per-room `covenant_status` Electric shape and folds each streamed verdict in, so a
   // peer's in-range edit flips the glyph `✓`→`~` within a render tick and an exact
-  // revert flips it back — with no route re-fetch. `data.covenantReads` seeds the first
-  // paint (the server's verdict, not a flash of all-`~`) until the shape syncs. `✓` only
-  // for a span the sweep resolved `ok`; `drift` / no-row / foreign-room / a not-yet-synced
-  // shape ⇒ `~`, fail-closed — provenance alone never mints a `✓`. Resolving server-side
+  // revert flips it back — with no route re-fetch. `✓` is served ONLY while the shape
+  // is currently LIVE (connected + up-to-date + un-errored) and the sweep resolved
+  // `ok`; `drift` / no-row / foreign-room / a not-yet-synced / errored / disconnected
+  // shape ⇒ `~`, fail-closed — provenance alone never mints a `✓`, and a stale/dead
+  // shape degrades every `✓` to `~` rather than stranding a last-known `ok` (#218 fix
+  // round — the liveness invariant). A brief `~` ("verifying") on mount before the
+  // first live sync is the correct, honest behaviour. Resolving server-side
   // is not incidental: P6F-2 made the authoritative doc server-side, so a client-doc
   // resolve would trust bytes a peer can drift; this only READS the server's projection.
   const glyphResolver = useLiveGlyphResolver(roomId, data.covenantReads);

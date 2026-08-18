@@ -112,6 +112,14 @@ export interface SyncedCovenantStatusRow {
 export interface LiveGlyphResolver extends ObjectGlyphResolver {
   /** Rebuild the verdict map from the shape's current rows (newest generation wins). */
   replace(rows: Iterable<SyncedCovenantStatusRow>): void;
+  /**
+   * Set whether the shape is CURRENTLY LIVE and UP-TO-DATE (#218 fix round — the
+   * liveness invariant). `✓` is served ONLY while this is `true`; any loss of live
+   * authority (error / disconnect / never-synced / no fabric) sets it `false` and
+   * every glyph degrades to `~` (`unresolved`), REGARDLESS of what the last map held.
+   * The map alone never certifies — a stale/dead shape must never paint a stale `✓`.
+   */
+  setLive(live: boolean): void;
 }
 
 /**
@@ -120,12 +128,25 @@ export interface LiveGlyphResolver extends ObjectGlyphResolver {
  * server's verdict rather than a flash of all-`~` while the shape connects; the shape's
  * first up-to-date snapshot then `replace`s the seed and every live delta after it.
  *
- * `peek` is the SAME pure map read as {@link precomputedGlyphResolver}: a synced `ok`
- * is `✓`; a `drift`/`unresolved`, an object absent from the map, or a not-yet-synced
- * shape is `~`, fail-closed. NEVER treat "a row exists" as `✓` — only `status === 'ok'`
- * certifies, and `anchorCertifies` remains the single gate that decides it. A status
- * that is not one of the three known kinds is coerced to `drift`, so a corrupted wire
- * value can never mint a `✓`.
+ * `peek` is the SAME pure map read as {@link precomputedGlyphResolver}, GATED on
+ * liveness (#218 fix round): a synced `ok` is `✓` ONLY while the shape is currently
+ * live (`setLive(true)`); a `drift`/`unresolved`, an object absent from the map, a
+ * not-yet-synced shape, OR any loss of live authority is `~`, fail-closed. NEVER treat
+ * "a row exists" as `✓` — only `status === 'ok'` on a LIVE shape certifies, and
+ * `anchorCertifies` remains the single gate that decides it. A status that is not one
+ * of the three known kinds is coerced to `drift`, so a corrupted wire value can never
+ * mint a `✓`.
+ *
+ * ## The liveness invariant (#218 fix round — the last-mile cardinal-sin fix)
+ *
+ * `✓` is served ONLY while `setLive(true)` — i.e. while the caller (the hook) can
+ * affirmatively prove the shape is connected, has reached its first up-to-date
+ * snapshot, and is not errored. The resolver starts NOT live: the SSR seed below is
+ * therefore NON-certifying (`~`) until the live shape confirms it, closing the
+ * seed-window `✓`. Any later loss of live authority — a `503`/`401`, a slept/dead
+ * connection, a missing `electricShapePath`, a room change — flips `setLive(false)`
+ * and every glyph degrades to `~`, closing the "silent/dead shape retains last `ok`"
+ * path. Fail-closed means fail to `~`, NEVER to the last-known `✓`.
  *
  * ## TODO (#218, DO NOT build here — reserved): the un-certify prune seam
  *
@@ -143,6 +164,11 @@ export function liveGlyphResolver(
 ): LiveGlyphResolver {
   const map = new Map<string, CovenantReadStatus>();
   const generations = new Map<string, number>();
+  // NOT live until the caller proves the shape is connected + up-to-date + un-errored.
+  // While `live` is false, `peek` serves `unresolved` (`~`) for EVERY object regardless
+  // of the map — this is what makes the SSR seed non-certifying and demotes a stale/dead
+  // shape's last `ok` to `~` (the #218 cardinal-sin fix).
+  let live = false;
   if (seed) {
     for (const [objectId, status] of Object.entries(seed)) map.set(objectId, status);
   }
@@ -157,10 +183,17 @@ export function liveGlyphResolver(
         // row per (room, object_id) PK, so a duplicate object_id here is not
         // expected — but if one appears, the strictly-newer generation wins, the
         // same monotone rule the durable `upsertCovenantStatus` guard enforces.
-        const generation = Number(row.generation ?? 0);
+        //
+        // FINITE-GEN GUARD (#218 fix round): coerce a non-numeric / NaN generation to
+        // 0 BEFORE the monotone comparison. Without this a `NaN` generation fails the
+        // `seen >= generation` test (every comparison with NaN is false), slips past
+        // the guard, and lets a corrupt `ok` row overwrite a finite `drift`. Pinning
+        // it to 0 means a NaN row can never out-rank a stored finite verdict.
+        const rawGeneration = Number(row.generation ?? 0);
+        const generation = Number.isFinite(rawGeneration) ? rawGeneration : 0;
         const seen = generations.get(objectId);
         if (seen !== undefined && seen >= generation) continue;
-        generations.set(objectId, Number.isFinite(generation) ? generation : 0);
+        generations.set(objectId, generation);
         // Fail-closed on any status that is not a known kind: only `ok` ever
         // certifies, so an unrecognised value must never survive as one.
         const status: CovenantReadStatus =
@@ -170,8 +203,17 @@ export function liveGlyphResolver(
         map.set(objectId, status);
       }
     },
+    setLive(next: boolean): void {
+      live = next;
+    },
     peek(objectId: string): CovenantReadResult {
-      const covenantStatus: CovenantReadStatus = map.get(objectId) ?? 'drift';
+      // Liveness gate: `✓` requires a currently-live shape. Not live ⇒ `unresolved`
+      // (`~`, the honest "verifying" state) for EVERYTHING — the map is never trusted
+      // to certify on its own, so a stale/dead shape or an unconfirmed seed can never
+      // paint a stale `✓`.
+      const covenantStatus: CovenantReadStatus = live
+        ? (map.get(objectId) ?? 'drift')
+        : 'unresolved';
       return { objectId, revision: null, renderedFragment: null, covenantStatus };
     },
   };
