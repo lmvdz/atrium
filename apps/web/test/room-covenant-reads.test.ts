@@ -1,17 +1,25 @@
 import { type CovenantAnchor, certifyAnchor } from '@atrium/core';
 import type { Database } from '@atrium/db';
 import { afterEach, describe, expect, it } from 'vitest';
+import * as Y from 'yjs';
 import { anchorCertifies, precomputedGlyphResolver } from '@/lib/covenant-read';
 import { readerForLiveDoc } from '@/lib/covenant-reader';
 import { liveCovenantDoc } from '@/lib/live-covenant-doc';
 import { roomCovenantReads } from '@/lib/room-covenant-reads';
 import {
+  type PersistedYdocUpdate,
+  RoomReplicaManager,
+  type YdocStreamSource,
+} from '@/lib/room-replica-manager';
+import {
   clearServerReplicas,
   registerServerReplica,
   ServerRoomReplica,
+  serverReplicaFor,
   type WriterIdentity,
 } from '@/lib/server-room-replica';
 import type { ChatMsg } from '../app/prototype/types';
+import { ConversationDoc } from '../app/prototype/yjs-conversation';
 
 /* ═══════════════════════════════════════════════════════════════════════════
  * P6F-4 / #198 — LIVE RESOLVER WIRING, end-to-end, NOT-THEATER.
@@ -42,6 +50,12 @@ import type { ChatMsg } from '../app/prototype/types';
 
 const ROOM = 'room_p6f4';
 const ALICE: WriterIdentity = { userId: 'u_alice', principalKind: 'human' };
+/**
+ * These resolution tests register the replica themselves ({@link seedReplica}), so
+ * they inject a NO-OP lazy-start — the acquire is exercised on its own in the
+ * lazy-start block below, against the fail-closed and the resolves-authorship paths.
+ */
+const NO_LAZY_START = { acquire: async () => {} } as const;
 const CERT_ALICE = { kind: 'human', userId: 'u_alice' } as const;
 const AT = '2026-08-17T12:00:00.000Z';
 const OBJECT_ID = 'o_span';
@@ -115,7 +129,12 @@ describe('roomCovenantReads — the server resolves ✓/~ against the authoritat
   it('a certified UNCHANGED span ⇒ ok (the `✓`), and the client shim + anchorCertifies agree', async () => {
     const replica = seedReplica('ship the migration');
     const anchor = deriveAnchor(replica, { start: 0, end: 4 }); // 'ship'
-    const reads = await roomCovenantReads(stubDb([rowFrom(anchor)]), ROOM, [OBJECT_ID]);
+    const reads = await roomCovenantReads(
+      stubDb([rowFrom(anchor)]),
+      ROOM,
+      [OBJECT_ID],
+      NO_LAZY_START,
+    );
 
     expect(reads[OBJECT_ID]).toBe('ok');
     // The shipped client decision: precomputedGlyphResolver → anchorCertifies ⇒ `✓`.
@@ -128,14 +147,19 @@ describe('roomCovenantReads — the server resolves ✓/~ against the authoritat
     // A peer edits the certified sub-range on the authoritative replica AFTER certify.
     replica.conversation.body('m1')?.insert(2, 'X');
 
-    const reads = await roomCovenantReads(stubDb([rowFrom(anchor)]), ROOM, [OBJECT_ID]);
+    const reads = await roomCovenantReads(
+      stubDb([rowFrom(anchor)]),
+      ROOM,
+      [OBJECT_ID],
+      NO_LAZY_START,
+    );
     expect(reads[OBJECT_ID]).toBe('drift');
     expect(anchorCertifies(precomputedGlyphResolver(reads), OBJECT_ID)).toBe(false); // `~`
   });
 
   it('NO anchor for the object ⇒ drift (`~`)', async () => {
     seedReplica('ship the migration');
-    const reads = await roomCovenantReads(stubDb([]), ROOM, [OBJECT_ID]); // empty ledger read
+    const reads = await roomCovenantReads(stubDb([]), ROOM, [OBJECT_ID], NO_LAZY_START); // empty ledger read
     expect(reads[OBJECT_ID]).toBe('drift');
     expect(anchorCertifies(precomputedGlyphResolver(reads), OBJECT_ID)).toBe(false);
   });
@@ -148,7 +172,7 @@ describe('roomCovenantReads — the server resolves ✓/~ against the authoritat
     // wrong room's `✓`. (The `loadCovenantAnchor` room-scoped query is the first
     // guard; `expectedRoomId` is this defence-in-depth second guard.)
     const foreign = rowFrom({ ...anchor, roomId: 'room_somewhere_else' });
-    const reads = await roomCovenantReads(stubDb([foreign]), ROOM, [OBJECT_ID]);
+    const reads = await roomCovenantReads(stubDb([foreign]), ROOM, [OBJECT_ID], NO_LAZY_START);
     expect(reads[OBJECT_ID]).toBe('drift');
     expect(anchorCertifies(precomputedGlyphResolver(reads), OBJECT_ID)).toBe(false);
   });
@@ -159,8 +183,86 @@ describe('roomCovenantReads — the server resolves ✓/~ against the authoritat
     const replica = seedReplica('ship the migration');
     const anchor = deriveAnchor(replica, { start: 0, end: 4 });
     clearServerReplicas(); // tear the replica down; the row remains readable
-    const reads = await roomCovenantReads(stubDb([rowFrom(anchor)]), ROOM, [OBJECT_ID]);
+    const reads = await roomCovenantReads(
+      stubDb([rowFrom(anchor)]),
+      ROOM,
+      [OBJECT_ID],
+      NO_LAZY_START,
+    );
     expect(reads[OBJECT_ID]).toBe('drift');
+  });
+});
+
+describe('E3 (#203) — the READ path LAZY-STARTS the replica (authorship survives restart to the glyphs)', () => {
+  it('MAJOR-4: after a cold rebuild, roomCovenantReads lazy-starts a NEW replica via a real durable-stream catch-up — content + authorship recovered, span resolves ✓', async () => {
+    // Build the durable stream the way E2 persists it: one row carrying Alice's
+    // authored update bytes AND her writer stamp. The anchor is derived from a replica
+    // caught up FROM THAT ROW (via catchUp), so what we certify is exactly what a
+    // rebuild reconstructs — not a hand-seeded double.
+    const authored = new ConversationDoc();
+    authored.append(msg('m1', 'ship the migration'));
+    const durableRow: PersistedYdocUpdate = {
+      op: Y.encodeStateAsUpdate(authored.doc),
+      writerUserId: ALICE.userId,
+      writerKind: 'human',
+      streamSeq: 1n,
+    };
+    const source: YdocStreamSource = {
+      async snapshot() {
+        return [durableRow];
+      },
+      async head() {
+        return 1n;
+      },
+    };
+
+    // Derive the real anchor against a replica caught up from the durable row.
+    const seed = await new RoomReplicaManager({ source }).acquire(ROOM);
+    if (seed === null) throw new Error('seed replica must catch up');
+    const anchor = deriveAnchor(seed, { start: 0, end: 4 }); // 'ship'
+    expect(seed.authenticatedAuthorOf('m1')).toEqual(ALICE); // authorship from the stamp
+
+    // COLD REBUILD: tear every replica down. Nothing is registered — a read now would
+    // be `~` unless the read path itself lazy-starts a fresh catch-up.
+    clearServerReplicas();
+    expect(serverReplicaFor(ROOM)).toBeNull();
+
+    // The lazy-start is a REAL acquire against the durable stream — it rebuilds a
+    // BRAND-NEW replica object from the row (not the one the anchor was derived from),
+    // recovering both content and the replayed authorship.
+    const rebuildManager = new RoomReplicaManager({ source });
+    let acquired = 0;
+    const lazyStart = {
+      acquire: async (roomId: string) => {
+        acquired += 1;
+        expect(roomId).toBe(ROOM);
+        return rebuildManager.acquire(roomId);
+      },
+    };
+
+    const reads = await roomCovenantReads(stubDb([rowFrom(anchor)]), ROOM, [OBJECT_ID], lazyStart);
+    expect(acquired).toBe(1); // the read path acquired; it did not assume a warm replica
+    const rebuilt = serverReplicaFor(ROOM);
+    expect(rebuilt).not.toBeNull();
+    expect(rebuilt).not.toBe(seed); // a genuinely NEW replica, rebuilt from the stream
+    expect(rebuilt?.conversation.body('m1')?.toString()).toBe('ship the migration');
+    expect(rebuilt?.authenticatedAuthorOf('m1')).toEqual(ALICE); // authorship RESTORED via data
+    expect(reads[OBJECT_ID]).toBe('ok'); // the certified span resolves after the restart
+    expect(anchorCertifies(precomputedGlyphResolver(reads), OBJECT_ID)).toBe(true);
+    rebuildManager.evictAll();
+  });
+
+  it('eviction stays FAIL-CLOSED: an acquire that leaves nothing registered ⇒ every glyph drifts (`~`)', async () => {
+    const replica = seedReplica('ship the migration');
+    const anchor = deriveAnchor(replica, { start: 0, end: 4 });
+    // The replica is idle-evicted; the lazy-start cannot reach the stream (returns
+    // null and registers nothing). The reader must poll null and yield `~`.
+    clearServerReplicas();
+    const reads = await roomCovenantReads(stubDb([rowFrom(anchor)]), ROOM, [OBJECT_ID], {
+      acquire: async () => null, // acquire failed / stream unreachable ⇒ nothing registered
+    });
+    expect(reads[OBJECT_ID]).toBe('drift');
+    expect(anchorCertifies(precomputedGlyphResolver(reads), OBJECT_ID)).toBe(false);
   });
 });
 

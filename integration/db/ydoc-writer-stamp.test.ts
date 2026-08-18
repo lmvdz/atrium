@@ -171,8 +171,8 @@ describe('a door-less write is honestly unattributed, not silently a person', ()
     await handle.db.execute(
       sql.raw(
         `DO $forge$ BEGIN
-           INSERT INTO ydoc_updates (room, op) /* function atrium_append_ydoc_update( */
-           VALUES ('${roomId}'::uuid, '\\x0102'::bytea);
+           INSERT INTO ydoc_updates (room, op, stream_seq) /* function atrium_append_ydoc_update( */
+           VALUES ('${roomId}'::uuid, '\\x0102'::bytea, 1);
          END $forge$;`,
       ),
     );
@@ -192,9 +192,9 @@ describe('a door-less write is honestly unattributed, not silently a person', ()
       handle.db.execute(
         sql.raw(
           `DO $forge$ BEGIN
-             INSERT INTO ydoc_updates (room, op, writer_kind, writer_user_id)
+             INSERT INTO ydoc_updates (room, op, writer_kind, writer_user_id, stream_seq)
                /* function atrium_append_ydoc_update( */
-             VALUES ('${roomId}'::uuid, '\\x0102'::bytea, 'human', NULL);
+             VALUES ('${roomId}'::uuid, '\\x0102'::bytea, 'human', NULL, 1);
            END $forge$;`,
         ),
       ),

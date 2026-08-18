@@ -1,9 +1,15 @@
 'use server';
 
-import { type CertifyAnchorOutcome, certifyObjectSpan } from '@/lib/certify-anchor';
+import {
+  type CertifyAnchorOutcome,
+  certifyObjectSpan,
+  REPLICA_ABSENT_POSITION,
+} from '@/lib/certify-anchor';
 import { type BodyPath, readerForLiveDoc } from '@/lib/covenant-reader';
 import { db } from '@/lib/db';
 import { liveCovenantDoc } from '@/lib/live-covenant-doc';
+import { roomReplicaManager } from '@/lib/room-replica-singleton';
+import { serverReplicaFor } from '@/lib/server-room-replica';
 import { requireSession } from '@/lib/session';
 import { loadRoom, loadWorkspace } from '@/lib/workspaces';
 import { CertifyObjectSpanInput } from './covenant-actions-input';
@@ -64,6 +70,14 @@ export async function certifyObjectSpanAction(raw: unknown): Promise<CertifyAnch
   const room = await loadRoom(workspace.id, roomSlug, session.userId);
   if (!room) return { ok: false, reason: 'not_in_room' };
 
+  /* THE SERVER REPLICA (E3, #203). The stream head at REQUEST TIME is what the
+     replica must have caught up to; capture it first, then lazy-start (or reuse) the
+     replica from the durable stream — a fresh catch-up reaches at least this head, a
+     reused warm replica that trails it is refused below (`replica_lagging`). */
+  const replicaManager = roomReplicaManager();
+  const requiredPosition = await replicaManager.streamHead(room.id);
+  await replicaManager.acquire(room.id);
+
   /* The authoritative server reader over the live doc, positioned on the human's
      selection. `liveCovenantDoc` provides the doc handle AND the content share
      (#194's seam); an absent handle fails closed (DRIFT / no capture) in the reader,
@@ -78,5 +92,13 @@ export async function certifyObjectSpanAction(raw: unknown): Promise<CertifyAnch
     authorizedRoomId: room.id,
     objectId,
     reader,
+    /* Refuse to mint if the replica lags the request-time stream head — never anchor
+       content the server replica has not caught up to. An evicted/absent replica reads
+       `-Infinity` and refuses (fail-closed). Distinct from #209's client witness. */
+    streamFreshness: {
+      requiredPosition,
+      consumedPosition: () =>
+        serverReplicaFor(room.id)?.consumedStreamPosition() ?? REPLICA_ABSENT_POSITION,
+    },
   });
 }

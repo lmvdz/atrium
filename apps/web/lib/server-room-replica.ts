@@ -28,16 +28,22 @@ import { ConversationDoc } from '@/app/prototype/yjs-conversation';
  * inserts at. P6F-1's gauntlet routed exactly this to P6F-2: "the CRDT layer
  * converges but cannot securely authenticate WHO authored content."
  *
- * So this replica separates the two:
+ * So this replica separates the two, by SOURCE of the authorship signal:
  *
- *   - CONVERGENCE — {@link connect} joins the replica to the durable stream /
- *     in-memory hub, and {@link catchUp} folds a whole-doc update in. Both move
- *     content and NOTHING about authorship: an item that arrives this way has
+ *   - CONVERGENCE-ONLY — {@link connect} joins the replica to a live replication
+ *     fabric for content alone; an item that arrives this way has
  *     `authenticatedAuthorOf === null` (unknown), fail-closed.
  *
- *   - AUTHORSHIP — {@link applyAuthenticatedUpdate} is the ONLY write that binds
- *     an item to a writer. It applies an update that arrived over an
- *     AUTHENTICATED connection (the ws server's `AtriumSession`, adjacent to
+ *   - AUTHORSHIP FROM DATA — {@link catchUp} folds one DURABLE-STREAM row and
+ *     replays that row's PERSISTED writer stamp (E2's `writer_user_id` /
+ *     `writer_kind`, migration 0054) into the ledger over the exact `(client, clock)`
+ *     ranges the row's bytes declare (E3, #203). So a replica rebuilt after a cold
+ *     restart recovers the ORIGINAL writers from the rows — a `system`/unstamped row
+ *     (writer `null`) folds content WITHOUT authorship, fail-closed to unknown.
+ *
+ *   - AUTHORSHIP FROM A LIVE CONNECTION — {@link applyAuthenticatedUpdate} is the
+ *     live write that binds an item to a writer. It applies an update that arrived
+ *     over an AUTHENTICATED connection (the ws server's `AtriumSession`, adjacent to
  *     #187) and records, in a ledger keyed by the item's `(client, clock)`, WHICH
  *     authenticated writer's connection introduced it. Authorship of a message's
  *     content is then {@link authenticatedAuthorOf}: enumerate the CURRENT content
@@ -90,11 +96,37 @@ export interface WriterIdentity {
   readonly principalKind: 'human' | 'agent';
 }
 
-/** One attributed clock range for a client: `[from, to)` written by `writer`. */
+/**
+ * The stream position a LIVE authenticated apply records its claims at. A live
+ * apply ({@link ServerRoomReplica.applyAuthenticatedUpdate} /
+ * {@link ServerRoomReplica.seedAuthored}) is in-memory content, not a durable
+ * stream row, so it has no durable ordinal — and its items are always NEW clocks
+ * that no durable row has declared yet (Yjs cannot integrate a colliding item), so
+ * this value only ever loses a tie to a durable row that later re-declares the
+ * SAME item with the SAME writer. A sentinel ABOVE every real `stream_seq` encodes
+ * exactly that ordering: the durable stream is authoritative; a live in-memory
+ * attribution yields to a durable row's stamp for the same `(client, clock)` (which
+ * is the same writer anyway). `stream_seq` is a Postgres `bigint`, so its maximum is
+ * `2^63 − 1`; `2^63` is beyond any real row's seq and always loses the
+ * smallest-position tiebreak in {@link WriterLedger.writerAt} — the bigint analogue
+ * of the `+Infinity` this used before positions became `bigint` (#203 hygiene).
+ */
+const LIVE_APPLY_POSITION = 1n << 63n;
+
+/**
+ * One attributed clock range for a client: `[from, to)` written by `writer`, as
+ * declared by the durable row at stream position `streamPosition` (the row's
+ * immutable `stream_seq`; lower = earlier). {@link WriterLedger.writerAt} resolves an
+ * overlapping clock to the claim with the SMALLEST `streamPosition` — the earliest
+ * genuine writer — so attribution is independent of the order rows are replayed in.
+ */
 interface AttributedRange {
   readonly from: number;
   readonly to: number;
   readonly writer: WriterIdentity;
+  /** The declaring row's immutable `stream_seq` (a Postgres `bigint`), carried as a
+   *  JS `bigint` so a seq above `2^53` compares exactly, never narrowed (#203). */
+  readonly streamPosition: bigint;
 }
 
 /**
@@ -105,40 +137,60 @@ interface AttributedRange {
  * connection, so a crafted `client` field can never reassign an existing item's
  * author, and a new crafted item is attributed to its own deliverer.
  *
- * First-writer-wins per `(client, clock)`: once an item is attributed, a later
- * apply of the SAME item (a replay) does not overwrite it — Yjs would dedupe the
- * item anyway, but the ledger is explicit so a re-recorded range cannot silently
- * re-home an already-authored item.
+ * ## Earliest-stream-writer-wins — genuinely ORDER-INDEPENDENT for overlaps
+ *
+ * Each recorded range carries the STREAM POSITION of the durable row that declared
+ * it (the row's immutable `stream_seq`, passed as the fold ordinal). When
+ * two rows declare OVERLAPPING clocks of the same client — the reachable-in-theory
+ * case where a full-state update re-contains another writer's structs alongside its
+ * own new ones — {@link writerAt} resolves each clock to the writer of the range
+ * with the SMALLEST stream position: the row that GENUINELY introduced the item,
+ * which is the earliest one in the stream. Because that ordinal is INTRINSIC to the
+ * row (not the replay order), replaying the rows in ANY order attributes the clock
+ * to the same original writer. A re-consumed row (a duplicate stream read) is a
+ * no-op at the replica level ({@link ServerRoomReplica.catchUp} dedupes by seq),
+ * so the ledger never even sees the second read; the min-position rule is the
+ * belt-and-suspenders that keeps a full-state re-declaration from re-homing an
+ * already-attributed clock regardless.
  */
 class WriterLedger {
   private readonly byClient = new Map<number, AttributedRange[]>();
 
-  /** Attribute the newly-integrated `[from, to)` clock range of `client` to `writer`. */
-  record(client: number, from: number, to: number, writer: WriterIdentity): void {
+  /**
+   * Attribute the `[from, to)` clock range of `client` to `writer`, as declared by
+   * the durable row at `streamPosition`. Overlaps are resolved at read time
+   * ({@link writerAt}) by smallest stream position, so this simply records the claim
+   * — it never trims against arrival order, which is what made the old fold
+   * order-dependent.
+   */
+  record(
+    client: number,
+    from: number,
+    to: number,
+    writer: WriterIdentity,
+    streamPosition: bigint,
+  ): void {
     if (to <= from) return;
     const ranges = this.byClient.get(client) ?? [];
-    // First-writer-wins: only attribute the sub-range not already claimed. Yjs
-    // integrates each item exactly once, so in practice `from` is the previous
-    // frontier and no overlap exists — but clamp defensively so a replay or an
-    // out-of-order fill can never re-home an already-attributed clock.
-    let start = from;
-    for (const r of ranges) {
-      if (r.to <= start || r.from >= to) continue;
-      // Overlap — skip the already-claimed slice.
-      if (r.from <= start) start = Math.max(start, r.to);
-    }
-    if (start < to) ranges.push({ from: start, to, writer });
+    ranges.push({ from, to, writer, streamPosition });
     this.byClient.set(client, ranges);
   }
 
-  /** The authenticated writer of the item at `(client, clock)`, or `null` if unattributed. */
+  /**
+   * The authenticated writer of the item at `(client, clock)`, or `null` if
+   * unattributed. When more than one range covers the clock (overlapping
+   * declarations), the EARLIEST-stream-position range wins — the genuine original
+   * writer, independent of replay order.
+   */
   writerAt(client: number, clock: number): WriterIdentity | null {
     const ranges = this.byClient.get(client);
     if (!ranges) return null;
+    let best: AttributedRange | null = null;
     for (const r of ranges) {
-      if (clock >= r.from && clock < r.to) return r.writer;
+      if (clock < r.from || clock >= r.to) continue;
+      if (best === null || r.streamPosition < best.streamPosition) best = r;
     }
-    return null;
+    return best?.writer ?? null;
   }
 }
 
@@ -153,8 +205,60 @@ export class ServerRoomReplica {
   /** Tags the replica's own authenticated applies so its `update` fan-out (if any) can tell them apart. */
   private readonly applyOrigin = Symbol('server-replica-authenticated-apply');
 
+  /**
+   * The DISTINCT durable-stream rows this replica has folded in, keyed by each
+   * row's IMMUTABLE `stream_seq` (a per-room, gap-free, strictly-increasing bigint
+   * minted at append time, migration 0055 — NEVER an array index or a count). A
+   * SET, not a counter, on purpose (E3, #203): re-consuming a row — a duplicate
+   * stream read, or the warm re-catch-up {@link RoomReplicaManager.acquire} runs on
+   * every acquire — reuses its seq and folds as a no-op, and a row that was NEVER
+   * applied (a poison row the fold quarantines) leaves its seq absent as a GAP.
+   *
+   * Because the key is a stable row identity rather than a positional index, a
+   * REORDERED snapshot (a later-committed row whose in-flight txn stamped an earlier
+   * `appended_at`) can no longer make a new row collide with an already-applied
+   * row's ordinal: a seq belongs to exactly one row for the life of the room, so
+   * that row is either folded (its seq present) or missing (its seq a gap). This is
+   * the array-index collision the #203 gauntlet found, closed at the root.
+   *
+   * Moved ONLY by {@link catchUp} — the durable stream is the only thing that moves
+   * a stream position; an in-process authenticated apply is content, not a consumed
+   * stream row. Distinct from #209's CLIENT freshness witness (this proves the
+   * SERVER replica is caught up to the stream, not that a client saw a fragment).
+   */
+  private readonly appliedRows = new Set<bigint>();
+
+  /**
+   * The highest CONTIGUOUS `stream_seq` folded — the largest `N` such that every
+   * seq `1..N` is in {@link appliedRows}. This, not the set's size, is
+   * {@link consumedStreamPosition}: a room's seqs are gap-free from 1 (migration
+   * 0055), so a replica caught up to the head has folded every seq up to it with no
+   * hole, and a MISSING row below the head (skipped/quarantined/reordered-away)
+   * stalls this value below the head even if a LATER seq was folded — which the
+   * set's size would falsely count. Advanced amortized-O(1) in {@link catchUp} as
+   * each new seq closes the gap above it. Carried as a `bigint` so it holds a
+   * `stream_seq` above `2^53` without narrowing (#203 hygiene).
+   */
+  private contiguousHigh = 0n;
+
   constructor(convo: ConversationDoc = new ConversationDoc()) {
     this.convo = convo;
+  }
+
+  /**
+   * The durable-stream position this replica has consumed to — the highest
+   * CONTIGUOUS `stream_seq` folded via {@link catchUp} (see {@link contiguousHigh}),
+   * NEVER a row count. The freshness gate compares this against the stream head
+   * (`max(stream_seq)`) captured at certify-request time and REFUSES to mint when
+   * this trails it (fail-closed: never anchor content a lagging replica has not yet
+   * caught up to). Keying on the highest contiguous seq — not the applied-set's
+   * size — is what closes the #203 class: a row missing BELOW the head (skipped,
+   * quarantined, or reordered away) leaves a gap that holds this value below the
+   * head even if a later seq was folded, whereas a size count could reach the head
+   * with a hole still open. See {@link appliedRows}.
+   */
+  consumedStreamPosition(): bigint {
+    return this.contiguousHigh;
   }
 
   /** The wrapped conversation — its `bodyPath`, `messages`, `model`, `contentFragment`. */
@@ -214,16 +318,87 @@ export class ServerRoomReplica {
   }
 
   /**
-   * Fold a whole-doc / catch-up update into the replica WITHOUT authorship. This
-   * is the convergence-only path — a catch-up from the durable stream's history
-   * whose per-item authenticated writer this process did not itself observe. Items
-   * it integrates are UNATTRIBUTED (`authenticatedAuthorOf === null` ⇒ unknown),
-   * fail-closed, until an authenticated write re-establishes authorship. Kept
-   * distinct from {@link applyAuthenticatedUpdate} on purpose: convergence is not
-   * authorship, and conflating them is the exact hole P6F-1 routed here.
+   * Fold ONE durable-stream row's update into the replica, replaying its PERSISTED
+   * authorship (E3, #203 — the load-bearing property). This is the catch-up path
+   * the {@link RoomReplicaManager} drives per `ydoc_updates` row during Electric
+   * catch-up: the row's opaque `op` bytes converge the content AND its persisted
+   * `writer_user_id`/`writer_kind` stamp (migration 0054) re-establishes authorship
+   * — so after a COLD RESTART `authenticatedAuthorOf` returns the ORIGINAL writers
+   * from DATA, never fail-closed-unknown. `writer === null` (a `system` row, or a
+   * pre-0054 row that carries no author) folds content WITHOUT authorship, exactly
+   * as before: those items read as unknown, fail-closed.
+   *
+   * `streamPosition` is the row's IMMUTABLE `stream_seq` — a per-room, gap-free,
+   * strictly-increasing bigint minted at append time (migration 0055), supplied by
+   * {@link RoomReplicaManager} as the fold ordinal. It is BOTH the row's dedupe
+   * identity (a re-consumed row reuses its seq, so it never re-inflates the freshness
+   * position or re-records the ledger) AND the tiebreak the ledger resolves
+   * overlapping declarations by. Because the seq is a stable row identity rather than
+   * a positional index, a reordered snapshot can never make a new row collide with an
+   * already-applied row's ordinal (the #203 class). A row already folded is a no-op.
+   *
+   * ## RANGE-EXACT, and ORDER-INDEPENDENT — why it uses `parseUpdateMeta`, not the
+   * state-vector delta {@link applyAuthenticatedUpdate} uses.
+   *
+   * The stamp must land on the `(client, clock)` ranges THIS row's op introduces,
+   * and nothing else — an off-by-one would attribute a NEIGHBOR's item to the wrong
+   * writer. `parseUpdateMeta(op)` reads the exact per-client `[from, to)` ranges the
+   * op's own structs carry, INTRINSIC to the bytes: it does not depend on what is
+   * already integrated, on whether this row's deps have arrived yet, or on the order
+   * rows are replayed in. (The SV-delta the live path uses is right THERE — the
+   * connection delivered exactly the newly-integrated items — but wrong here: a row
+   * replayed before its causal dependency integrates NOTHING, so an after-minus-before
+   * delta would be empty and the stamp would be lost, then mis-charged to whichever
+   * later row happens to fill the gap.) Recording the op's declared ranges STAMPED
+   * WITH THIS ROW'S STREAM POSITION means a replay in ANY order lands every stamp on
+   * its own item, and — when a full-state row re-declares an EARLIER row's clocks —
+   * {@link WriterLedger.writerAt}'s earliest-stream-position rule keeps the original
+   * writer regardless of which row was replayed first.
+   *
+   * A PEER RACING APPENDS AROUND A RESTART cannot poison this: its live authenticated
+   * writes land on NEW `(client, clock)` items under the peer's own clocks and its own
+   * identity, and a durable row's earliest-position claim protects every clock a
+   * replayed stamp already owns — a later declaration of an already-attributed clock
+   * never re-homes it.
    */
-  catchUp(update: Uint8Array): void {
+  catchUp(update: Uint8Array, writer: WriterIdentity | null, streamPosition: bigint): void {
+    // A row already folded (a duplicate stream read, or the warm re-catch-up on
+    // acquire) is a no-op: its content is already integrated and its stamp already
+    // recorded, and re-counting its seq would falsely advance the position.
+    if (this.appliedRows.has(streamPosition)) return;
+
+    // Parse the op's OWN declared ranges from the bytes — range-exact and
+    // independent of whether this row's causal deps have arrived yet or of replay
+    // order. `parseUpdateMeta` throws on garbage bytes (a poison row), which is the
+    // quarantine trigger: it happens BEFORE any state change, so a poison row folds
+    // nothing, records nothing, and leaves its seq a gap (fail-closed).
+    const pending: Array<{ client: number; from: number; to: number }> = [];
+    if (writer !== null) {
+      const meta = Y.parseUpdateMeta(update);
+      for (const [client, to] of meta.to) {
+        const from = meta.from.get(client) ?? 0;
+        if (to > from) pending.push({ client, from, to });
+      }
+    }
+
+    // ATOMICITY (E3, #203 / B2). Integrate the content FIRST; only if `applyUpdate`
+    // returns do we flush the ledger stamps and mark the seq consumed. A row that
+    // parses but throws on integration therefore records NOTHING — no phantom ledger
+    // entry, no consumed seq — so a re-acquire re-attempts it cleanly rather than
+    // re-recording a stamp for content that never landed.
     Y.applyUpdate(this.convo.doc, update);
+
+    if (writer !== null) {
+      for (const { client, from, to } of pending) {
+        this.ledger.record(client, from, to, writer, streamPosition);
+      }
+    }
+    // One distinct durable-stream row consumed — record its seq and advance the
+    // contiguous-prefix high-water mark past any gap this fold just closed (E3,
+    // #203). Reached only after `applyUpdate` succeeded: a poison row's seq stays
+    // absent, so the freshness position stays below the head (fail-closed).
+    this.appliedRows.add(streamPosition);
+    while (this.appliedRows.has(this.contiguousHigh + 1n)) this.contiguousHigh += 1n;
   }
 
   /**
@@ -301,7 +476,12 @@ export class ServerRoomReplica {
     const after = Y.decodeStateVector(Y.encodeStateVector(doc));
     for (const [client, toClock] of after) {
       const fromClock = before.get(client) ?? 0;
-      if (toClock > fromClock) this.ledger.record(client, fromClock, toClock, writer);
+      // A live apply has no durable ordinal — its items are new clocks no durable row
+      // has declared, so it only ever loses a tie to a durable row that later
+      // re-declares the SAME item with the SAME writer. See {@link LIVE_APPLY_POSITION}.
+      if (toClock > fromClock) {
+        this.ledger.record(client, fromClock, toClock, writer, LIVE_APPLY_POSITION);
+      }
     }
   }
 }
@@ -336,38 +516,37 @@ export function clearServerReplicas(): void {
 }
 
 /* ─────────────────────────────────────────────────────────────────────────────
- * NAMED INFRA GAP — what the PRODUCTION server replica needs beyond this seam.
+ * THE PRODUCTION SERVER REPLICA — E3 (#203) retired the four named gaps this block
+ * used to list. What each was, and where it now lives:
  *
- *  1. THE CATCH-UP SOURCE. This replica converges from a `ConversationTransport`.
- *     In production that is `electricConversationTransport(config)` over Electric
- *     Durable Streams, which needs (electric-transport.ts, verbatim): an Electric
- *     sync service in front of Postgres with `wal_level = logical`; the
- *     `ydoc_updates` / `ydoc_awareness` bytea tables; and a write endpoint that
- *     appends `op` rows. None stands up in-sandbox — hence the in-memory hub here.
+ *  1. THE CATCH-UP SOURCE — was "converges only from a `ConversationTransport`".
+ *     Now `RoomReplicaManager` ({@link ./room-replica-manager}) catches a replica
+ *     up from the durable stream itself: a snapshot of the room's `ydoc_updates`
+ *     rows in stream order (the Electric shape's rows), folded via {@link catchUp}.
+ *     No in-process append feed — the row is the source of truth.
  *
- *  2. THE AUTHENTICATED-WRITE INGRESS. `applyAuthenticatedUpdate(update, writer)`
- *     is driven directly in tests. In production the writer comes from the ws
- *     server's AUTHENTICATED connection (`AtriumSession`, ws-presence-server.ts /
- *     #187): a client's Yjs update arrives as an authenticated frame, the server
- *     resolves `writer = { userId, principalKind }` from the connection's session,
- *     calls this method, and fans the update out to peers. Wiring that frame into
- *     `ws-presence-server.ts`'s command path is the follow-up; the binding it
- *     needs is exactly this method's signature.
+ *  2. THE LIFECYCLE / INGRESS — `RoomReplicaManager` lazy-starts a replica on first
+ *     need and idle-evicts it; eviction is FAIL-CLOSED ({@link serverReplicaFor}
+ *     ⇒ `null` ⇒ the reader yields `~`, never a stale `✓`). The authenticated-write
+ *     ingress ({@link applyAuthenticatedUpdate}) is still the ws server's job to
+ *     wire (its writer comes from the connection's `AtriumSession`), but the door
+ *     it writes THROUGH — the `ydoc_updates` append that stamps the writer — is E2
+ *     (#202); the replica reads that stamp back on catch-up.
  *
- *  3. HISTORICAL AUTHORSHIP ACROSS A SERVER RESTART. The ledger is in-process, so
- *     a replica caught up from the durable stream after a restart sees content but
- *     not the per-item authenticated writer that produced it (⇒ {@link catchUp}
- *     attributes nothing; those items read as unknown, fail-closed). To make
- *     authorship survive a restart, the authenticated writer must be PERSISTED
- *     alongside each durable update (a signed authorship envelope, or an
- *     append-time `writer` column keyed to the update's item ranges) and replayed
- *     into the ledger on catch-up. Fail-closed-to-unknown is the safe interim: it
- *     never mis-attributes, it only declines to vouch.
+ *  3. AUTHORSHIP ACROSS A COLD RESTART — RETIRED, the load-bearing property. E2
+ *     (migration 0054) persists `writer_user_id`/`writer_kind` on every row; E3
+ *     replays that stamp into the ledger, RANGE-EXACT, as {@link catchUp} folds each
+ *     row (see that method). After a restart `authenticatedAuthorOf` returns the
+ *     ORIGINAL writers from DATA — no longer fail-closed-to-unknown.
  *
- *  4. THE REGISTRY'S TOPOLOGY. `registry` is per-process. The certify Server
- *     Action (`apps/web`) and the replica-maintaining ws server (`apps/server`)
- *     are separate processes in the shipped topology, so in production the action
- *     must reach the replica the ws server maintains — co-locate them in one
- *     process, or expose an internal authoritative-read RPC the action calls. The
- *     registry is the seam that swap slots into without touching `liveCovenantDoc`.
+ *  4. THE REGISTRY'S TOPOLOGY — the web process's replica IS its authority (NO RPC):
+ *     the certify path lazy-starts and reads the SAME in-process replica through this
+ *     registry, so there is no cross-process reach to broker. Two web processes each
+ *     catch up independently from the shared durable stream and converge to identical
+ *     content — the registry stays the per-process seam `liveCovenantDoc` reads.
+ *
+ * What remains genuinely infra-pending is the LIVE Electric subscription (streaming
+ * new rows into a warm replica between catch-ups) and the ws authenticated-write
+ * ingress — both need an Electric service / ws server the sandbox cannot stand up.
+ * The catch-up + freshness + authorship-replay seam is complete and compose-tested.
  * ───────────────────────────────────────────────────────────────────────────── */
