@@ -5,6 +5,7 @@ import { loadReplayData } from '@/lib/replay-data';
 import { requireSession } from '@/lib/session';
 import { loadRoom, loadWorkspace } from '@/lib/workspaces';
 import { LiveRoomSession } from './LiveRoomSession';
+import { YjsRoomSession } from './YjsRoomSession';
 
 export const metadata: Metadata = { title: 'Room · Atrium' };
 export const dynamic = 'force-dynamic';
@@ -33,6 +34,15 @@ export default async function RoomPage({
 
   const data = await loadReplayData(db(), room.id);
   if (!data) notFound();
+
+  // THE SUBSTRATE SWAP (#216 / T2). A `'yjs'` room renders + writes its
+  // conversation through a client `Y.Doc` over Electric (`YjsRoomSession`); every
+  // other room keeps the Phase-5 ledger path (`LiveRoomSession`) unchanged. The
+  // flag rides on the authorized room read (`rooms.conversation_substrate`, 0057),
+  // failing closed to `'ledger'` for any unreadable value.
+  if (room.conversationSubstrate === 'yjs') {
+    return <YjsRoomSession data={data} viewerId={session.userId} />;
+  }
 
   return <LiveRoomSession data={data} viewerId={session.userId} />;
 }

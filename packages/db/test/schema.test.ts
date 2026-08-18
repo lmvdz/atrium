@@ -18,6 +18,7 @@ import {
   attentionClass,
   attentionItems,
   commandReceipts,
+  conversationSubstrate,
   coreEvents,
   coreEventTypes,
   corrections,
@@ -127,6 +128,17 @@ describe('table shape', () => {
       'attention_items',
       'corrections',
     ]);
+  });
+
+  it('gives a room a conversation substrate, defaulting to the unchanged ledger path (#216 / T2)', () => {
+    // The enum is exactly the two substrates, no more.
+    expect([...conversationSubstrate.enumValues]).toEqual(['ledger', 'yjs']);
+    const column = getTableConfig(rooms).columns.find((c) => c.name === 'conversation_substrate');
+    expect(column).toBeDefined();
+    // NOT NULL DEFAULT 'ledger' — a room is always on exactly one substrate, and an
+    // existing row (or an unset insert) keeps the Phase-5 path untouched.
+    expect(column?.notNull).toBe(true);
+    expect(column?.default).toBe('ledger');
   });
 
   it('keeps messages append-only — no updated_at, no deleted_at', () => {
