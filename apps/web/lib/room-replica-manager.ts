@@ -162,43 +162,76 @@ export class RoomReplicaManager {
   }
 
   /**
-   * The room's replica, lazy-started and caught up from the durable stream if this
-   * manager does not already hold a live one. Registers it so `liveCovenantDoc` /
-   * `serverReplicaFor` resolve it, and marks it used (resetting the idle timer).
+   * The room's replica, caught up to the current durable-stream head. A warm replica
+   * this manager already holds is REUSED (same object) and CAUGHT UP to the head
+   * before it is returned; otherwise one is lazy-started from the stream. Registers
+   * it so `liveCovenantDoc` / `serverReplicaFor` resolve it, and marks it used
+   * (resetting the idle timer).
    *
-   * FAIL-CLOSED: if the catch-up SOURCE throws (the stream is unreachable), no replica
-   * is registered and this returns `null` — the certify/read path then resolves a
-   * `null` provider and refuses, rather than vouching against a half-caught-up doc. A
-   * replica this manager holds but that was unregistered/destroyed out from under it
-   * (a stale entry) is rebuilt.
+   * WHY A WARM REPLICA RE-CATCHES-UP ON EVERY ACQUIRE (E3, #203 blocker). Without a
+   * live Electric subscription (the eventual E-infra shape), a warm replica does not
+   * see rows appended since it warmed — so a reused replica would trail the head
+   * forever and the freshness gate would refuse `replica_lagging` permanently
+   * (certify → append → certify again → never mints). Re-folding the durable snapshot
+   * on acquire fixes that: {@link ServerRoomReplica.catchUp} dedupes by each row's
+   * stream ordinal, so already-consumed rows are no-ops and only genuinely-new rows
+   * advance the replica. It converges to head from the SAME durable stream — no RPC.
+   *
+   * FAIL-CLOSED, twice:
+   *   - If the catch-up SOURCE throws (the stream is unreachable), a COLD acquire
+   *     registers nothing and returns `null`; a WARM one keeps the replica it already
+   *     had (the freshness gate still refuses if that replica trails the head), rather
+   *     than tearing down a working replica over a transient read failure.
+   *   - A POISON ROW (garbage bytes PUT through the E2 door: `parseUpdateMeta` /
+   *     `applyUpdate` throws) is caught PER ROW and skipped — it never crashes acquire
+   *     and never 500s certify for the whole room. A skipped row is not counted, so the
+   *     replica stays below the head and certify cleanly refuses `replica_lagging`.
    */
   async acquire(roomId: string): Promise<ServerRoomReplica | null> {
     const held = this.entries.get(roomId);
-    // Reuse only a replica that is BOTH ours and still the registered authority; a
-    // replaced/unregistered/destroyed one is rebuilt so we never hand back a stale doc.
-    if (
+    const warm =
       held !== undefined &&
       serverReplicaFor(roomId) === held.replica &&
-      !held.replica.conversation.isDestroyed()
-    ) {
-      held.lastUsedAt = this.now();
-      return held.replica;
-    }
-    if (held !== undefined) this.dispose(roomId, held);
+      !held.replica.conversation.isDestroyed();
 
     let rows: readonly PersistedYdocUpdate[];
     try {
       rows = await this.source.snapshot(roomId);
     } catch {
-      return null; // stream unreachable ⇒ fail-closed, register nothing
+      // Stream unreachable. A warm replica is kept as-is (gate guards staleness); a
+      // cold acquire (nothing usable held) registers nothing and fails closed.
+      if (warm && held !== undefined) {
+        held.lastUsedAt = this.now();
+        return held.replica;
+      }
+      if (held !== undefined) this.dispose(roomId, held);
+      return null;
     }
 
-    const replica = new ServerRoomReplica();
-    // Replay each row in stream order, folding content AND replaying its persisted
-    // authorship stamp (range-exact) — so authorship survives a cold restart via data.
-    for (const row of rows) replica.catchUp(row.op, writerFromRow(row));
-    registerServerReplica(roomId, replica);
-    this.entries.set(roomId, { replica, lastUsedAt: this.now() });
+    let replica: ServerRoomReplica;
+    if (warm && held !== undefined) {
+      replica = held.replica; // reuse the SAME object; catch it up below
+      held.lastUsedAt = this.now();
+    } else {
+      if (held !== undefined) this.dispose(roomId, held); // stale entry ⇒ rebuild
+      replica = new ServerRoomReplica();
+      registerServerReplica(roomId, replica);
+      this.entries.set(roomId, { replica, lastUsedAt: this.now() });
+    }
+
+    // Replay each row in stream order, folding content AND its persisted authorship
+    // stamp (range-exact) — so authorship survives a cold restart via data. The row's
+    // INDEX is its stream ordinal: dedupe key (a re-consumed row is a no-op) and the
+    // ledger's overlap tiebreak. A poison row is caught and skipped (fail-closed).
+    for (let position = 0; position < rows.length; position += 1) {
+      const row = rows[position] as PersistedYdocUpdate;
+      try {
+        replica.catchUp(row.op, writerFromRow(row), position);
+      } catch {
+        // Garbage bytes for this row: quarantine it. It stays unconsumed, so the
+        // replica trails the head and certify refuses cleanly rather than 500ing.
+      }
+    }
     return replica;
   }
 

@@ -28,16 +28,22 @@ import { ConversationDoc } from '@/app/prototype/yjs-conversation';
  * inserts at. P6F-1's gauntlet routed exactly this to P6F-2: "the CRDT layer
  * converges but cannot securely authenticate WHO authored content."
  *
- * So this replica separates the two:
+ * So this replica separates the two, by SOURCE of the authorship signal:
  *
- *   - CONVERGENCE — {@link connect} joins the replica to the durable stream /
- *     in-memory hub, and {@link catchUp} folds a whole-doc update in. Both move
- *     content and NOTHING about authorship: an item that arrives this way has
+ *   - CONVERGENCE-ONLY — {@link connect} joins the replica to a live replication
+ *     fabric for content alone; an item that arrives this way has
  *     `authenticatedAuthorOf === null` (unknown), fail-closed.
  *
- *   - AUTHORSHIP — {@link applyAuthenticatedUpdate} is the ONLY write that binds
- *     an item to a writer. It applies an update that arrived over an
- *     AUTHENTICATED connection (the ws server's `AtriumSession`, adjacent to
+ *   - AUTHORSHIP FROM DATA — {@link catchUp} folds one DURABLE-STREAM row and
+ *     replays that row's PERSISTED writer stamp (E2's `writer_user_id` /
+ *     `writer_kind`, migration 0054) into the ledger over the exact `(client, clock)`
+ *     ranges the row's bytes declare (E3, #203). So a replica rebuilt after a cold
+ *     restart recovers the ORIGINAL writers from the rows — a `system`/unstamped row
+ *     (writer `null`) folds content WITHOUT authorship, fail-closed to unknown.
+ *
+ *   - AUTHORSHIP FROM A LIVE CONNECTION — {@link applyAuthenticatedUpdate} is the
+ *     live write that binds an item to a writer. It applies an update that arrived
+ *     over an AUTHENTICATED connection (the ws server's `AtriumSession`, adjacent to
  *     #187) and records, in a ledger keyed by the item's `(client, clock)`, WHICH
  *     authenticated writer's connection introduced it. Authorship of a message's
  *     content is then {@link authenticatedAuthorOf}: enumerate the CURRENT content
@@ -90,11 +96,31 @@ export interface WriterIdentity {
   readonly principalKind: 'human' | 'agent';
 }
 
-/** One attributed clock range for a client: `[from, to)` written by `writer`. */
+/**
+ * The stream position a LIVE authenticated apply records its claims at. A live
+ * apply ({@link ServerRoomReplica.applyAuthenticatedUpdate} /
+ * {@link ServerRoomReplica.seedAuthored}) is in-memory content, not a durable
+ * stream row, so it has no durable ordinal — and its items are always NEW clocks
+ * that no durable row has declared yet (Yjs cannot integrate a colliding item), so
+ * this value only ever loses a tie to a durable row that later re-declares the
+ * SAME item with the SAME writer. `+Infinity` encodes exactly that ordering: the
+ * durable stream is authoritative; a live in-memory attribution yields to a durable
+ * row's stamp for the same `(client, clock)` (which is the same writer anyway).
+ */
+const LIVE_APPLY_POSITION = Number.POSITIVE_INFINITY;
+
+/**
+ * One attributed clock range for a client: `[from, to)` written by `writer`, as
+ * declared by the durable row at stream position `streamPosition` (the row's total
+ * order in the stream; lower = earlier). {@link WriterLedger.writerAt} resolves an
+ * overlapping clock to the claim with the SMALLEST `streamPosition` — the earliest
+ * genuine writer — so attribution is independent of the order rows are replayed in.
+ */
 interface AttributedRange {
   readonly from: number;
   readonly to: number;
   readonly writer: WriterIdentity;
+  readonly streamPosition: number;
 }
 
 /**
@@ -105,40 +131,60 @@ interface AttributedRange {
  * connection, so a crafted `client` field can never reassign an existing item's
  * author, and a new crafted item is attributed to its own deliverer.
  *
- * First-writer-wins per `(client, clock)`: once an item is attributed, a later
- * apply of the SAME item (a replay) does not overwrite it — Yjs would dedupe the
- * item anyway, but the ledger is explicit so a re-recorded range cannot silently
- * re-home an already-authored item.
+ * ## Earliest-stream-writer-wins — genuinely ORDER-INDEPENDENT for overlaps
+ *
+ * Each recorded range carries the STREAM POSITION of the durable row that declared
+ * it (the row's total order `(appended_at, id)`, passed as the fold ordinal). When
+ * two rows declare OVERLAPPING clocks of the same client — the reachable-in-theory
+ * case where a full-state update re-contains another writer's structs alongside its
+ * own new ones — {@link writerAt} resolves each clock to the writer of the range
+ * with the SMALLEST stream position: the row that GENUINELY introduced the item,
+ * which is the earliest one in the stream. Because that ordinal is INTRINSIC to the
+ * row (not the replay order), replaying the rows in ANY order attributes the clock
+ * to the same original writer. A re-consumed row (a duplicate stream read) is a
+ * no-op at the replica level ({@link ServerRoomReplica.catchUp} dedupes by ordinal),
+ * so the ledger never even sees the second read; the min-position rule is the
+ * belt-and-suspenders that keeps a full-state re-declaration from re-homing an
+ * already-attributed clock regardless.
  */
 class WriterLedger {
   private readonly byClient = new Map<number, AttributedRange[]>();
 
-  /** Attribute the newly-integrated `[from, to)` clock range of `client` to `writer`. */
-  record(client: number, from: number, to: number, writer: WriterIdentity): void {
+  /**
+   * Attribute the `[from, to)` clock range of `client` to `writer`, as declared by
+   * the durable row at `streamPosition`. Overlaps are resolved at read time
+   * ({@link writerAt}) by smallest stream position, so this simply records the claim
+   * — it never trims against arrival order, which is what made the old fold
+   * order-dependent.
+   */
+  record(
+    client: number,
+    from: number,
+    to: number,
+    writer: WriterIdentity,
+    streamPosition: number,
+  ): void {
     if (to <= from) return;
     const ranges = this.byClient.get(client) ?? [];
-    // First-writer-wins: only attribute the sub-range not already claimed. Yjs
-    // integrates each item exactly once, so in practice `from` is the previous
-    // frontier and no overlap exists — but clamp defensively so a replay or an
-    // out-of-order fill can never re-home an already-attributed clock.
-    let start = from;
-    for (const r of ranges) {
-      if (r.to <= start || r.from >= to) continue;
-      // Overlap — skip the already-claimed slice.
-      if (r.from <= start) start = Math.max(start, r.to);
-    }
-    if (start < to) ranges.push({ from: start, to, writer });
+    ranges.push({ from, to, writer, streamPosition });
     this.byClient.set(client, ranges);
   }
 
-  /** The authenticated writer of the item at `(client, clock)`, or `null` if unattributed. */
+  /**
+   * The authenticated writer of the item at `(client, clock)`, or `null` if
+   * unattributed. When more than one range covers the clock (overlapping
+   * declarations), the EARLIEST-stream-position range wins — the genuine original
+   * writer, independent of replay order.
+   */
   writerAt(client: number, clock: number): WriterIdentity | null {
     const ranges = this.byClient.get(client);
     if (!ranges) return null;
+    let best: AttributedRange | null = null;
     for (const r of ranges) {
-      if (clock >= r.from && clock < r.to) return r.writer;
+      if (clock < r.from || clock >= r.to) continue;
+      if (best === null || r.streamPosition < best.streamPosition) best = r;
     }
-    return null;
+    return best?.writer ?? null;
   }
 }
 
@@ -154,17 +200,23 @@ export class ServerRoomReplica {
   private readonly applyOrigin = Symbol('server-replica-authenticated-apply');
 
   /**
-   * How far this replica has consumed the room's DURABLE STREAM — the count of
-   * `ydoc_updates` rows folded in via {@link catchUp} (E3, #203). It is the
-   * server-replica half of the freshness gate on `certifyObjectSpan`: a mint is
-   * refused when this trails the stream head at request time (the replica lags,
-   * so its content may be stale). Advanced ONLY by {@link catchUp} — the durable
-   * stream is the only thing that moves a stream position; an in-process
-   * authenticated apply is content, not a consumed stream row, so it never
-   * advances it. Distinct from #209's CLIENT freshness witness (this proves the
+   * The DISTINCT durable-stream rows this replica has folded in, keyed by each
+   * row's stream position (its total order `(appended_at, id)`, passed to
+   * {@link catchUp} as the fold ordinal). A SET, not a counter, on purpose (E3,
+   * #203 gauntlet): re-consuming a row — a duplicate stream read, or the warm
+   * re-catch-up {@link RoomReplicaManager.acquire} runs on every acquire — reuses
+   * its ordinal and does not inflate the position, and a row that was NEVER applied
+   * (a poison row the fold quarantines) leaves its ordinal absent, so the position
+   * can never reach the head with a row unapplied. `consumedStreamPosition()` is
+   * this set's size; the freshness gate compares it against the head (`count(*)`),
+   * and equality is only possible when every ordinal `0..head-1` is present.
+   *
+   * Moved ONLY by {@link catchUp} — the durable stream is the only thing that moves
+   * a stream position; an in-process authenticated apply is content, not a consumed
+   * stream row. Distinct from #209's CLIENT freshness witness (this proves the
    * SERVER replica is caught up to the stream, not that a client saw a fragment).
    */
-  private streamPosition = 0;
+  private readonly appliedRows = new Set<number>();
 
   constructor(convo: ConversationDoc = new ConversationDoc()) {
     this.convo = convo;
@@ -172,13 +224,15 @@ export class ServerRoomReplica {
 
   /**
    * The durable-stream position this replica has consumed to — the number of
-   * `ydoc_updates` rows folded in via {@link catchUp}. The freshness gate compares
-   * this against the stream head captured at certify-request time and REFUSES to
-   * mint when this trails it (fail-closed: never anchor content a lagging replica
-   * has not yet caught up to). See {@link streamPosition}.
+   * DISTINCT `ydoc_updates` rows folded in via {@link catchUp}. The freshness gate
+   * compares this against the stream head (`count(*)`) captured at certify-request
+   * time and REFUSES to mint when this trails it (fail-closed: never anchor content
+   * a lagging replica has not yet caught up to). Because it counts distinct rows by
+   * their stream ordinal, a duplicate fold cannot inflate it and a skipped
+   * (poison/quarantined) row keeps it below the head. See {@link appliedRows}.
    */
   consumedStreamPosition(): number {
-    return this.streamPosition;
+    return this.appliedRows.size;
   }
 
   /** The wrapped conversation — its `bodyPath`, `messages`, `model`, `contentFragment`. */
@@ -248,6 +302,13 @@ export class ServerRoomReplica {
    * pre-0054 row that carries no author) folds content WITHOUT authorship, exactly
    * as before: those items read as unknown, fail-closed.
    *
+   * `streamPosition` is the row's TOTAL-ORDER position in the durable stream (its
+   * `(appended_at, id)` rank, supplied by {@link RoomReplicaManager} as the fold
+   * ordinal). It is BOTH the row's dedupe identity (a re-consumed row reuses its
+   * ordinal, so it never re-inflates the freshness position or re-records the ledger)
+   * AND the tiebreak the ledger resolves overlapping declarations by. A row already
+   * folded is a no-op.
+   *
    * ## RANGE-EXACT, and ORDER-INDEPENDENT — why it uses `parseUpdateMeta`, not the
    * state-vector delta {@link applyAuthenticatedUpdate} uses.
    *
@@ -260,16 +321,23 @@ export class ServerRoomReplica {
    * connection delivered exactly the newly-integrated items — but wrong here: a row
    * replayed before its causal dependency integrates NOTHING, so an after-minus-before
    * delta would be empty and the stamp would be lost, then mis-charged to whichever
-   * later row happens to fill the gap.) Recording the op's declared ranges instead
-   * means a replay in ANY order lands every stamp on its own item, and the ledger's
-   * first-writer-wins makes a re-consumed row (a duplicate stream read) a no-op.
+   * later row happens to fill the gap.) Recording the op's declared ranges STAMPED
+   * WITH THIS ROW'S STREAM POSITION means a replay in ANY order lands every stamp on
+   * its own item, and — when a full-state row re-declares an EARLIER row's clocks —
+   * {@link WriterLedger.writerAt}'s earliest-stream-position rule keeps the original
+   * writer regardless of which row was replayed first.
    *
    * A PEER RACING APPENDS AROUND A RESTART cannot poison this: its live authenticated
    * writes land on NEW `(client, clock)` items under the peer's own clocks and its own
-   * identity, and the ledger's first-writer-wins protects every range a replayed stamp
-   * already claimed — a later apply of an already-attributed clock never re-homes it.
+   * identity, and a durable row's earliest-position claim protects every clock a
+   * replayed stamp already owns — a later declaration of an already-attributed clock
+   * never re-homes it.
    */
-  catchUp(update: Uint8Array, writer: WriterIdentity | null = null): void {
+  catchUp(update: Uint8Array, writer: WriterIdentity | null, streamPosition: number): void {
+    // A row already folded (a duplicate stream read, or the warm re-catch-up on
+    // acquire) is a no-op: its content is already integrated and its stamp already
+    // recorded, and re-counting its ordinal would falsely advance the position.
+    if (this.appliedRows.has(streamPosition)) return;
     // Record the stamp over the op's OWN declared ranges FIRST — from the bytes,
     // before integration — so attribution is range-exact and independent of whether
     // this row's causal deps have arrived yet or of the order rows are replayed in.
@@ -277,12 +345,14 @@ export class ServerRoomReplica {
       const meta = Y.parseUpdateMeta(update);
       for (const [client, to] of meta.to) {
         const from = meta.from.get(client) ?? 0;
-        if (to > from) this.ledger.record(client, from, to, writer);
+        if (to > from) this.ledger.record(client, from, to, writer, streamPosition);
       }
     }
     Y.applyUpdate(this.convo.doc, update);
-    // One durable-stream row consumed — advance the freshness position (E3, #203).
-    this.streamPosition += 1;
+    // One distinct durable-stream row consumed — record its ordinal (E3, #203). Only
+    // reached if the two lines above did not throw: a poison row leaves its ordinal
+    // absent, so the freshness position stays below the head (fail-closed).
+    this.appliedRows.add(streamPosition);
   }
 
   /**
@@ -360,7 +430,12 @@ export class ServerRoomReplica {
     const after = Y.decodeStateVector(Y.encodeStateVector(doc));
     for (const [client, toClock] of after) {
       const fromClock = before.get(client) ?? 0;
-      if (toClock > fromClock) this.ledger.record(client, fromClock, toClock, writer);
+      // A live apply has no durable ordinal — its items are new clocks no durable row
+      // has declared, so it only ever loses a tie to a durable row that later
+      // re-declares the SAME item with the SAME writer. See {@link LIVE_APPLY_POSITION}.
+      if (toClock > fromClock) {
+        this.ledger.record(client, fromClock, toClock, writer, LIVE_APPLY_POSITION);
+      }
     }
   }
 }

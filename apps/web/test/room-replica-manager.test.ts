@@ -88,15 +88,58 @@ describe('lazy-start: a replica is built from the stream on first need and regis
     expect(replica?.consumedStreamPosition()).toBe(1);
   });
 
-  it('a second acquire REUSES the live replica — it does not rebuild', async () => {
+  it('a second acquire REUSES the same replica OBJECT — it does not rebuild from scratch', async () => {
     const store = new Map([[ROOM, [row('m1', 'ship it', 'u_alice', 'human')]]]);
     const source = new FakeSource(store);
     const manager = new RoomReplicaManager({ source });
 
     const first = await manager.acquire(ROOM);
     const second = await manager.acquire(ROOM);
-    expect(second).toBe(first);
-    expect(source.calls.snapshot).toBe(1); // only the first need caught up
+    expect(second).toBe(first); // the warm replica object is reused, never rebuilt
+  });
+
+  it('BLOCKER-1: a warm replica RE-CATCHES-UP on acquire — a row appended after it warmed is folded in (no manual evict)', async () => {
+    const rows = [row('m1', 'ship it', 'u_alice', 'human')];
+    const store = new Map([[ROOM, rows]]);
+    const manager = new RoomReplicaManager({ source: new FakeSource(store) });
+
+    const warm = await manager.acquire(ROOM);
+    expect(warm?.consumedStreamPosition()).toBe(1);
+    expect(warm?.conversation.body('m2')).toBeNull(); // m2 not yet appended
+
+    // A new durable row is appended. Without a live subscription the warm replica has
+    // not seen it — a second acquire must catch it up (the permanent-lag blocker).
+    rows.push(row('m2', 'review it', 'u_alice', 'human'));
+    const caughtUp = await manager.acquire(ROOM);
+
+    expect(caughtUp).toBe(warm); // same object…
+    expect(caughtUp?.consumedStreamPosition()).toBe(2); // …now caught up to head
+    expect(caughtUp?.conversation.body('m2')?.toString()).toBe('review it');
+    expect(await manager.streamHead(ROOM)).toBe(2);
+  });
+});
+
+describe('BLOCKER-2: a poison row does not crash acquire — it is quarantined, the room reads as lagging', () => {
+  it('acquire skips an unparseable row (never throws), and the replica trails the head ⇒ fail-closed', async () => {
+    // A member PUTs garbage bytes through the E2 door (stored verbatim). The good row
+    // before it folds; the poison row throws inside catchUp and must be caught.
+    const poison: PersistedYdocUpdate = {
+      op: Uint8Array.from([0xff, 0xff, 0xff, 0xff, 0xff, 0xff]),
+      writerUserId: 'u_mallory',
+      writerKind: 'human',
+    };
+    const store = new Map([[ROOM, [row('m1', 'the honest reading', 'u_alice', 'human'), poison]]]);
+    const manager = new RoomReplicaManager({ source: new FakeSource(store) });
+
+    // acquire does NOT throw (the whole point — certify would otherwise 500 for the room).
+    const replica = await manager.acquire(ROOM);
+    expect(replica).not.toBeNull();
+    // The good row folded; the poison row was quarantined (not counted).
+    expect(replica?.conversation.body('m1')?.toString()).toBe('the honest reading');
+    expect(replica?.consumedStreamPosition()).toBe(1); // one of two rows applied
+    // Head counts both rows, so the replica trails it — certify refuses cleanly.
+    expect(await manager.streamHead(ROOM)).toBe(2);
+    expect(replica?.consumedStreamPosition()).toBeLessThan(await manager.streamHead(ROOM));
   });
 });
 

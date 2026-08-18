@@ -41,8 +41,8 @@ describe('authorship survives a cold restart — the stamp is replayed into the 
     // COLD RESTART: a fresh process, an empty ledger, rebuilding from the rows +
     // their persisted stamps.
     const restarted = new ServerRoomReplica();
-    restarted.catchUp(rowAlice, ALICE);
-    restarted.catchUp(rowBob, BOB);
+    restarted.catchUp(rowAlice, ALICE, 0);
+    restarted.catchUp(rowBob, BOB, 1);
 
     expect(restarted.conversation.body('m1')?.toString()).toBe('ship the migration');
     expect(restarted.conversation.body('m2')?.toString()).toBe('reviewed and approved');
@@ -57,7 +57,7 @@ describe('authorship survives a cold restart — the stamp is replayed into the 
     const row = Y.encodeStateAsUpdate(hexi.doc);
 
     const restarted = new ServerRoomReplica();
-    restarted.catchUp(row, HEXI);
+    restarted.catchUp(row, HEXI, 0);
     expect(restarted.authenticatedAuthorOf('a1')).toEqual(HEXI);
   });
 
@@ -67,7 +67,7 @@ describe('authorship survives a cold restart — the stamp is replayed into the 
     const row = Y.encodeStateAsUpdate(c.doc);
 
     const restarted = new ServerRoomReplica();
-    restarted.catchUp(row, null); // a `system` row maps to a null writer
+    restarted.catchUp(row, null, 0); // a `system` row maps to a null writer
     expect(restarted.conversation.body('m1')?.toString()).toBe('arrived with no author');
     expect(restarted.authenticatedAuthorOf('m1')).toBeNull();
   });
@@ -86,8 +86,8 @@ describe('the replay is RANGE-EXACT — a row’s stamp lands on its OWN items, 
     const rowB = Y.encodeStateAsUpdate(convo.doc, svA); // only m2's items, starting at A's frontier
 
     const restarted = new ServerRoomReplica();
-    restarted.catchUp(rowA, ALICE); // rowA's declared range ⇒ Alice
-    restarted.catchUp(rowB, BOB); // rowB's declared range ⇒ Bob
+    restarted.catchUp(rowA, ALICE, 0); // rowA's declared range ⇒ Alice
+    restarted.catchUp(rowB, BOB, 1); // rowB's declared range ⇒ Bob
 
     // Range-exact: m1's content is entirely Alice's, m2's entirely Bob's. An
     // off-by-one that let rowB's stamp reach one clock into rowA's range would make
@@ -97,40 +97,56 @@ describe('the replay is RANGE-EXACT — a row’s stamp lands on its OWN items, 
     expect(restarted.authenticatedAuthorOf('m2')).toEqual(BOB);
   });
 
-  it('the ledger is ORDER-INDEPENDENT — replaying rows in REVERSE yields the same attribution', () => {
-    // rowB causally depends on rowA (m2's clocks follow m1's on the same client).
-    const convo = new ConversationDoc();
-    convo.append(msg('m1', 'the first reading'));
-    const rowA = Y.encodeStateAsUpdate(convo.doc);
-    const svA = Y.encodeStateVector(convo.doc);
-    convo.append(msg('m2', 'the second reading'));
-    const rowB = Y.encodeStateAsUpdate(convo.doc, svA);
+  it('ORDER-INDEPENDENT over the OVERLAP branch — a full-state row re-declaring an earlier writer’s structs attributes the ORIGINAL writer, either replay order', () => {
+    // Alice (her own client) writes m1; her row declares client-Alice [0,n).
+    const alice = new ConversationDoc();
+    alice.append(msg('m1', 'the original reading'));
+    const rowAlice = Y.encodeStateAsUpdate(alice.doc); // stream position 0
 
-    // Replay B BEFORE A. B's structs are pending (their dep is not integrated yet),
-    // so an after-minus-before state-vector delta would attribute NOTHING to Bob and
-    // then mis-charge B's items to A when A's apply integrates them. Recording each
-    // row's OWN declared range from the bytes makes order irrelevant.
-    const restarted = new ServerRoomReplica();
-    restarted.catchUp(rowB, BOB);
-    restarted.catchUp(rowA, ALICE);
+    // Bob catches up Alice's content, writes m2, and — the reachable-in-theory case
+    // this hardens against — appends a FULL-STATE update (not a delta). Bob's row
+    // therefore DECLARES BOTH client-Bob's own new structs AND client-Alice's [0,n),
+    // re-contained. A first-listed-match fold would let arrival order decide who owns
+    // client-Alice's clocks; the earliest-stream-position rule must pin them to Alice.
+    const bob = new ConversationDoc();
+    Y.applyUpdate(bob.doc, rowAlice);
+    bob.append(msg('m2', 'the reviewer reading'));
+    const rowBobFull = Y.encodeStateAsUpdate(bob.doc); // FULL state, position 1
 
-    expect(restarted.conversation.body('m1')?.toString()).toBe('the first reading');
-    expect(restarted.conversation.body('m2')?.toString()).toBe('the second reading');
-    expect(restarted.authenticatedAuthorOf('m1')).toEqual(ALICE);
-    expect(restarted.authenticatedAuthorOf('m2')).toEqual(BOB);
+    // The row's stream position is INTRINSIC (position 0 = Alice's, 1 = Bob's),
+    // regardless of the order they are replayed in.
+    const forward = new ServerRoomReplica();
+    forward.catchUp(rowAlice, ALICE, 0);
+    forward.catchUp(rowBobFull, BOB, 1);
+
+    const reverse = new ServerRoomReplica();
+    reverse.catchUp(rowBobFull, BOB, 1); // Bob's full-state row replayed FIRST…
+    reverse.catchUp(rowAlice, ALICE, 0); // …then Alice's genuine row.
+
+    for (const replica of [forward, reverse]) {
+      expect(replica.conversation.body('m1')?.toString()).toBe('the original reading');
+      expect(replica.conversation.body('m2')?.toString()).toBe('the reviewer reading');
+      // m1's content is client-Alice's clocks, declared by BOTH rows — the earlier
+      // stream row (Alice's, position 0) wins: the original writer, both orders.
+      expect(replica.authenticatedAuthorOf('m1')).toEqual(ALICE);
+      // m2 is only Bob's, attributed to Bob.
+      expect(replica.authenticatedAuthorOf('m2')).toEqual(BOB);
+    }
   });
 
-  it('re-consuming a row (a duplicate stream read) is a no-op — first-writer-wins holds', () => {
+  it('re-consuming a row (a duplicate stream read at the SAME stream position) is a no-op — the original writer holds', () => {
     const convo = new ConversationDoc();
     convo.append(msg('m1', 'the reading'));
     const row = Y.encodeStateAsUpdate(convo.doc);
 
     const restarted = new ServerRoomReplica();
-    restarted.catchUp(row, ALICE);
-    // The same row read again, and even (adversarially) with a different stamp: Yjs
-    // dedupes the items and first-writer-wins keeps Alice — never re-homed.
-    restarted.catchUp(row, MALLORY);
+    restarted.catchUp(row, ALICE, 0);
+    // The same durable row (same stream position) read again, and even (adversarially)
+    // with a different stamp: the position is already applied, so the second read is a
+    // no-op — Alice is never re-homed, and the freshness position does not inflate.
+    restarted.catchUp(row, MALLORY, 0);
     expect(restarted.authenticatedAuthorOf('m1')).toEqual(ALICE);
+    expect(restarted.consumedStreamPosition()).toBe(1);
   });
 });
 
@@ -142,7 +158,7 @@ describe('a peer racing appends around a restart cannot poison replayed attribut
 
     // Restart: catch up Alice's row.
     const restarted = new ServerRoomReplica();
-    restarted.catchUp(row, ALICE);
+    restarted.catchUp(row, ALICE, 0);
     expect(restarted.authenticatedAuthorOf('m1')).toEqual(ALICE);
 
     // Mallory races an authenticated append of m2 right after the restart.
@@ -165,7 +181,7 @@ describe('a peer racing appends around a restart cannot poison replayed attribut
     const row = Y.encodeStateAsUpdate(alice.doc);
 
     const restarted = new ServerRoomReplica();
-    restarted.catchUp(row, ALICE);
+    restarted.catchUp(row, ALICE, 0);
     // Mallory replays Alice's exact bytes over her own authenticated connection.
     restarted.applyAuthenticatedUpdate(row, MALLORY);
     expect(restarted.authenticatedAuthorOf('m1')).toEqual(ALICE);
@@ -183,9 +199,9 @@ describe('the freshness position advances one per consumed row', () => {
 
     const restarted = new ServerRoomReplica();
     expect(restarted.consumedStreamPosition()).toBe(0);
-    restarted.catchUp(rowA, ALICE);
+    restarted.catchUp(rowA, ALICE, 0);
     expect(restarted.consumedStreamPosition()).toBe(1);
-    restarted.catchUp(rowB, BOB);
+    restarted.catchUp(rowB, BOB, 1);
     expect(restarted.consumedStreamPosition()).toBe(2);
     // A live authenticated write is content, NOT a consumed stream row — position holds.
     const peer = new ConversationDoc();

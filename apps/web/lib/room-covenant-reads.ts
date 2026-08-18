@@ -4,6 +4,7 @@ import { type Database, loadCovenantAnchor } from '@atrium/db';
 import { webCovenantReadAuthority } from './covenant-read';
 import { readerForLiveDoc } from './covenant-reader';
 import { liveCovenantDoc } from './live-covenant-doc';
+import { roomReplicaManager } from './room-replica-singleton';
 
 /**
  * RESOLVE A ROOM'S OBJECT `✓`/`~` GLYPHS — the server side of the display-glyph
@@ -32,19 +33,44 @@ import { liveCovenantDoc } from './live-covenant-doc';
  *                    watching the `conversation-content` share (`liveCovenantDoc.options`).
  *   - `expectedRoomId` — the room binding, so a foreign-room anchor fails closed.
  *
- * FAIL-CLOSED throughout: no replica registered (torn down / never joined) ⇒ the
- * provider polls `null` ⇒ the reader resolves nothing ⇒ `drift` (`~`); no anchor ⇒
- * `drift` (`~`); a drifted span ⇒ `drift` (`~`). Only a live span byte-identical to
- * its anchor resolves `ok` (`✓`). Each call `resolve()`s fresh, so a subsequent
- * server render (the live route's `router.refresh()` on drift/projection change)
- * re-resolves the current verdict — the staleness bound without a client doc.
+ * LAZY-STARTS THE REPLICA (E3, #203). The read path — not only certify — acquires
+ * the room's server replica before resolving, so authorship SURVIVES A RESTART all
+ * the way to the glyphs: after a cold restart nothing is registered, and if only the
+ * certify path acquired, every object would read `~` until someone certified. The
+ * acquire catches the replica up from the durable stream (idempotently — a warm one
+ * is reused), so the reader resolves against caught-up content. Eviction stays
+ * FAIL-CLOSED: an acquire that returns `null` (stream unreachable) leaves the
+ * provider polling `null`, and the reader yields `~`. Injectable (`acquire`) so a
+ * unit test can drive the fail-closed branches without a durable stream; production
+ * defaults to the process's one {@link roomReplicaManager}.
+ *
+ * FAIL-CLOSED throughout: no replica registered (torn down / never joined / a lazy-
+ * start that could not reach the stream) ⇒ the provider polls `null` ⇒ the reader
+ * resolves nothing ⇒ `drift` (`~`); no anchor ⇒ `drift` (`~`); a drifted span ⇒
+ * `drift` (`~`). Only a live span byte-identical to its anchor resolves `ok` (`✓`).
+ * Each call `resolve()`s fresh, so a subsequent server render (the live route's
+ * `router.refresh()` on drift/projection change) re-resolves the current verdict —
+ * the staleness bound without a client doc.
  */
 export async function roomCovenantReads(
   db: Pick<Database, 'select'>,
   roomId: string,
   objectIds: readonly string[],
+  options?: {
+    /**
+     * Lazy-start the room's replica before resolving. Defaults to the process's one
+     * {@link roomReplicaManager}'s `acquire`; a test injects a fake to drive the
+     * fail-closed branches (or a manager over its own durable stream) without the
+     * production singleton's real-Postgres source.
+     */
+    readonly acquire?: (roomId: string) => Promise<unknown>;
+  },
 ): Promise<Record<string, CovenantReadStatus>> {
   if (objectIds.length === 0) return {};
+  // Lazy-start (or catch up) the room's replica so a read after a restart resolves
+  // authorship, not `~`. Fail-closed: any failure here leaves the provider `null`.
+  const acquire = options?.acquire ?? ((id: string) => roomReplicaManager().acquire(id));
+  await acquire(roomId);
   const live = liveCovenantDoc(roomId);
   const reader = readerForLiveDoc(live.provider, undefined, live.options);
   const authority = webCovenantReadAuthority({

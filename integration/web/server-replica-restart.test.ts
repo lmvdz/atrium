@@ -12,6 +12,7 @@ import {
 import { certifyObjectSpan } from '../../apps/web/lib/certify-anchor.js';
 import { CovenantDocReaderProd, readerForLiveDoc } from '../../apps/web/lib/covenant-reader.js';
 import { liveCovenantDoc } from '../../apps/web/lib/live-covenant-doc.js';
+import { roomCovenantReads } from '../../apps/web/lib/room-covenant-reads.js';
 import { dbYdocStreamSource, RoomReplicaManager } from '../../apps/web/lib/room-replica-manager.js';
 import {
   clearServerReplicas,
@@ -270,6 +271,192 @@ describe('the freshness gate refuses a lagging replica, then mints once caught u
     });
     expect(mintedAfter.ok).toBe(true);
     manager.evictAll();
+  });
+
+  it('BLOCKER-1: certify → append → certify again MINTS, with NO manual evict (the warm replica re-catches-up on acquire)', async () => {
+    const room = await seedRoom(handle, ['ada']);
+    const o1 = randomUUID();
+    const o2 = randomUUID();
+    for (const id of [o1, o2]) {
+      await handle.db.insert(acceptedObjects).values({
+        id,
+        roomId: room.roomId,
+        type: 'decision',
+        payload: { statement: 'ship it', decidedBy: null, status: 'active' },
+      });
+    }
+
+    const ada = new ConversationDoc();
+    ada.append(msg('m1', 'alpha beta gamma'));
+    await appendThroughDoor(
+      handle,
+      room.roomId,
+      room.people.ada as string,
+      Y.encodeStateAsUpdate(ada.doc),
+    );
+
+    const manager = new RoomReplicaManager({ source: dbYdocStreamSource(handle.db) });
+
+    // The certify action's exact wiring, run twice against the SAME manager.
+    const certify = async (objectId: string, messageId: string): Promise<boolean> => {
+      const requiredPosition = await manager.streamHead(room.roomId);
+      const replica = await manager.acquire(room.roomId); // lazy-start OR warm re-catch-up
+      if (replica === null) throw new Error('acquire must return a replica');
+      const live = liveCovenantDoc(room.roomId);
+      const path = replica.conversation.bodyPath(messageId) as number[];
+      const reader = readerForLiveDoc(live.provider, { path, start: 0, end: 5 }, live.options);
+      const outcome = await certifyObjectSpan({
+        database: handle.db,
+        session: { userId: room.people.ada as string, principalKind: 'human' },
+        authorizedRoomId: room.roomId,
+        objectId,
+        reader,
+        streamFreshness: {
+          requiredPosition,
+          consumedPosition: () =>
+            serverReplicaFor(room.roomId)?.consumedStreamPosition() ?? Number.NEGATIVE_INFINITY,
+        },
+      });
+      return outcome.ok;
+    };
+
+    // First certify mints.
+    expect(await certify(o1, 'm1')).toBe(true);
+
+    // A new row is appended AFTER the replica warmed (no live subscription sees it).
+    const ada2 = new ConversationDoc();
+    Y.applyUpdate(ada2.doc, Y.encodeStateAsUpdate(serverReplicaFor(room.roomId)?.doc as Y.Doc));
+    const svBefore = Y.encodeStateVector(ada2.doc);
+    ada2.append(msg('m2', 'delta epsilon'));
+    await appendThroughDoor(handle, room.roomId, room.people.ada as string, delta(ada2, svBefore));
+
+    // The SECOND certify — WITHOUT any manual evict — must catch the warm replica up on
+    // acquire and MINT, not refuse `replica_lagging` forever. This is the blocker.
+    expect(await certify(o2, 'm2')).toBe(true);
+    expect(serverReplicaFor(room.roomId)?.consumedStreamPosition()).toBe(2);
+    manager.evictAll();
+  });
+
+  it('BLOCKER-2: a poison row PUT through the door does not 500 certify — acquire skips it, the room refuses cleanly', async () => {
+    const room = await seedRoom(handle, ['ada']);
+    const o1 = randomUUID();
+    await handle.db.insert(acceptedObjects).values({
+      id: o1,
+      roomId: room.roomId,
+      type: 'decision',
+      payload: { statement: 'ship it', decidedBy: null, status: 'active' },
+    });
+
+    const ada = new ConversationDoc();
+    ada.append(msg('m1', 'alpha beta gamma'));
+    await appendThroughDoor(
+      handle,
+      room.roomId,
+      room.people.ada as string,
+      Y.encodeStateAsUpdate(ada.doc),
+    );
+    // Ada PUTs GARBAGE bytes through the authenticated door — stored verbatim (the door
+    // does not parse the op; #208 tracks the non-owner boundary, not op validity).
+    await appendThroughDoor(
+      handle,
+      room.roomId,
+      room.people.ada as string,
+      Uint8Array.from([0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff]),
+    );
+
+    const manager = new RoomReplicaManager({ source: dbYdocStreamSource(handle.db) });
+    // acquire MUST NOT throw (otherwise the action 500s and certify is DOWN for the room).
+    const replica = await manager.acquire(room.roomId);
+    expect(replica).not.toBeNull();
+    // The good row folded; the poison row was quarantined ⇒ the replica trails the head.
+    expect(replica?.conversation.body('m1')?.toString()).toBe('alpha beta gamma');
+    const head = await manager.streamHead(room.roomId);
+    expect(head).toBe(2);
+    expect(replica?.consumedStreamPosition()).toBe(1);
+
+    // certify against the lagging (poisoned) room is a CLEAN refusal, never a 500.
+    const live = liveCovenantDoc(room.roomId);
+    const path = replica?.conversation.bodyPath('m1') as number[];
+    const reader = readerForLiveDoc(live.provider, { path, start: 0, end: 5 }, live.options);
+    const outcome = await certifyObjectSpan({
+      database: handle.db,
+      session: { userId: room.people.ada as string, principalKind: 'human' },
+      authorizedRoomId: room.roomId,
+      objectId: o1,
+      reader,
+      streamFreshness: {
+        requiredPosition: head,
+        consumedPosition: () =>
+          serverReplicaFor(room.roomId)?.consumedStreamPosition() ?? Number.NEGATIVE_INFINITY,
+      },
+    });
+    expect(outcome).toEqual({ ok: false, reason: 'replica_lagging' });
+    manager.evictAll();
+  });
+});
+
+describe('the READ path lazy-starts the replica so authorship reaches the glyphs after a restart (acceptance #4)', () => {
+  it('MAJOR-4: after a cold restart, roomCovenantReads acquires the replica and resolves the certified span ✓ — not `~`', async () => {
+    const room = await seedRoom(handle, ['ada']);
+    const objectId = randomUUID();
+    await handle.db.insert(acceptedObjects).values({
+      id: objectId,
+      roomId: room.roomId,
+      type: 'decision',
+      payload: { statement: 'ship it', decidedBy: null, status: 'active' },
+    });
+
+    const ada = new ConversationDoc();
+    ada.append(msg('m1', 'alpha beta gamma'));
+    await appendThroughDoor(
+      handle,
+      room.roomId,
+      room.people.ada as string,
+      Y.encodeStateAsUpdate(ada.doc),
+    );
+
+    // Certify m1's 'alpha' span — persists a real covenant anchor.
+    const manager = new RoomReplicaManager({ source: dbYdocStreamSource(handle.db) });
+    const replica = await manager.acquire(room.roomId);
+    if (replica === null) throw new Error('replica must catch up');
+    const head = await manager.streamHead(room.roomId);
+    const live = liveCovenantDoc(room.roomId);
+    const path = replica.conversation.bodyPath('m1') as number[];
+    const reader = readerForLiveDoc(live.provider, { path, start: 0, end: 5 }, live.options);
+    const minted = await certifyObjectSpan({
+      database: handle.db,
+      session: { userId: room.people.ada as string, principalKind: 'human' },
+      authorizedRoomId: room.roomId,
+      objectId,
+      reader,
+      streamFreshness: {
+        requiredPosition: head,
+        consumedPosition: () =>
+          serverReplicaFor(room.roomId)?.consumedStreamPosition() ?? Number.NEGATIVE_INFINITY,
+      },
+    });
+    expect(minted.ok).toBe(true);
+
+    // COLD RESTART: tear every replica down. The registry is now empty — if only the
+    // certify path acquired, the read below would be `~`.
+    manager.evictAll();
+    clearServerReplicas();
+    expect(serverReplicaFor(room.roomId)).toBeNull();
+
+    // BEFORE (the bug): a read with no lazy-start resolves `~` because nothing is registered.
+    const withoutLazyStart = await roomCovenantReads(handle.db, room.roomId, [objectId], {
+      acquire: async () => {}, // no lazy-start ⇒ nothing registered
+    });
+    expect(withoutLazyStart[objectId]).toBe('drift');
+
+    // AFTER (the fix): the read path lazy-starts the replica from the durable stream,
+    // so the certified span resolves `ok` — authorship survives the restart to the glyph.
+    const freshManager = new RoomReplicaManager({ source: dbYdocStreamSource(handle.db) });
+    const reads = await roomCovenantReads(handle.db, room.roomId, [objectId], {
+      acquire: (rid) => freshManager.acquire(rid),
+    });
+    expect(reads[objectId]).toBe('ok');
+    freshManager.evictAll();
   });
 });
 

@@ -42,6 +42,12 @@ import type { ChatMsg } from '../app/prototype/types';
 
 const ROOM = 'room_p6f4';
 const ALICE: WriterIdentity = { userId: 'u_alice', principalKind: 'human' };
+/**
+ * These resolution tests register the replica themselves ({@link seedReplica}), so
+ * they inject a NO-OP lazy-start — the acquire is exercised on its own in the
+ * lazy-start block below, against the fail-closed and the resolves-authorship paths.
+ */
+const NO_LAZY_START = { acquire: async () => {} } as const;
 const CERT_ALICE = { kind: 'human', userId: 'u_alice' } as const;
 const AT = '2026-08-17T12:00:00.000Z';
 const OBJECT_ID = 'o_span';
@@ -115,7 +121,12 @@ describe('roomCovenantReads — the server resolves ✓/~ against the authoritat
   it('a certified UNCHANGED span ⇒ ok (the `✓`), and the client shim + anchorCertifies agree', async () => {
     const replica = seedReplica('ship the migration');
     const anchor = deriveAnchor(replica, { start: 0, end: 4 }); // 'ship'
-    const reads = await roomCovenantReads(stubDb([rowFrom(anchor)]), ROOM, [OBJECT_ID]);
+    const reads = await roomCovenantReads(
+      stubDb([rowFrom(anchor)]),
+      ROOM,
+      [OBJECT_ID],
+      NO_LAZY_START,
+    );
 
     expect(reads[OBJECT_ID]).toBe('ok');
     // The shipped client decision: precomputedGlyphResolver → anchorCertifies ⇒ `✓`.
@@ -128,14 +139,19 @@ describe('roomCovenantReads — the server resolves ✓/~ against the authoritat
     // A peer edits the certified sub-range on the authoritative replica AFTER certify.
     replica.conversation.body('m1')?.insert(2, 'X');
 
-    const reads = await roomCovenantReads(stubDb([rowFrom(anchor)]), ROOM, [OBJECT_ID]);
+    const reads = await roomCovenantReads(
+      stubDb([rowFrom(anchor)]),
+      ROOM,
+      [OBJECT_ID],
+      NO_LAZY_START,
+    );
     expect(reads[OBJECT_ID]).toBe('drift');
     expect(anchorCertifies(precomputedGlyphResolver(reads), OBJECT_ID)).toBe(false); // `~`
   });
 
   it('NO anchor for the object ⇒ drift (`~`)', async () => {
     seedReplica('ship the migration');
-    const reads = await roomCovenantReads(stubDb([]), ROOM, [OBJECT_ID]); // empty ledger read
+    const reads = await roomCovenantReads(stubDb([]), ROOM, [OBJECT_ID], NO_LAZY_START); // empty ledger read
     expect(reads[OBJECT_ID]).toBe('drift');
     expect(anchorCertifies(precomputedGlyphResolver(reads), OBJECT_ID)).toBe(false);
   });
@@ -148,7 +164,7 @@ describe('roomCovenantReads — the server resolves ✓/~ against the authoritat
     // wrong room's `✓`. (The `loadCovenantAnchor` room-scoped query is the first
     // guard; `expectedRoomId` is this defence-in-depth second guard.)
     const foreign = rowFrom({ ...anchor, roomId: 'room_somewhere_else' });
-    const reads = await roomCovenantReads(stubDb([foreign]), ROOM, [OBJECT_ID]);
+    const reads = await roomCovenantReads(stubDb([foreign]), ROOM, [OBJECT_ID], NO_LAZY_START);
     expect(reads[OBJECT_ID]).toBe('drift');
     expect(anchorCertifies(precomputedGlyphResolver(reads), OBJECT_ID)).toBe(false);
   });
@@ -159,8 +175,55 @@ describe('roomCovenantReads — the server resolves ✓/~ against the authoritat
     const replica = seedReplica('ship the migration');
     const anchor = deriveAnchor(replica, { start: 0, end: 4 });
     clearServerReplicas(); // tear the replica down; the row remains readable
-    const reads = await roomCovenantReads(stubDb([rowFrom(anchor)]), ROOM, [OBJECT_ID]);
+    const reads = await roomCovenantReads(
+      stubDb([rowFrom(anchor)]),
+      ROOM,
+      [OBJECT_ID],
+      NO_LAZY_START,
+    );
     expect(reads[OBJECT_ID]).toBe('drift');
+  });
+});
+
+describe('E3 (#203) — the READ path LAZY-STARTS the replica (authorship survives restart to the glyphs)', () => {
+  it('MAJOR-4: with nothing registered (a cold restart), roomCovenantReads acquires the replica, and the certified span resolves ✓ — not `~`', async () => {
+    // A cold restart: the registry is empty. If only certify acquired, this read would
+    // be `~` until someone certified. The injected acquire is the lazy-start the
+    // production default performs against the durable stream — here it registers a
+    // caught-up replica so authorship reaches the glyph.
+    const replica = seedReplica('ship the migration');
+    const anchor = deriveAnchor(replica, { start: 0, end: 4 });
+    clearServerReplicas(); // NOTHING registered — the cold-restart starting point
+
+    let acquired = 0;
+    const lazyStart = {
+      acquire: async (roomId: string) => {
+        acquired += 1;
+        expect(roomId).toBe(ROOM);
+        // A real acquire catches up from the durable stream to the SAME content; here
+        // we re-register the identical replica the anchor was derived from.
+        registerServerReplica(ROOM, replica);
+        return replica;
+      },
+    };
+
+    const reads = await roomCovenantReads(stubDb([rowFrom(anchor)]), ROOM, [OBJECT_ID], lazyStart);
+    expect(acquired).toBe(1); // the read path acquired, it did not assume a warm replica
+    expect(reads[OBJECT_ID]).toBe('ok'); // authorship/content resolved after the restart
+    expect(anchorCertifies(precomputedGlyphResolver(reads), OBJECT_ID)).toBe(true);
+  });
+
+  it('eviction stays FAIL-CLOSED: an acquire that leaves nothing registered ⇒ every glyph drifts (`~`)', async () => {
+    const replica = seedReplica('ship the migration');
+    const anchor = deriveAnchor(replica, { start: 0, end: 4 });
+    // The replica is idle-evicted; the lazy-start cannot reach the stream (returns
+    // null and registers nothing). The reader must poll null and yield `~`.
+    clearServerReplicas();
+    const reads = await roomCovenantReads(stubDb([rowFrom(anchor)]), ROOM, [OBJECT_ID], {
+      acquire: async () => null, // acquire failed / stream unreachable ⇒ nothing registered
+    });
+    expect(reads[OBJECT_ID]).toBe('drift');
+    expect(anchorCertifies(precomputedGlyphResolver(reads), OBJECT_ID)).toBe(false);
   });
 });
 
