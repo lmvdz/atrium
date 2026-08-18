@@ -31,9 +31,12 @@
  * from the authorized room id is the allowlist form — there is no request shape
  * that produces a `where` this route did not write.
  *
- * The same reasoning covers `columns`: unspecified means all of them, and the
- * two ydoc tables have no column a member may not see. A client-supplied
- * projection would be one more input with no upside.
+ * The same reasoning covers `columns`, and a generated column forces the issue:
+ * `ydoc_updates.op_digest` is `GENERATED ALWAYS … STORED` (migration 0054), and
+ * Electric answers `400` to an all-columns read of a table that has one. So the
+ * proxy PINS the exact columns per table (`lib/electric-shape.ts` `SHAPE_COLUMNS`),
+ * discarding whatever the client sent — the allowlist form of `where`, and here
+ * also the difference between a `200` and a stream that 400s for every reader.
  *
  * ## What IS forwarded
  *
