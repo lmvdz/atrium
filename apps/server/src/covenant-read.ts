@@ -54,7 +54,13 @@ export async function readCovenantAnchor(
     .where(and(eq(covenantAnchors.roomId, roomId), eq(covenantAnchors.objectId, objectId)))
     .limit(1);
 
-  const row = rows[0];
+  // Destructured rather than indexed, and not for taste. `rows` is derived from a
+  // `Database` handle, and `@atrium/auth`'s room-membership boundary check treats
+  // any element access on a handle-derived value with a non-string key as "we could
+  // not tell what this reads" — so `rows[0]` fails that test. The guard is over-broad
+  // there (a numeric literal cannot be a table name) but it is another lane's, and the
+  // safe direction is to write the shape it can read (see apps/server/src/jobs/interpret.ts).
+  const [row] = rows;
   if (!row) return null;
 
   // FAIL-CLOSED: a `✓` whose certifier was deleted (certifier_id NULL) has no core

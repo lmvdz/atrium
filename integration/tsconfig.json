@@ -9,6 +9,13 @@
     // stubbing it away would mean the test no longer drives the real client,
     // which is the whole point of it (#22 gauntlet r1, major 6).
     "lib": ["ES2023", "DOM"],
+    // `jsx: preserve`, as `apps/web/tsconfig.json` sets it. Resolving `@/*` (above)
+    // lets the covenant read path be followed to source: `replay-data.ts` →
+    // `room-covenant-reads.ts` → `live-covenant-doc.ts` → `@/app/prototype/yjs-conversation`,
+    // which imports `@/src/components/model` and `./conversation-model` — i.e. the
+    // shipped `.tsx` grammar. Those files have to typecheck (noEmit, so nothing is
+    // written), and without `jsx` set tsc refuses a `.tsx` in the program.
+    "jsx": "preserve",
     "types": ["node", "vitest/globals"],
     "module": "ESNext",
     "moduleResolution": "Bundler",
@@ -21,6 +28,16 @@
       "@atrium/db": ["./packages/db/src/index.ts"],
       "@atrium/db/schema": ["./packages/db/src/schema.ts"],
       "@atrium/auth": ["./packages/auth/src/index.ts"],
+      // `@/*` — the same alias `apps/web/tsconfig.json` declares as `["./*"]`
+      // (rooted at `apps/web`), restated here against this project's `baseUrl` of
+      // the repo root. The covenant read path (#181) reaches the live conversation
+      // through `apps/web/lib/{live-covenant-doc,server-room-replica}.ts`, which
+      // import `@/app/prototype/*` (the Yjs substrate still lives there until E4's
+      // #204 refactor). Without this, `integration/web/replay-data.test.ts` — which
+      // pulls `apps/web/lib/replay-data.ts` → `room-covenant-reads.ts` →
+      // `live-covenant-doc.ts` — cannot resolve the alias and fails to typecheck,
+      // and the same alias in `vitest.integration.config.ts` is what lets it LOAD.
+      "@/*": ["./apps/web/*"],
       // The covenant certify path (#190) resolves a live span through
       // `apps/web/lib/covenant-reader.ts`, which binds the Yjs port. `yjs` is an
       // `apps/web` dependency, not a root one, so point the compiler at the one
