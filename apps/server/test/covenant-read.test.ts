@@ -171,6 +171,38 @@ describe('serverCovenantReadAuthority — the authority wired to the ledger read
     expect(authority.read('o_span').covenantStatus).toBe('unresolved');
   });
 
+  // E7 (#199) — the `#182-before-server-✓` gate opens ONLY under a drift sweep. With
+  // `driftSwept: true` the caller declares a RoomDriftSweep is invalidating this exact
+  // authority on every replica update, so a cached `ok` that was NOT invalidated is
+  // proven fresh and is served as `✓` — the flag SL-4 kept SET until DETECT is real.
+  it('a drift-swept authority serves a cached `ok` as `✓` (the #182 flag-clear)', async () => {
+    const fragment: RenderedFragment = {
+      ancestors: [],
+      nodes: [{ kind: 'text', text: 'ship it', marks: [] }],
+    };
+    const digest = renderedDigestOf(fragment);
+    const resolveSpan = async (anchor: CovenantAnchor): Promise<ResolvedSpan | null> => ({
+      fragment,
+      enclosedItems: anchor.enclosedItems,
+      snapshotVerified: true,
+    });
+    const authority = serverCovenantReadAuthority({
+      db: fakeDb([goodRow({ renderedDigest: digest, enclosedItems: ENCLOSED })]),
+      roomId: 'room_1',
+      resolveSpan,
+      driftSwept: true, // a sweep is live ⇒ the interim fail-closed guard is cleared
+    });
+    const r = await authority.resolve('o_span');
+    expect(r.covenantStatus).toBe('ok');
+    // not-theater: with the guard still SET this read would demote to `~`; the swept
+    // authority trusts the cached `ok` because the sweep guarantees invalidate-on-drift.
+    expect(authority.read('o_span').covenantStatus).toBe('ok');
+    // The invariant the sweep upholds: an `invalidate` (what the sweep calls on a drift)
+    // still demotes to `~` at once — a swept `✓` is trusted, but never a stale one.
+    authority.invalidate('o_span');
+    expect(authority.read('o_span').covenantStatus).not.toBe('ok');
+  });
+
   it('a ledger read that THROWS (null-certifier parse aside) fails closed to drift, never propagates', async () => {
     const authority = serverCovenantReadAuthority({
       db: fakeDb([goodRow({ renderedDigest: 'not-a-sha256' })]),
