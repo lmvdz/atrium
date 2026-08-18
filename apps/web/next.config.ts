@@ -21,7 +21,16 @@ const nextConfig: NextConfig = {
   // build is at best pointless and at worst breaks them. Leave them as real
   // Node requires. (The workspace packages are deliberately *not* listed — Next
   // compiles those from source, which is what makes `@/lib` imports work.)
-  serverExternalPackages: ['postgres', 'drizzle-orm', 'better-auth', 'nodemailer'],
+  // `yjs` is external for a COVENANT-CORRECTNESS reason (#220 / T6), not just size:
+  // the production `CovenantDocReaderProd` identifies Yjs content items by
+  // `item.content.constructor.name` ('ContentString'/'ContentEmbed'/'ContentFormat'/
+  // 'ContentType'). Bundled into the server chunk, SWC MINIFIES those class names (to
+  // e.g. `cU`), so the reader rejects every item ("unrecognized Yjs content") and the
+  // covenant can never resolve `ok` in production. Required from node_modules at
+  // runtime, Yjs keeps its class names — and the app loads ONE copy (this also silences
+  // the "Yjs was already imported" dual-instance warning), so the server replica's doc
+  // and the reader agree on those names. The client bundle is unaffected.
+  serverExternalPackages: ['postgres', 'drizzle-orm', 'better-auth', 'nodemailer', 'yjs'],
   /* In the deployed stack Caddy owns `/attachments/*`. A split-process local
      run has no proxy, so it may state the server origin here; the browser still
      calls the same-origin path and only the small presign JSON is forwarded. */

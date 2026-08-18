@@ -1,18 +1,19 @@
 'use server';
 
+import { ClaimPayload } from '@atrium/core';
 import {
   type CertifyAnchorOutcome,
   certifyObjectSpan,
   REPLICA_ABSENT_POSITION,
 } from '@/lib/certify-anchor';
-import { type BodyPath, readerForLiveDoc } from '@/lib/covenant-reader';
+import { type BodyPath, type CovenantDocReaderProd, readerForLiveDoc } from '@/lib/covenant-reader';
 import { db } from '@/lib/db';
 import { liveCovenantDoc } from '@/lib/live-covenant-doc';
 import { roomReplicaManager } from '@/lib/room-replica-singleton';
 import { serverReplicaFor } from '@/lib/server-room-replica';
 import { requireSession } from '@/lib/session';
 import { loadRoom, loadWorkspace } from '@/lib/workspaces';
-import { CertifyObjectSpanInput } from './covenant-actions-input';
+import { CertifyObjectSpanInput, PokeCovenantSweepInput } from './covenant-actions-input';
 
 /**
  * CERTIFY AN OBJECT/SPAN — the human-only gesture that mints a covenant anchor
@@ -111,4 +112,137 @@ export async function certifyObjectSpanAction(raw: unknown): Promise<CertifyAnch
   if (outcome.ok) replicaManager.noteCertifiedFor(room.id, objectId);
 
   return outcome;
+}
+
+/**
+ * The span's rendered PLAINTEXT, derived server-authoritatively for the accepted
+ * object's claim statement (#220 / T6). The covenant MEANING lives in the anchor (its
+ * rendered digest over the exact span); this string is only the object's human-readable
+ * label, so it fails CLOSED to a stable non-empty default — an unresolved / empty /
+ * unrenderable span never leaves the `ClaimPayload`'s `min(1)` unsatisfied, and never
+ * throws out of the certify path. Read through the SAME reader the anchor is derived
+ * from, never from the client.
+ */
+function spanStatement(reader: CovenantDocReaderProd): string {
+  try {
+    const captured = reader.captureSelection();
+    if (captured !== null) {
+      const text = captured.fragment.nodes
+        .flatMap((node) => (node.kind === 'text' ? [node.text] : []))
+        .join('');
+      const trimmed = text.trim();
+      if (trimmed.length > 0) return trimmed.slice(0, 500);
+    }
+  } catch {
+    // A hostile / unrenderable body throws out of the reader — fail closed to the
+    // default label below; the certify's own derive step will refuse the anchor.
+  }
+  return 'certified passage';
+}
+
+/**
+ * CERTIFY A YJS SPAN — the human-only span certify on the yjs conversation surface
+ * (#220 / T6), the sibling of {@link certifyObjectSpanAction} that resolves the E8
+ * `objectIdFor` dormancy by DERIVING the covenant object the anchor binds to.
+ *
+ * ## The binding: one-accepted-object-per-certified-span (Lars-endorsed)
+ *
+ * A yjs span has no ledger proposal/acceptance to project an `accepted_objects` row
+ * from (that is `apps/server`'s event-sourced projection, for ledger rooms). So the
+ * human certify gesture derives the object DIRECTLY: the request's `objectId` is the
+ * message's own id (the client passes the yjs message id, a uuid), and this action
+ * hands {@link certifyObjectSpan} an `ensureObject` that UPSERTS the matching
+ * `accepted_objects` row (a human-touched `claim` over the span's rendered text)
+ * inside the anchor's write transaction, so the anchor's composite FK resolves and
+ * the two writes are atomic. One object per message body ⇒ one certified span per
+ * message; a second span in the same body would reuse the object id and the anchor's
+ * unique `(room_id, object_id)` index reports `already_certified` (the deferred
+ * overlapping-spans meaning fork, NOT baked in here — see #220).
+ *
+ * Everything else is {@link certifyObjectSpanAction}'s discipline verbatim: the
+ * certifier is the authenticated session (a non-human is refused in
+ * `certifyObjectSpan`), the span materials are derived by the authoritative server
+ * reader over the live doc, and the request carries only WHICH span (`.strict()`).
+ */
+export async function certifyYjsSpanAction(raw: unknown): Promise<CertifyAnchorOutcome> {
+  const session = await requireSession('/app');
+  const parsed = CertifyObjectSpanInput.safeParse(raw);
+  if (!parsed.success) return { ok: false, reason: 'derive_failed' };
+  const { workspaceSlug, roomSlug, objectId, bodyPath, start, end } = parsed.data;
+
+  const workspace = await loadWorkspace(workspaceSlug, session.userId);
+  if (!workspace) return { ok: false, reason: 'not_in_room' };
+  const room = await loadRoom(workspace.id, roomSlug, session.userId);
+  if (!room) return { ok: false, reason: 'not_in_room' };
+
+  const replicaManager = roomReplicaManager();
+  const requiredPosition = await replicaManager.streamHead(room.id);
+  await replicaManager.acquire(room.id);
+
+  const live = liveCovenantDoc(room.id);
+  const selection: { path: BodyPath; start: number; end: number } = { path: bodyPath, start, end };
+  const reader = readerForLiveDoc(live.provider, selection, live.options);
+
+  const outcome = await certifyObjectSpan({
+    database: db(),
+    session: { userId: session.userId, principalKind: session.principalKind },
+    authorizedRoomId: room.id,
+    objectId,
+    reader,
+    // THE BINDING (see docblock): derive the object the anchor's FK names, in the
+    // anchor's transaction. A `claim` labelled by the span's server-derived text.
+    ensureObject: {
+      type: 'claim',
+      payload: ClaimPayload.parse({
+        statement: spanStatement(reader),
+        claimant: session.userId,
+        verification: 'unverified',
+      }),
+    },
+    streamFreshness: {
+      requiredPosition,
+      consumedPosition: () =>
+        serverReplicaFor(room.id)?.consumedStreamPosition() ?? REPLICA_ABSENT_POSITION,
+    },
+  });
+
+  if (outcome.ok) replicaManager.noteCertifiedFor(room.id, objectId);
+
+  return outcome;
+}
+
+/**
+ * POKE THE COVENANT SWEEP for a room (#220 / T6) — the yjs surface's drift SCHEDULER.
+ *
+ * On the ledger surface a peer edit lands as a ledger event and `router.refresh()`
+ * re-runs `roomCovenantReads`, which acquires the replica and re-verdicts. The yjs
+ * surface has neither: its conversation is pure Electric, so the server-authoritative
+ * replica has NO trigger to re-consume peer edits and re-run the sweep that projects
+ * `covenant_status` (the glyph shape). Without a driver a certified span would show
+ * `✓` and never flip on a peer edit.
+ *
+ * This is that driver, membership-gated: {@link roomReplicaManager}`.acquire` re-folds
+ * the durable stream (idempotent — already-consumed ops are no-ops, only genuinely-new
+ * ones advance the replica and fire its doc `update`, which drives the drift sweep →
+ * `upsertCovenantStatus` → the client shape). The client polls it while mounted. It
+ * NEVER mints a verdict — it only re-runs the fail-closed sweep, whose only write is
+ * the owner/server `covenant_status` projection.
+ *
+ * Fail-safe: any refusal (not signed in / not a member / a torn-down room) returns
+ * `{ ok: false }` and mints nothing; the glyphs stay at their last synced verdict,
+ * degrading fail-closed to `~` on the client if the shape's liveness lapses.
+ */
+export async function pokeCovenantSweepAction(raw: unknown): Promise<{ readonly ok: boolean }> {
+  const session = await requireSession('/app');
+  const parsed = PokeCovenantSweepInput.safeParse(raw);
+  if (!parsed.success) return { ok: false };
+  const { workspaceSlug, roomSlug } = parsed.data;
+
+  const workspace = await loadWorkspace(workspaceSlug, session.userId);
+  if (!workspace) return { ok: false };
+  const room = await loadRoom(workspace.id, roomSlug, session.userId);
+  if (!room) return { ok: false };
+
+  await roomReplicaManager().acquire(room.id);
+  return { ok: true };
 }

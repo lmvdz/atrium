@@ -116,6 +116,40 @@ export function writerFromRow(
   return { userId: row.writerUserId, principalKind: row.writerKind };
 }
 
+/**
+ * Strip y-electric's document-update FRAME to the bare Yjs update (#220 / T6).
+ *
+ * The `ydoc_updates.op` column does NOT hold a bare Yjs update — it holds what the
+ * y-electric transport PUTs, which is `writeVarUint8Array(update)`: a lib0 varUint
+ * byte-length prefix followed by the raw update bytes (see
+ * `@electric-sql/y-electric` `sendOperations`, and its receive path
+ * `Y.applyUpdate(doc, readVarUint8Array(decoder))`). The Electric shape the CLIENT
+ * reads strips this prefix via `readVarUint8Array`; the server-authoritative replica
+ * reads the SAME column and must strip it identically before `Y.applyUpdate` /
+ * `Y.parseUpdateMeta`, or every fold throws (a misaligned parse) and the replica
+ * never advances — which stranded the covenant certify at `replica_lagging`.
+ *
+ * This reads the unsigned-LEB128 varUint (lib0's `readVarUint` wire form) and returns
+ * the trailing update bytes. A frame too short to carry its declared length throws,
+ * which the caller quarantines as a poison row (fail-closed) — never a false fold.
+ */
+export function decodeYElectricDocFrame(op: Uint8Array): Uint8Array {
+  let length = 0;
+  let shift = 0;
+  let i = 0;
+  for (;;) {
+    if (i >= op.length) throw new Error('ydoc frame: varUint length prefix is truncated');
+    const byte = op[i] as number;
+    i += 1;
+    length += (byte & 0x7f) * 2 ** shift;
+    if ((byte & 0x80) === 0) break;
+    shift += 7;
+  }
+  const end = i + length;
+  if (end > op.length) throw new Error('ydoc frame: declared update length exceeds the frame');
+  return op.subarray(i, end);
+}
+
 /** A direct-Postgres {@link YdocStreamSource} over the room's `ydoc_updates` rows. */
 export function dbYdocStreamSource(db: Pick<Database, 'select'>): YdocStreamSource {
   return {
@@ -135,8 +169,10 @@ export function dbYdocStreamSource(db: Pick<Database, 'select'>): YdocStreamSour
         // the fold and the dedupe key on the row's own seq, not this array index.
         .orderBy(asc(ydocUpdates.streamSeq));
       return rows.map((r) => ({
-        // Postgres `bytea` arrives as a Node Buffer; Yjs needs a plain Uint8Array.
-        op: Uint8Array.from(r.op as Uint8Array),
+        // Postgres `bytea` arrives as a Node Buffer; Yjs needs a plain Uint8Array —
+        // and the stored `op` is y-electric's framed form, so strip the varUint prefix
+        // to the bare update the replica's `catchUp` (Y.applyUpdate) expects (#220).
+        op: decodeYElectricDocFrame(Uint8Array.from(r.op as Uint8Array)),
         writerUserId: r.writerUserId,
         writerKind: r.writerKind,
         streamSeq: BigInt(r.streamSeq),

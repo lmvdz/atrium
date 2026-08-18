@@ -39,3 +39,25 @@ export const CertifyObjectSpanInput = z
 
 /** The parsed, validated certify request — WHICH object + WHICH span, nothing more. */
 export type CertifyObjectSpanRequest = z.infer<typeof CertifyObjectSpanInput>;
+
+/**
+ * THE COVENANT-SWEEP POKE REQUEST (#220 / T6) — WHICH room to re-verdict.
+ *
+ * The yjs surface syncs its conversation purely over Electric; it never calls
+ * `router.refresh()`, so the server-authoritative replica has no trigger to
+ * re-consume peer edits and re-run the drift sweep that projects `covenant_status`
+ * (the client glyph shape). This request drives that: the client polls it while
+ * mounted, the action re-acquires the room's replica (folding new durable ops), and
+ * the sweep re-verdicts every certified span. It carries ONLY the room locators —
+ * membership is re-checked server-side; nothing resolution-bearing crosses. `.strict()`
+ * for the same reason the certify input is: refuse an unknown field, never strip it.
+ */
+export const PokeCovenantSweepInput = z
+  .object({
+    workspaceSlug: z.string().min(1).max(200),
+    roomSlug: z.string().min(1).max(200),
+  })
+  .strict();
+
+/** The parsed, validated sweep-poke request — WHICH room, nothing more. */
+export type PokeCovenantSweepRequest = z.infer<typeof PokeCovenantSweepInput>;

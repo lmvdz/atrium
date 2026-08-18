@@ -45,12 +45,18 @@
  * is T2's to add; T1 gates on a query param and disturbs nothing.
  * ═════════════════════════════════════════════════════════════════════════ */
 
+import type { CovenantReadStatus } from '@atrium/core';
 import { useEffect, useRef, useState } from 'react';
+import { CertifyPassage } from '@/app/prototype/CertifyPassage';
 import type { ChatMsg } from '@/app/prototype/types';
 import type { ConversationDoc } from '@/app/prototype/yjs-conversation';
+import { anchorCertifies } from '@/lib/covenant-read';
+import { useLiveGlyphResolver } from '@/lib/use-live-glyph-resolver';
 import { fileText } from '@/src/components/model';
+import { type Glyph, glyphFor } from '@/src/components/model/glyph';
 import { loadRuntimeConfig } from '@/src/lib/runtime-config';
 import { resolveElectricSendUrl, resolveElectricShapeUrl } from '@/src/lib/ws-url';
+import { certifyYjsSpanAction, pokeCovenantSweepAction } from './control/covenant-actions';
 
 type MountStatus = 'connecting' | 'live' | 'no-fabric' | 'error';
 
@@ -61,6 +67,34 @@ interface LiveDocState {
 }
 
 const INITIAL: LiveDocState = { status: 'connecting', messages: [], error: null };
+
+/**
+ * How often the covenant surface pokes the server sweep (#220 / T6). The rubric's
+ * flip window is "≤1 render tick" (≤1 s); a sub-second poke keeps the `✓`→`~` flip and
+ * its exact-revert `~`→`✓` inside that bound after a peer edit reaches the durable
+ * stream. Cheap (a membership check + an idempotent replica catch-up).
+ */
+const POKE_INTERVAL_MS = 600;
+
+/**
+ * The covenant markers, DERIVED through `glyphFor` (never a hand-written glyph literal —
+ * the one-source-of-truth rule `glyph-source.test.ts` enforces). A live-resolved `ok`
+ * span renders the SETTLED `✓`; anything else — never certified, drifted, verifying, or
+ * a dead shape — renders the UNSETTLED `~`. `anchorCertifies` is the gate that decides
+ * which; these only NAME the two outcomes.
+ */
+const CERTIFIED_GLYPH: Glyph = glyphFor({
+  kind: 'claim',
+  verification: 'accepted',
+  owedToViewer: false,
+  irreversible: false,
+});
+const UNVERIFIED_GLYPH: Glyph = glyphFor({
+  kind: 'claim',
+  verification: 'unverified',
+  owedToViewer: false,
+  irreversible: false,
+});
 
 /**
  * The T1 read side, now with the T2 (#216) LOCAL-EDIT WRITE PATH.
@@ -84,10 +118,27 @@ export function LiveConversationDoc({
   roomId,
   write = false,
   viewerName,
+  covenantReads,
+  workspaceSlug,
+  roomSlug,
+  viewerId,
 }: {
   roomId: string;
   write?: boolean;
   viewerName?: string;
+  /**
+   * The SSR covenant verdict seed (`data.covenantReads`, keyed by object id = message
+   * id — the T6 binding). Its PRESENCE turns on the COVENANT surface (#220 / T6): the
+   * live `✓`/`~` glyph over `covenant_status` and the span-certify affordance. Absent
+   * (the T1 read-only mount) keeps the surface exactly as it was — no glyph, no certify.
+   */
+  covenantReads?: Readonly<Record<string, CovenantReadStatus>>;
+  /** The room's workspace slug — the certify action + sweep poke's membership locator. */
+  workspaceSlug?: string;
+  /** The room's slug — same. */
+  roomSlug?: string;
+  /** The authenticated viewer id — the certify actor when no display name is set. */
+  viewerId?: string;
 }) {
   const [state, setState] = useState<LiveDocState>(INITIAL);
   const [draft, setDraft] = useState('');
@@ -95,6 +146,27 @@ export function LiveConversationDoc({
   // mount renders and the transport ships. Set once the mount goes live; cleared
   // on dispose so a submit after unmount is a no-op, never a write to a dead doc.
   const docRef = useRef<ConversationDoc | null>(null);
+  // A re-render trigger + the live doc as STATE, so the certify affordance mounts once
+  // the doc is ready and CertifyPassage recomputes its rendered span on every
+  // convergence (its `version` prop, E8 finding #1).
+  const [docInstance, setDocInstance] = useState<ConversationDoc | null>(null);
+  const [version, setVersion] = useState(0);
+  // The COVENANT surface is on only when the seed AND the membership locators are all
+  // present (a real yjs room load). The read-only T1 mount passes none of these and
+  // stays untouched. `write` is required too: certify is a human act on a writable doc.
+  const covenant =
+    write &&
+    covenantReads !== undefined &&
+    workspaceSlug !== undefined &&
+    roomSlug !== undefined;
+  // The live covenant glyph resolver (T4, #218) — subscribes the room's `covenant_status`
+  // Electric shape and folds each streamed verdict, so a certified span's glyph flips
+  // `✓`→`~` on a peer edit and back on an exact revert, liveness-gated fail-closed (`✓`
+  // ONLY while the shape is live + up-to-date + `ok`). Called unconditionally (rules of
+  // hooks); a `undefined` seed (the T1 mount) subscribes nothing and every glyph is `~`.
+  const glyphResolver = useLiveGlyphResolver(roomId, covenant ? covenantReads : undefined);
+  // Which message's certify panel is open (at most one).
+  const [openCertifyId, setOpenCertifyId] = useState<string | null>(null);
 
   useEffect(() => {
     let disposed = false;
@@ -142,7 +214,11 @@ export function LiveConversationDoc({
 
       const doc = new ConversationDoc();
       const offChange = doc.onChange(() => {
-        if (!disposed) setState((current) => ({ ...current, messages: doc.messages() }));
+        if (disposed) return;
+        setState((current) => ({ ...current, messages: doc.messages() }));
+        // Bump the convergence tick so the certify panel recomputes its rendered span
+        // (E8 finding #1: a span captured against a stale body must never be certified).
+        setVersion((current) => current + 1);
       });
       let disconnect: (() => void) | undefined;
       try {
@@ -163,6 +239,7 @@ export function LiveConversationDoc({
       // Publish the initial (empty) projection under the live status; onChange
       // drives every convergence after this.
       docRef.current = doc;
+      setDocInstance(doc);
       setState({ status: 'live', messages: doc.messages(), error: null });
 
       dispose = () => {
@@ -170,6 +247,7 @@ export function LiveConversationDoc({
         disconnect?.();
         if (!doc.isDestroyed()) doc.destroy();
         docRef.current = null;
+        setDocInstance(null);
       };
     })();
 
@@ -196,6 +274,108 @@ export function LiveConversationDoc({
       text,
     });
     setDraft('');
+  };
+
+  // THE YJS DRIFT SCHEDULER (#220 / T6). The yjs surface is pure Electric — no
+  // `router.refresh()` — so the server-authoritative replica has no trigger to
+  // re-consume peer edits and re-run the drift sweep that projects `covenant_status`.
+  // While the covenant surface is live, poll the membership-gated poke action: each
+  // call re-acquires the replica (idempotent), folding any new durable ops, which fires
+  // the sweep → `upsertCovenantStatus` → the glyph shape. Without this a certified span
+  // would show `✓` and never flip on a peer edit. Fail-safe: the poke mints no verdict,
+  // it only re-runs the fail-closed sweep.
+  useEffect(() => {
+    if (!covenant || state.status !== 'live') return;
+    if (workspaceSlug === undefined || roomSlug === undefined) return;
+    let stopped = false;
+    const poke = () => {
+      void pokeCovenantSweepAction({ workspaceSlug, roomSlug }).catch(() => {
+        // A transient poke failure is harmless: the glyphs keep their last synced
+        // verdict and the next poke retries. Never surfaced as an error.
+      });
+    };
+    poke(); // an immediate first pass so a fresh mount verdicts without waiting a tick
+    const timer = setInterval(() => {
+      if (!stopped) poke();
+    }, POKE_INTERVAL_MS);
+    return () => {
+      stopped = true;
+      clearInterval(timer);
+    };
+  }, [covenant, state.status, workspaceSlug, roomSlug]);
+
+  // THE HARNESS PEER-EDIT / CERTIFY SEAM (#220 / T6 acceptance scaffolding). The
+  // rubric-12 flip needs an IN-RANGE peer edit of a certified span and an EXACT undo —
+  // in-body co-editing that this thin slice does not yet ship as a user affordance. So,
+  // ONLY behind an explicit `?covenant-e2e=1` gate, expose the live doc's edit + certify
+  // to the acceptance harness (a legitimate peer): editing a body is already a
+  // peer-writable capability, and certify still goes through the human-gated server
+  // action. Never exposed on the normal surface.
+  // biome-ignore lint/correctness/useExhaustiveDependencies: re-bind when the doc, tick, or membership locators change so the hooks close over the live instance
+  useEffect(() => {
+    if (typeof window === 'undefined') return;
+    if (new URLSearchParams(window.location.search).get('covenant-e2e') !== '1') return;
+    const doc = docRef.current;
+    if (doc === null || workspaceSlug === undefined || roomSlug === undefined) return;
+    (window as unknown as { __atriumYjsTest?: unknown }).__atriumYjsTest = {
+      /** The current message ids + their body plaintext, for the harness to target. */
+      messages: (): Array<{ id: string; text: string }> =>
+        doc.messages().map((message) => ({ id: message.id, text: message.text ?? '' })),
+      /** A peer edit: insert `text` at char `index` inside a message's body. */
+      edit: (messageId: string, index: number, text: string): boolean => {
+        const body = doc.body(messageId);
+        if (body === null) return false;
+        body.insert(index, text);
+        return true;
+      },
+      /** The exact undo of an insert: delete `len` chars at `index` (restores the items). */
+      deleteRange: (messageId: string, index: number, len: number): boolean => {
+        const body = doc.body(messageId);
+        if (body === null) return false;
+        body.delete(index, len);
+        return true;
+      },
+      /** Certify a span through the REAL human-gated action (scaffolding mint). */
+      certify: async (
+        messageId: string,
+        start: number,
+        end: number,
+      ): Promise<{ ok: boolean; reason?: string }> => {
+        const bodyPath = doc.bodyPath(messageId);
+        if (bodyPath === null) return { ok: false, reason: 'no_body' };
+        const outcome = await certifyYjsSpanAction({
+          workspaceSlug,
+          roomSlug,
+          objectId: messageId,
+          bodyPath,
+          start,
+          end,
+        });
+        return outcome.ok ? { ok: true } : { ok: false, reason: outcome.reason };
+      },
+    };
+    return () => {
+      delete (window as unknown as { __atriumYjsTest?: unknown }).__atriumYjsTest;
+    };
+  }, [docInstance, version, workspaceSlug, roomSlug]);
+
+  // THE SPAN-CERTIFY ACT (#220 / T6) — CertifyPassage's `onCertify`, wired to the
+  // human-gated `certifyYjsSpanAction`. The machine NEVER mints `✓`: this awaits the
+  // server's answer and maps it to the panel's outcome; a refusal is surfaced verbatim,
+  // never dressed as success. The object id IS the message id — the one-object-per-span
+  // binding — so no client-forgeable object reference crosses.
+  const runCertify = async (request: {
+    workspaceSlug: string;
+    roomSlug: string;
+    objectId: string;
+    bodyPath: number[];
+    start: number;
+    end: number;
+  }): Promise<{ ok: true; anchorId: string } | { ok: false; reason: string }> => {
+    const outcome = await certifyYjsSpanAction(request);
+    return outcome.ok
+      ? { ok: true, anchorId: outcome.anchorId }
+      : { ok: false, reason: outcome.reason };
   };
 
   return (
@@ -240,36 +420,105 @@ export function LiveConversationDoc({
         </p>
       ) : null}
       <ol style={{ listStyle: 'none', margin: '0.5rem 0 0', padding: 0 }}>
-        {state.messages.map((message) => (
-          <li
-            key={message.id}
-            data-live-doc-message-id={message.id}
-            style={{ padding: '0.25rem 0', borderTop: '1px solid rgba(0,0,0,0.06)' }}
-          >
-            {/* Every peer string is printed through `fileText`: this is verbatim
-               content off the PEER-WRITABLE Yjs doc, so it is record data, not the
-               page's voice — and `fileText` neutralises bidi/control characters, so
-               a peer cannot smuggle a right-to-left override or a forged newline
-               into the feed. */}
-            <span style={{ opacity: 0.6 }}>
-              {fileText(message.time, 'live document line time')}
-            </span>{' '}
-            <span
-              style={{
-                fontSize: '0.85em',
-                padding: '0 0.35em',
-                borderRadius: 4,
-                background: 'rgba(0,0,0,0.06)',
-                opacity: 0.8,
-              }}
+        {state.messages.map((message) => {
+          // THE LIVE COVENANT GLYPH (#220 / T6). `✓` ONLY when the read authority
+          // positively resolves this object (`covenant_status === 'ok'`) over a LIVE
+          // shape — `anchorCertifies` is the single fail-closed gate, keyed by object id
+          // = message id (the T6 binding). Anything else — never certified, drifted,
+          // not-yet-synced, or a dead shape — is `~`. The machine never mints `✓`; a peer
+          // edit flips it to `~` within a render tick and an exact revert flips it back.
+          const certified = covenant && anchorCertifies(glyphResolver, message.id);
+          const canCertify =
+            covenant && docInstance !== null && workspaceSlug !== undefined && roomSlug !== undefined;
+          const panelOpen = openCertifyId === message.id;
+          return (
+            <li
+              key={message.id}
+              data-live-doc-message-id={message.id}
+              style={{ padding: '0.25rem 0', borderTop: '1px solid rgba(0,0,0,0.06)' }}
             >
-              unverified · live
-            </span>{' '}
-            <span data-live-doc-message-text>
-              {fileText(message.text ?? '', 'live document line body')}
-            </span>
-          </li>
-        ))}
+              {/* Every peer string is printed through `fileText`: this is verbatim
+                 content off the PEER-WRITABLE Yjs doc, so it is record data, not the
+                 page's voice — and `fileText` neutralises bidi/control characters, so
+                 a peer cannot smuggle a right-to-left override or a forged newline
+                 into the feed. */}
+              <span style={{ opacity: 0.6 }}>
+                {fileText(message.time, 'live document line time')}
+              </span>{' '}
+              {covenant ? (
+                // The covenant marker. `data-glyph="✓"` ONLY on a live-resolved `ok`
+                // (the acceptance cardinal keys on it); a `~` is the honest
+                // not-certified / drifted / verifying state.
+                <span
+                  data-glyph={certified ? CERTIFIED_GLYPH : UNVERIFIED_GLYPH}
+                  title={
+                    certified
+                      ? 'a human certification stands over a span of this line'
+                      : 'no live human certification stands over this line'
+                  }
+                  style={{
+                    fontSize: '0.85em',
+                    padding: '0 0.35em',
+                    borderRadius: 4,
+                    background: certified ? 'rgba(16,128,64,0.14)' : 'rgba(0,0,0,0.06)',
+                    color: certified ? 'rgb(16,110,56)' : 'inherit',
+                    opacity: 0.9,
+                  }}
+                >
+                  {certified ? `${CERTIFIED_GLYPH} certified` : `${UNVERIFIED_GLYPH} unverified`}
+                </span>
+              ) : (
+                <span
+                  style={{
+                    fontSize: '0.85em',
+                    padding: '0 0.35em',
+                    borderRadius: 4,
+                    background: 'rgba(0,0,0,0.06)',
+                    opacity: 0.8,
+                  }}
+                >
+                  unverified · live
+                </span>
+              )}{' '}
+              <span data-live-doc-message-text>
+                {fileText(message.text ?? '', 'live document line body')}
+              </span>
+              {canCertify && (message.text ?? '').length > 0 ? (
+                <>
+                  {' '}
+                  <button
+                    type="button"
+                    data-live-doc-certify-toggle={message.id}
+                    onClick={() => setOpenCertifyId((current) => (current === message.id ? null : message.id))}
+                    style={{
+                      fontSize: '0.8em',
+                      padding: '0 0.4em',
+                      border: '1px solid rgba(0,0,0,0.2)',
+                      borderRadius: 6,
+                      background: 'transparent',
+                      cursor: 'pointer',
+                    }}
+                  >
+                    {panelOpen ? 'close' : 'certify a passage'}
+                  </button>
+                </>
+              ) : null}
+              {canCertify && panelOpen && docInstance !== null ? (
+                <CertifyPassage
+                  doc={docInstance}
+                  messageId={message.id}
+                  version={version}
+                  // THE BINDING: the object id IS the message id (one object per span).
+                  objectId={message.id}
+                  workspaceSlug={workspaceSlug as string}
+                  roomSlug={roomSlug as string}
+                  actor={viewerName ?? viewerId ?? 'viewer'}
+                  onCertify={runCertify}
+                />
+              ) : null}
+            </li>
+          );
+        })}
       </ol>
       {write && state.status === 'live' ? (
         <form

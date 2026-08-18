@@ -34,13 +34,18 @@ import postgres from 'postgres';
  * re-run starts clean and nothing is left on the box.
  * ═════════════════════════════════════════════════════════════════════════ */
 
-/** Its own compose project — never the default `atrium` one, never `dagon-*`. */
-export const PROJECT = 'atrium-t5electric';
+/** Its own compose project — never the default `atrium` one, never `dagon-*`.
+ *  Overridable via `ELECTRIC_STACK_PROJECT` so a second lane (e.g. the T6 covenant
+ *  run, `atrium-t6v`) can stand up an ISOLATED stack in parallel without colliding
+ *  with the default T5 project. Default unchanged when the env is unset. */
+export const PROJECT = process.env.ELECTRIC_STACK_PROJECT ?? 'atrium-t5electric';
 
 /** Unique loopback ports. 55433 (pg) and 3110 (electric) avoid 5432/5433 (default),
- *  55432 (e2e pg), 5434 (dagon pg), and 3100 (the dev electric override). */
-export const PG_PORT = 55433;
-export const ELECTRIC_PORT = 3110;
+ *  55432 (e2e pg), 5434 (dagon pg), and 3100 (the dev electric override). Overridable
+ *  via `ELECTRIC_STACK_PG_PORT` / `ELECTRIC_STACK_ELECTRIC_PORT` for a parallel lane
+ *  (the T6 run uses 55434 / 3111); defaults unchanged when the env is unset. */
+export const PG_PORT = Number(process.env.ELECTRIC_STACK_PG_PORT ?? 55433);
+export const ELECTRIC_PORT = Number(process.env.ELECTRIC_STACK_ELECTRIC_PORT ?? 3110);
 
 /** Test credentials — obviously not production values. */
 const POSTGRES_USER = 'atrium';

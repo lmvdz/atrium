@@ -6,7 +6,13 @@ import {
   certifyAnchor,
   type HumanCertifier,
 } from '@atrium/core';
-import { type Database, insertCovenantAnchor, users } from '@atrium/db';
+import {
+  acceptedObjects,
+  type Database,
+  insertCovenantAnchor,
+  type ObjectPayload,
+  users,
+} from '@atrium/db';
 import { eq } from 'drizzle-orm';
 
 /* ---------------------------------------------------------------------------
@@ -147,6 +153,32 @@ export interface CertifyAnchorInput {
    * caller (the certify action) wires the replica's consumed position and the head.
    */
   readonly streamFreshness?: StreamFreshnessGate;
+  /**
+   * THE YJS-SPAN → COVENANT-OBJECT BINDING (#220 / T6). When present, an
+   * `accepted_objects` row for {@link CertifyAnchorInput.objectId} is UPSERTED
+   * (ON CONFLICT DO NOTHING) INSIDE the same write transaction, immediately before
+   * the anchor insert, so the anchor's composite FK to `accepted_objects(room_id,
+   * id)` (migration 0050) resolves. This is the "one-accepted-object-per-certified-
+   * span" model Lars endorsed: on the yjs surface a certified span has no ledger
+   * proposal/acceptance to project an object from (that path is `apps/server`'s
+   * event-sourced projection, for ledger rooms only), so the human certify gesture
+   * derives the durable object directly. It is created HUMAN-touched (`acceptedBy` =
+   * the certifier, `acceptedByKind` = `'human'`, `humanTouchedAt` = the certify
+   * instant) because a human is performing the act; the covenant `✓` itself is still
+   * the separate, gated anchor row over the exact span. Absent ⇒ the object must
+   * already exist (the prototype / ledger path), unchanged.
+   *
+   * Atomic by construction: the insert shares {@link certifyObjectSpan}'s transaction,
+   * so a refused anchor (derive failure caught earlier, membership/humanity refusal,
+   * or a unique-collision at the anchor) rolls the object insert back too — a certify
+   * that does not mint an anchor never strands a bare object.
+   */
+  readonly ensureObject?: {
+    /** The object type for the derived row — `'claim'` on the yjs span surface. */
+    readonly type: 'decision' | 'commitment' | 'open_question' | 'claim' | 'objective';
+    /** The validated payload (a `ClaimPayload` for the span surface). */
+    readonly payload: ObjectPayload;
+  };
 }
 
 /**
@@ -277,6 +309,28 @@ export async function certifyObjectSpan(input: CertifyAnchorInput): Promise<Cert
         lock: 'membership-and-workspace',
       });
       if (membership === null) return { ok: false, reason: 'not_in_room' } as const;
+
+      /* THE YJS-SPAN → COVENANT-OBJECT BINDING (#220 / T6). Derive the durable
+         `accepted_objects` row the anchor's FK names, in THIS transaction, before the
+         anchor insert. ON CONFLICT DO NOTHING so a re-certify (or a concurrent certify
+         of another span under the same object id) reuses the standing object rather than
+         erroring — the anchor's own unique `(room_id, object_id)` index (below) is what
+         enforces one-live-anchor-per-span. Human-touched because a human is certifying;
+         the machine never reaches this path (the non-human gate above already refused). */
+      if (input.ensureObject !== undefined) {
+        await tx
+          .insert(acceptedObjects)
+          .values({
+            id: objectId,
+            roomId: authorizedRoomId,
+            type: input.ensureObject.type,
+            payload: input.ensureObject.payload,
+            acceptedBy: session.userId,
+            acceptedByKind: 'human',
+            humanTouchedAt: new Date(certifiedAt),
+          })
+          .onConflictDoNothing();
+      }
 
       /* THE SINGLE GATED WRITE. `certifierKind` is the kind just re-read from the
          session's identity — the row's kind IS the authenticated principal's kind —

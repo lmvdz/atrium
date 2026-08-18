@@ -18,13 +18,16 @@
  * `router.refresh()`, no server RPC — and the content lands on `ydoc_updates`,
  * which the server replica + drift sweep consume.
  *
- * ## What this deliberately does NOT do (the T2 scope boundary)
+ * ## The covenant is now composed onto this surface (#220 / T6)
  *
- * No covenant verdict/glyph is wired here: an appended line carries no
- * authenticated who/kind and no `✓` (it renders "unverified · live"), exactly as
- * the peer-writable Yjs doc's honest fail-closed. The verdict projection (T3
- * #217) and the client glyph (T4 #218) own that axis; this file never reads
- * `covenant_status`.
+ * T2's original scope boundary — "no covenant verdict/glyph is wired here" — is
+ * LIFTED by T6: this surface now carries the covenant. `LiveConversationDoc` receives
+ * the SSR verdict seed (`data.covenantReads`, keyed by object id = message id) and the
+ * membership locators, which turn on (a) the live `✓`/`~` glyph over the
+ * `covenant_status` Electric shape (T4's `useLiveGlyphResolver`, liveness-gated
+ * fail-closed) and (b) the human-gated span-certify affordance (`CertifyPassage` →
+ * `certifyYjsSpanAction`). A human certifies a span; the machine NEVER mints `✓`, and a
+ * peer edit of a certified span flips the glyph `✓`→`~` live across both browsers.
  * ═════════════════════════════════════════════════════════════════════════ */
 
 import type { ReplayData } from '@/lib/replay-data';
@@ -48,7 +51,20 @@ export function YjsRoomSession({ data, viewerId }: { data: ReplayData; viewerId:
           live document substrate
         </span>
       </header>
-      <LiveConversationDoc roomId={roomId} write viewerName={viewerName ?? undefined} />
+      <LiveConversationDoc
+        roomId={roomId}
+        write
+        viewerName={viewerName ?? undefined}
+        // THE COVENANT COMPOSITION (#220 / T6): the SSR verdict seed + membership
+        // locators turn on the live glyph and the span-certify affordance. The seed is
+        // keyed by object id = message id (the one-object-per-span binding); a `{}` from
+        // a room with no certified spans still engages the live shape (vs `undefined`,
+        // which would leave the T1 read-only surface). `data.room` carries both slugs.
+        covenantReads={data.covenantReads ?? {}}
+        workspaceSlug={data.room.workspaceSlug}
+        roomSlug={data.room.slug}
+        viewerId={viewerId}
+      />
     </main>
   );
 }
