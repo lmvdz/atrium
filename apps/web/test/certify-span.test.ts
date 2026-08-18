@@ -318,6 +318,28 @@ describe('never-flipped coordinate classes: a naive offset would get these wrong
     expect(readerText(convo, 'm1', span)).toContain(rlo);
   });
 
+  it('render-divergence is DERIVED from the door, with the newline as its one exception', () => {
+    // `bodyRenderDivergesFromRaw` is now `neutralizeControlChars(ch) !== ch` per char
+    // (not a second hand-kept denylist), so it can never drift from `fileText`'s set.
+    const diverges = (raw: string) =>
+      bodyRenderDivergesFromRaw(renderBodyModel(nn(seededDoc(msg('mx', raw)).body('mx'))));
+
+    // A NEWLINE is rewritten by the neutralizer, but `renderRun` re-emits it as a real
+    // line break, so it renders faithfully here — it must NOT trip the warning.
+    expect(diverges('line one\nline two')).toBe(false);
+    // TAB survives the door untouched, so it does not diverge either.
+    expect(diverges('a\tb')).toBe(false);
+    // A surrogate pair (emoji) is left intact — judged as ONE char, never two lone
+    // surrogates — so it does not diverge.
+    expect(diverges('hi 😀 there')).toBe(false);
+    // Any OTHER char the door rewrites diverges — a Unicode line separator (U+2028)
+    // the old hand-list happened to include, proving the derived form still covers it.
+    expect(diverges(`a${String.fromCharCode(0x2028)}b`)).toBe(true);
+    // …and a bidi isolate (U+2066), so a set that GROWS in `fileText` is tracked here
+    // for free rather than silently missed by a stale copy.
+    expect(diverges(`x${String.fromCharCode(0x2066)}y`)).toBe(true);
+  });
+
   it('a selection in the SECOND message maps to its OWN bodyPath, read from its own body', () => {
     const convo = seededDoc(msg('m1', T), msg('m2', 'the second body here'));
     const path1 = nn(convo.bodyPath('m1'));
@@ -447,6 +469,110 @@ describe('an embed counts as exactly one unit, and a selection touching it inclu
     const span = nn(spanFromRange(root, r));
     expect(span).toEqual({ start: 2, end: 3 }); // the whole atom, one unit
     expect(readerText(convo, 'm2', span)).toBe('￼');
+  });
+
+  // ── ENCODING-INDEPENDENCE (E8 r2 finding: the r1 outward-snap over-included) ──
+  //
+  // The SAME physical boundary has two Range encodings and the real browser's choice
+  // is unobservable here (jsdom differs from Chrome/Firefox). A caret at an embed's
+  // LEFT edge is `(parent, indexOfEmbed)` or `(embed, 0)`; at its RIGHT edge it is
+  // `(parent, indexOfEmbed + 1)` or `(embed, childCount)`. Both encodings of a
+  // boundary MUST map to the same index, or a selection that merely ends at (or, with
+  // adjacent embeds, starts at the next atom's edge) grabs an atom the human never
+  // highlighted. r1 snapped every touched point outward, so `(embed, 0)` as an upper
+  // bound wrongly INCLUDED the atom. These pin the fix: the child-index (parent)
+  // encoding and the on-element encoding agree, and neither over-includes.
+  const embedIndexInRoot = (root: HTMLElement, embedEl: Element): number =>
+    Array.prototype.indexOf.call(root.childNodes, embedEl);
+
+  it('a selection ending at the embed LEFT edge excludes it — BOTH Range encodings agree', () => {
+    const convo = seededDoc(msg('m2', 'AB CD'));
+    const body = nn(convo.body('m2'));
+    body.insertEmbed(2, { embedType: 'image', src: 'x' });
+    const segments = renderBodyModel(body);
+    const { root, textNodeOf } = renderCertifyBodyDom(CertifyBody, segments);
+    const embedEl = nn(root.querySelector('[data-certify-embed]'));
+    const iEmbed = embedIndexInRoot(root, embedEl);
+
+    // (embed, 0) — the point lands ON the atom element at offset 0 (its left edge).
+    const rInner = root.ownerDocument.createRange();
+    rInner.setStart(textNodeOf(0), 0);
+    rInner.setEnd(embedEl, 0);
+    expect(nn(spanFromRange(root, rInner))).toEqual({ start: 0, end: 2 });
+
+    // (parent, indexOfEmbed) — the SAME left edge, on the parent as a child index.
+    const rParent = root.ownerDocument.createRange();
+    rParent.setStart(textNodeOf(0), 0);
+    rParent.setEnd(root, iEmbed);
+    expect(nn(spanFromRange(root, rParent))).toEqual({ start: 0, end: 2 });
+
+    // The atom is NOT in either span — the reader re-reads only 'AB'.
+    expect(readerText(convo, 'm2', { start: 0, end: 2 })).toBe('AB');
+  });
+
+  it('a selection starting at the embed RIGHT edge excludes it — BOTH Range encodings agree', () => {
+    const convo = seededDoc(msg('m2', 'AB CD'));
+    const body = nn(convo.body('m2'));
+    body.insertEmbed(2, { embedType: 'image', src: 'x' }); // body: A B <embed> ' ' C D (len 6)
+    const segments = renderBodyModel(body);
+    const { root, textNodeOf } = renderCertifyBodyDom(CertifyBody, segments);
+    const embedEl = nn(root.querySelector('[data-certify-embed]'));
+    const iEmbed = embedIndexInRoot(root, embedEl);
+
+    // (embed, childCount) — the point lands ON the atom element at its end (right edge).
+    const rInner = root.ownerDocument.createRange();
+    rInner.setStart(embedEl, embedEl.childNodes.length);
+    rInner.setEnd(textNodeOf(2), 3); // ' CD' end → body end (6)
+    expect(nn(spanFromRange(root, rInner))).toEqual({ start: 3, end: 6 });
+
+    // (parent, indexOfEmbed + 1) — the SAME right edge, on the parent as a child index.
+    const rParent = root.ownerDocument.createRange();
+    rParent.setStart(root, iEmbed + 1);
+    rParent.setEnd(textNodeOf(2), 3);
+    expect(nn(spanFromRange(root, rParent))).toEqual({ start: 3, end: 6 });
+
+    // The atom is excluded — the reader re-reads only ' CD'.
+    expect(readerText(convo, 'm2', { start: 3, end: 6 })).toBe(' CD');
+  });
+
+  it('ADJACENT embeds: a selection starting on the second must not grab the first — every encoding', () => {
+    const convo = seededDoc(msg('m2', 'AB'));
+    const body = nn(convo.body('m2'));
+    body.insertEmbed(2, { embedType: 'image', src: 'a' }); // A B <eA>          (len 3)
+    body.insertEmbed(3, { embedType: 'image', src: 'b' }); // A B <eA> <eB>      (len 4)
+    const segments = renderBodyModel(body);
+    expect(segments.map((s) => s.kind)).toEqual(['text', 'embed', 'embed']);
+    const { root } = renderCertifyBodyDom(CertifyBody, segments);
+    const [eA, eB] = Array.from(root.querySelectorAll('[data-certify-embed]'));
+    const iA = embedIndexInRoot(root, nn(eA));
+
+    // The boundary BETWEEN the two atoms (body index 3) has three encodings; a
+    // selection from there to the body end must cover ONLY the second atom.
+    const endAtBodyEnd = (r: Range) => {
+      r.setEnd(root, root.childNodes.length); // after eB → body end (4)
+    };
+
+    // (eB, 0) — left edge of the second atom.
+    const rB0 = root.ownerDocument.createRange();
+    rB0.setStart(nn(eB), 0);
+    endAtBodyEnd(rB0);
+    expect(nn(spanFromRange(root, rB0))).toEqual({ start: 3, end: 4 });
+
+    // (eA, childCount) — right edge of the FIRST atom (same physical point). r1 snapped
+    // this outward to eA's near edge and so wrongly INCLUDED eA.
+    const rAend = root.ownerDocument.createRange();
+    rAend.setStart(nn(eA), nn(eA).childNodes.length);
+    endAtBodyEnd(rAend);
+    expect(nn(spanFromRange(root, rAend))).toEqual({ start: 3, end: 4 });
+
+    // (parent, indexOfEA + 1) — the same boundary on the parent as a child index.
+    const rParent = root.ownerDocument.createRange();
+    rParent.setStart(root, iA + 1);
+    endAtBodyEnd(rParent);
+    expect(nn(spanFromRange(root, rParent))).toEqual({ start: 3, end: 4 });
+
+    // Only the second atom is covered — one opaque unit, the first atom untouched.
+    expect(readerText(convo, 'm2', { start: 3, end: 4 })).toBe('￼');
   });
 
   it('an inline mark wrapper adds no units — offsets are unchanged by emphasis', () => {

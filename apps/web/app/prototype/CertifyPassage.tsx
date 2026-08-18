@@ -231,6 +231,13 @@ export function CertifyPassage({
   const [span, setSpan] = useState<BodySpan | null>(null);
   const [status, setStatus] = useState<Status>({ phase: 'idle' });
 
+  /* The doc `version` the current `span` was MEASURED against. A span is a set of
+     coordinates into ONE body revision; the moment the body converges (version bumps)
+     those coordinates may name a different passage — or nothing the human read. This
+     stamp lets `request` refuse a stale span DURING RENDER (below), before any hold
+     frame can complete, rather than only in the post-commit effect that clears it. */
+  const spanVersionRef = useRef(version);
+
   // The body's live rich-text, projected to the index-faithful render model.
   // RECOMPUTED ON `version` (E8 finding #1): a body edit under an open panel — local
   // or remote — bumps `version`, so the rendered segments (and the offsets a
@@ -264,8 +271,12 @@ export function CertifyPassage({
   const syncSelection = useCallback(() => {
     const root = bodyRef.current;
     if (!root) return;
+    // Stamp the span with the version it was measured against, so a later convergence
+    // can tell this span is stale (see the `request` memo). Written before the state
+    // update so the render that observes the new span also sees the matching stamp.
+    spanVersionRef.current = version;
     setSpan(spanFromSelection(root));
-  }, []);
+  }, [version]);
 
   useEffect(() => {
     const docNode = bodyRef.current?.ownerDocument;
@@ -274,8 +285,16 @@ export function CertifyPassage({
     return () => docNode.removeEventListener('selectionchange', syncSelection);
   }, [syncSelection]);
 
+  // The certify request, recomputed on `version` (E8 finding #1 / r2 blocker). A span
+  // is coordinates into ONE body revision; on any convergence the pending span is
+  // STALE — it names a passage the human may never have read — so `request` goes null
+  // the instant the stamped version no longer matches the current one. This nulling
+  // happens DURING RENDER (not in the post-commit effect below), so `canCertify` is
+  // false and the ✓ is disabled BEFORE any in-flight hold frame can complete over the
+  // stale span; `HoldToAct` then abandons the running hold and re-checks at fire time.
   const request: ObjectSpanRequest | null = useMemo(() => {
     if (span === null) return null;
+    if (spanVersionRef.current !== version) return null;
     return objectSpanRequest({
       workspaceSlug,
       roomSlug,
@@ -283,7 +302,7 @@ export function CertifyPassage({
       bodyPath: doc.bodyPath(messageId),
       span,
     });
-  }, [span, objectId, workspaceSlug, roomSlug, doc, messageId]);
+  }, [span, objectId, workspaceSlug, roomSlug, doc, messageId, version]);
 
   /* The verbatim body goes through the `fileText` door, which truncates past
      `FILE_TEXT_MAX`. A truncated body would render fewer characters than the live

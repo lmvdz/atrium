@@ -168,6 +168,18 @@ export function HoldToAct({
   const frameRef = useRef<number | null>(null);
   const startRef = useRef<number | null>(null);
 
+  /* THE LIVE `disabled`, read at fire time — not the value captured when a hold's
+     `requestAnimationFrame` chain was scheduled. A body edit under an open certify
+     panel invalidates the pending span, which the caller reflects by flipping
+     `disabled` true (certify: `!canCertify`); but a frame already in flight still
+     holds the closure from BEFORE the edit, so the running `tick`/`complete` would
+     otherwise fire the STALE act. `complete` re-checks this ref at the instant it
+     fires and refuses if the control has since gone disabled (E8 r2 blocker). Kept
+     in a ref, written every render, so a frame scheduled before the flip reads the
+     value AFTER it — a captured prop could not. */
+  const disabledRef = useRef(disabled);
+  disabledRef.current = disabled;
+
   const meterRef = useRef<HTMLSpanElement | null>(null);
 
   const paint = useCallback((progress: number) => {
@@ -206,6 +218,20 @@ export function HoldToAct({
   const complete = useCallback(() => {
     const started = startRef.current;
     if (started === null) return;
+    /* RE-CHECK VALIDITY AT FIRE TIME (E8 r2 blocker). A frame scheduled while the
+       control was enabled can run AFTER an edit disabled it — the certify span the
+       hold was over is now stale. `disabledRef` carries the current value (written
+       every render), so this reads the state as of NOW, not as of when the frame was
+       scheduled. If the control has gone disabled, abandon the hold exactly as a
+       release would: cancel, reset, and fire `onCancel` (the server disarm, if one
+       was armed on begin) — never `onAct`. */
+    if (disabledRef.current) {
+      stop();
+      paint(0);
+      setPhase('idle');
+      onCancel?.();
+      return;
+    }
     const heldMs = Math.round(performance.now() - started);
     stop();
     if (resetOnComplete) {
@@ -229,7 +255,7 @@ export function HoldToAct({
        before the irreversible thing happens, not after it succeeded. */
     onArm?.(arming);
     onAct?.(arming);
-  }, [actionId, actor, onAct, onArm, paint, resetOnComplete, stop]);
+  }, [actionId, actor, onAct, onArm, onCancel, paint, resetOnComplete, stop]);
 
   const tick = useCallback(() => {
     const started = startRef.current;
@@ -258,6 +284,19 @@ export function HoldToAct({
     onBegin?.();
     frameRef.current = requestAnimationFrame(tick);
   }, [disabled, onBegin, paint, tick]);
+
+  /* ABANDON AN IN-FLIGHT HOLD WHEN THE CONTROL GOES DISABLED (E8 r2 blocker). A body
+     edit under an open certify panel invalidates the pending span; the caller flips
+     `disabled` true. Cancel the running `requestAnimationFrame` and abandon the hold
+     NOW — do not let the frame chain run to completion over a span the human never
+     saw. `cancel` is a no-op unless a hold had actually begun (`startRef`), so this
+     stays inert for ordinary enabled/disabled toggles and fires `onCancel` (the
+     server disarm, if any) exactly once for a real mid-hold invalidation. This is the
+     cleanup path; the RACE-PROOF refusal is `complete`'s own `disabledRef` check,
+     since a scheduled frame can fire before this post-commit effect runs. */
+  useEffect(() => {
+    if (disabled) cancel();
+  }, [disabled, cancel]);
 
   /* DISARM ON UNMOUNT — the mirror of release, for the navigation that never
      released. A hold in progress when the control unmounts (the person left the

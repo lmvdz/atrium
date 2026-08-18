@@ -8,6 +8,7 @@
  * ------------------------------------------------------------------------- */
 
 import { act, cleanup, fireEvent, render, screen } from '@testing-library/react';
+import { useState } from 'react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { AttentionCard, AttentionCompact } from '../src/components';
 import type { AttentionItem } from '../src/components/model';
@@ -417,6 +418,68 @@ describe('a disabled hold begins nothing (#146 FIX 1)', () => {
     advance(5000);
     expect(events).toEqual([]);
     expect(button.getAttribute('data-holding')).toBeNull();
+  });
+});
+
+/* ---------------------------------------------------------------------------
+ * E8 r2 BLOCKER — A HOLD IN FLIGHT WHEN THE CONTROL GOES DISABLED MUST NOT ACT.
+ *
+ * The certify pane flips `disabled` (`!canCertify`) the instant a body edit
+ * invalidates the pending span. A hold begun BEFORE the edit kept a running
+ * `requestAnimationFrame` chain whose closure was captured pre-edit, so it ran to
+ * completion and fired the act over the STALE span. The fix cancels the frame when
+ * `disabled` goes true AND re-checks `disabled` at fire time, so neither path can
+ * fire the stale act.
+ * ------------------------------------------------------------------------- */
+describe('a hold abandoned by going disabled mid-press never acts (E8 r2)', () => {
+  function Controlled({
+    onAct,
+    onCancel,
+  }: {
+    onAct: () => void;
+    onCancel: () => void;
+  }) {
+    const [disabled, setDisabled] = useState(false);
+    return (
+      <>
+        <HoldToAct
+          actionId="certify"
+          actor="lars"
+          describe="certify the passage"
+          disabled={disabled}
+          label="Certify this passage"
+          onAct={onAct}
+          onCancel={onCancel}
+          resetOnComplete
+        />
+        <button data-testid="invalidate" onClick={() => setDisabled(true)} type="button">
+          invalidate
+        </button>
+      </>
+    );
+  }
+
+  /* CATCHES: the running rAF completing over a span the edit already invalidated —
+     the exact blocker both lineages converged on. Going disabled mid-hold cancels
+     the frame and abandons the hold (firing onCancel, the server disarm), and the
+     later frames fire nothing. */
+  it('going disabled mid-hold cancels the in-flight hold and fires no act', () => {
+    const events: string[] = [];
+    render(
+      <Controlled onAct={() => events.push('act')} onCancel={() => events.push('cancel')} />,
+    );
+    const hold = screen.getByRole('button', { name: /Certify this passage/ });
+    fireEvent.pointerDown(hold);
+    advance(1000); // mid-hold, well before the 2s gate
+    expect(Number(hold.getAttribute('data-hold-progress'))).toBeGreaterThan(0.4);
+
+    // The body edit lands: the pane flips the control disabled.
+    fireEvent.click(screen.getByTestId('invalidate'));
+    advance(5000); // long past the gate — a stale frame would have fired here
+
+    expect(events).toEqual(['cancel']); // abandoned, never acted
+    expect(hold.getAttribute('data-hold-progress')).toBe('0.000');
+    expect(hold.getAttribute('data-armed')).toBeNull();
   });
 });
 

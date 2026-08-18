@@ -24,10 +24,18 @@
  * real `\n`, never `<br>`, or the count drifts), each embed as a length-1 atom
  * marked {@link EMBED_ATTR}, and marks as *wrapping* elements that add no text.
  * {@link renderBodyModel} produces exactly that shape; {@link CertifyPassage}
- * renders it; {@link spanFromRange} counts over it. All three share one index
- * definition ({@link nodeBodyLength} / {@link indexOfPoint}) so they cannot drift
- * from each other — the mutation test flips the selection and asserts the mapped
- * span moves with it (if it did not, the mapping would be ornament).
+ * renders it; {@link spanFromRange} counts over it — all three walking the one index
+ * definition ({@link nodeBodyLength} / {@link indexOfPoint}), so the COUNTING cannot
+ * drift. What the render and the reader do NOT share is the text itself: the render
+ * passes every run through the `fileText` door (which rewrites bidi/control chars to
+ * U+FFFD), while the reader reads the RAW `Y.XmlText`. They land on the same indices
+ * only because that rewrite is strictly LENGTH-PRESERVING — one code unit in, one
+ * out — i.e. because of the 1:1 shape, not because they read the same bytes. If
+ * `fileText` ever folded or expanded a character, the DOM the human selects over and
+ * the body the covenant certifies would diverge in length and the coordinates would
+ * drift; {@link bodyRenderDivergesFromRaw} surfaces the (currently glyph-only)
+ * divergence, and the mutation test flips the selection and asserts the mapped span
+ * moves with it (if it did not, the mapping would be ornament).
  *
  * On a LIVE room there is no client `Y.Doc` (the authoritative doc is server-side;
  * the client holds only precomputed glyph reads). This mapping therefore runs
@@ -37,6 +45,7 @@
  * ═════════════════════════════════════════════════════════════════════════ */
 
 import type { XmlText as YXmlText } from 'yjs';
+import { neutralizeControlChars } from '@/src/components/model';
 
 /**
  * The marker attribute on a rendered EMBED atom. An element carrying it counts as
@@ -118,31 +127,54 @@ type SpanEdge = 'lower' | 'upper';
  * `offset` is a character offset when `node` is a text node, or a child index when
  * `node` is an element (the two shapes the DOM Range/Selection API produces).
  *
- * EMBED-ATOM ENDPOINTS. An embed is ONE indivisible index unit; a point that lands
- * ON the atom's element or INSIDE its inner DOM cannot split it. Rather than
- * silently collapse every such point to the atom's START (which dropped the embed
- * from any selection whose UPPER bound touched it — the E8 finding-#2 wrong span),
- * the point is snapped by the end of the span it belongs to: a `lower` bound snaps
- * to the atom's NEAR edge (index before it) and an `upper` bound to its FAR edge
- * (index after it). So an atom the selection touches at either end is included
- * WHOLE — never split, never silently excluded. Endpoints that merely sit at an
- * atom's boundary (expressed as a child index on the PARENT, e.g. `selectNode`)
- * are handled by the ordinary element/child-index walk below, so ending a selection
- * exactly before an atom still excludes it — only a point genuinely on/inside the
- * atom is rounded outward.
+ * EMBED-ATOM ENDPOINTS. An embed is ONE indivisible index unit that a Range point
+ * cannot split; the point is resolved to one of the atom's two BOUNDARIES — the
+ * index BEFORE it (`within` 0) or AFTER it (`within` 1) — and the ordinary
+ * half-open `[start, end)` coverage then decides whether the atom is included.
+ *
+ * The resolution is ENCODING-INDEPENDENT, which is the whole point (E8 r2 finding).
+ * The same physical boundary has two Range encodings and the real browser's choice
+ * is unobservable here (jsdom differs): a caret at an atom's LEFT edge is emitted as
+ * either `(parent, indexOfEmbed)` or `(embed, 0)`, and at its RIGHT edge as either
+ * `(parent, indexOfEmbed + 1)` or `(embed, childCount)`. Both encodings of the left
+ * edge must map to "before the atom" and both of the right edge to "after it", or a
+ * selection that merely ENDS at an atom's edge (or STARTS at the next atom's edge,
+ * with adjacent embeds) grabs an atom the human never highlighted — the r1
+ * over-correction, which snapped every touched point OUTWARD and so over-included.
+ *
+ * So a point AT a boundary is NOT snapped outward; it takes that boundary's index,
+ * exactly as the `(parent, …)` child-index walk would. Only a point GENUINELY
+ * INSIDE the atom's inner DOM — which cannot be split and cannot mean "exclude" —
+ * rounds to include the touched atom WHOLE: a `lower` bound to the near edge, an
+ * `upper` bound to the far edge. `(parent, indexOfEmbed)` / `(parent, i+1)` points
+ * never reach the embed branch at all (their `node` is the PARENT, not in the atom),
+ * so they fall to the element walk below and already produce the same indices.
  */
 function indexOfPoint(root: Node, node: Node, offset: number, edge: SpanEdge): number {
   let target: Node = node;
   let within: number;
-  // `closestEmbed` is ancestor-OR-self, so this covers both a point on the atom
-  // element itself and one inside its inner DOM. Snap outward by the span edge.
+  // `closestEmbed` is ancestor-OR-self, so this covers both a point ON the atom
+  // element itself and one INSIDE its inner DOM.
   const embedAncestor = closestEmbed(root, node);
   if (embedAncestor) {
     target = embedAncestor;
-    // `within` is measured from `target`'s start: 0 ⇒ before the atom (near edge);
-    // 1 ⇒ after the atom's single unit (far edge). The preceding-sibling walk below
-    // then adds every unit lying before the atom.
-    within = edge === 'upper' ? 1 : 0;
+    // `within` is measured from `target`'s start: 0 ⇒ before the atom, 1 ⇒ after its
+    // single unit. The preceding-sibling walk below then adds every unit before it.
+    const onAtomElement = node === embedAncestor;
+    if (onAtomElement && offset <= 0) {
+      // The atom's LEFT edge as `(embed, 0)` — the SAME boundary as
+      // `(parent, indexOfEmbed)`: exclude the atom by default.
+      within = 0;
+    } else if (onAtomElement && offset >= embedAncestor.childNodes.length) {
+      // The atom's RIGHT edge as `(embed, childCount)` — the SAME boundary as
+      // `(parent, indexOfEmbed + 1)`: exclude the atom by default.
+      within = 1;
+    } else {
+      // Genuinely inside the atom's inner DOM (a descendant text node, or a mid
+      // child-index on the atom element). A touched, unsplittable atom is included
+      // whole: a lower bound rounds to its near edge, an upper bound to its far edge.
+      within = edge === 'upper' ? 1 : 0;
+    }
   } else if (node.nodeType === 3 /* TEXT_NODE */) {
     within = Math.max(0, Math.min(offset, (node.nodeValue ?? '').length));
   } else if (node.nodeType === 1 /* ELEMENT_NODE */) {
@@ -316,30 +348,24 @@ export function bodyModelLength(segments: readonly BodySegment[]): number {
 }
 
 /**
- * Whether a character's RENDERED form on the certify surface differs from its raw
- * code unit (E8 finding #4). The body is drawn through the `fileText`
- * verbatim-content door, which replaces every bidi override/isolate and nonprinting
- * control char with U+FFFD (the replacement glyph). That rewrite is
- * LENGTH-PRESERVING (one code unit in, one out), so the span index still aligns
- * byte-for-byte -- but the human sees the replacement glyph while the covenant
- * would certify the RAW character. This predicate matches exactly the `fileText`
- * control-char set MINUS the newline (0x0A, which this surface re-emits as a real
- * line break) and TAB (0x09, which `fileText` leaves intact): a char it accepts is
- * one the human would see rendered differently from what would be certified.
+ * Whether a single character's RENDERED form on the certify surface differs from its
+ * raw form (E8 finding #4). The body is drawn through the `fileText` verbatim-content
+ * door, which replaces every bidi override/isolate and nonprinting control char with
+ * U+FFFD (the replacement glyph). That rewrite is LENGTH-PRESERVING (one code unit
+ * in, one out), so the span index still aligns byte-for-byte -- but the human sees
+ * the replacement glyph while the covenant would certify the RAW character.
+ *
+ * DERIVED FROM THE DOOR, not a second hand-maintained denylist (E8 r2 minor). The
+ * predicate is exactly `neutralizeControlChars(ch) !== ch` — the SAME function
+ * `fileText` runs — so it cannot drift from `fileText`'s set as that set grows. The
+ * ONE exception is the newline: `neutralizeControlChars` rewrites `\n`, but
+ * {@link renderRun} re-emits it as a real line break on this surface, so a `\n`
+ * renders faithfully here and is NOT a divergence. (TAB needs no exception: the door
+ * leaves it intact, so `neutralizeControlChars` reports no change for it.)
  */
-function isRenderDivergent(code: number): boolean {
-  return (
-    (code >= 0x00 && code <= 0x08) ||
-    (code >= 0x0b && code <= 0x1f) ||
-    (code >= 0x7f && code <= 0x9f) ||
-    code === 0x061c ||
-    code === 0x200e ||
-    code === 0x200f ||
-    code === 0x2028 ||
-    code === 0x2029 ||
-    (code >= 0x202a && code <= 0x202e) ||
-    (code >= 0x2066 && code <= 0x2069)
-  );
+function isRenderDivergent(ch: string): boolean {
+  if (ch === '\n') return false;
+  return neutralizeControlChars(ch) !== ch;
 }
 
 /**
@@ -357,8 +383,10 @@ function isRenderDivergent(code: number): boolean {
 export function bodyRenderDivergesFromRaw(segments: readonly BodySegment[]): boolean {
   for (const seg of segments) {
     if (seg.kind !== 'text') continue;
-    for (let i = 0; i < seg.text.length; i++) {
-      if (isRenderDivergent(seg.text.charCodeAt(i))) return true;
+    // Iterate by code POINT: a surrogate pair (emoji) is left intact by the door, so
+    // it must be judged as one character, never as two lone-surrogate code units.
+    for (const ch of seg.text) {
+      if (isRenderDivergent(ch)) return true;
     }
   }
   return false;
