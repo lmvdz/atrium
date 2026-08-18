@@ -1,0 +1,41 @@
+-- ═════════════════════════════════════════════════════════════════════════════
+-- THE CONVERSATION CHOOSES ITS SUBSTRATE — the per-room render/write switch.
+--
+-- Phase 6, #216 (E4 / T2); map #162. T1 (#215) mounted a live client `Y.Doc`
+-- over Electric behind a dev query flag; this column is the DURABLE switch that
+-- promotes a room onto that substrate for real.
+--
+--   * `'ledger'` — the Phase-5 path every room runs on today: the conversation is
+--                  projected from the gated `core_events` ledger (`liveRoomView`)
+--                  and edits go through the realtime WebSocket + Server Actions.
+--   * `'yjs'`    — the conversation is a live client `Y.Doc` synced over Electric
+--                  Durable Streams (`ydoc_updates`, 0053). The surface renders
+--                  FROM the doc and a local edit is a Yjs update PUT to the
+--                  authenticated append door (`app/api/rooms/[room]/ydoc`, 0053/
+--                  0054), so browser A's edit reaches browser B purely over
+--                  Electric with no server RPC — and real content lands on
+--                  `ydoc_updates`, which the server replica + drift sweep consume.
+--
+-- ## Why NOT NULL DEFAULT 'ledger'
+--
+-- The swap is OPT-IN, per room. Existing rooms MUST be unaffected: the column
+-- defaults to `'ledger'`, so every row already in `rooms` — and every room
+-- created without naming a substrate — keeps the exact render/write path it has
+-- now. Flipping a room to `'yjs'` is a deliberate `UPDATE rooms SET
+-- conversation_substrate = 'yjs'`, never a side effect of this migration.
+--
+-- ## Scope boundary (spelled in)
+--
+-- This column chooses the SUBSTRATE only. It does NOT touch the covenant MEANING
+-- (the `✓`): the verdict projection is T3 (#217) and the client glyph is T4
+-- (#218); a `'yjs'` room's covenant glyph keeps the existing resolver behaviour
+-- and this flag never wires `covenant_status`. It does not alter the #208
+-- replication role or the ydoc door's authorization — the door (0053/0054) is
+-- rented as-is.
+--
+-- NUMBERING: 0057, not 0056. 0056 is reserved by T3 (#217, in flight) so the two
+-- lanes do not collide on a migration number when they merge.
+-- ═════════════════════════════════════════════════════════════════════════════
+
+CREATE TYPE "public"."conversation_substrate" AS ENUM('ledger', 'yjs');--> statement-breakpoint
+ALTER TABLE "rooms" ADD COLUMN "conversation_substrate" "conversation_substrate" DEFAULT 'ledger' NOT NULL;

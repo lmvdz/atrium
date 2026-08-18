@@ -74,6 +74,24 @@ import {
 
 export const membershipRole = pgEnum('membership_role', ['owner', 'admin', 'member']);
 
+/**
+ * Which substrate a room's CONVERSATION renders and writes through (#216 / T2,
+ * map #162 Phase 6). `'ledger'` is the Phase-5 path every existing room runs on:
+ * the conversation is projected from the gated `core_events` ledger via
+ * `liveRoomView`, and edits go through the realtime WebSocket + Server Actions.
+ * `'yjs'` swaps the substrate to a live client `Y.Doc` synced over Electric
+ * Durable Streams (`ydoc_updates`): the surface renders FROM the doc and a local
+ * edit is a Yjs update PUT to the authenticated append door
+ * (`app/api/rooms/[room]/ydoc`), so browser A's edit reaches browser B purely
+ * over Electric with no server RPC.
+ *
+ * Defaults to `'ledger'` so every existing room is untouched — the swap is
+ * OPT-IN per room, the render/write path branches on this column, and the
+ * covenant MEANING (the `✓`) is unchanged by it (T3/T4 own the projection/glyph;
+ * this flag never wires `covenant_status`).
+ */
+export const conversationSubstrate = pgEnum('conversation_substrate', ['ledger', 'yjs']);
+
 export const acceptedObjectType = pgEnum('accepted_object_type', [
   'decision',
   'commitment',
@@ -477,6 +495,17 @@ export const rooms = pgTable(
     agentUserId: uuid('agent_user_id').references(() => users.id, { onDelete: 'set null' }),
     createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
     archivedAt: timestamp('archived_at', { withTimezone: true }),
+    /**
+     * Which substrate this room's CONVERSATION renders and writes through (#216 /
+     * T2). `'ledger'` (the default, so every existing room is unaffected) keeps
+     * the Phase-5 ledger + WebSocket path; `'yjs'` swaps to the live client
+     * `Y.Doc` over Electric. See {@link conversationSubstrate}. `NOT NULL DEFAULT
+     * 'ledger'` — a room is always on exactly one substrate, and an unset value
+     * is the safe (unchanged) one.
+     */
+    conversationSubstrate: conversationSubstrate('conversation_substrate')
+      .notNull()
+      .default('ledger'),
   },
   // Slugs are unique *within* a workspace: two tenants may both have #general.
   (t) => [

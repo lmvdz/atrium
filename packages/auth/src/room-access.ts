@@ -152,11 +152,27 @@ export async function loadRoomMembership(
   return role === null ? null : { role };
 }
 
+/** Which substrate a room's conversation renders/writes through (#216 / T2). */
+export type ConversationSubstrate = 'ledger' | 'yjs';
+
+/**
+ * The room's stored substrate, failing CLOSED to `'ledger'` — the unchanged
+ * Phase-5 path — for any value the column returns that this allowlist does not
+ * recognise (a later enum member, a driver that stops returning the column). A
+ * room whose substrate cannot be read is rendered the safe, existing way, never
+ * accidentally promoted onto the live doc.
+ */
+function parseConversationSubstrate(value: unknown): ConversationSubstrate {
+  return value === 'yjs' ? 'yjs' : 'ledger';
+}
+
 export interface AuthorizedRoom {
   id: string;
   slug: string;
   name: string;
   role: Role;
+  /** Which substrate this room's conversation renders/writes through (#216 / T2). */
+  conversationSubstrate: ConversationSubstrate;
 }
 
 /** Live rooms in a workspace this user may actually open, in slug order. */
@@ -171,6 +187,7 @@ export async function listAuthorizedRooms(
       id: rooms.id,
       slug: rooms.slug,
       name: rooms.name,
+      conversationSubstrate: rooms.conversationSubstrate,
       ...roomAuthorizationRoles,
     })
     .from(rooms)
@@ -182,7 +199,17 @@ export async function listAuthorizedRooms(
   // A role neither table can be read for is not a room this caller gets to see.
   return rows.flatMap((row) => {
     const role = effectiveRoomRole(row, logger);
-    return role === null ? [] : [{ id: row.id, slug: row.slug, name: row.name, role }];
+    return role === null
+      ? []
+      : [
+          {
+            id: row.id,
+            slug: row.slug,
+            name: row.name,
+            role,
+            conversationSubstrate: parseConversationSubstrate(row.conversationSubstrate),
+          },
+        ];
   });
 }
 
@@ -199,6 +226,7 @@ export async function loadAuthorizedRoom(
       id: rooms.id,
       slug: rooms.slug,
       name: rooms.name,
+      conversationSubstrate: rooms.conversationSubstrate,
       ...roomAuthorizationRoles,
     })
     .from(rooms)
@@ -211,7 +239,15 @@ export async function loadAuthorizedRoom(
 
   if (!row) return null;
   const role = effectiveRoomRole(row, logger);
-  return role === null ? null : { id: row.id, slug: row.slug, name: row.name, role };
+  return role === null
+    ? null
+    : {
+        id: row.id,
+        slug: row.slug,
+        name: row.name,
+        role,
+        conversationSubstrate: parseConversationSubstrate(row.conversationSubstrate),
+      };
 }
 
 /* ---------------------------------------------------------------------------

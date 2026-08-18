@@ -45,8 +45,9 @@
  * is T2's to add; T1 gates on a query param and disturbs nothing.
  * ═════════════════════════════════════════════════════════════════════════ */
 
-import { useEffect, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import type { ChatMsg } from '@/app/prototype/types';
+import type { ConversationDoc } from '@/app/prototype/yjs-conversation';
 import { fileText } from '@/src/components/model';
 import { loadRuntimeConfig } from '@/src/lib/runtime-config';
 import { resolveElectricSendUrl, resolveElectricShapeUrl } from '@/src/lib/ws-url';
@@ -61,8 +62,39 @@ interface LiveDocState {
 
 const INITIAL: LiveDocState = { status: 'connecting', messages: [], error: null };
 
-export function LiveConversationDoc({ roomId }: { roomId: string }) {
+/**
+ * The T1 read side, now with the T2 (#216) LOCAL-EDIT WRITE PATH.
+ *
+ * `write` (off by default, so every T1 caller keeps the read-only surface it had)
+ * turns on a composer. A submitted line is `doc.append`ed to the SAME live
+ * `ConversationDoc` this mount renders from — which mutates the `Y.Doc`, so the
+ * rented y-electric provider observes the update and PUTs it to the authenticated
+ * append door (`resolveElectricSendUrl(room)` → `app/api/rooms/[room]/ydoc`, the
+ * E2 door rented as-is). Nothing here names an author or a `✓`: the door stamps
+ * the writer from the session (never client bytes), and an appended line carries
+ * NO authenticated who/kind and NO certification — it renders "unverified · live"
+ * exactly like an inbound peer line. Browser A's append therefore reaches browser
+ * B purely over Electric, with no server RPC and no ledger write.
+ *
+ * `viewerName` is a DISPLAY hint only (the `who` shown beside the local line). It
+ * is authority-stripped by `encodeDurable` before it ever hits the wire, so a peer
+ * can neither trust it nor forge one — the trust envelope is #181's gated read.
+ */
+export function LiveConversationDoc({
+  roomId,
+  write = false,
+  viewerName,
+}: {
+  roomId: string;
+  write?: boolean;
+  viewerName?: string;
+}) {
   const [state, setState] = useState<LiveDocState>(INITIAL);
+  const [draft, setDraft] = useState('');
+  // The live doc, held so the composer can `append` into the SAME instance this
+  // mount renders and the transport ships. Set once the mount goes live; cleared
+  // on dispose so a submit after unmount is a no-op, never a write to a dead doc.
+  const docRef = useRef<ConversationDoc | null>(null);
 
   useEffect(() => {
     let disposed = false;
@@ -130,12 +162,14 @@ export function LiveConversationDoc({ roomId }: { roomId: string }) {
 
       // Publish the initial (empty) projection under the live status; onChange
       // drives every convergence after this.
+      docRef.current = doc;
       setState({ status: 'live', messages: doc.messages(), error: null });
 
       dispose = () => {
         offChange();
         disconnect?.();
         if (!doc.isDestroyed()) doc.destroy();
+        docRef.current = null;
       };
     })();
 
@@ -144,6 +178,25 @@ export function LiveConversationDoc({ roomId }: { roomId: string }) {
       dispose?.();
     };
   }, [roomId]);
+
+  // THE LOCAL-EDIT WRITE PATH (T2). Append the drafted line to the live doc; the
+  // mutation drives both the local re-render (via `onChange`) and the transport's
+  // PUT to the authenticated door. A no-op unless the mount is live and writable —
+  // there is nothing to append into otherwise, and never a write to a torn-down doc.
+  const submitDraft = () => {
+    const doc = docRef.current;
+    const text = draft.trim();
+    if (!write || doc === null || doc.isDestroyed() || text.length === 0) return;
+    doc.append({
+      id: crypto.randomUUID(),
+      time: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }),
+      kind: 'human',
+      // A DISPLAY hint only — authority-stripped before it reaches the wire.
+      ...(viewerName ? { who: viewerName } : {}),
+      text,
+    });
+    setDraft('');
+  };
 
   return (
     <section
@@ -162,7 +215,8 @@ export function LiveConversationDoc({ roomId }: { roomId: string }) {
       <header style={{ display: 'flex', gap: '0.5rem', alignItems: 'baseline', flexWrap: 'wrap' }}>
         <strong>live document · Electric</strong>
         <span style={{ opacity: 0.7 }}>
-          read-only (T1) · {statusLabel(state.status)} · {state.messages.length} line
+          {write ? 'live substrate (yjs)' : 'read-only (T1)'} · {statusLabel(state.status)} ·{' '}
+          {state.messages.length} line
           {state.messages.length === 1 ? '' : 's'}
         </span>
       </header>
@@ -217,6 +271,45 @@ export function LiveConversationDoc({ roomId }: { roomId: string }) {
           </li>
         ))}
       </ol>
+      {write && state.status === 'live' ? (
+        <form
+          data-live-doc-composer
+          onSubmit={(event) => {
+            event.preventDefault();
+            submitDraft();
+          }}
+          style={{ display: 'flex', gap: '0.5rem', marginTop: '0.5rem' }}
+        >
+          <input
+            data-live-doc-input
+            aria-label="write a line to the live document"
+            value={draft}
+            onChange={(event) => setDraft(event.target.value)}
+            placeholder="type a line — it converges over Electric, no server RPC"
+            style={{
+              flex: 1,
+              padding: '0.35rem 0.5rem',
+              border: '1px solid rgba(0,0,0,0.2)',
+              borderRadius: 6,
+              font: 'inherit',
+            }}
+          />
+          <button
+            data-live-doc-send
+            type="submit"
+            disabled={draft.trim().length === 0}
+            style={{
+              padding: '0.35rem 0.75rem',
+              border: '1px solid rgba(0,0,0,0.2)',
+              borderRadius: 6,
+              font: 'inherit',
+              cursor: draft.trim().length === 0 ? 'default' : 'pointer',
+            }}
+          >
+            send
+          </button>
+        </form>
+      ) : null}
     </section>
   );
 }
