@@ -25,13 +25,20 @@ function msg(id: string, text: string): ChatMsg {
   return { id, time: '10:00', kind: 'human', who: 'you', text };
 }
 
+/**
+ * A durable row WITHOUT its `stream_seq` — {@link FakeSource} mints the per-room,
+ * gap-free seq (1..N) from the stored array order, exactly as migration 0055's
+ * append function does, so a test never has to hand-assign one.
+ */
+type UnsequencedRow = Omit<PersistedYdocUpdate, 'streamSeq'>;
+
 /** A persisted row from a single-message doc, stamped to `writerUserId`/`writerKind`. */
 function row(
   id: string,
   text: string,
   writerUserId: string | null,
   writerKind: PersistedYdocUpdate['writerKind'],
-): PersistedYdocUpdate {
+): UnsequencedRow {
   const c = new ConversationDoc();
   c.append(msg(id, text));
   return { op: Y.encodeStateAsUpdate(c.doc), writerUserId, writerKind };
@@ -39,38 +46,33 @@ function row(
 
 class FakeSource implements YdocStreamSource {
   calls = { snapshot: 0, head: 0 };
-  constructor(private readonly store: Map<string, PersistedYdocUpdate[]>) {}
+  constructor(private readonly store: Map<string, UnsequencedRow[]>) {}
   async snapshot(roomId: string): Promise<readonly PersistedYdocUpdate[]> {
     this.calls.snapshot += 1;
-    return this.store.get(roomId) ?? [];
+    // Mint the per-room gap-free stream_seq (1..N) from the stored order — the
+    // stable row identity the replica dedupes and gap-detects on (#203).
+    return (this.store.get(roomId) ?? []).map((r, i) => ({ ...r, streamSeq: i + 1 }));
   }
   async head(roomId: string): Promise<number> {
     this.calls.head += 1;
+    // The head is the MAX stream_seq; the store is gap-free from 1, so that is its length.
     return (this.store.get(roomId) ?? []).length;
   }
 }
 
 describe('writerFromRow maps the persisted stamp to a writer identity', () => {
   it('human/agent rows become a writer; system / inconsistent rows are unattributed', () => {
-    expect(
-      writerFromRow({ op: new Uint8Array(), writerUserId: 'u_a', writerKind: 'human' }),
-    ).toEqual({
+    expect(writerFromRow({ writerUserId: 'u_a', writerKind: 'human' })).toEqual({
       userId: 'u_a',
       principalKind: 'human',
     });
-    expect(
-      writerFromRow({ op: new Uint8Array(), writerUserId: 'ag', writerKind: 'agent' }),
-    ).toEqual({
+    expect(writerFromRow({ writerUserId: 'ag', writerKind: 'agent' })).toEqual({
       userId: 'ag',
       principalKind: 'agent',
     });
-    expect(
-      writerFromRow({ op: new Uint8Array(), writerUserId: null, writerKind: 'system' }),
-    ).toBeNull();
+    expect(writerFromRow({ writerUserId: null, writerKind: 'system' })).toBeNull();
     // A malformed stamp (authored kind, no user) is fail-closed to unattributed.
-    expect(
-      writerFromRow({ op: new Uint8Array(), writerUserId: null, writerKind: 'human' }),
-    ).toBeNull();
+    expect(writerFromRow({ writerUserId: null, writerKind: 'human' })).toBeNull();
   });
 });
 
@@ -119,11 +121,68 @@ describe('lazy-start: a replica is built from the stream on first need and regis
   });
 });
 
+describe('#203 CLASS: a visibility-hole reorder folds the missing middle row (stable seq, not array index)', () => {
+  it('a snapshot that first HIDES a middle seq then reveals it folds that row on re-acquire — the gate does not pass until it is', async () => {
+    // Three durable rows on one client: m1, m2, m3 — seqs 1, 2, 3. The first snapshot
+    // is missing the MIDDLE row (seq 2) — the visibility hole: seq 3 committed and is
+    // visible, but seq 2's in-flight txn is not yet. A source that keys the fold on the
+    // ARRAY INDEX would, on the second (full) snapshot, see m2 at index 1 — an index
+    // an already-folded row owns — and DEDUPE IT AWAY while the count still reached the
+    // head: the false-pass this class produces. Keyed on the stable stream_seq, m2 is a
+    // distinct seq that folds cleanly.
+    const c = new ConversationDoc();
+    c.append(msg('m1', 'one'));
+    const r1 = { op: Y.encodeStateAsUpdate(c.doc), streamSeq: 1 };
+    const sv1 = Y.encodeStateVector(c.doc);
+    c.append(msg('m2', 'two'));
+    const r2 = { op: Y.encodeStateAsUpdate(c.doc, sv1), streamSeq: 2 };
+    const sv2 = Y.encodeStateVector(c.doc);
+    c.append(msg('m3', 'three'));
+    const r3 = { op: Y.encodeStateAsUpdate(c.doc, sv2), streamSeq: 3 };
+
+    const mk = (r: { op: Uint8Array; streamSeq: number }): PersistedYdocUpdate => ({
+      op: r.op,
+      writerUserId: 'u_alice',
+      writerKind: 'human',
+      streamSeq: r.streamSeq,
+    });
+
+    // The head sees seq 3 as the max throughout (seq 3 is committed); the snapshot is
+    // what momentarily hides seq 2, then reveals it.
+    let reveal = false;
+    const source: YdocStreamSource = {
+      async snapshot() {
+        return reveal ? [mk(r1), mk(r2), mk(r3)] : [mk(r1), mk(r3)];
+      },
+      async head() {
+        return 3;
+      },
+    };
+    const manager = new RoomReplicaManager({ source });
+
+    // First acquire: seq 2 is hidden, so only seqs 1 and 3 fold. The contiguous
+    // position is 1 (the gap at seq 2), BELOW the head of 3 — the gate would refuse.
+    const first = await manager.acquire(ROOM);
+    expect(first?.conversation.body('m2')).toBeNull(); // the middle row is not here yet
+    expect(first?.consumedStreamPosition()).toBe(1);
+    expect(first?.consumedStreamPosition()).toBeLessThan(await manager.streamHead(ROOM));
+
+    // The hole fills. A re-acquire re-catches-up: seq 2 folds (it never deduped away),
+    // and the contiguous position closes to 3 — caught up, gate passes, content present.
+    reveal = true;
+    const caughtUp = await manager.acquire(ROOM);
+    expect(caughtUp).toBe(first); // same warm object
+    expect(caughtUp?.conversation.body('m2')?.toString()).toBe('two'); // the once-missing row
+    expect(caughtUp?.consumedStreamPosition()).toBe(3);
+    expect(caughtUp?.consumedStreamPosition()).toBe(await manager.streamHead(ROOM));
+  });
+});
+
 describe('BLOCKER-2: a poison row does not crash acquire — it is quarantined, the room reads as lagging', () => {
   it('acquire skips an unparseable row (never throws), and the replica trails the head ⇒ fail-closed', async () => {
     // A member PUTs garbage bytes through the E2 door (stored verbatim). The good row
     // before it folds; the poison row throws inside catchUp and must be caught.
-    const poison: PersistedYdocUpdate = {
+    const poison: UnsequencedRow = {
       op: Uint8Array.from([0xff, 0xff, 0xff, 0xff, 0xff, 0xff]),
       writerUserId: 'u_mallory',
       writerKind: 'human',

@@ -13,7 +13,11 @@ import { certifyObjectSpan } from '../../apps/web/lib/certify-anchor.js';
 import { CovenantDocReaderProd, readerForLiveDoc } from '../../apps/web/lib/covenant-reader.js';
 import { liveCovenantDoc } from '../../apps/web/lib/live-covenant-doc.js';
 import { roomCovenantReads } from '../../apps/web/lib/room-covenant-reads.js';
-import { dbYdocStreamSource, RoomReplicaManager } from '../../apps/web/lib/room-replica-manager.js';
+import {
+  dbYdocStreamSource,
+  RoomReplicaManager,
+  type YdocStreamSource,
+} from '../../apps/web/lib/room-replica-manager.js';
 import {
   clearServerReplicas,
   type ServerRoomReplica,
@@ -391,6 +395,124 @@ describe('the freshness gate refuses a lagging replica, then mints once caught u
       },
     });
     expect(outcome).toEqual({ ok: false, reason: 'replica_lagging' });
+    manager.evictAll();
+  });
+});
+
+describe('#203 CLASS on a REAL stream: a visibility-hole reorder folds the missing row (stable seq, not array index)', () => {
+  it('a middle durable row hidden then revealed folds on re-acquire; the gate refuses until it is caught up', async () => {
+    const room = await seedRoom(handle, ['ada']);
+
+    // Three durable rows on one client — real per-room stream_seqs 1, 2, 3, minted by
+    // the append function (migration 0055).
+    const ada = new ConversationDoc();
+    ada.append(msg('m1', 'alpha'));
+    await appendThroughDoor(
+      handle,
+      room.roomId,
+      room.people.ada as string,
+      Y.encodeStateAsUpdate(ada.doc),
+    );
+    const sv1 = Y.encodeStateVector(ada.doc);
+    ada.append(msg('m2', 'beta'));
+    await appendThroughDoor(handle, room.roomId, room.people.ada as string, delta(ada, sv1));
+    const sv2 = Y.encodeStateVector(ada.doc);
+    ada.append(msg('m3', 'gamma'));
+    await appendThroughDoor(handle, room.roomId, room.people.ada as string, delta(ada, sv2));
+
+    // The REAL durable rows, in seq order, from Postgres.
+    const real = dbYdocStreamSource(handle.db);
+    const all = await real.snapshot(room.roomId);
+    expect(all.map((r) => r.streamSeq)).toEqual([1, 2, 3]);
+    const midSeq = all[1]?.streamSeq as number; // 2 — the row the hole hides
+
+    // A source that reads real rows but momentarily HIDES the middle seq from the
+    // SNAPSHOT while the HEAD (max seq) already sees it — the visibility hole. Keyed on
+    // the array index, m2 would collide with an already-folded index on reveal and be
+    // deduped away; keyed on stream_seq it is a distinct row that folds cleanly.
+    let reveal = false;
+    const holed: YdocStreamSource = {
+      async snapshot(roomId: string) {
+        const rows = await real.snapshot(roomId);
+        return reveal ? rows : rows.filter((r) => r.streamSeq !== midSeq);
+      },
+      head: (roomId: string) => real.head(roomId),
+    };
+    const manager = new RoomReplicaManager({ source: holed });
+
+    const first = await manager.acquire(room.roomId);
+    if (first === null) throw new Error('first acquire must catch up');
+    expect(first.conversation.body('m2')).toBeNull(); // the hidden middle row
+    expect(first.consumedStreamPosition()).toBe(1); // gap at seq 2 holds the prefix at 1
+    expect(first.consumedStreamPosition()).toBeLessThan(await manager.streamHead(room.roomId));
+
+    reveal = true;
+    const caughtUp = await manager.acquire(room.roomId);
+    expect(caughtUp).toBe(first); // same warm object, re-caught-up
+    expect(caughtUp?.conversation.body('m2')?.toString()).toBe('beta'); // once-missing row folded
+    expect(caughtUp?.consumedStreamPosition()).toBe(3);
+    expect(caughtUp?.consumedStreamPosition()).toBe(await manager.streamHead(room.roomId));
+    manager.evictAll();
+  });
+
+  it('POISON-then-FULL-STATE: a full-state row re-declaring an earlier writer keeps original authorship, and the poisoned room stays fail-closed', async () => {
+    const room = await seedRoom(handle, ['ada', 'bob']);
+
+    // Ada writes m1 (seq 1).
+    const ada = new ConversationDoc();
+    ada.append(msg('m1', 'the original reading'));
+    await appendThroughDoor(
+      handle,
+      room.roomId,
+      room.people.ada as string,
+      Y.encodeStateAsUpdate(ada.doc),
+    );
+
+    // A poison row is PUT through the door (seq 2) — garbage bytes, stored verbatim.
+    await appendThroughDoor(
+      handle,
+      room.roomId,
+      room.people.ada as string,
+      Uint8Array.from([0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff]),
+    );
+
+    // Bob catches up Ada's content, writes m2, and appends a FULL-STATE update (seq 3)
+    // that re-declares Ada's m1 structs alongside his own new ones.
+    const bob = new ConversationDoc();
+    Y.applyUpdate(bob.doc, Y.encodeStateAsUpdate(ada.doc));
+    bob.append(msg('m2', 'the reviewer reading'));
+    await appendThroughDoor(
+      handle,
+      room.roomId,
+      room.people.bob as string,
+      Y.encodeStateAsUpdate(bob.doc), // FULL state, not a delta
+    );
+
+    const manager = new RoomReplicaManager({ source: dbYdocStreamSource(handle.db) });
+    const replica = await manager.acquire(room.roomId);
+    if (replica === null) throw new Error('acquire must not throw on a poison row');
+
+    // Content: m1 and m2 both present (the full-state row carried both); authorship is
+    // the ORIGINAL writers — m1 to Ada (earliest seq wins over the full-state
+    // re-declaration), m2 to Bob.
+    expect(replica.conversation.body('m1')?.toString()).toBe('the original reading');
+    expect(replica.conversation.body('m2')?.toString()).toBe('the reviewer reading');
+    expect(replica.authenticatedAuthorOf('m1')).toEqual({
+      userId: room.people.ada,
+      principalKind: 'human',
+    });
+    expect(replica.authenticatedAuthorOf('m2')).toEqual({
+      userId: room.people.bob,
+      principalKind: 'human',
+    });
+
+    // FAIL-CLOSED: the poison row (seq 2) never folds, so the contiguous position is
+    // stuck at 1 below a head of 3 — the room can never certify while the poison sits
+    // in the stream, exactly the fail-closed the ticket asks for.
+    const head = await manager.streamHead(room.roomId);
+    expect(head).toBe(3);
+    expect(replica.consumedStreamPosition()).toBe(1);
+    expect(replica.consumedStreamPosition()).toBeLessThan(head);
     manager.evictAll();
   });
 });

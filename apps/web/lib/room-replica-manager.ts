@@ -55,6 +55,14 @@ export interface PersistedYdocUpdate {
   readonly op: Uint8Array;
   readonly writerUserId: string | null;
   readonly writerKind: 'human' | 'agent' | 'system';
+  /**
+   * The row's IMMUTABLE `stream_seq` (migration 0055) — a per-room, gap-free,
+   * strictly-increasing bigint minted at append time. It is the STABLE ROW IDENTITY
+   * the replica dedupes and gap-detects on, NEVER the row's position in this
+   * snapshot array: a reordered snapshot reuses each row's own seq, so a late/
+   * reordered row can never collide with an already-folded row's ordinal (#203).
+   */
+  readonly streamSeq: number;
 }
 
 /**
@@ -65,17 +73,21 @@ export interface PersistedYdocUpdate {
  */
 export interface YdocStreamSource {
   /**
-   * Every `ydoc_updates` row for the room, IN STREAM (append) ORDER — the catch-up
-   * snapshot. Order is the total order `(appended_at, id)`; a stable order is what
-   * makes two independently-catching-up replicas converge and makes the stream
-   * position below meaningful.
+   * Every `ydoc_updates` row for the room, IN STREAM ORDER — the catch-up snapshot.
+   * Order is by the immutable per-room `stream_seq` (migration 0055); each row
+   * carries its own `streamSeq`, so the replica's dedupe/freshness never depend on a
+   * row's POSITION in this array (a reordered snapshot is harmless — the fix for the
+   * #203 array-index class).
    */
   snapshot(roomId: string): Promise<readonly PersistedYdocUpdate[]>;
   /**
-   * The current stream HEAD position for the room — the count of durable rows. The
-   * freshness gate compares a replica's consumed position ({@link
-   * ServerRoomReplica.consumedStreamPosition}) against this: a replica that trails
-   * the head has not caught up, and a certify against it is refused (fail-closed).
+   * The current stream HEAD for the room — the MAXIMUM `stream_seq`, not a row count
+   * (0 when the room has no rows). The freshness gate compares a replica's consumed
+   * position ({@link ServerRoomReplica.consumedStreamPosition} — the highest
+   * CONTIGUOUS seq folded) against this: a replica that has not folded every seq up
+   * to the head with no gap has not caught up, and a certify against it is refused
+   * (fail-closed). Head-as-max and consumed-as-contiguous-prefix are the pair that
+   * makes a skipped-yet-reordered row surface as a lag rather than a false pass.
    */
   head(roomId: string): Promise<number>;
 }
@@ -89,7 +101,9 @@ export interface YdocStreamSource {
  * with no user — both refused by the DB's consistency check) is treated as
  * unattributed rather than trusted.
  */
-export function writerFromRow(row: PersistedYdocUpdate): WriterIdentity | null {
+export function writerFromRow(
+  row: Pick<PersistedYdocUpdate, 'writerUserId' | 'writerKind'>,
+): WriterIdentity | null {
   if (row.writerKind === 'system') return null;
   if (row.writerUserId === null) return null; // inconsistent stamp ⇒ fail-closed
   return { userId: row.writerUserId, principalKind: row.writerKind };
@@ -104,24 +118,30 @@ export function dbYdocStreamSource(db: Pick<Database, 'select'>): YdocStreamSour
           op: ydocUpdates.op,
           writerUserId: ydocUpdates.writerUserId,
           writerKind: ydocUpdates.writerKind,
+          streamSeq: ydocUpdates.streamSeq,
         })
         .from(ydocUpdates)
         .where(eq(ydocUpdates.room, roomId))
-        // The total stream order: append time, id breaking any same-instant tie.
-        .orderBy(asc(ydocUpdates.appendedAt), asc(ydocUpdates.id));
+        // The stream order is the immutable per-room stream_seq (migration 0055);
+        // the fold and the dedupe key on the row's own seq, not this array index.
+        .orderBy(asc(ydocUpdates.streamSeq));
       return rows.map((r) => ({
         // Postgres `bytea` arrives as a Node Buffer; Yjs needs a plain Uint8Array.
         op: Uint8Array.from(r.op as Uint8Array),
         writerUserId: r.writerUserId,
         writerKind: r.writerKind,
+        streamSeq: Number(r.streamSeq),
       }));
     },
     async head(roomId: string): Promise<number> {
+      // The head is the MAXIMUM stream_seq, not a row count — the value the
+      // replica's highest-contiguous-seq position is compared against (#203). 0 for
+      // an empty room (coalesce), so an empty stream's gate is 0 >= 0.
       const [row] = await db
-        .select({ count: sql<number>`count(*)::int` })
+        .select({ head: sql<number>`coalesce(max(${ydocUpdates.streamSeq}), 0)::int` })
         .from(ydocUpdates)
         .where(eq(ydocUpdates.room, roomId));
-      return Number(row?.count ?? 0);
+      return Number(row?.head ?? 0);
     },
   };
 }
@@ -174,7 +194,7 @@ export class RoomReplicaManager {
    * forever and the freshness gate would refuse `replica_lagging` permanently
    * (certify → append → certify again → never mints). Re-folding the durable snapshot
    * on acquire fixes that: {@link ServerRoomReplica.catchUp} dedupes by each row's
-   * stream ordinal, so already-consumed rows are no-ops and only genuinely-new rows
+   * immutable `stream_seq`, so already-consumed rows are no-ops and only genuinely-new rows
    * advance the replica. It converges to head from the SAME durable stream — no RPC.
    *
    * FAIL-CLOSED, twice:
@@ -188,18 +208,18 @@ export class RoomReplicaManager {
    *     replica stays below the head and certify cleanly refuses `replica_lagging`.
    */
   async acquire(roomId: string): Promise<ServerRoomReplica | null> {
-    const held = this.entries.get(roomId);
-    const warm =
-      held !== undefined &&
-      serverReplicaFor(roomId) === held.replica &&
-      !held.replica.conversation.isDestroyed();
-
     let rows: readonly PersistedYdocUpdate[];
     try {
       rows = await this.source.snapshot(roomId);
     } catch {
-      // Stream unreachable. A warm replica is kept as-is (gate guards staleness); a
+      // Stream unreachable. Re-read the registry AFTER the await (single-flight, see
+      // below): a warm replica is kept as-is (the gate still guards staleness); a
       // cold acquire (nothing usable held) registers nothing and fails closed.
+      const held = this.entries.get(roomId);
+      const warm =
+        held !== undefined &&
+        serverReplicaFor(roomId) === held.replica &&
+        !held.replica.conversation.isDestroyed();
       if (warm && held !== undefined) {
         held.lastUsedAt = this.now();
         return held.replica;
@@ -207,6 +227,19 @@ export class RoomReplicaManager {
       if (held !== undefined) this.dispose(roomId, held);
       return null;
     }
+
+    // SINGLE-FLIGHT (E3, #203 hardening). Decide warm-vs-cold from the registry as
+    // it stands AFTER the await, not from a snapshot taken before it. The whole
+    // block below is synchronous (no `await`), so two concurrent cold acquires
+    // cannot interleave here: whichever resumes first creates + registers the one
+    // replica, and the other re-reads the registry and REUSES it instead of
+    // registering a second — which the old (pre-await) check leaked as an orphan
+    // (registered, then overwritten last-wins, never disposed).
+    const held = this.entries.get(roomId);
+    const warm =
+      held !== undefined &&
+      serverReplicaFor(roomId) === held.replica &&
+      !held.replica.conversation.isDestroyed();
 
     let replica: ServerRoomReplica;
     if (warm && held !== undefined) {
@@ -221,14 +254,14 @@ export class RoomReplicaManager {
 
     // Replay each row in stream order, folding content AND its persisted authorship
     // stamp (range-exact) — so authorship survives a cold restart via data. The row's
-    // INDEX is its stream ordinal: dedupe key (a re-consumed row is a no-op) and the
-    // ledger's overlap tiebreak. A poison row is caught and skipped (fail-closed).
-    for (let position = 0; position < rows.length; position += 1) {
-      const row = rows[position] as PersistedYdocUpdate;
+    // IMMUTABLE `stream_seq` is its stream ordinal: dedupe key (a re-consumed or
+    // reordered row is a no-op / lands on its own seq) and the ledger's overlap
+    // tiebreak. A poison row is caught and skipped (fail-closed).
+    for (const row of rows) {
       try {
-        replica.catchUp(row.op, writerFromRow(row), position);
+        replica.catchUp(row.op, writerFromRow(row), row.streamSeq);
       } catch {
-        // Garbage bytes for this row: quarantine it. It stays unconsumed, so the
+        // Garbage bytes for this row: quarantine it. Its seq stays a gap, so the
         // replica trails the head and certify refuses cleanly rather than 500ing.
       }
     }

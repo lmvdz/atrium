@@ -154,7 +154,7 @@ describe('ydoc_updates is writable only through the append door', () => {
    */
   it('refuses a direct INSERT even as the table owner', async () => {
     await violatesConstraint('ydoc_updates_append_through_procedure', () =>
-      handle.db.insert(ydocUpdates).values({ room: roomId, op: OP }),
+      handle.db.insert(ydocUpdates).values({ room: roomId, op: OP, streamSeq: 1 }),
     );
   });
 
@@ -179,8 +179,8 @@ describe('ydoc_updates is writable only through the append door', () => {
     await handle.db.execute(
       sql.raw(
         `DO $forge$ BEGIN
-           INSERT INTO ydoc_updates (room, op) /* function atrium_append_ydoc_update( */
-           VALUES ('${roomId}'::uuid, '\\x0102'::bytea);
+           INSERT INTO ydoc_updates (room, op, stream_seq) /* function atrium_append_ydoc_update( */
+           VALUES ('${roomId}'::uuid, '\\x0102'::bytea, 1);
          END $forge$;`,
       ),
     );

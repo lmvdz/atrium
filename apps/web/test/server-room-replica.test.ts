@@ -346,7 +346,7 @@ describe('the authenticated writer determines authorship (a peer cannot inherit 
     client.append(msg('m1', 'arrived over the raw stream'));
     // catchUp is the convergence-only path (a durable-stream replay this process
     // did not authenticate) — content lands, authorship does not.
-    replica.catchUp(Y.encodeStateAsUpdate(client.doc), null, 0);
+    replica.catchUp(Y.encodeStateAsUpdate(client.doc), null, 1);
     expect(replica.conversation.body('m1')?.toString()).toBe('arrived over the raw stream');
     expect(replica.authenticatedAuthorOf('m1')).toBeNull();
   });

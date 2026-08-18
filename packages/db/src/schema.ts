@@ -2584,18 +2584,33 @@ export const ydocUpdates = pgTable(
      * constraint below.
      */
     opDigest: bytea('op_digest').generatedAlwaysAs(sql`sha256("op")`),
+    /**
+     * A per-room, gap-free, strictly-increasing ordinal minted at append time
+     * under a per-room advisory lock (the `core_events.room_seq` discipline;
+     * drizzle/0055). This is the STABLE ROW IDENTITY the E3 server replica keys on
+     * (#203): dedupe by seq, and freshness as the highest CONTIGUOUS seq folded vs
+     * the head `max(stream_seq)` — never an array index or a row count, so a
+     * reordered/late row is folded or a detectable gap, never skipped-yet-counted.
+     */
+    streamSeq: bigint('stream_seq', { mode: 'number' }).notNull(),
   },
   (t) => [
     index('ydoc_updates_room_idx').on(t.room, t.appendedAt),
+    // The catch-up snapshot folds rows in stream_seq order; this index is that scan.
+    index('ydoc_updates_room_seq_idx').on(t.room, t.streamSeq),
     check('ydoc_updates_op_not_empty', sql`octet_length(${t.op}) > 0`),
     // The stamp is internally consistent: `system` XOR a named user is refused.
     check(
       'ydoc_updates_writer_stamp_consistent',
       sql`(${t.writerKind} = 'system') = (${t.writerUserId} IS NULL)`,
     ),
+    // The sequence starts at 1 per room, exactly like core_events.room_seq.
+    check('ydoc_updates_stream_seq_positive', sql`${t.streamSeq} >= 1`),
     // Replay dedupe: one byte-identical update per room, so a replay collides
     // with the original row rather than re-attributing it.
     unique('ydoc_updates_room_op_digest_key').on(t.room, t.opDigest),
+    // One seq per room, ever — the stable row identity the replica dedupes on.
+    unique('ydoc_updates_room_stream_seq_key').on(t.room, t.streamSeq),
   ],
 );
 

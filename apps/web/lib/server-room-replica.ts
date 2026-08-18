@@ -111,8 +111,8 @@ const LIVE_APPLY_POSITION = Number.POSITIVE_INFINITY;
 
 /**
  * One attributed clock range for a client: `[from, to)` written by `writer`, as
- * declared by the durable row at stream position `streamPosition` (the row's total
- * order in the stream; lower = earlier). {@link WriterLedger.writerAt} resolves an
+ * declared by the durable row at stream position `streamPosition` (the row's
+ * immutable `stream_seq`; lower = earlier). {@link WriterLedger.writerAt} resolves an
  * overlapping clock to the claim with the SMALLEST `streamPosition` — the earliest
  * genuine writer — so attribution is independent of the order rows are replayed in.
  */
@@ -134,7 +134,7 @@ interface AttributedRange {
  * ## Earliest-stream-writer-wins — genuinely ORDER-INDEPENDENT for overlaps
  *
  * Each recorded range carries the STREAM POSITION of the durable row that declared
- * it (the row's total order `(appended_at, id)`, passed as the fold ordinal). When
+ * it (the row's immutable `stream_seq`, passed as the fold ordinal). When
  * two rows declare OVERLAPPING clocks of the same client — the reachable-in-theory
  * case where a full-state update re-contains another writer's structs alongside its
  * own new ones — {@link writerAt} resolves each clock to the writer of the range
@@ -142,7 +142,7 @@ interface AttributedRange {
  * which is the earliest one in the stream. Because that ordinal is INTRINSIC to the
  * row (not the replay order), replaying the rows in ANY order attributes the clock
  * to the same original writer. A re-consumed row (a duplicate stream read) is a
- * no-op at the replica level ({@link ServerRoomReplica.catchUp} dedupes by ordinal),
+ * no-op at the replica level ({@link ServerRoomReplica.catchUp} dedupes by seq),
  * so the ledger never even sees the second read; the min-position rule is the
  * belt-and-suspenders that keeps a full-state re-declaration from re-homing an
  * already-attributed clock regardless.
@@ -201,15 +201,19 @@ export class ServerRoomReplica {
 
   /**
    * The DISTINCT durable-stream rows this replica has folded in, keyed by each
-   * row's stream position (its total order `(appended_at, id)`, passed to
-   * {@link catchUp} as the fold ordinal). A SET, not a counter, on purpose (E3,
-   * #203 gauntlet): re-consuming a row — a duplicate stream read, or the warm
-   * re-catch-up {@link RoomReplicaManager.acquire} runs on every acquire — reuses
-   * its ordinal and does not inflate the position, and a row that was NEVER applied
-   * (a poison row the fold quarantines) leaves its ordinal absent, so the position
-   * can never reach the head with a row unapplied. `consumedStreamPosition()` is
-   * this set's size; the freshness gate compares it against the head (`count(*)`),
-   * and equality is only possible when every ordinal `0..head-1` is present.
+   * row's IMMUTABLE `stream_seq` (a per-room, gap-free, strictly-increasing bigint
+   * minted at append time, migration 0055 — NEVER an array index or a count). A
+   * SET, not a counter, on purpose (E3, #203): re-consuming a row — a duplicate
+   * stream read, or the warm re-catch-up {@link RoomReplicaManager.acquire} runs on
+   * every acquire — reuses its seq and folds as a no-op, and a row that was NEVER
+   * applied (a poison row the fold quarantines) leaves its seq absent as a GAP.
+   *
+   * Because the key is a stable row identity rather than a positional index, a
+   * REORDERED snapshot (a later-committed row whose in-flight txn stamped an earlier
+   * `appended_at`) can no longer make a new row collide with an already-applied
+   * row's ordinal: a seq belongs to exactly one row for the life of the room, so
+   * that row is either folded (its seq present) or missing (its seq a gap). This is
+   * the array-index collision the #203 gauntlet found, closed at the root.
    *
    * Moved ONLY by {@link catchUp} — the durable stream is the only thing that moves
    * a stream position; an in-process authenticated apply is content, not a consumed
@@ -218,21 +222,36 @@ export class ServerRoomReplica {
    */
   private readonly appliedRows = new Set<number>();
 
+  /**
+   * The highest CONTIGUOUS `stream_seq` folded — the largest `N` such that every
+   * seq `1..N` is in {@link appliedRows}. This, not the set's size, is
+   * {@link consumedStreamPosition}: a room's seqs are gap-free from 1 (migration
+   * 0055), so a replica caught up to the head has folded every seq up to it with no
+   * hole, and a MISSING row below the head (skipped/quarantined/reordered-away)
+   * stalls this value below the head even if a LATER seq was folded — which the
+   * set's size would falsely count. Advanced amortized-O(1) in {@link catchUp} as
+   * each new seq closes the gap above it.
+   */
+  private contiguousHigh = 0;
+
   constructor(convo: ConversationDoc = new ConversationDoc()) {
     this.convo = convo;
   }
 
   /**
-   * The durable-stream position this replica has consumed to — the number of
-   * DISTINCT `ydoc_updates` rows folded in via {@link catchUp}. The freshness gate
-   * compares this against the stream head (`count(*)`) captured at certify-request
-   * time and REFUSES to mint when this trails it (fail-closed: never anchor content
-   * a lagging replica has not yet caught up to). Because it counts distinct rows by
-   * their stream ordinal, a duplicate fold cannot inflate it and a skipped
-   * (poison/quarantined) row keeps it below the head. See {@link appliedRows}.
+   * The durable-stream position this replica has consumed to — the highest
+   * CONTIGUOUS `stream_seq` folded via {@link catchUp} (see {@link contiguousHigh}),
+   * NEVER a row count. The freshness gate compares this against the stream head
+   * (`max(stream_seq)`) captured at certify-request time and REFUSES to mint when
+   * this trails it (fail-closed: never anchor content a lagging replica has not yet
+   * caught up to). Keying on the highest contiguous seq — not the applied-set's
+   * size — is what closes the #203 class: a row missing BELOW the head (skipped,
+   * quarantined, or reordered away) leaves a gap that holds this value below the
+   * head even if a later seq was folded, whereas a size count could reach the head
+   * with a hole still open. See {@link appliedRows}.
    */
   consumedStreamPosition(): number {
-    return this.appliedRows.size;
+    return this.contiguousHigh;
   }
 
   /** The wrapped conversation — its `bodyPath`, `messages`, `model`, `contentFragment`. */
@@ -302,12 +321,14 @@ export class ServerRoomReplica {
    * pre-0054 row that carries no author) folds content WITHOUT authorship, exactly
    * as before: those items read as unknown, fail-closed.
    *
-   * `streamPosition` is the row's TOTAL-ORDER position in the durable stream (its
-   * `(appended_at, id)` rank, supplied by {@link RoomReplicaManager} as the fold
-   * ordinal). It is BOTH the row's dedupe identity (a re-consumed row reuses its
-   * ordinal, so it never re-inflates the freshness position or re-records the ledger)
-   * AND the tiebreak the ledger resolves overlapping declarations by. A row already
-   * folded is a no-op.
+   * `streamPosition` is the row's IMMUTABLE `stream_seq` — a per-room, gap-free,
+   * strictly-increasing bigint minted at append time (migration 0055), supplied by
+   * {@link RoomReplicaManager} as the fold ordinal. It is BOTH the row's dedupe
+   * identity (a re-consumed row reuses its seq, so it never re-inflates the freshness
+   * position or re-records the ledger) AND the tiebreak the ledger resolves
+   * overlapping declarations by. Because the seq is a stable row identity rather than
+   * a positional index, a reordered snapshot can never make a new row collide with an
+   * already-applied row's ordinal (the #203 class). A row already folded is a no-op.
    *
    * ## RANGE-EXACT, and ORDER-INDEPENDENT — why it uses `parseUpdateMeta`, not the
    * state-vector delta {@link applyAuthenticatedUpdate} uses.
@@ -336,23 +357,41 @@ export class ServerRoomReplica {
   catchUp(update: Uint8Array, writer: WriterIdentity | null, streamPosition: number): void {
     // A row already folded (a duplicate stream read, or the warm re-catch-up on
     // acquire) is a no-op: its content is already integrated and its stamp already
-    // recorded, and re-counting its ordinal would falsely advance the position.
+    // recorded, and re-counting its seq would falsely advance the position.
     if (this.appliedRows.has(streamPosition)) return;
-    // Record the stamp over the op's OWN declared ranges FIRST — from the bytes,
-    // before integration — so attribution is range-exact and independent of whether
-    // this row's causal deps have arrived yet or of the order rows are replayed in.
+
+    // Parse the op's OWN declared ranges from the bytes — range-exact and
+    // independent of whether this row's causal deps have arrived yet or of replay
+    // order. `parseUpdateMeta` throws on garbage bytes (a poison row), which is the
+    // quarantine trigger: it happens BEFORE any state change, so a poison row folds
+    // nothing, records nothing, and leaves its seq a gap (fail-closed).
+    const pending: Array<{ client: number; from: number; to: number }> = [];
     if (writer !== null) {
       const meta = Y.parseUpdateMeta(update);
       for (const [client, to] of meta.to) {
         const from = meta.from.get(client) ?? 0;
-        if (to > from) this.ledger.record(client, from, to, writer, streamPosition);
+        if (to > from) pending.push({ client, from, to });
       }
     }
+
+    // ATOMICITY (E3, #203 / B2). Integrate the content FIRST; only if `applyUpdate`
+    // returns do we flush the ledger stamps and mark the seq consumed. A row that
+    // parses but throws on integration therefore records NOTHING — no phantom ledger
+    // entry, no consumed seq — so a re-acquire re-attempts it cleanly rather than
+    // re-recording a stamp for content that never landed.
     Y.applyUpdate(this.convo.doc, update);
-    // One distinct durable-stream row consumed — record its ordinal (E3, #203). Only
-    // reached if the two lines above did not throw: a poison row leaves its ordinal
+
+    if (writer !== null) {
+      for (const { client, from, to } of pending) {
+        this.ledger.record(client, from, to, writer, streamPosition);
+      }
+    }
+    // One distinct durable-stream row consumed — record its seq and advance the
+    // contiguous-prefix high-water mark past any gap this fold just closed (E3,
+    // #203). Reached only after `applyUpdate` succeeded: a poison row's seq stays
     // absent, so the freshness position stays below the head (fail-closed).
     this.appliedRows.add(streamPosition);
+    while (this.appliedRows.has(this.contiguousHigh + 1)) this.contiguousHigh += 1;
   }
 
   /**
