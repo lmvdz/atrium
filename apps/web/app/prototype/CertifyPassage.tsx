@@ -238,6 +238,25 @@ export function CertifyPassage({
      frame can complete, rather than only in the post-commit effect that clears it. */
   const spanVersionRef = useRef(version);
 
+  /* A SYNCHRONOUS convergence counter — the commit-order-independent partner to the
+     React `version` prop (E8 r3). `version` is React state: it lands only after React
+     commits the re-render a convergence schedules, and a `requestAnimationFrame` hold
+     frame can fire `complete` BEFORE that commit, reading a stale disabled/request. So
+     the certify staleness guard cannot be built on `version` alone. This ref is bumped
+     inside the Yjs `onChange` (`observeDeep`, which fires synchronously within the
+     converging transaction), so it is fresh the instant the doc changes — before any
+     frame or commit. `spanConvergeRef` stamps its value when a span is measured; the
+     `HoldToAct` guard aborts a completing hold if it has advanced since (see below). */
+  const liveConvergeRef = useRef(0);
+  const spanConvergeRef = useRef(0);
+  useEffect(() => {
+    // Bump BEFORE React's own `version` state update runs, and outside its commit.
+    const off = doc.onChange(() => {
+      liveConvergeRef.current += 1;
+    });
+    return off;
+  }, [doc]);
+
   // The body's live rich-text, projected to the index-faithful render model.
   // RECOMPUTED ON `version` (E8 finding #1): a body edit under an open panel — local
   // or remote — bumps `version`, so the rendered segments (and the offsets a
@@ -275,6 +294,10 @@ export function CertifyPassage({
     // can tell this span is stale (see the `request` memo). Written before the state
     // update so the render that observes the new span also sees the matching stamp.
     spanVersionRef.current = version;
+    // Stamp the SYNCHRONOUS convergence count too, so the fire-time hold guard can
+    // detect a convergence that happened after this span was measured even before
+    // React commits the matching `version` re-render (E8 r3).
+    spanConvergeRef.current = liveConvergeRef.current;
     setSpan(spanFromSelection(root));
   }, [version]);
 
@@ -285,13 +308,18 @@ export function CertifyPassage({
     return () => docNode.removeEventListener('selectionchange', syncSelection);
   }, [syncSelection]);
 
-  // The certify request, recomputed on `version` (E8 finding #1 / r2 blocker). A span
-  // is coordinates into ONE body revision; on any convergence the pending span is
-  // STALE — it names a passage the human may never have read — so `request` goes null
-  // the instant the stamped version no longer matches the current one. This nulling
-  // happens DURING RENDER (not in the post-commit effect below), so `canCertify` is
-  // false and the ✓ is disabled BEFORE any in-flight hold frame can complete over the
-  // stale span; `HoldToAct` then abandons the running hold and re-checks at fire time.
+  // The certify request, recomputed on `version` (E8 finding #1 / r2 / r3). A span is
+  // coordinates into ONE body revision; on any convergence the pending span is STALE —
+  // it names a passage the human may never have read — so `request` goes null the
+  // instant the stamped version no longer matches the current one. This nulling happens
+  // DURING RENDER, so `canCertify` is false and the ✓ is disabled once React commits
+  // the convergence re-render. That commit is NOT guaranteed to beat an in-flight hold
+  // frame, though: a queued `requestAnimationFrame` can fire `complete` before React
+  // commits, reading a stale `disabled`. So this render-time nulling (and the
+  // `disabled` it drives) is defense-in-depth; what actually closes the race regardless
+  // of commit ordering is the `guard` handed to `HoldToAct` below, backed by
+  // `liveConvergeRef` — a counter bumped synchronously inside the doc's convergence,
+  // before any frame or commit.
   const request: ObjectSpanRequest | null = useMemo(() => {
     if (span === null) return null;
     if (spanVersionRef.current !== version) return null;
@@ -373,6 +401,7 @@ export function CertifyPassage({
           label="Certify this passage"
           describe="record a human certification over exactly the selected span of this message"
           disabled={!canCertify}
+          guard={() => liveConvergeRef.current === spanConvergeRef.current}
           resetOnComplete
           onAct={() => {
             void runCertify();

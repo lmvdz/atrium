@@ -483,6 +483,73 @@ describe('a hold abandoned by going disabled mid-press never acts (E8 r2)', () =
   });
 });
 
+/* ---------------------------------------------------------------------------
+ * E8 r3 — A FIRE-TIME GUARD REFUSES A COMPLETED HOLD EVEN BEFORE `disabled` COMMITS.
+ *
+ * `disabled` is React state: a caller that invalidates the act on a synchronous
+ * event (certify: a Yjs convergence) cannot flip `disabled` until React commits the
+ * re-render, and a `requestAnimationFrame` chain already in flight can fire
+ * `complete` in that pre-commit window, reading a stale `disabledRef`. The `guard`
+ * predicate is re-evaluated at fire time against a value the caller updates
+ * SYNCHRONOUSLY, so it closes that window regardless of commit ordering.
+ * ------------------------------------------------------------------------- */
+describe('a fire-time guard abandons a completed hold, independent of disabled (E8 r3)', () => {
+  /* CATCHES: `complete` acting when the caller's synchronous validity has gone false
+     but `disabled` has not yet committed. With the guard removed this fires the act;
+     with it, the hold is abandoned (onCancel) and nothing acts. */
+  it('guard=false at fire time aborts the act, with disabled never flipped', () => {
+    const events: string[] = [];
+    // A mutable validity flipped imperatively — no React state, so `disabled` stays
+    // false throughout, exactly like the pre-commit window.
+    const valid = { current: true };
+    render(
+      <HoldToAct
+        actionId="certify"
+        actor="lars"
+        describe="certify the passage"
+        guard={() => valid.current}
+        label="Certify this passage"
+        onAct={() => events.push('act')}
+        onCancel={() => events.push('cancel')}
+        resetOnComplete
+      />,
+    );
+    const button = screen.getByRole('button');
+    fireEvent.pointerDown(button);
+    advance(1000); // mid-hold
+    expect((button as HTMLButtonElement).disabled).toBe(false);
+
+    valid.current = false; // the doc converged synchronously; the guard's value is stale
+    advance(5000); // past the gate — the completing frame evaluates the guard
+
+    expect(events).toEqual(['cancel']); // abandoned, never acted
+    expect(button.getAttribute('data-armed')).toBeNull();
+    expect(button.getAttribute('data-hold-progress')).toBe('0.000');
+  });
+
+  /* CATCHES: the guard blocking a VALID completion — it must only refuse when it
+     returns false, never gate an honest hold. */
+  it('guard=true lets the hold complete and act as normal', () => {
+    const events: string[] = [];
+    render(
+      <HoldToAct
+        actionId="certify"
+        actor="lars"
+        describe="certify the passage"
+        guard={() => true}
+        holdMs={1500}
+        label="Certify this passage"
+        onAct={() => events.push('act')}
+        onArm={() => events.push('arm')}
+      />,
+    );
+    const button = screen.getByRole('button');
+    fireEvent.pointerDown(button);
+    advance(1600);
+    expect(events).toEqual(['arm', 'act']);
+  });
+});
+
 describe('resetOnComplete returns a fire-once act to idle (#146 FIX 3)', () => {
   /* CATCHES: a fund/settle control resting at `armed` after it fired. The act
      still fires (arm then act); only the resting phase changes — so the control

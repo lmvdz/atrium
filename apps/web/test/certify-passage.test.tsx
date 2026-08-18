@@ -195,3 +195,44 @@ describe('a hold in flight when the body converges never certifies the stale spa
     expect(req).toMatchObject({ objectId: OBJECT_ID, start: 9, end: 14 });
   });
 });
+
+describe('a hold that completes BEFORE the version bump commits still refuses (E8 r3)', () => {
+  /* CATCHES the residual the r2 fix left open: the convergence-driven `disabled` flip
+     is React state, so it lands only after React commits the re-render — and a queued
+     `requestAnimationFrame` can fire `complete` in the pre-commit window, reading a
+     stale `disabled`. Here the body converges (which fires the doc's synchronous
+     `onChange`) but the pane is NOT re-rendered with the new `version` before the gate
+     fires — the exact ordering `disabled`/`disabledRef` misses. The version-guard,
+     backed by a counter bumped inside `onChange`, is fresh regardless, so the stale
+     span never certifies. Without the guard, `onCertify` fires over the pre-edit coords. */
+  it('a synchronous convergence with no committed version bump aborts the certify', () => {
+    const doc = seededDoc(msg('m1', 'hello world'));
+    const onCertify = vi.fn<CertifyPassageCertify>(async () => ({ ok: true, anchorId: 'a1' }));
+    // Render ONCE at version 1 and never rerender: the doc converges below, but the
+    // `version` prop (and the `disabled` it drives) stays as of before the edit.
+    renderPane(doc, 1, onCertify);
+
+    selectChars(0, 5); // "hello" — a valid span, stamped against the pre-edit doc
+    const hold = screen.getByRole('button', { name: /Certify this passage/ });
+    expect((hold as HTMLButtonElement).disabled).toBe(false);
+    fireEvent.pointerDown(hold);
+    advance(1000); // mid-hold
+
+    // The body converges mid-hold. `doc.onChange` (observeDeep) fires SYNCHRONOUSLY
+    // here, so the pane's live convergence counter advances — but we deliberately do
+    // NOT rerender with version=2, modelling the rAF-before-commit window.
+    act(() => {
+      const body = doc.body('m1');
+      if (!body) throw new Error('no body');
+      body.insert(0, 'XX ');
+    });
+    // The control is still, from React's stale view, enabled — proving the guard, not
+    // `disabled`, is what refuses.
+    expect((hold as HTMLButtonElement).disabled).toBe(false);
+
+    advance(5000); // past the gate — the completing frame runs the guard
+
+    expect(onCertify).not.toHaveBeenCalled();
+    expect(hold.getAttribute('data-armed')).toBeNull();
+  });
+});

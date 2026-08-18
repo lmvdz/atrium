@@ -132,21 +132,32 @@ type SpanEdge = 'lower' | 'upper';
  * index BEFORE it (`within` 0) or AFTER it (`within` 1) — and the ordinary
  * half-open `[start, end)` coverage then decides whether the atom is included.
  *
- * The resolution is ENCODING-INDEPENDENT, which is the whole point (E8 r2 finding).
- * The same physical boundary has two Range encodings and the real browser's choice
- * is unobservable here (jsdom differs): a caret at an atom's LEFT edge is emitted as
- * either `(parent, indexOfEmbed)` or `(embed, 0)`, and at its RIGHT edge as either
- * `(parent, indexOfEmbed + 1)` or `(embed, childCount)`. Both encodings of the left
- * edge must map to "before the atom" and both of the right edge to "after it", or a
- * selection that merely ENDS at an atom's edge (or STARTS at the next atom's edge,
- * with adjacent embeds) grabs an atom the human never highlighted — the r1
- * over-correction, which snapped every touched point OUTWARD and so over-included.
+ * The resolution is ENCODING-INDEPENDENT, which is the whole point (E8 r2/r3
+ * finding). The same physical boundary has TWO Range encodings and the real
+ * browser's choice is unobservable here (jsdom differs). Every encoding is
+ * NORMALIZED to a boundary FIRST ({@link embedPointBoundary}), then half-open
+ * `[start, end)` coverage alone decides inclusion — there is no path where "point
+ * on/in an embed" implies include regardless of coverage.
  *
- * So a point AT a boundary is NOT snapped outward; it takes that boundary's index,
- * exactly as the `(parent, …)` child-index walk would. Only a point GENUINELY
- * INSIDE the atom's inner DOM — which cannot be split and cannot mean "exclude" —
- * rounds to include the touched atom WHOLE: a `lower` bound to the near edge, an
- * `upper` bound to the far edge. `(parent, indexOfEmbed)` / `(parent, i+1)` points
+ *   - LEFT edge — `(parent, indexOfEmbed)`, `(embed, 0)`, or the descendant
+ *     `(embed.firstChild, 0)`: maps to "before the atom" (`within` 0).
+ *   - RIGHT edge — `(parent, indexOfEmbed + 1)`, `(embed, childCount)`, or the
+ *     descendant `(embed.lastChild, textLength)`: maps to "after the atom"
+ *     (`within` 1).
+ *   - INTERIOR — a point genuinely between the atom's first and last inner
+ *     characters (`(embed, midChildIndex)` or a descendant offset that is neither
+ *     the leading nor the trailing edge): the atom cannot be split and cannot mean
+ *     "exclude", so a touched atom is included WHOLE — a `lower` bound rounds to
+ *     its near edge (`within` 0), an `upper` bound to its far edge (`within` 1).
+ *
+ * A point that merely ENDS at an atom's edge (or STARTS at the next atom's edge,
+ * with adjacent embeds) therefore excludes it; only a selection that actually
+ * COVERS the atom (one endpoint before, the other after) grabs its one unit. The
+ * r1 over-correction snapped every touched point OUTWARD and so over-included; the
+ * r2 fix only classified the ELEMENT encoding and left the DESCENDANT encoding to
+ * the interior branch (the r3 residual). {@link embedPointBoundary} classifies BOTH
+ * encodings by measuring the point's character offset within the atom's inner DOM,
+ * so no future Range encoding can re-open the over-include. `(parent, …)` points
  * never reach the embed branch at all (their `node` is the PARENT, not in the atom),
  * so they fall to the element walk below and already produce the same indices.
  */
@@ -160,19 +171,17 @@ function indexOfPoint(root: Node, node: Node, offset: number, edge: SpanEdge): n
     target = embedAncestor;
     // `within` is measured from `target`'s start: 0 ⇒ before the atom, 1 ⇒ after its
     // single unit. The preceding-sibling walk below then adds every unit before it.
-    const onAtomElement = node === embedAncestor;
-    if (onAtomElement && offset <= 0) {
-      // The atom's LEFT edge as `(embed, 0)` — the SAME boundary as
-      // `(parent, indexOfEmbed)`: exclude the atom by default.
-      within = 0;
-    } else if (onAtomElement && offset >= embedAncestor.childNodes.length) {
-      // The atom's RIGHT edge as `(embed, childCount)` — the SAME boundary as
-      // `(parent, indexOfEmbed + 1)`: exclude the atom by default.
-      within = 1;
+    // NORMALIZE FIRST: classify the point as one of the atom's boundaries or its
+    // interior, ENCODING-INDEPENDENTLY (element or descendant), then let coverage
+    // decide. There is no branch where touching the atom forces inclusion.
+    const boundary = embedPointBoundary(embedAncestor, node, offset);
+    if (boundary === 'left') {
+      within = 0; // the atom's LEFT edge, any encoding — exclude by default.
+    } else if (boundary === 'right') {
+      within = 1; // the atom's RIGHT edge, any encoding — exclude by default.
     } else {
-      // Genuinely inside the atom's inner DOM (a descendant text node, or a mid
-      // child-index on the atom element). A touched, unsplittable atom is included
-      // whole: a lower bound rounds to its near edge, an upper bound to its far edge.
+      // Genuinely inside the atom's inner DOM. A touched, unsplittable atom is
+      // included whole: a lower bound rounds to its near edge, an upper to its far.
       within = edge === 'upper' ? 1 : 0;
     }
   } else if (node.nodeType === 3 /* TEXT_NODE */) {
@@ -210,6 +219,83 @@ function closestEmbed(root: Node, node: Node): Element | null {
     cur = cur.parentNode;
   }
   return null;
+}
+
+/**
+ * The raw text length of a DOM subtree in UTF-16 code units, counting EVERY text
+ * node (embed-ness is irrelevant here — we are measuring position *inside* one atom's
+ * inner DOM, not the body index). Used only by {@link embedPointBoundary}.
+ */
+function rawTextLength(node: Node): number {
+  if (node.nodeType === 3 /* TEXT_NODE */) return (node.nodeValue ?? '').length;
+  if (node.nodeType === 1 /* ELEMENT_NODE */) {
+    let total = 0;
+    for (let i = 0; i < node.childNodes.length; i++) {
+      const child = node.childNodes[i];
+      if (child) total += rawTextLength(child);
+    }
+    return total;
+  }
+  return 0;
+}
+
+/** Which boundary of an embed atom a Range point resolves to. */
+type EmbedBoundary = 'left' | 'right' | 'interior';
+
+/**
+ * Classify a Range point that lands ON or INSIDE an embed `atom` as the atom's LEFT
+ * boundary, its RIGHT boundary, or its INTERIOR — ENCODING-INDEPENDENTLY, so the two
+ * DOM encodings of each physical edge collapse to the same answer (E8 r3: closes the
+ * class the r2 fix left open for the descendant encoding).
+ *
+ * The method is a character offset within the atom's inner DOM: `left` when nothing
+ * precedes the point inside the atom, `right` when nothing follows it, `interior`
+ * otherwise. This makes every encoding of an edge agree:
+ *   - LEFT: `(atom, 0)` → offset 0; `(atom.firstChild, 0)` → offset 0.
+ *   - RIGHT: `(atom, childCount)` → full length; `(atom.lastChild, textLen)` → full.
+ *   - INTERIOR: `(atom, midChildIndex)` or a mid-text descendant offset.
+ * An empty atom (no inner text) has length 0, so its every point is `left` (before
+ * the sole unit) — which the element-offset checks below also produce, keeping the
+ * two paths consistent.
+ */
+function embedPointBoundary(atom: Element, node: Node, offset: number): EmbedBoundary {
+  // ELEMENT encoding: `offset` is a CHILD index on the atom itself, which is
+  // unambiguous regardless of inner text — before the first child is the left edge,
+  // at/after the last is the right edge, and a mid child-index is the interior.
+  if (node === atom) {
+    if (offset <= 0) return 'left';
+    if (offset >= atom.childNodes.length) return 'right';
+    return 'interior';
+  }
+  // DESCENDANT encoding: measure the point's character offset within the atom's
+  // inner DOM (document order). `left` when nothing precedes it, `right` when
+  // nothing follows it, `interior` otherwise.
+  let acc: number;
+  if (node.nodeType === 3 /* TEXT_NODE */) {
+    acc = Math.max(0, Math.min(offset, (node.nodeValue ?? '').length));
+  } else if (node.nodeType === 1 /* ELEMENT_NODE */) {
+    acc = 0;
+    for (let i = 0; i < offset && i < node.childNodes.length; i++) {
+      const child = node.childNodes[i];
+      if (child) acc += rawTextLength(child);
+    }
+  } else {
+    acc = 0;
+  }
+  // Add every text unit lying before `node`'s subtree, up to (but not through) `atom`.
+  let cur: Node | null = node;
+  while (cur && cur !== atom) {
+    let sib: Node | null = cur.previousSibling;
+    while (sib) {
+      acc += rawTextLength(sib);
+      sib = sib.previousSibling;
+    }
+    cur = cur.parentNode;
+  }
+  const innerLength = rawTextLength(atom);
+  if (acc <= 0) return 'left';
+  if (acc >= innerLength) return 'right';
+  return 'interior';
 }
 
 /**

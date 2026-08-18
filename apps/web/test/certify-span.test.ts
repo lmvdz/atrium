@@ -575,6 +575,98 @@ describe('an embed counts as exactly one unit, and a selection touching it inclu
     expect(readerText(convo, 'm2', { start: 3, end: 4 })).toBe('￼');
   });
 
+  // ── DESCENDANT-ENCODING edges (E8 r3 residual) ──
+  //
+  // The r2 fix classified the ELEMENT encoding of an embed edge — `(embed, 0)` /
+  // `(embed, childCount)` — but a DESCENDANT encoding of the SAME physical edge —
+  // `(embed.firstChild, 0)` at the left, `(embed.lastChild, textLen)` at the right —
+  // fell to the interior branch and rounded include-whole regardless of coverage: a
+  // selection merely ENDING at the left edge (or STARTING at the right edge) over-
+  // included the atom. These pin the class closed: every text-node encoding of an edge
+  // maps to the same boundary the element/parent encodings do, and the ACTUAL span
+  // spanFromRange returns is fed to the reader.
+  const embedTextNodes = (embedEl: Element): Text[] => {
+    const out: Text[] = [];
+    const visit = (n: Node) => {
+      if (n.nodeType === 3) return void out.push(n as Text);
+      for (let i = 0; i < n.childNodes.length; i++) {
+        const c = n.childNodes[i];
+        if (c) visit(c);
+      }
+    };
+    visit(embedEl);
+    return out;
+  };
+
+  it('a selection ending at the embed LEFT edge as (firstChild,0) excludes it — descendant encoding', () => {
+    const convo = seededDoc(msg('m2', 'AB CD'));
+    const body = nn(convo.body('m2'));
+    body.insertEmbed(2, { embedType: 'image', src: 'x' });
+    const segments = renderBodyModel(body);
+    const { root, textNodeOf } = renderCertifyBodyDom(CertifyBody, segments);
+    const embedEl = nn(root.querySelector('[data-certify-embed]'));
+    const firstInner = nn(embedTextNodes(embedEl)[0]);
+
+    // Upper bound at the atom's LEFT edge, encoded as the FIRST descendant text node
+    // at offset 0. The old else-branch rounded this (upper) to `within=1` → end 3.
+    const r = root.ownerDocument.createRange();
+    r.setStart(textNodeOf(0), 0);
+    r.setEnd(firstInner, 0);
+    const span = nn(spanFromRange(root, r));
+    expect(span).toEqual({ start: 0, end: 2 }); // atom EXCLUDED
+    expect(readerText(convo, 'm2', span)).toBe('AB');
+  });
+
+  it('a selection starting at the embed RIGHT edge as (lastChild,len) excludes it — descendant encoding', () => {
+    const convo = seededDoc(msg('m2', 'AB CD'));
+    const body = nn(convo.body('m2'));
+    body.insertEmbed(2, { embedType: 'image', src: 'x' }); // A B <embed> ' ' C D (len 6)
+    const segments = renderBodyModel(body);
+    const { root, textNodeOf } = renderCertifyBodyDom(CertifyBody, segments);
+    const embedEl = nn(root.querySelector('[data-certify-embed]'));
+    const inner = embedTextNodes(embedEl);
+    const lastInner = nn(inner[inner.length - 1]);
+
+    // Lower bound at the atom's RIGHT edge, encoded as the LAST descendant text node
+    // at its end. The old else-branch rounded this (lower) to `within=0` → start 2,
+    // grabbing the atom the human did not highlight.
+    const r = root.ownerDocument.createRange();
+    r.setStart(lastInner, lastInner.data.length);
+    r.setEnd(textNodeOf(2), 3);
+    const span = nn(spanFromRange(root, r));
+    expect(span).toEqual({ start: 3, end: 6 }); // atom EXCLUDED
+    expect(readerText(convo, 'm2', span)).toBe(' CD');
+  });
+
+  it('ADJACENT embeds, descendant encoding: starting at (eB.firstChild,0) must not grab eA', () => {
+    const convo = seededDoc(msg('m2', 'AB'));
+    const body = nn(convo.body('m2'));
+    body.insertEmbed(2, { embedType: 'image', src: 'a' }); // A B <eA>      (len 3)
+    body.insertEmbed(3, { embedType: 'image', src: 'b' }); // A B <eA> <eB>  (len 4)
+    const segments = renderBodyModel(body);
+    const { root } = renderCertifyBodyDom(CertifyBody, segments);
+    const [eA, eB] = Array.from(root.querySelectorAll('[data-certify-embed]'));
+
+    // Left edge of the SECOND atom as its first descendant text node — the same
+    // physical point as eA's right edge. Must cover ONLY eB.
+    const bFirst = nn(embedTextNodes(nn(eB))[0]);
+    const aInner = embedTextNodes(nn(eA));
+    const aLast = nn(aInner[aInner.length - 1]);
+
+    const r1 = root.ownerDocument.createRange();
+    r1.setStart(bFirst, 0);
+    r1.setEnd(root, root.childNodes.length); // → body end (4)
+    expect(nn(spanFromRange(root, r1))).toEqual({ start: 3, end: 4 });
+
+    // eA's right edge as ITS last descendant text node — the same point, must agree.
+    const r2 = root.ownerDocument.createRange();
+    r2.setStart(aLast, aLast.data.length);
+    r2.setEnd(root, root.childNodes.length);
+    expect(nn(spanFromRange(root, r2))).toEqual({ start: 3, end: 4 });
+
+    expect(readerText(convo, 'm2', { start: 3, end: 4 })).toBe('￼'); // only eB
+  });
+
   it('an inline mark wrapper adds no units — offsets are unchanged by emphasis', () => {
     const convo = seededDoc(msg('m3', 'bold word here'));
     const body = nn(convo.body('m3'));
