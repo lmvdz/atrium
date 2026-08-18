@@ -234,8 +234,11 @@ export function CertifyPassage({
   /* The doc `version` the current `span` was MEASURED against. A span is a set of
      coordinates into ONE body revision; the moment the body converges (version bumps)
      those coordinates may name a different passage — or nothing the human read. This
-     stamp lets `request` refuse a stale span DURING RENDER (below), before any hold
-     frame can complete, rather than only in the post-commit effect that clears it. */
+     stamp lets `request` null a stale span DURING RENDER (below) — post-commit
+     defense-in-depth. It does NOT by itself close the rAF-before-commit window; the
+     fire-time convergence guard in `complete()` (liveConvergeRef vs spanConvergeRef,
+     bumped synchronously in Yjs onChange) is what refuses a stale span regardless of
+     scheduler/commit ordering. */
   const spanVersionRef = useRef(version);
 
   /* A SYNCHRONOUS convergence counter — the commit-order-independent partner to the
