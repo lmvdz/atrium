@@ -1,20 +1,22 @@
 import { randomUUID } from 'node:crypto';
+import type { CovenantReadStatus } from '@atrium/core';
 import {
   acceptedObjects,
   covenantAnchors,
   type DatabaseHandle,
   listCovenantAnchorObjectIds,
+  loadCovenantAnchor,
 } from '@atrium/db';
 import { and, eq, sql } from 'drizzle-orm';
 import { afterAll, beforeEach, describe, expect, it } from 'vitest';
 import * as Y from 'yjs';
-import { serverCovenantReadAuthority } from '../../apps/server/src/covenant-read.js';
 import type { ChatMsg } from '../../apps/web/app/prototype/types.js';
 import { ConversationDoc } from '../../apps/web/app/prototype/yjs-conversation.js';
 import { certifyObjectSpan, REPLICA_ABSENT_POSITION } from '../../apps/web/lib/certify-anchor.js';
-import { readerSpanResolver } from '../../apps/web/lib/covenant-read.js';
+import { webCovenantReadAuthority } from '../../apps/web/lib/covenant-read.js';
 import { readerForLiveDoc } from '../../apps/web/lib/covenant-reader.js';
 import { liveCovenantDoc } from '../../apps/web/lib/live-covenant-doc.js';
+import { roomCovenantReads } from '../../apps/web/lib/room-covenant-reads.js';
 import { RoomDriftSweep } from '../../apps/web/lib/room-drift-sweep.js';
 import { dbYdocStreamSource, RoomReplicaManager } from '../../apps/web/lib/room-replica-manager.js';
 import {
@@ -30,25 +32,36 @@ import { openDatabase, resetDatabase, seedRoom } from '../support/harness.js';
  *
  * The auto-stale heart: a human `✓` goes `~` the instant an agent-peer edits the
  * certified content — decided SERVER-SIDE on the E3 replica, by a coarse
- * invalidate + a SPAN-SCOPED digest re-resolution. This exercises the sweep
- * against a real durable stream + replica + the `covenant_anchors` ledger:
+ * invalidate + a SPAN-SCOPED digest re-resolution, and surfaced to the glyphs by
+ * the read path's overlay of the sweep's `staleObjectIds` (DETECT's deliverable).
+ *
+ * ## THESE TESTS EXERCISE THE PRODUCTION SHAPE (E7, #199 Fix 5)
+ *
+ * What production runs is what is verified here: the read path is
+ * {@link roomCovenantReads} (NOT the non-prod `serverCovenantReadAuthority`), the
+ * sweep drives a {@link webCovenantReadAuthority} (the SAME authority the process
+ * singleton binds, with its `liveFreshness` port), and the sweep lifecycle is the
+ * {@link RoomReplicaManager}'s `sweepFactory` (start + seed on acquire, stop on evict).
+ * Reads are asserted through the `{ objectId → status }` map `roomCovenantReads`
+ * returns — the exact map the surface's glyph resolver consumes.
  *
  *   1. an edit IN a certified span → `✓`→`~` within one render tick;
  *   2. an edit OUT of range → the `✓` STAYS (digest identical);
  *   3. no false-stale STORM (an out-of-range edit doesn't stale a sibling span);
  *   4. the stale transition is a MACHINE `~` — never a `✓`; the machine writes
- *      no anchor; no sweep/re-resolve/race turns a `~` into a `✓`;
+ *      no anchor; the draft is frozen so no consumer can flip it to `✓`;
  *   5. green TWICE at concurrency (two peers editing);
  *   6. the sweep racing a human certify of the SAME object — the certify mints,
  *      the sweep never clobbers it and never re-`✓`s;
- *   7. trust tied to an ACTUALLY-LIVE sweep (Fix 3): a live-swept authority serves
- *      a cached `ok` as `✓`; an UNSWEPT one serves it `~`; invalidate-on-update
- *      (not a boolean) is what a swept read reflects;
- *   8. the swept set is AUTHORITATIVE (Fix 1): an anchor omitted from a caller list
- *      is STILL swept (found from `covenant_anchors`), so no undetected false `✓`;
- *   9. a STOPPED/evicted sweep fails closed (Fix 3): read-after-stop never serves a
- *      trusted `✓` (markSweepLive(false) + invalidate-all);
- *  10. revert-to-original-digest returns to `✓` — PINNING the #180 DIGEST MODEL
+ *   7. Fix 1 — the async ledger refresh is EPOCHED: a stale/older refresh completing
+ *      after a newer one never wipes a newer certified set or a live `~` draft;
+ *   8. Fix 2 — a freshly-certified anchor seeded via `noteCertified` is under the
+ *      sweep's synchronous coverage, so its FIRST in-span edit is caught;
+ *   9. Fix 3 — the overlay is FAIL-CLOSED until the sweep has spoken: a certified span
+ *      with no settled sweep verdict reads `~`, not `ok`; demote-only (never mints `ok`);
+ *  10. Fix 4 — the PRODUCTION teardown fail-close: evict → provider→null → the read
+ *      path's fresh per-request resolve yields `~` (no `markSweepLive` gate — removed);
+ *  11. revert-to-original-digest returns to `✓` — PINNING the #180 DIGEST MODEL
  *      (a covenant-MEANING call reserved for Lars, pending sticky-`~` ratification).
  * ═════════════════════════════════════════════════════════════════════════ */
 
@@ -111,14 +124,16 @@ interface Wired {
   replica: ServerRoomReplica;
   /** Object ids certified so far — the sweep re-resolves exactly these. */
   certified: string[];
-  authority: ReturnType<typeof serverCovenantReadAuthority>;
-  sweep: RoomDriftSweep;
+  /** The sweeps the manager's production `sweepFactory` created, keyed by room. */
+  sweeps: Map<string, RoomDriftSweep>;
 }
 
 /**
- * Seed a room with two rich-text messages (m1, m2), catch a replica up from the
- * durable stream, and build a DRIFT-SWEPT server read authority + a RoomDriftSweep
- * over the replica doc. Returns the wiring; the caller certifies spans and edits.
+ * Seed a room with two rich-text messages (m1, m2), then stand up the PRODUCTION
+ * wiring: a {@link RoomReplicaManager} whose `sweepFactory` builds exactly what
+ * `room-replica-singleton` builds in production — a {@link RoomDriftSweep} over a
+ * {@link webCovenantReadAuthority} whose certified set is the AUTHORITATIVE ledger.
+ * `acquire` starts + seeds the sweep. Returns the wiring; the caller certifies and edits.
  */
 async function wire(): Promise<Wired> {
   const room = await seedRoom(handle, ['ada', 'hexi'], { agents: ['hexi'] });
@@ -133,32 +148,64 @@ async function wire(): Promise<Wired> {
   doc.append(msg('m2', 'delta epsilon zeta'));
   await appendThroughDoor(handle, room.roomId, ada, delta(doc, sv1));
 
-  const manager = new RoomReplicaManager({ source: dbYdocStreamSource(handle.db) });
+  const sweeps = new Map<string, RoomDriftSweep>();
+  const manager = new RoomReplicaManager({
+    source: dbYdocStreamSource(handle.db),
+    // The PRODUCTION sweep factory (mirrors room-replica-singleton): the sweep drives a
+    // web authority (with a `liveFreshness` port), and its certified set is the
+    // AUTHORITATIVE `covenant_anchors`, never a caller allowlist.
+    sweepFactory: (roomId, replica) => {
+      const live = liveCovenantDoc(roomId);
+      const reader = readerForLiveDoc(live.provider, undefined, live.options);
+      const authority = webCovenantReadAuthority({
+        loadAnchor: (objectId) => loadCovenantAnchor(handle.db, { roomId, objectId }),
+        reader,
+        expectedRoomId: roomId,
+      });
+      const sweep = new RoomDriftSweep({
+        doc: replica.doc,
+        authority,
+        loadCertifiedObjectIds: () => listCovenantAnchorObjectIds(handle.db, { roomId }),
+        now: () => FIXED_NOW,
+      });
+      sweeps.set(roomId, sweep);
+      return sweep;
+    },
+  });
   const replica = await manager.acquire(room.roomId);
   if (replica === null) throw new Error('the replica must catch up from the durable stream');
 
-  const live = liveCovenantDoc(room.roomId);
-  const sweepReader = readerForLiveDoc(live.provider, undefined, live.options);
-  const authority = serverCovenantReadAuthority({
-    db: handle.db,
-    roomId: room.roomId,
-    resolveSpan: readerSpanResolver(sweepReader),
-    // No `driftSwept` boolean any more (E7 #199 Fix 3): the guard clears ONLY because
-    // the sweep below calls `authority.markSweepLive(true)` on `start()`. Trust follows
-    // the sweep's real lifecycle, so a stopped sweep re-fail-closes this authority.
-  });
-  const certified: string[] = [];
-  const sweep = new RoomDriftSweep({
-    doc: replica.doc,
-    authority,
-    // AUTHORITATIVE certified set from the ledger (E7 #199 Fix 1), NOT a caller list —
-    // an anchor a caller forgot to enumerate would otherwise never be swept (a false ✓).
-    loadCertifiedObjectIds: () => listCovenantAnchorObjectIds(handle.db, { roomId: room.roomId }),
-    now: () => FIXED_NOW,
-  });
-  sweep.start();
+  return { roomId: room.roomId, ada, hexi, manager, replica, certified: [], sweeps };
+}
 
-  return { roomId: room.roomId, ada, hexi, manager, replica, certified, authority, sweep };
+/** The manager-owned production sweep for the room. */
+function mgrSweep(w: Wired): RoomDriftSweep {
+  const s = w.sweeps.get(w.roomId);
+  if (s === undefined) throw new Error('the production sweepFactory must have built a sweep');
+  return s;
+}
+
+/** Await the room's live sweep going quiet (every re-resolve + ledger refresh settled). */
+function settle(w: Wired): Promise<void> {
+  return mgrSweep(w).settled();
+}
+
+/** Run one sweep now (as `acquire`/an update would) and await it settle — seed verdicts. */
+async function seedAndSettle(w: Wired): Promise<void> {
+  mgrSweep(w).sweepNow();
+  await settle(w);
+}
+
+/**
+ * Resolve the room's glyphs through the PRODUCTION read path ({@link roomCovenantReads}),
+ * wired to THIS manager's acquire + sweep overlays — exactly what the surface consumes.
+ */
+function reads(w: Wired, ids: string[]): Promise<Record<string, CovenantReadStatus>> {
+  return roomCovenantReads(handle.db, w.roomId, ids, {
+    acquire: (id) => w.manager.acquire(id),
+    staleObjectIds: (id) => w.manager.staleObjectIdsFor(id),
+    sweptObjectIds: (id) => w.manager.sweptObjectIdsFor(id),
+  });
 }
 
 /**
@@ -214,16 +261,18 @@ function anchorsFor(roomId: string, objectId: string) {
     .where(and(eq(covenantAnchors.roomId, roomId), eq(covenantAnchors.objectId, objectId)));
 }
 
+/** Tear the room's live sweep + replica down (production eviction path). */
+function teardown(w: Wired): void {
+  w.manager.evictAll();
+}
+
 describe('acceptance #1 — an edit IN a certified span → ✓→~ within one render tick', () => {
-  it('the in-span digest move flips a resolved ✓ to ~; the transition is a machine ~ draft', async () => {
+  it('the in-span digest move flips a resolved ✓ to ~ in the read map; the transition is a machine ~ draft', async () => {
     const w = await wire();
     const o1 = randomUUID();
     await certifySpan(w, o1, 'm1', 0, 5); // certify 'alpha'
-
-    // A first sweep settles the standing ✓ (out-of-range of nothing yet) to `ok`.
-    w.sweep.sweepNow();
-    await w.sweep.settled();
-    expect(w.authority.read(o1).covenantStatus).toBe('ok'); // the human's ✓ resolves
+    await seedAndSettle(w);
+    expect((await reads(w, [o1]))[o1]).toBe('ok'); // the human's ✓ resolves through the read path
 
     // An agent peer edits INSIDE the certified span. The update fires synchronously,
     // so the sweep's invalidate has already run by the time this returns.
@@ -231,21 +280,21 @@ describe('acceptance #1 — an edit IN a certified span → ✓→~ within one r
       peer.body('m1')?.insert(2, 'X'),
     );
 
-    // WITHIN THE TICK: the synchronous invalidate already demoted the ✓ to `~`
-    // (no await needed) — the read authority returns `unresolved` for the dropped entry.
-    expect(w.authority.read(o1).covenantStatus).not.toBe('ok');
+    // WITHIN THE TICK: the read path's fresh re-resolve sees the moved digest → `~`
+    // (drift), with no await on the sweep.
+    expect((await reads(w, [o1]))[o1]).toBe('drift');
 
-    // Once the async re-resolve settles: the span-scoped digest moved ⇒ definitive `~`.
-    await w.sweep.settled();
-    expect(w.authority.read(o1).covenantStatus).toBe('drift');
+    // Once the async sweep settles: the push-based DETECT deliverable (staleObjectIds)
+    // also carries o1, and the read map is still `~`.
+    await settle(w);
+    expect(mgrSweep(w).staleObjectIds().has(o1)).toBe(true);
+    expect((await reads(w, [o1]))[o1]).toBe('drift');
 
     // The stale transition is recorded as a MACHINE `~` draft — kind is `'~'`, never `✓`.
-    const draft = w.sweep.staleDraftFor(o1);
-    expect(draft).toBeDefined();
+    const draft = mgrSweep(w).staleDraftFor(o1);
     expect(draft?.kind).toBe('~');
     expect(draft?.objectId).toBe(o1);
-    w.sweep.stop();
-    w.manager.evictAll();
+    teardown(w);
   });
 });
 
@@ -254,38 +303,34 @@ describe('acceptance #2 — an edit OUT of range → the ✓ STAYS (digest ident
     const w = await wire();
     const o1 = randomUUID();
     await certifySpan(w, o1, 'm1', 0, 5); // certify 'alpha'
-    w.sweep.sweepNow();
-    await w.sweep.settled();
-    expect(w.authority.read(o1).covenantStatus).toBe('ok');
+    await seedAndSettle(w);
+    expect((await reads(w, [o1]))[o1]).toBe('ok');
 
     // Edit m1 at index 12 — inside 'gamma', OUT of the [0,5) certified span.
     peerEdit(w.replica, { userId: w.hexi, principalKind: 'agent' }, (peer) =>
       peer.body('m1')?.insert(12, 'ZZZ'),
     );
-    await w.sweep.settled();
+    await settle(w);
 
     // The certified [0,5) window re-renders byte-identically ⇒ the human's ✓ STAYS.
-    expect(w.authority.read(o1).covenantStatus).toBe('ok');
-    expect(w.sweep.staleDraftFor(o1)).toBeUndefined(); // no machine ~ draft
-    w.sweep.stop();
-    w.manager.evictAll();
+    expect((await reads(w, [o1]))[o1]).toBe('ok');
+    expect(mgrSweep(w).staleDraftFor(o1)).toBeUndefined(); // no machine ~ draft
+    teardown(w);
   });
 
   it('an edit to a DIFFERENT message leaves the certified span ✓', async () => {
     const w = await wire();
     const o1 = randomUUID();
     await certifySpan(w, o1, 'm1', 0, 5);
-    w.sweep.sweepNow();
-    await w.sweep.settled();
-    expect(w.authority.read(o1).covenantStatus).toBe('ok');
+    await seedAndSettle(w);
+    expect((await reads(w, [o1]))[o1]).toBe('ok');
 
     peerEdit(w.replica, { userId: w.hexi, principalKind: 'agent' }, (peer) =>
       peer.body('m2')?.insert(0, 'CHANGED '),
     );
-    await w.sweep.settled();
-    expect(w.authority.read(o1).covenantStatus).toBe('ok');
-    w.sweep.stop();
-    w.manager.evictAll();
+    await settle(w);
+    expect((await reads(w, [o1]))[o1]).toBe('ok');
+    teardown(w);
   });
 });
 
@@ -296,29 +341,28 @@ describe('acceptance #3 — span precision: no false-stale STORM', () => {
     const o2 = randomUUID();
     await certifySpan(w, o1, 'm1', 0, 5); // 'alpha'
     await certifySpan(w, o2, 'm2', 0, 5); // 'delta'
-    w.sweep.sweepNow();
-    await w.sweep.settled();
-    expect(w.authority.read(o1).covenantStatus).toBe('ok');
-    expect(w.authority.read(o2).covenantStatus).toBe('ok');
+    await seedAndSettle(w);
+    let m = await reads(w, [o1, o2]);
+    expect(m[o1]).toBe('ok');
+    expect(m[o2]).toBe('ok');
 
     // Edit m1 in-span. The sweep coarsely invalidates BOTH o1 and o2, but only o1's
-    // digest moved — o2 re-resolves back to `ok`. That is span precision, and the
-    // proof there is no storm.
+    // digest moved — o2 re-resolves back to `ok`. That is span precision (no storm).
     peerEdit(w.replica, { userId: w.hexi, principalKind: 'agent' }, (peer) =>
       peer.body('m1')?.insert(1, 'QQ'),
     );
-    await w.sweep.settled();
-    expect(w.authority.read(o1).covenantStatus).toBe('drift'); // ~
-    expect(w.authority.read(o2).covenantStatus).toBe('ok'); // ✓ — NOT stormed
-    expect(w.sweep.staleDraftFor(o1)?.kind).toBe('~');
-    expect(w.sweep.staleDraftFor(o2)).toBeUndefined();
-    w.sweep.stop();
-    w.manager.evictAll();
+    await settle(w);
+    m = await reads(w, [o1, o2]);
+    expect(m[o1]).toBe('drift'); // ~
+    expect(m[o2]).toBe('ok'); // ✓ — NOT stormed
+    expect(mgrSweep(w).staleDraftFor(o1)?.kind).toBe('~');
+    expect(mgrSweep(w).staleDraftFor(o2)).toBeUndefined();
+    teardown(w);
   });
 });
 
 describe('acceptance #4 — the machine drafts ~ ONLY, never ✓; no re-✓ path', () => {
-  it('the machine writes NO covenant anchor, and the standing anchor stays human-certified', async () => {
+  it('the machine writes NO covenant anchor; the draft is frozen `~`', async () => {
     const w = await wire();
     const o1 = randomUUID();
     await certifySpan(w, o1, 'm1', 0, 5);
@@ -329,29 +373,26 @@ describe('acceptance #4 — the machine drafts ~ ONLY, never ✓; no re-✓ path
     peerEdit(w.replica, { userId: w.hexi, principalKind: 'agent' }, (peer) =>
       peer.body('m1')?.insert(2, 'X'),
     );
-    await w.sweep.settled();
-    expect(w.authority.read(o1).covenantStatus).toBe('drift');
+    await settle(w);
+    expect((await reads(w, [o1]))[o1]).toBe('drift');
 
     // The machine touched the LEDGER not at all — same one row, still human-certified.
     const after = await anchorsFor(w.roomId, o1);
     expect(after.length).toBe(1);
     expect(after[0]?.certifierKind).toBe('human');
     expect(after[0]?.certifierId).toBe(w.ada);
-    // Every machine draft that exists is a `~` — there is no ✓ variant to record.
-    for (const draft of w.sweep.staleDrafts().values()) expect(draft.kind).toBe('~');
+    for (const draft of mgrSweep(w).staleDrafts().values()) expect(draft.kind).toBe('~');
 
-    // Fix 4 — the exposed draft is FROZEN at runtime, not only `readonly` at compile
-    // time: a cast/JS consumer cannot flip its kind to '✓'. `Object.freeze` makes the
-    // write a no-op (throws in strict mode; vitest ESM runs strict), so kind stays '~'.
-    const draft = w.sweep.staleDraftFor(o1);
+    // The exposed draft is FROZEN at runtime, not only `readonly` at compile time: a
+    // cast/JS consumer cannot flip its kind to '✓'.
+    const draft = mgrSweep(w).staleDraftFor(o1);
     expect(draft).toBeDefined();
     expect(Object.isFrozen(draft)).toBe(true);
     expect(() => {
       (draft as unknown as { kind: string }).kind = '✓';
     }).toThrow();
-    expect(w.sweep.staleDraftFor(o1)?.kind).toBe('~');
-    w.sweep.stop();
-    w.manager.evictAll();
+    expect(mgrSweep(w).staleDraftFor(o1)?.kind).toBe('~');
+    teardown(w);
   });
 
   it('FLIP: while the content stays drifted, no sweep / re-resolve / race yields a ✓', async () => {
@@ -361,25 +402,23 @@ describe('acceptance #4 — the machine drafts ~ ONLY, never ✓; no re-✓ path
     peerEdit(w.replica, { userId: w.hexi, principalKind: 'agent' }, (peer) =>
       peer.body('m1')?.insert(2, 'X'),
     );
-    await w.sweep.settled();
-    expect(w.authority.read(o1).covenantStatus).toBe('drift');
+    await settle(w);
+    expect((await reads(w, [o1]))[o1]).toBe('drift');
 
     // Hammer the sweep concurrently — the content is still drifted, so EVERY resolve
     // must land on `~`. A single `ok` here would be a machine re-certification.
     for (let round = 0; round < 5; round++) {
       const races = Array.from({ length: 8 }, () => {
-        w.sweep.sweepNow();
-        return w.sweep.settled();
+        mgrSweep(w).sweepNow();
+        return settle(w);
       });
       await Promise.all(races);
-      expect(w.authority.read(o1).covenantStatus).toBe('drift');
+      expect((await reads(w, [o1]))[o1]).toBe('drift');
     }
-    // The anchor never became machine-certified.
     const rows = await anchorsFor(w.roomId, o1);
     expect(rows.length).toBe(1);
     expect(rows[0]?.certifierKind).toBe('human');
-    w.sweep.stop();
-    w.manager.evictAll();
+    teardown(w);
   });
 });
 
@@ -393,10 +432,10 @@ describe('acceptance #5 — green TWICE at concurrency (two peers editing)', () 
       const o2 = randomUUID();
       await certifySpan(w, o1, 'm1', 0, 5);
       await certifySpan(w, o2, 'm2', 0, 5);
-      w.sweep.sweepNow();
-      await w.sweep.settled();
-      expect(w.authority.read(o1).covenantStatus).toBe('ok');
-      expect(w.authority.read(o2).covenantStatus).toBe('ok');
+      await seedAndSettle(w);
+      let m = await reads(w, [o1, o2]);
+      expect(m[o1]).toBe('ok');
+      expect(m[o2]).toBe('ok');
 
       // Two peers edit, each INSIDE a different certified span, back to back — two
       // updates racing through the one sweep. Both spans must end `~`.
@@ -406,167 +445,241 @@ describe('acceptance #5 — green TWICE at concurrency (two peers editing)', () 
       peerEdit(w.replica, { userId: w.ada, principalKind: 'human' }, (peer) =>
         peer.body('m2')?.insert(1, 'B'),
       );
-      await w.sweep.settled();
-      expect(w.authority.read(o1).covenantStatus).toBe('drift');
-      expect(w.authority.read(o2).covenantStatus).toBe('drift');
-      expect(w.sweep.staleDraftFor(o1)?.kind).toBe('~');
-      expect(w.sweep.staleDraftFor(o2)?.kind).toBe('~');
-      w.sweep.stop();
-      w.manager.evictAll();
+      await settle(w);
+      m = await reads(w, [o1, o2]);
+      expect(m[o1]).toBe('drift');
+      expect(m[o2]).toBe('drift');
+      expect(mgrSweep(w).staleDraftFor(o1)?.kind).toBe('~');
+      expect(mgrSweep(w).staleDraftFor(o2)?.kind).toBe('~');
+      teardown(w);
     }
   });
 });
 
 describe('acceptance #6 — the sweep racing a human certify of the SAME object', () => {
   it('the certify of the swept object mints cleanly; the sweep never clobbers it and never re-✓s', async () => {
-    // Same-object race (Fix 6): the sweep HAMMERS while the human certifies the VERY
-    // object it is sweeping (its first certify — certifyObjectSpan refuses a second over
-    // an already-certified object). The human ✓ must land, and the machine must neither
-    // clobber it nor mint a ✓ of its own — no matter how the two interleave.
+    // Same-object race: the sweep HAMMERS while the human certifies the VERY object it is
+    // sweeping. The human ✓ must land; the machine must neither clobber it nor mint a ✓.
     const w = await wire();
     const o1 = randomUUID();
 
-    // Hammer the sweep concurrently with the certify — a sweep pass may observe o1 mid-
-    // certify (before its anchor exists) or just after; either way it may only read.
     const hammer = (async () => {
       for (let round = 0; round < 12; round++) {
-        w.sweep.sweepNow();
-        await w.sweep.settled();
+        mgrSweep(w).sweepNow();
+        await settle(w);
       }
     })();
     await Promise.all([hammer, certifySpan(w, o1, 'm1', 0, 5)]);
 
     // A final sweep resolves against the now-committed anchor.
-    w.sweep.sweepNow();
-    await w.sweep.settled();
-    expect(w.authority.read(o1).covenantStatus).toBe('ok'); // the human's ✓ stands
-    expect(w.sweep.staleDraftFor(o1)).toBeUndefined(); // no machine ~ over a fresh ✓
+    await seedAndSettle(w);
+    expect((await reads(w, [o1]))[o1]).toBe('ok'); // the human's ✓ stands
+    expect(mgrSweep(w).staleDraftFor(o1)).toBeUndefined(); // no machine ~ over a fresh ✓
 
-    // Exactly ONE row for o1, human-certified — the machine minted nothing.
     const rows = await anchorsFor(w.roomId, o1);
     expect(rows.length).toBe(1);
     expect(rows[0]?.certifierKind).toBe('human');
     expect(rows[0]?.certifierId).toBe(w.ada);
-    w.sweep.stop();
-    w.manager.evictAll();
+    teardown(w);
   });
 });
 
-describe('acceptance #7 — trust is tied to an ACTUALLY-LIVE sweep, not a caller boolean (Fix 3)', () => {
-  it('a LIVE-swept authority serves a cached ✓; an UNSWEPT one serves the same ok as ~', async () => {
+describe('acceptance #7 — Fix 1: the async ledger refresh is EPOCHED (stale result never rolls back)', () => {
+  it('a stale/older refresh completing AFTER a newer one never wipes a live ~ draft or the certified set', async () => {
+    // The race: two sweeps kick two `loadCertifiedObjectIds` reads; the OLDER (smaller/
+    // empty) result resolves LAST. Without the epoch guard it would overwrite the newer
+    // certified set and PRUNE the drafts the newer snapshot added — the next sweep would
+    // then invalidate nothing and a real drift would go undetected (a false ✓).
     const w = await wire();
     const o1 = randomUUID();
     await certifySpan(w, o1, 'm1', 0, 5);
-    w.sweep.sweepNow();
-    await w.sweep.settled();
-    // The sweep is LIVE (start() called markSweepLive(true)), so a cached ✓ is trusted —
-    // NOT because a caller passed driftSwept, but because a sweep is genuinely running.
-    expect(w.authority.read(o1).covenantStatus).toBe('ok');
-
-    // The SAME ledger + the SAME live doc, but NO sweep started on it: fail-closed. A
-    // server-cached `ok` it cannot freshness-prove is served `~`, never a stale ✓.
-    const live = liveCovenantDoc(w.roomId);
-    const unsweptReader = readerForLiveDoc(live.provider, undefined, live.options);
-    const unswept = serverCovenantReadAuthority({
-      db: handle.db,
-      roomId: w.roomId,
-      resolveSpan: readerSpanResolver(unsweptReader),
-    });
-    const resolved = await unswept.resolve(o1);
-    expect(resolved.covenantStatus).toBe('ok'); // genuinely resolves ok…
-    expect(unswept.read(o1).covenantStatus).not.toBe('ok'); // …but read() demotes to ~ (no live sweep)
-    w.sweep.stop();
-    w.manager.evictAll();
-  });
-
-  it('invalidate-on-update, not a standing boolean, is what a swept read reflects', async () => {
-    // NOT-THEATER for Fix 3: the guard is real machinery, not a `driftSwept:true` flag.
-    // A live sweep serves ✓; an in-span edit fires the sweep's synchronous invalidate;
-    // the very next read is `~` WITHIN THE TICK — the invalidate did the work, not a boolean.
-    const w = await wire();
-    const o1 = randomUUID();
-    await certifySpan(w, o1, 'm1', 0, 5);
-    w.sweep.sweepNow();
-    await w.sweep.settled();
-    expect(w.authority.read(o1).covenantStatus).toBe('ok');
-
+    // Drift o1 in-span so its correct verdict is `~`.
     peerEdit(w.replica, { userId: w.hexi, principalKind: 'agent' }, (peer) =>
       peer.body('m1')?.insert(2, 'X'),
     );
-    // No await: the update handler ran the synchronous invalidate already.
-    expect(w.authority.read(o1).covenantStatus).not.toBe('ok');
-    w.sweep.stop();
-    w.manager.evictAll();
+
+    // A STANDALONE production-authority sweep with a controllable ledger loader, so the
+    // completion ORDER of the two refreshes is deterministic (the sweep class + the web
+    // authority are exactly production's; only the ledger read's timing is controlled —
+    // which is precisely the race). Not subscribed to updates: driven by manual sweepNow.
+    const live = liveCovenantDoc(w.roomId);
+    const reader = readerForLiveDoc(live.provider, undefined, live.options);
+    const authority = webCovenantReadAuthority({
+      loadAnchor: (objectId) => loadCovenantAnchor(handle.db, { roomId: w.roomId, objectId }),
+      reader,
+      expectedRoomId: w.roomId,
+    });
+    const loadResolvers: Array<(ids: string[]) => void> = [];
+    const sweep = new RoomDriftSweep({
+      doc: w.replica.doc,
+      authority,
+      loadCertifiedObjectIds: () =>
+        new Promise<string[]>((res) => {
+          loadResolvers.push(res);
+        }),
+      now: () => FIXED_NOW,
+    });
+
+    // Kick TWO sweeps: epoch 1 (first) and epoch 2 (second). Neither ledger read has
+    // resolved yet — both are parked in loadResolvers.
+    sweep.sweepNow(); // epoch 1
+    sweep.sweepNow(); // epoch 2
+    expect(loadResolvers.length).toBe(2);
+    const [resolveEpoch1, resolveEpoch2] = loadResolvers;
+    if (resolveEpoch1 === undefined || resolveEpoch2 === undefined) {
+      throw new Error('both ledger refreshes must be parked');
+    }
+
+    // Complete the NEWER refresh (epoch 2) FIRST with the correct set {o1}: it sweeps o1
+    // → resolve → `~` draft, and adopts {o1} at epoch 2.
+    resolveEpoch2([o1]);
+    // Then complete the OLDER refresh (epoch 1) with a STALE EMPTY set: the epoch guard
+    // must DROP its adoption + pruning, so o1's `~` draft and the certified set survive.
+    resolveEpoch1([]);
+    await sweep.settled();
+
+    expect(sweep.staleObjectIds().has(o1)).toBe(true); // the ~ draft SURVIVED the stale refresh
+    expect(sweep.staleDraftFor(o1)?.kind).toBe('~');
+
+    // And a further sweep still invalidates + re-resolves o1 (proof the set wasn't emptied).
+    loadResolvers.length = 0;
+    sweep.sweepNow(); // epoch 3
+    const resolveEpoch3 = loadResolvers[0];
+    if (resolveEpoch3 === undefined) throw new Error('the epoch-3 refresh must be parked');
+    resolveEpoch3([o1]);
+    await sweep.settled();
+    expect(sweep.staleObjectIds().has(o1)).toBe(true);
+    teardown(w);
   });
 });
 
-describe('acceptance #8 — the swept set is AUTHORITATIVE (an anchor omitted from a caller list is STILL swept)', () => {
-  it('Fix 1: an object certified but NEVER added to the caller list drifts anyway (found from the ledger)', async () => {
+describe('acceptance #8 — Fix 2: a freshly-certified anchor is swept on its first edit', () => {
+  it('noteCertified seeds the fresh anchor into synchronous coverage; its first in-span edit is caught', async () => {
+    const w = await wire();
+    const o1 = randomUUID();
+    // Certify AFTER acquire (so the acquire-time seed did NOT know o1) and DO NOT run a
+    // full ledger-refresh sweep — this is the fresh-anchor window Fix 2 addresses.
+    await certifySpan(w, o1, 'm1', 0, 5);
+
+    // Seed the fresh anchor into the live sweep (what the certify action does in prod).
+    w.manager.noteCertifiedFor(w.roomId, o1);
+    await settle(w);
+    // Now under coverage and confirmed swept-clean.
+    expect(mgrSweep(w).sweptObjectIds().has(o1)).toBe(true);
+    expect((await reads(w, [o1]))[o1]).toBe('ok');
+
+    // The FIRST in-span edit fires the sweep's synchronous pass, which — because o1 is now
+    // in the certified snapshot — invalidates o1 AND clears its swept-clean confirmation
+    // WITHIN THE TICK (no await). Without the Fix 2 seed, o1 would not be in the sync pass
+    // until the async ledger refresh landed, and this would still read swept-clean.
+    peerEdit(w.replica, { userId: w.hexi, principalKind: 'agent' }, (peer) =>
+      peer.body('m1')?.insert(2, 'X'),
+    );
+    expect(mgrSweep(w).sweptObjectIds().has(o1)).toBe(false); // sync coverage touched it
+
+    await settle(w);
+    expect(mgrSweep(w).staleObjectIds().has(o1)).toBe(true);
+    expect((await reads(w, [o1]))[o1]).toBe('drift');
+    teardown(w);
+  });
+
+  it('Fix 1 companion — the swept set is AUTHORITATIVE: an anchor omitted from any caller list is still swept', async () => {
     const w = await wire();
     const oOmitted = randomUUID();
-    // Certify WITHOUT tracking in the caller-side list — the old caller-passed
-    // `certifiedObjectIds()` would never enumerate it, so its drift would go UNDETECTED
-    // (a false ✓). The sweep now derives its set from the AUTHORITATIVE `covenant_anchors`.
+    // Certify WITHOUT tracking in the caller-side list — the sweep derives its set from
+    // the AUTHORITATIVE `covenant_anchors`, so an omitted id is still swept.
     await certifySpan(w, oOmitted, 'm1', 0, 5, { trackInCallerList: false });
-    expect(w.certified).not.toContain(oOmitted); // proven absent from any caller list
+    expect(w.certified).not.toContain(oOmitted);
+    await seedAndSettle(w);
+    expect((await reads(w, [oOmitted]))[oOmitted]).toBe('ok');
 
-    w.sweep.sweepNow();
-    await w.sweep.settled();
-    // The ledger loader found it → it resolves to the human's standing ✓.
-    expect(w.authority.read(oOmitted).covenantStatus).toBe('ok');
-
-    // Drift it in-span. The sweep — driven by the ledger, not the caller list — catches it.
     peerEdit(w.replica, { userId: w.hexi, principalKind: 'agent' }, (peer) =>
       peer.body('m1')?.insert(2, 'X'),
     );
-    await w.sweep.settled();
-    expect(w.authority.read(oOmitted).covenantStatus).toBe('drift'); // ~ — NOT an undetected false ✓
-    expect(w.sweep.staleDraftFor(oOmitted)?.kind).toBe('~');
-    expect(w.sweep.staleObjectIds().has(oOmitted)).toBe(true);
-    w.sweep.stop();
-    w.manager.evictAll();
+    await settle(w);
+    expect((await reads(w, [oOmitted]))[oOmitted]).toBe('drift');
+    expect(mgrSweep(w).staleObjectIds().has(oOmitted)).toBe(true);
+    teardown(w);
   });
 });
 
-describe('acceptance #9 — a STOPPED sweep fails closed (Fix 3): read-after-stop never serves a trusted ✓', () => {
-  it('after stop(), a previously-✓ object reads ~ — the authority is re-fail-closed + invalidated', async () => {
+describe('acceptance #9 — Fix 3: the overlay is FAIL-CLOSED until the sweep has spoken', () => {
+  it('a certified span with NO settled sweep verdict reads ~, not ok; then ok once swept-clean', async () => {
     const w = await wire();
     const o1 = randomUUID();
+    // Certify AFTER acquire and DO NOT sweep: the live sweep has NO settled verdict for o1.
     await certifySpan(w, o1, 'm1', 0, 5);
-    w.sweep.sweepNow();
-    await w.sweep.settled();
-    expect(w.authority.read(o1).covenantStatus).toBe('ok'); // trusted while the sweep is live
 
-    // Teardown. stop() must both re-arm the fail-closed guard (markSweepLive(false)) AND
-    // invalidate every cached object — so no stopped sweep leaves a trusting authority.
-    w.sweep.stop();
-    expect(w.authority.read(o1).covenantStatus).not.toBe('ok'); // proved fail-open, now closed
+    // The fresh per-request resolve would conclude `ok` (the span is byte-identical), but
+    // the overlay WITHHOLDS it — o1 is neither `~` nor swept-clean, so it reads `~`.
+    expect(mgrSweep(w).sweptObjectIds().has(o1)).toBe(false);
+    expect((await reads(w, [o1]))[o1]).toBe('drift');
 
-    // Even a fresh resolve after stop cannot be TRUSTED by read(): the guard is re-armed,
-    // so read() demotes the freshly-cached ok to ~ (no live sweep to prove it fresh).
-    const r = await w.authority.resolve(o1);
-    expect(r.covenantStatus).toBe('ok'); // it genuinely still resolves ok…
-    expect(w.authority.read(o1).covenantStatus).not.toBe('ok'); // …but read() serves ~ (stopped)
-    w.manager.evictAll();
+    // Once the sweep has POSITIVELY swept o1 clean, the overlay serves the `ok`.
+    await seedAndSettle(w);
+    expect(mgrSweep(w).sweptObjectIds().has(o1)).toBe(true);
+    expect((await reads(w, [o1]))[o1]).toBe('ok');
+    teardown(w);
   });
 
-  it('eviction through the manager stops the sweep and re-fail-closes it', async () => {
-    // The production teardown path: RoomReplicaManager.evict → dispose → sweep.stop().
+  it('DEMOTE-ONLY: the overlay never mints an ok — a sweep ~ wins over a fresh-resolve ok is impossible to invert', async () => {
     const w = await wire();
     const o1 = randomUUID();
     await certifySpan(w, o1, 'm1', 0, 5);
-    w.sweep.sweepNow();
-    await w.sweep.settled();
-    expect(w.authority.read(o1).covenantStatus).toBe('ok');
+    await seedAndSettle(w);
+    expect((await reads(w, [o1]))[o1]).toBe('ok');
 
-    w.sweep.stop(); // (the manager owns the sweep in production; here the sweep is wired by hand)
+    // Drift it: both the fresh resolve AND the sweep say `~`. The overlay cannot turn that
+    // back into `ok` — there is no path from a `~` (either source) to an `ok` in the map.
+    peerEdit(w.replica, { userId: w.hexi, principalKind: 'agent' }, (peer) =>
+      peer.body('m1')?.insert(2, 'X'),
+    );
+    await settle(w);
+    expect((await reads(w, [o1]))[o1]).toBe('drift');
+
+    // Directly assert the demote-only property against the read path: inject a swept-clean
+    // set that (wrongly) claims o1 is clean while the live content is drifted. The fresh
+    // resolve is `~`, and the overlay must NOT promote it to `ok`.
+    const m = await roomCovenantReads(handle.db, w.roomId, [o1], {
+      acquire: (id) => w.manager.acquire(id),
+      staleObjectIds: () => new Set<string>(), // pretend the sweep has no ~ draft
+      sweptObjectIds: () => new Set<string>([o1]), // pretend o1 is swept-clean
+    });
+    expect(m[o1]).toBe('drift'); // still `~` — the overlay only ever demotes, never mints
+    teardown(w);
+  });
+});
+
+describe('acceptance #10 — Fix 4: the PRODUCTION teardown fail-close', () => {
+  it('after evict (provider→null), the read path fresh-resolves to ~ — no markSweepLive gate', async () => {
+    const w = await wire();
+    const o1 = randomUUID();
+    await certifySpan(w, o1, 'm1', 0, 5);
+    await seedAndSettle(w);
+    expect((await reads(w, [o1]))[o1]).toBe('ok'); // trusted while the replica + sweep are live
+
+    // Production teardown: evict the room. `dispose` stops the sweep (invalidate-all) and
+    // UNREGISTERS the replica, so `serverReplicaFor` → null.
     w.manager.evict(w.roomId);
-    expect(w.authority.read(o1).covenantStatus).not.toBe('ok');
-    w.manager.evictAll();
+    expect(serverReplicaFor(w.roomId)).toBeNull();
+    // The overlays no longer exist for the room.
+    expect(w.manager.staleObjectIdsFor(w.roomId)).toBeUndefined();
+    expect(w.manager.sweptObjectIdsFor(w.roomId)).toBeUndefined();
+
+    // A read whose lazy-start cannot re-establish the replica (stream unreachable ⇒
+    // acquire returns null) fresh-resolves against a `null` provider ⇒ `~`. This is the
+    // proven teardown fail-close: invalidate-all + provider→null + fresh-resolve-per-request.
+    const afterEvict = await roomCovenantReads(handle.db, w.roomId, [o1], {
+      acquire: async () => null, // stream unreachable — no re-establish
+      staleObjectIds: (id) => w.manager.staleObjectIdsFor(id),
+      sweptObjectIds: (id) => w.manager.sweptObjectIdsFor(id),
+    });
+    expect(afterEvict[o1]).toBe('drift');
+    teardown(w);
   });
 });
 
-describe('acceptance #10 — revert-to-original-digest returns to ✓ (the #180 DIGEST MODEL)', () => {
+describe('acceptance #11 — revert-to-original-digest returns to ✓ (the #180 DIGEST MODEL)', () => {
   it('an exact revert of the edited content clears the ~ and resolves ✓ again', async () => {
     /* COVENANT-MEANING NOTE (do NOT change without Lars): this asserts the CURRENT
        #180 DIGEST MODEL — a `✓` is bound to the rendered DIGEST of the certified span,
@@ -578,34 +691,31 @@ describe('acceptance #10 — revert-to-original-digest returns to ✓ (the #180 
     const w = await wire();
     const o1 = randomUUID();
     await certifySpan(w, o1, 'm1', 0, 5); // certify 'alpha' [0,5)
-    w.sweep.sweepNow();
-    await w.sweep.settled();
-    expect(w.authority.read(o1).covenantStatus).toBe('ok');
+    await seedAndSettle(w);
+    expect((await reads(w, [o1]))[o1]).toBe('ok');
 
     // Edit IN-span → drift → ~.
     peerEdit(w.replica, { userId: w.hexi, principalKind: 'agent' }, (peer) =>
       peer.body('m1')?.insert(2, 'X'),
     );
-    await w.sweep.settled();
-    expect(w.authority.read(o1).covenantStatus).toBe('drift');
-    expect(w.sweep.staleDraftFor(o1)?.kind).toBe('~');
+    await settle(w);
+    expect((await reads(w, [o1]))[o1]).toBe('drift');
+    expect(mgrSweep(w).staleDraftFor(o1)?.kind).toBe('~');
 
     // REVERT exactly: delete the inserted 'X' at index 2, restoring 'alpha' byte-for-byte.
     peerEdit(w.replica, { userId: w.hexi, principalKind: 'agent' }, (peer) =>
       peer.body('m1')?.delete(2, 1),
     );
-    await w.sweep.settled();
+    await settle(w);
 
     // The rendered digest returns to the certified bytes ⇒ the human's ✓ resolves again
     // and the machine ~ is cleared (the digest model — pending sticky-~ ratification).
-    expect(w.authority.read(o1).covenantStatus).toBe('ok');
-    expect(w.sweep.staleDraftFor(o1)).toBeUndefined();
+    expect((await reads(w, [o1]))[o1]).toBe('ok');
+    expect(mgrSweep(w).staleDraftFor(o1)).toBeUndefined();
 
-    // The machine minted nothing: still exactly one human anchor row.
     const rows = await anchorsFor(w.roomId, o1);
     expect(rows.length).toBe(1);
     expect(rows[0]?.certifierKind).toBe('human');
-    w.sweep.stop();
-    w.manager.evictAll();
+    teardown(w);
   });
 });

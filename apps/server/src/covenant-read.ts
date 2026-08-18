@@ -114,14 +114,15 @@ export function serverCovenantReadAuthority(input: {
     // Bind the authority to its room: an anchor loaded for a different room fails
     // closed (defence-in-depth over the `(room_id, object_id)`-keyed query).
     expectedRoomId: input.roomId,
-    // THE `#182-before-server-✓` GATE (SL-4 fix round 2, HIGH), now tied to an
-    // ACTUALLY-LIVE sweep (E7, #199 Fix 3). The server has no sync doc handle, so this
-    // is ALWAYS SET; a cached `ok` is trusted ONLY while a drift sweep is genuinely
-    // live on this authority (`RoomDriftSweep.start()` → `authority.markSweepLive(true)`,
-    // `stop()`/evict → `markSweepLive(false)`). There is deliberately NO construction
-    // boolean to clear the guard: the old `driftSwept: true` cleared it once and left a
-    // STOPPED sweep still serving a cached `ok` as a trusted `✓` (the proved fail-open).
-    // Trust now follows the sweep's real lifecycle, so a torn-down sweep re-fail-closes.
+    // THE `#182-before-server-✓` GATE (SL-4 fix round 2, HIGH). The server has no sync
+    // doc handle, so this is ALWAYS SET: the sync `read()` NEVER vouches for a cached
+    // `ok` on its own — freshness is driven ENTIRELY by the `invalidate` a drift sweep
+    // calls on every content update, plus a fresh `resolve()`. (E7, #199 Fix 4: the
+    // `driftSwept`/`markSweepLive` trust-gate an earlier round added was DEAD on the
+    // production wiring — production binds the WEB authority, whose `liveFreshness` port
+    // decides read() freshness on its own — so it was removed rather than shipped as a
+    // guarantee production never exercises. This server binding itself is not on the
+    // production read path; it stays fail-closed by construction.)
     failClosedWithoutFreshness: true,
   };
   return new CovenantReadAuthority(options);

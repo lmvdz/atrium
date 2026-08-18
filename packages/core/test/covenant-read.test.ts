@@ -572,8 +572,10 @@ describe('CovenantReadAuthority — SL-4 warm-cache defects (#191 fix)', () => {
     expect(authority.read('o_span').covenantStatus).toBe('ok');
   });
 
-  // ── E7 (#199 Fix 3): trust tied to an ACTUALLY-LIVE sweep, not a caller boolean ──
-  it('markSweepLive: with failClosedWithoutFreshness set, a cached `ok` is trusted ONLY while a sweep is live', async () => {
+  // ── E7 (#199 Fix 4): the failClosedWithoutFreshness read() NEVER vouches for a cached
+  // `ok` — there is no `sweepLive`/`markSweepLive` gate to "open" trust (removed as dead
+  // on the production wiring). Freshness is driven by `invalidate` + a fresh `resolve()`.
+  it('failClosedWithoutFreshness: read() never serves a cached `ok`; resolve() still yields the real verdict', async () => {
     const doc = sampleDoc();
     const anchor = anchorFor(doc);
     const authority = new CovenantReadAuthority({
@@ -581,16 +583,15 @@ describe('CovenantReadAuthority — SL-4 warm-cache defects (#191 fix)', () => {
       resolveSpan: resolverFor(doc),
       failClosedWithoutFreshness: true, // server mode: no sync doc handle
     });
-    // No live sweep ⇒ fail-closed: a genuine `ok` is served `~`.
+    // A genuine `ok` resolves…
+    expect((await authority.resolve('o_span')).covenantStatus).toBe('ok');
+    // …but the sync read() demotes it to `~` (it cannot prove freshness on its own).
+    expect(authority.read('o_span').covenantStatus).not.toBe('ok');
+    // Re-resolving does not change the read() contract — there is no boolean to flip.
     expect((await authority.resolve('o_span')).covenantStatus).toBe('ok');
     expect(authority.read('o_span').covenantStatus).not.toBe('ok');
-    // A sweep goes live (start()) ⇒ the cached `ok` is trusted.
-    authority.markSweepLive(true);
-    expect((await authority.resolve('o_span')).covenantStatus).toBe('ok');
-    expect(authority.read('o_span').covenantStatus).toBe('ok');
-    // The sweep stops (stop()/evict) ⇒ re-fail-closed: the same cached `ok` reads `~`.
-    authority.markSweepLive(false);
-    expect(authority.read('o_span').covenantStatus).not.toBe('ok');
+    // There is no `markSweepLive` API any more — the dead trust-gate was removed.
+    expect((authority as unknown as { markSweepLive?: unknown }).markSweepLive).toBeUndefined();
   });
 
   it('invalidateAll: the teardown hook drops EVERY cached object at once (read returns `~`)', async () => {

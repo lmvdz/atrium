@@ -86,7 +86,7 @@ export async function certifyObjectSpanAction(raw: unknown): Promise<CertifyAnch
   const selection: { path: BodyPath; start: number; end: number } = { path: bodyPath, start, end };
   const reader = readerForLiveDoc(live.provider, selection, live.options);
 
-  return certifyObjectSpan({
+  const outcome = await certifyObjectSpan({
     database: db(),
     session: { userId: session.userId, principalKind: session.principalKind },
     authorizedRoomId: room.id,
@@ -101,4 +101,14 @@ export async function certifyObjectSpanAction(raw: unknown): Promise<CertifyAnch
         serverReplicaFor(room.id)?.consumedStreamPosition() ?? REPLICA_ABSENT_POSITION,
     },
   });
+
+  /* SEED the fresh anchor into the room's live drift sweep (E7, #199 Fix 2). A certify is
+     not itself a Yjs `update`, so without this the sweep would not cover the new object
+     until its next async ledger refresh — and its FIRST in-span edit could read a stale
+     `ok`. Seeding it synchronously here means the next update's sweep pass already covers
+     it, and the read-path overlay is fail-closed for it until its verdict settles. Only
+     on a successful mint; a refused certify wrote no anchor to sweep. */
+  if (outcome.ok) replicaManager.noteCertifiedFor(room.id, objectId);
+
+  return outcome;
 }

@@ -111,10 +111,10 @@ export interface RoomDriftSweepOptions {
   /**
    * The room's covenant read authority — the ONE fail-closed seam that decides
    * `✓`/`~` for an object (`resolve`/`read`/`invalidate`). The sweep drives its
-   * `invalidate` on every update and re-resolves, and — the E7 #199 Fix 3 tie —
-   * marks it LIVE on {@link start} and NOT-live + invalidate-all on {@link stop}, so
-   * a cached `ok` on a server (no-freshness-port) authority is trusted ONLY while
-   * THIS sweep is genuinely live to guarantee invalidate-on-drift.
+   * `invalidate` on every update and re-resolves against it; on {@link stop} it
+   * `invalidateAll`s so a torn-down sweep leaves no stale cached `ok`. (Production
+   * binds the web authority, whose `liveFreshness` port decides read() freshness on
+   * its own — E7 #199 Fix 4 removed the dead `markSweepLive` trust-gate.)
    */
   readonly authority: CovenantReadAuthority;
   /**
@@ -158,6 +158,28 @@ export class RoomDriftSweep {
    */
   private knownCertified = new Set<string>();
   /**
+   * Monotone REFRESH epoch (E7, #199 Fix 1). Each async `loadCertifiedObjectIds`
+   * refresh captures the value of {@link refreshCounter} at kick time; its result is
+   * ADOPTED into {@link knownCertified} (and its stale-draft pruning applied) only if
+   * that epoch is still the latest to have completed ({@link appliedRefreshEpoch}). A
+   * stale/older refresh completing AFTER a newer one is DROPPED — it can never overwrite
+   * a newer certified set or momentarily empty it while anchors exist. This is the SL-4
+   * generation guard applied to the ledger refresh itself, not just per-object resolves.
+   */
+  private refreshCounter = 0;
+  /** The highest refresh epoch whose result has been adopted (see {@link refreshCounter}). */
+  private appliedRefreshEpoch = 0;
+  /**
+   * Objects the sweep has POSITIVELY confirmed swept-clean (E7, #199 Fix 3): a re-resolve
+   * settled `ok` under the current generation and no later edit has re-opened the verdict.
+   * The read-path overlay ({@link staleObjectIds} is its `~` counterpart) consumes this to
+   * be FAIL-CLOSED until the sweep has spoken: a certified span NOT in this set (nor in
+   * {@link drafts}) has no settled sweep verdict, so the overlay withholds `ok`. Cleared
+   * for an object the instant it is (re-)swept — its verdict is unknown until the resolve
+   * settles again — so the pre-settle window can never serve a stale `ok`.
+   */
+  private readonly sweptClean = new Set<string>();
+  /**
    * Per-object SWEEP generation (E7, #199 Fix 5). Bumped every time an object is
    * (re-)swept; a resolve captures the generation at kick time and only folds its
    * verdict if it is still current — so a superseded compute (a late `unresolved`/
@@ -176,36 +198,36 @@ export class RoomDriftSweep {
   }
 
   /**
-   * Begin sweeping: re-run DETECT on every update the replica's doc integrates, and
-   * mark this authority's sweep LIVE (E7, #199 Fix 3) so its cached `ok` may be
-   * trusted — the guard clears because a sweep is now genuinely guaranteeing
-   * invalidate-on-drift, not because a caller passed a boolean.
+   * Begin sweeping: re-run DETECT on every update the replica's doc integrates. Idempotent.
    */
   start(): void {
     if (this.handler !== null) return; // already subscribed — idempotent
     const handler = (_update: Uint8Array, _origin: unknown): void => this.sweep();
     this.handler = handler;
     this.doc.on('update', handler);
-    // The guard clears ONLY now, when the sweep is actually live (Fix 3).
-    this.authority.markSweepLive(true);
   }
 
   /**
-   * Stop sweeping (replica teardown / eviction). Idempotent. FAIL-CLOSED (E7, #199
-   * Fix 3): a stopped sweep must never leave a trusting authority behind, so this
-   * both RE-FAIL-CLOSES the authority ({@link CovenantReadAuthority.markSweepLive}
-   * `false` — every future `read()` of a cached `ok` demotes to `~`) AND
-   * INVALIDATES every currently-cached object ({@link
-   * CovenantReadAuthority.invalidateAll} — drops what is cached and bumps generations
-   * so a resolve kicked before the stop cannot recache an `ok` after it). The drafts
-   * ledger is left intact (the fail-closed direction — a recorded `~` stays `~`).
+   * Stop sweeping (replica teardown / eviction). Idempotent. FAIL-CLOSED (E7, #199):
+   * a stopped sweep must never leave a stale cached `ok` behind, so this INVALIDATES
+   * every currently-cached object ({@link CovenantReadAuthority.invalidateAll} — drops
+   * what is cached and bumps generations so a resolve kicked before the stop cannot
+   * recache an `ok` after it). Combined with the PRODUCTION teardown — the replica
+   * manager unregisters the doc provider (`serverReplicaFor → null`) so the read path's
+   * fresh per-request resolve yields `~` — an evicted room can serve no stale `✓`.
+   *
+   * (E7, #199 Fix 4: this no longer calls a `markSweepLive(false)` "re-fail-close" —
+   * that trust-gate was DEAD on the production wiring, since production binds the web
+   * authority whose `liveFreshness` port decides freshness on its own. The real
+   * teardown fail-close is `invalidateAll` + provider→null + fresh-resolve-per-request.)
+   * The drafts / swept-clean ledgers are left intact (the fail-closed direction — a
+   * recorded `~` stays `~`, and the swept-clean set only ever WITHHELD `ok`).
    */
   stop(): void {
     if (this.handler === null) return;
     this.doc.off('update', this.handler);
     this.handler = null;
-    // Re-arm the guard AND clear the cache, so no stopped sweep leaves a trusted `✓`.
-    this.authority.markSweepLive(false);
+    // Clear the cache so no stopped sweep leaves a stale cached `ok`.
     this.authority.invalidateAll();
   }
 
@@ -245,6 +267,34 @@ export class RoomDriftSweep {
   }
 
   /**
+   * The set of certified objects the sweep has POSITIVELY confirmed swept-clean (E7,
+   * #199 Fix 3) — a snapshot copy. The read path consumes this to be FAIL-CLOSED until
+   * the sweep has spoken: an object whose fresh resolve says `ok` but that is NOT in this
+   * set has no settled sweep verdict yet (a freshly-certified anchor, or one re-opened by
+   * an edit whose re-resolve has not settled), so the overlay WITHHOLDS `ok` and reads
+   * `~`. Only a positively-swept-clean span is served `ok`; the overlay never mints one.
+   */
+  sweptObjectIds(): ReadonlySet<string> {
+    return new Set(this.sweptClean);
+  }
+
+  /**
+   * SEED a freshly-certified anchor into the sweep NOW (E7, #199 Fix 2), synchronously,
+   * so its FIRST in-span edit is caught. `knownCertified` starts empty and only grows via
+   * the async ledger refresh; a human certify is not itself a Yjs `update`, so without
+   * this a new anchor would not be in the synchronous sweep pass until a refresh landed —
+   * its first edit could read a stale `ok`. The certify path calls this on a successful
+   * mint: the id joins {@link knownCertified} and is swept at once (invalidate + kick a
+   * re-resolve), so the next update's synchronous pass already covers it and the read-path
+   * overlay is fail-closed for it until its verdict settles. Idempotent for a known id
+   * (a re-sweep is harmless — it over-covers, the fail-closed direction).
+   */
+  noteCertified(objectId: string): void {
+    this.knownCertified.add(objectId);
+    this.sweepObject(objectId);
+  }
+
+  /**
    * Await the sweep going quiet — every re-resolve kicked so far (and any a still-
    * running resolve kicks) has settled and updated the drafts ledger. For the
    * acceptance test's "within one render tick" assertion after an edit. Loops
@@ -277,18 +327,35 @@ export class RoomDriftSweep {
     // (B) Async authoritative refresh; tracked in `pending` so `settled()` awaits it
     // (and the resolves it kicks). Fail-closed on a ledger throw: keep the current
     // snapshot (its objects were already swept synchronously in (A)).
+    //
+    // EPOCH GUARD (E7, #199 Fix 1): stamp this refresh with a monotone epoch and ADOPT
+    // its result only if it is still the latest to complete. Without this, an older
+    // `loadCertifiedObjectIds` result completing AFTER a newer one would overwrite
+    // `knownCertified` with a stale (possibly empty, or smaller) set AND prune the
+    // stale-draft/generation entries the newer snapshot added — so the next sweep would
+    // invalidate nothing and a real drift would go undetected. Latest-epoch-wins: a
+    // stale/older refresh is dropped, never overwrites a newer set or empties it.
+    const epoch = ++this.refreshCounter;
     const refresh: Promise<void> = this.loadCertifiedObjectIds()
       .then((ids) => {
         const authoritative = new Set(ids);
+        // Sweep any newly-certified id the synchronous pass could not yet know. Harmless
+        // and epoch-independent (a re-resolve over-covers), so it runs regardless of the
+        // guard below — the guard protects only the SET ADOPTION + draft pruning.
         for (const objectId of authoritative) {
           if (!this.knownCertified.has(objectId)) this.sweepObject(objectId);
         }
-        // Drop drafts/generations for objects no longer certified (anchor removed or
-        // replaced) — a `~` over an object with no live `✓` is meaningless.
+        // A stale/older refresh must not roll the certified set (or its drafts) backwards.
+        if (epoch <= this.appliedRefreshEpoch) return;
+        this.appliedRefreshEpoch = epoch;
+        // Drop drafts/generations/swept-clean for objects no longer certified (anchor
+        // removed or replaced) — a `~` (or a swept-clean `ok`) over an object with no
+        // live `✓` is meaningless.
         for (const objectId of this.knownCertified) {
           if (!authoritative.has(objectId)) {
             this.drafts.delete(objectId);
             this.draftGeneration.delete(objectId);
+            this.sweptClean.delete(objectId);
           }
         }
         this.knownCertified = authoritative;
@@ -315,6 +382,11 @@ export class RoomDriftSweep {
     // in-flight resolve for this object is now superseded and its late verdict dropped.
     const generation = (this.draftGeneration.get(objectId) ?? 0) + 1;
     this.draftGeneration.set(objectId, generation);
+    // The object's verdict is now UNKNOWN until this re-resolve settles (E7, #199 Fix 3):
+    // drop any prior swept-clean confirmation so the read-path overlay is fail-closed for
+    // it during the pre-settle window — it cannot serve a stale `ok` while the resolve
+    // that would confirm freshness is still in flight.
+    this.sweptClean.delete(objectId);
     this.authority.invalidate(objectId);
     const p: Promise<void> = this.authority
       .resolve(objectId)
@@ -346,8 +418,15 @@ export class RoomDriftSweep {
     if ((this.draftGeneration.get(objectId) ?? 0) !== generation) return;
     if (status === 'ok') {
       this.drafts.delete(objectId);
+      // POSITIVELY confirm swept-clean (E7, #199 Fix 3): the read-path overlay may now
+      // serve this object's `ok`. Only reached under the current generation, so a late
+      // verdict from a superseded compute can never re-confirm a since-edited object.
+      this.sweptClean.add(objectId);
       return;
     }
+    // A definitive `drift`/`unresolved`: it is NOT swept-clean (already dropped in
+    // sweepObject, kept dropped here for a resolve that folds without a prior sweepObject).
+    this.sweptClean.delete(objectId);
     if (!this.drafts.has(objectId)) {
       // FROZEN at creation (Fix 4): the exposed draft is immutable at runtime, not
       // only `readonly` at compile time — there is no `'✓'` variant to reach for.
