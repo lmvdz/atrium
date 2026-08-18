@@ -9,24 +9,34 @@
     // stubbing it away would mean the test no longer drives the real client,
     // which is the whole point of it (#22 gauntlet r1, major 6).
     "lib": ["ES2023", "DOM"],
-    // A server library an integration test imports can reach a barrel that re-exports
-    // a `.tsx` for a TYPE (the E3 replica → `ConversationDoc` → `ParticipantSummary`
-    // from `@/src/components/model`, whose index re-exports a `.tsx`). The runner
-    // transforms tsx via esbuild regardless; tsc needs `jsx` set to check the graph.
-    "jsx": "react-jsx",
+    // `jsx: preserve`, as `apps/web/tsconfig.json` sets it (Next wants it), and as
+    // the runner honours via `@vitejs/plugin-react` in `vitest.integration.config.ts`
+    // (so what tsc checks is what the runner runs). Resolving `@/*` (below) lets the
+    // covenant read path be followed to source — `replay-data.ts` →
+    // `room-covenant-reads.ts` → `live-covenant-doc.ts` → `@/app/prototype/*` (the
+    // Yjs substrate + the shipped `.tsx` grammar via `@/src/components/model`, and
+    // the E3 replica → `ConversationDoc` → `ParticipantSummary`). Those files must
+    // typecheck (noEmit, nothing written), and without `jsx` set tsc refuses a `.tsx`
+    // in the program. (Merge of E3's replica chain + #207's covenant-read chain — one
+    // `jsx` value, `preserve`, matching apps/web and the runner.)
+    "jsx": "preserve",
     "types": ["node", "vitest/globals"],
     "module": "ESNext",
     "moduleResolution": "Bundler",
-    // The same four aliases `vitest.integration.config.ts` resolves, so what
-    // the compiler checks is what the runner runs. Pointing at source rather
-    // than `dist` also means the suite never depends on build order.
+    // The same aliases `vitest.integration.config.ts` resolves, so what the compiler
+    // checks is what the runner runs. Pointing at source rather than `dist` also
+    // means the suite never depends on build order.
     "baseUrl": "..",
     "paths": {
-      // The webapp's own `@/*` alias (apps/web/tsconfig.json), so an integration
-      // test may import a server library that resolves siblings through it — the E3
-      // server replica (`apps/web/lib/server-room-replica.ts` → the prototype's
-      // `ConversationDoc`) is the first to. Mirrors the runner's `@/` alias in
-      // `vitest.integration.config.ts` so tsc checks what the runner runs.
+      // The webapp's own `@/*` alias (`apps/web/tsconfig.json` declares it as
+      // `["./*"]`, rooted at apps/web), restated here against this project's repo-root
+      // `baseUrl`. Both the E3 server replica (`apps/web/lib/server-room-replica.ts`
+      // → the prototype's `ConversationDoc`) and the covenant read path (#181/#207:
+      // `apps/web/lib/{replay-data,room-covenant-reads,live-covenant-doc}.ts` →
+      // `@/app/prototype/*`, the Yjs substrate still there until E4's #204 refactor)
+      // resolve siblings through it. Without this, `integration/web/replay-data.test.ts`
+      // cannot resolve the alias and fails to typecheck; the same alias in
+      // `vitest.integration.config.ts` is what lets it LOAD.
       "@/*": ["./apps/web/*"],
       "@atrium/core": ["./packages/core/src/index.ts"],
       "@atrium/db": ["./packages/db/src/index.ts"],

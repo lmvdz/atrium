@@ -252,11 +252,17 @@ describe('room membership is not reachable outside @atrium/auth', () => {
        * It shipped naming the table without an exemption, so this boundary suite
        * had been red since — the same "a spec seeds the table it proves" case the
        * other two already are.
+       *
+       * `destination-surface.spec.ts` joined it in the Phase-6 covenant-live work:
+       * it seeds a room's members, plans and rooms against real Postgres to drive
+       * the designed surface to its destination, so it too `memberships` on
+       * purpose. Same "a spec seeds the table it proves" case, not served to a user.
        */
       exempt: [
         'apps/web/e2e/agent-participant.spec.ts',
         'apps/web/e2e/control-plane.spec.ts',
         'apps/web/e2e/destination-scenario.spec.ts',
+        'apps/web/e2e/destination-surface.spec.ts',
         'apps/web/e2e/role-sync.spec.ts',
         'apps/web/e2e/room-access.spec.ts',
         'apps/web/e2e/support/ensure-database.mjs',

@@ -1,4 +1,5 @@
 import { fileURLToPath } from 'node:url';
+import react from '@vitejs/plugin-react';
 import { defineConfig } from 'vitest/config';
 
 /**
@@ -20,6 +21,24 @@ const src = (path: string) => fileURLToPath(new URL(path, import.meta.url));
 const webRoot = fileURLToPath(new URL('./apps/web/', import.meta.url));
 
 export default defineConfig({
+  /**
+   * JSX transform for the covenant read path's `.tsx` modules — the same plugin
+   * `apps/web/vitest.config.ts` runs, and for a reason its own comment records:
+   * `apps/web/tsconfig.json` sets `jsx: preserve` (Next wants it), so vite's esbuild
+   * transform leaves the JSX in place and `import-analysis` cannot parse it. The
+   * Babel-based plugin transforms JSX regardless of the discovered tsconfig, which
+   * esbuild's own `jsx` option does not override per-file.
+   *
+   * The suite reaches this `.tsx` grammar because resolving `@/*` (below) lets the
+   * runner follow the covenant read path to source: `apps/web/lib/replay-data.ts` →
+   * `room-covenant-reads.ts` → `live-covenant-doc.ts` → `@/app/prototype/yjs-conversation`
+   * → `./conversation-model`, which VALUE-imports `bodyText`/`messageEntry`/… from
+   * `@/src/components/model`. The suite only IMPORTS these modules (to drive the real
+   * covenant reader) — it never renders — so a Node environment plus this transform is
+   * enough. The entanglement is temporary: E4's #204 lifts the Yjs substrate out of
+   * `app/prototype/`, after which this path no longer crosses the component layer.
+   */
+  plugins: [react()],
   resolve: {
     // Array form, because order decides: `@atrium/db/schema` has to be matched
     // before the bare `@atrium/db` prefix would swallow it.
@@ -38,6 +57,18 @@ export default defineConfig({
       // the same reason as the other three: the suite must never depend on build
       // order, and what the compiler checks has to be what the runner runs.
       { find: /^@atrium\/auth$/, replacement: src('./packages/auth/src/index.ts') },
+      /**
+       * `@/*` — the same alias `apps/web/tsconfig.json` declares as `["./*"]`,
+       * mirrored here so what the runner resolves is what the compiler checks. The
+       * covenant read path (#181) reaches the conversation through
+       * `apps/web/lib/{live-covenant-doc,server-room-replica}.ts`, which import
+       * `@/app/prototype/*` (the Yjs substrate lives there until E4's #204). Without
+       * it, `integration/web/replay-data.test.ts` cannot LOAD — it pulls
+       * `apps/web/lib/replay-data.ts` → `room-covenant-reads.ts` → `live-covenant-doc.ts`.
+       * A prefix find (not `$`-anchored) so every `@/…` subpath rewrites onto
+       * `apps/web/`; ordered after the `@atrium/*` finds, which it does not overlap.
+       */
+      { find: /^@\//, replacement: src('./apps/web/') },
       /**
        * `yjs` — the covenant certify path (#190) resolves a live span through
        * `apps/web/lib/covenant-reader.ts`, which binds the Yjs port. `yjs` is a

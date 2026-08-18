@@ -227,6 +227,137 @@ const EXEMPT: readonly { readonly file: string; readonly expr: string; readonly 
     expr: 'target',
     why: 'THE INSTRUMENT IS WIDER THAN ITS OWN RULE HERE, and this entry is the receipt for that. `model/printed-surface.ts` states the bound in its own words — "`input` is here for `type="button" | "submit" | "reset"`, where the value IS the button\'s face; on every other input type the value is what the person typed, which is their own words and not the page printing anything" — but `announcesText(attribute, tag)` is given the TAG and not the TYPE, so it answers `true` for `value` on every `<input>`. Both sites are `<input type="hidden" name="next" value={target} />`: never painted, never in the accessibility tree, never announced, and read only by the server action on submit. The value is not laundered either — `safeNextPath` is why it is safe to REDIRECT to (same-origin, no protocol-relative `//`, no `/\\`), and it is deliberately NOT in REGISTER_DOORS because it is a validator on a query parameter and not a lookup in a record. It is also not a candidate for `systemText`: a `next` parameter carrying a quotation mark is a URL, not a system-voice defect, and holding it to that rule would turn `/sign-in?next=%2Fapp%3Fq%3D%22x%22` into a thrown page. The durable fix is to give `announcesText` the input\'s `type` so both enforcers narrow together; doing that inside a merge would change the denominator of the whole sweep, so it is recorded here instead',
   },
+  /* ---------------------------------------------------------------------------
+   * THE PROTOTYPE DESIGN SHELLS — app/prototype/{ChatBlock,SharePopover}.tsx.
+   *
+   * These are the phase-5 design surface's not-yet-wired shells, kept verbatim
+   * as the visual target while the covenant substrate is built underneath them.
+   * ChatBlock's own header says it: the `message`/`system` feed rows already
+   * render through the SHIPPED grammar (`TimelineRow`/`SystemRow`, the register
+   * every citation resolves against), and the strings THOSE print are traced by
+   * this sweep like any other. What is left here are the rows that are still
+   * DESIGN FIXTURES with no backend:
+   *   - the `turn` accordion (Turn/TurnStep/DiffLine) — "kept as the design shell
+   *     (#159)"; its `TurnData` comes from `mock.ts`, not from a `MessageRecord`,
+   *     so there is no record register to trace it back to and no door it can go
+   *     through, because the thing a door proves (this string is the page's own
+   *     voice, or a person's own words in the ledger) is not being claimed;
+   *   - the `image` row and the minimap `hover` preview — likewise fixture-fed
+   *     design chrome (`#156/attachments` is the later lane), and the composer's
+   *     `@`/`/` popover, whose entries are the imported `SLASH_COMMANDS`/`MENTION`
+   *     constants — a closed list authored in this repo, not caller text.
+   *
+   * None of these is caller-supplied in the sense the sweep exists to catch: no
+   * network payload, no cross-room ledger content reaches them; they are the
+   * design lane's own fixtures. The permanent home for this substrate is E4's
+   * #204 refactor, which lifts the Yjs conversation out of `app/prototype/`;
+   * when the turn/image rows are re-seated on real records they render through
+   * the shipped grammar and these exemptions go with the shells. Each is a
+   * receipt, not a licence — "every exemption still applies to something" below
+   * fails the day one of these fixture rows stops existing.
+   * ------------------------------------------------------------------------- */
+  {
+    file: 'app/prototype/ChatBlock.tsx',
+    expr: 'line.text',
+    why: 'a `DiffLine.text` in the Turn accordion (TurnStep.edit.lines) — the design tool-call shell #159 leaves without a backend; fixture data from mock.ts, not a ledger record',
+  },
+  {
+    file: 'app/prototype/ChatBlock.tsx',
+    expr: 'STEP_TAG[step.kind]',
+    why: '`STEP_TAG` is an imported constant map from ./types (a closed set of design step labels), painted in the Turn accordion design shell (#159); a repo-authored label, not caller text',
+  },
+  {
+    file: 'app/prototype/ChatBlock.tsx',
+    expr: 'step.edit.file',
+    why: 'a `TurnStep.edit.file` path in the Turn accordion design shell (#159) — mock.ts fixture data, no backend and no ledger record to trace through',
+  },
+  {
+    file: 'app/prototype/ChatBlock.tsx',
+    expr: 'step.command',
+    why: 'a `TurnStep.command` in the Turn accordion design shell (#159) — mock.ts fixture data, no backend and no ledger record to trace through',
+  },
+  {
+    file: 'app/prototype/ChatBlock.tsx',
+    expr: 'turn.summary',
+    why: 'a `TurnData.summary` in the Turn accordion design shell (#159) — mock.ts fixture data, no backend and no ledger record to trace through',
+  },
+  {
+    file: 'app/prototype/ChatBlock.tsx',
+    expr: 'turn.spend',
+    why: 'a `TurnData.spend` string in the Turn accordion design shell (#159) — mock.ts fixture data, no backend and no ledger record to trace through',
+  },
+  {
+    file: 'app/prototype/ChatBlock.tsx',
+    expr: 'STEP_TAG[s.kind]',
+    why: '`STEP_TAG` imported constant map from ./types, painted in the folded Turn stack preview design shell (#159); a repo-authored label, not caller text',
+  },
+  {
+    file: 'app/prototype/ChatBlock.tsx',
+    expr: 'stepPreview(s)',
+    why: 'a preview derived in-file from a `TurnStep` fixture (edit.file/command/text) in the folded Turn stack design shell (#159) — mock.ts data, no backend',
+  },
+  {
+    file: 'app/prototype/ChatBlock.tsx',
+    expr: 'turn.conclusion.reply.who',
+    why: 'a `TurnData.conclusion.reply.who` in the Turn accordion design shell (#159) — mock.ts fixture data, no backend and no ledger record to trace through',
+  },
+  {
+    file: 'app/prototype/ChatBlock.tsx',
+    expr: 'turn.conclusion.reply.text',
+    why: 'a `TurnData.conclusion.reply.text` in the Turn accordion design shell (#159) — mock.ts fixture data, no backend and no ledger record to trace through',
+  },
+  {
+    file: 'app/prototype/ChatBlock.tsx',
+    expr: "(who ?? '').slice(0, 2)",
+    why: 'a two-glyph avatar monogram, aria-hidden, sliced off a design-row author name; a decorative initial, not a printed sentence, and the row it sits on is a fixture design shell (#159)',
+  },
+  {
+    file: 'app/prototype/ChatBlock.tsx',
+    expr: 'item.who',
+    why: 'the author of a `turn`/`image` ConversationItem — the two design-shell feed rows (#159, #156/attachments); fixture-fed, unlike the message/system rows which render through the shipped grammar',
+  },
+  {
+    file: 'app/prototype/ChatBlock.tsx',
+    expr: 'item.at',
+    why: 'the timestamp of a `turn`/`image` ConversationItem design-shell row (#159, #156/attachments) — fixture-fed design chrome, no ledger record behind it',
+  },
+  {
+    file: 'app/prototype/ChatBlock.tsx',
+    expr: 'item.image.alt',
+    why: "an inline-image row's alt text (#156/attachments is the later lane) — mock data-URI fixture in the design shell, not a caller-supplied attachment yet",
+  },
+  {
+    file: 'app/prototype/ChatBlock.tsx',
+    // biome-ignore lint/suspicious/noTemplateCurlyInString: the printed expression quoted back verbatim — the `${…}` is the JSX source being exempted, not a template written here.
+    expr: 'hover.excerpt.length > 120 ? `${hover.excerpt.slice(0, 120)}…` : hover.excerpt',
+    why: 'a truncated preview in the minimap hover affordance, derived in-file from the design feed; the minimap is design chrome over fixture rows and paints no covenant claim',
+  },
+  {
+    file: 'app/prototype/ChatBlock.tsx',
+    expr: "(hover.who || '··').slice(0, 2)",
+    why: 'a two-glyph monogram, aria-hidden, in the minimap hover preview — a decorative initial over design-fixture feed data, not a printed sentence',
+  },
+  {
+    file: 'app/prototype/ChatBlock.tsx',
+    expr: "hover.who || 'system'",
+    why: "the author label in the minimap hover preview — design chrome over fixture feed data; the fallback 'system' is an in-file literal",
+  },
+  {
+    file: 'app/prototype/ChatBlock.tsx',
+    // biome-ignore lint/suspicious/noTemplateCurlyInString: the printed expression quoted back verbatim — the `${a}` is the JSX source being exempted, not a template written here.
+    expr: "kind === 'slash' ? a : `@${a}`",
+    why: 'a command/mention name from the imported `SLASH_COMMANDS`/`MENTION_TARGETS` constants (a closed, repo-authored list) in the composer popover — not caller text',
+  },
+  {
+    file: 'app/prototype/ChatBlock.tsx',
+    expr: 'd',
+    why: 'the description half of an imported `SLASH_COMMANDS` entry (a closed, repo-authored constant tuple) painted in the composer popover — not caller text',
+  },
+  {
+    file: 'app/prototype/SharePopover.tsx',
+    expr: 'e',
+    why: 'an invited-collaborator address in the design share popover — the invitee identifier a person typed, the same "somebody\'s own words / identifier" case as the sign-in `next` and MessageBody `words` exemptions, and this popover is a design fixture with no backend',
+  },
 ];
 
 function key(finding: { file: string; expr: string }): string {
