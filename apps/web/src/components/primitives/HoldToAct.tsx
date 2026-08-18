@@ -136,6 +136,25 @@ export interface HoldToActProps {
    */
   readonly disabled?: boolean;
   /**
+   * A validity predicate re-evaluated AT FIRE TIME, inside `complete`. Returns true
+   * while the completed hold may still act; false to abort it exactly as a disabled
+   * control would (cancel, reset, `onCancel`, never `onAct`).
+   *
+   * This exists because `disabled` alone cannot close the certify staleness race
+   * (E8 r3). `disabled` is React state: when a body edit converges the doc, the
+   * caller flips `disabled` true, but that only lands after React commits the
+   * re-render — and a `requestAnimationFrame` chain already in flight can fire
+   * `complete` BEFORE that commit, reading a stale `disabledRef`. A guard backed by
+   * a value the caller updates SYNCHRONOUSLY (certify: a convergence counter bumped
+   * inside the Yjs `onChange`, outside React's commit) is fresh the instant the doc
+   * converges, so it closes the window regardless of scheduler/commit ordering.
+   * `disabled` + the cancel-on-disable effect remain as defense-in-depth.
+   *
+   * Read through a ref written every render, so a frame scheduled before the caller's
+   * value changed still evaluates the LATEST predicate at fire time.
+   */
+  readonly guard?: () => boolean;
+  /**
    * When true, a completed hold returns the control to `idle` rather than resting
    * at `armed`. #146 FIX 3: the fund/settle acts fire once and are done — an act
    * whose control still reads `armed` on an already-funded plan is ambiguous. The
@@ -161,12 +180,32 @@ export function HoldToAct({
   onAct,
   className,
   disabled = false,
+  guard,
   resetOnComplete = false,
 }: HoldToActProps) {
   const [phase, setPhase] = useState<Phase>('idle');
   const buttonRef = useRef<HTMLButtonElement | null>(null);
   const frameRef = useRef<number | null>(null);
   const startRef = useRef<number | null>(null);
+
+  /* THE LIVE `disabled`, read at fire time — not the value captured when a hold's
+     `requestAnimationFrame` chain was scheduled. A body edit under an open certify
+     panel invalidates the pending span, which the caller reflects by flipping
+     `disabled` true (certify: `!canCertify`); but a frame already in flight still
+     holds the closure from BEFORE the edit, so the running `tick`/`complete` would
+     otherwise fire the STALE act. `complete` re-checks this ref at the instant it
+     fires and refuses if the control has since gone disabled (E8 r2 blocker). Kept
+     in a ref, written every render, so a frame scheduled before the flip reads the
+     value AFTER it — a captured prop could not. */
+  const disabledRef = useRef(disabled);
+  disabledRef.current = disabled;
+
+  /* THE FIRE-TIME VALIDITY GUARD, read at the instant `complete` runs — the
+     commit-order-independent partner to `disabledRef` (E8 r3). Written every render
+     so a frame scheduled before the caller's guard changed still evaluates the
+     latest predicate. `complete` aborts when it returns false. */
+  const guardRef = useRef(guard);
+  guardRef.current = guard;
 
   const meterRef = useRef<HTMLSpanElement | null>(null);
 
@@ -206,6 +245,29 @@ export function HoldToAct({
   const complete = useCallback(() => {
     const started = startRef.current;
     if (started === null) return;
+    /* RE-CHECK VALIDITY AT FIRE TIME (E8 r2/r3). A frame scheduled while the control
+       was valid can run AFTER the thing it acts over went stale. Two guards, both read
+       as of NOW rather than as of when the frame was scheduled:
+
+       - `guardRef` (E8 r3): the caller's fire-time predicate, backed by a value it
+         updates SYNCHRONOUSLY (certify: a convergence counter bumped inside the Yjs
+         `onChange`). It is fresh the instant the doc converges — BEFORE React commits
+         the re-render that would flip `disabled` — so it closes the race a queued
+         frame would otherwise win by firing pre-commit.
+       - `disabledRef` (E8 r2): React `disabled`, written every render. Defense-in-
+         depth for the frame that runs after the commit lands.
+
+       Either failing abandons the hold exactly as a release would: cancel, reset,
+       and fire `onCancel` (the server disarm, if one was armed on begin) — never
+       `onAct`. */
+    const guardFailed = guardRef.current ? guardRef.current() === false : false;
+    if (disabledRef.current || guardFailed) {
+      stop();
+      paint(0);
+      setPhase('idle');
+      onCancel?.();
+      return;
+    }
     const heldMs = Math.round(performance.now() - started);
     stop();
     if (resetOnComplete) {
@@ -229,7 +291,7 @@ export function HoldToAct({
        before the irreversible thing happens, not after it succeeded. */
     onArm?.(arming);
     onAct?.(arming);
-  }, [actionId, actor, onAct, onArm, paint, resetOnComplete, stop]);
+  }, [actionId, actor, onAct, onArm, onCancel, paint, resetOnComplete, stop]);
 
   const tick = useCallback(() => {
     const started = startRef.current;
@@ -258,6 +320,24 @@ export function HoldToAct({
     onBegin?.();
     frameRef.current = requestAnimationFrame(tick);
   }, [disabled, onBegin, paint, tick]);
+
+  /* ABANDON AN IN-FLIGHT HOLD WHEN THE CONTROL GOES DISABLED (E8 r2). A body edit
+     under an open certify panel invalidates the pending span; the caller flips
+     `disabled` true. Cancel the running `requestAnimationFrame` and abandon the hold
+     NOW — do not let the frame chain run to completion over a span the human never
+     saw. `cancel` is a no-op unless a hold had actually begun (`startRef`), so this
+     stays inert for ordinary enabled/disabled toggles and fires `onCancel` (the
+     server disarm, if any) exactly once for a real mid-hold invalidation.
+
+     This is a POST-COMMIT cleanup path: it runs only after React commits the
+     `disabled` flip, so a `requestAnimationFrame` can still fire `complete` before it
+     does. It does NOT by itself close that race — the fire-time `guardRef` check in
+     `complete` (fresh the instant the doc converges, before commit) is what does.
+     This effect is the tidy-up that also disarms the server, plus defense-in-depth
+     for the frame that runs after the commit. */
+  useEffect(() => {
+    if (disabled) cancel();
+  }, [disabled, cancel]);
 
   /* DISARM ON UNMOUNT — the mirror of release, for the navigation that never
      released. A hold in progress when the control unmounts (the person left the

@@ -8,6 +8,7 @@
  * ------------------------------------------------------------------------- */
 
 import { act, cleanup, fireEvent, render, screen } from '@testing-library/react';
+import { useState } from 'react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { AttentionCard, AttentionCompact } from '../src/components';
 import type { AttentionItem } from '../src/components/model';
@@ -417,6 +418,135 @@ describe('a disabled hold begins nothing (#146 FIX 1)', () => {
     advance(5000);
     expect(events).toEqual([]);
     expect(button.getAttribute('data-holding')).toBeNull();
+  });
+});
+
+/* ---------------------------------------------------------------------------
+ * E8 r2 BLOCKER — A HOLD IN FLIGHT WHEN THE CONTROL GOES DISABLED MUST NOT ACT.
+ *
+ * The certify pane flips `disabled` (`!canCertify`) the instant a body edit
+ * invalidates the pending span. A hold begun BEFORE the edit kept a running
+ * `requestAnimationFrame` chain whose closure was captured pre-edit, so it ran to
+ * completion and fired the act over the STALE span. The fix cancels the frame when
+ * `disabled` goes true AND re-checks `disabled` at fire time, so neither path can
+ * fire the stale act.
+ * ------------------------------------------------------------------------- */
+describe('a hold abandoned by going disabled mid-press never acts (E8 r2)', () => {
+  function Controlled({
+    onAct,
+    onCancel,
+  }: {
+    onAct: () => void;
+    onCancel: () => void;
+  }) {
+    const [disabled, setDisabled] = useState(false);
+    return (
+      <>
+        <HoldToAct
+          actionId="certify"
+          actor="lars"
+          describe="certify the passage"
+          disabled={disabled}
+          label="Certify this passage"
+          onAct={onAct}
+          onCancel={onCancel}
+          resetOnComplete
+        />
+        <button data-testid="invalidate" onClick={() => setDisabled(true)} type="button">
+          invalidate
+        </button>
+      </>
+    );
+  }
+
+  /* CATCHES: the running rAF completing over a span the edit already invalidated —
+     the exact blocker both lineages converged on. Going disabled mid-hold cancels
+     the frame and abandons the hold (firing onCancel, the server disarm), and the
+     later frames fire nothing. */
+  it('going disabled mid-hold cancels the in-flight hold and fires no act', () => {
+    const events: string[] = [];
+    render(
+      <Controlled onAct={() => events.push('act')} onCancel={() => events.push('cancel')} />,
+    );
+    const hold = screen.getByRole('button', { name: /Certify this passage/ });
+    fireEvent.pointerDown(hold);
+    advance(1000); // mid-hold, well before the 2s gate
+    expect(Number(hold.getAttribute('data-hold-progress'))).toBeGreaterThan(0.4);
+
+    // The body edit lands: the pane flips the control disabled.
+    fireEvent.click(screen.getByTestId('invalidate'));
+    advance(5000); // long past the gate — a stale frame would have fired here
+
+    expect(events).toEqual(['cancel']); // abandoned, never acted
+    expect(hold.getAttribute('data-hold-progress')).toBe('0.000');
+    expect(hold.getAttribute('data-armed')).toBeNull();
+  });
+});
+
+/* ---------------------------------------------------------------------------
+ * E8 r3 — A FIRE-TIME GUARD REFUSES A COMPLETED HOLD EVEN BEFORE `disabled` COMMITS.
+ *
+ * `disabled` is React state: a caller that invalidates the act on a synchronous
+ * event (certify: a Yjs convergence) cannot flip `disabled` until React commits the
+ * re-render, and a `requestAnimationFrame` chain already in flight can fire
+ * `complete` in that pre-commit window, reading a stale `disabledRef`. The `guard`
+ * predicate is re-evaluated at fire time against a value the caller updates
+ * SYNCHRONOUSLY, so it closes that window regardless of commit ordering.
+ * ------------------------------------------------------------------------- */
+describe('a fire-time guard abandons a completed hold, independent of disabled (E8 r3)', () => {
+  /* CATCHES: `complete` acting when the caller's synchronous validity has gone false
+     but `disabled` has not yet committed. With the guard removed this fires the act;
+     with it, the hold is abandoned (onCancel) and nothing acts. */
+  it('guard=false at fire time aborts the act, with disabled never flipped', () => {
+    const events: string[] = [];
+    // A mutable validity flipped imperatively — no React state, so `disabled` stays
+    // false throughout, exactly like the pre-commit window.
+    const valid = { current: true };
+    render(
+      <HoldToAct
+        actionId="certify"
+        actor="lars"
+        describe="certify the passage"
+        guard={() => valid.current}
+        label="Certify this passage"
+        onAct={() => events.push('act')}
+        onCancel={() => events.push('cancel')}
+        resetOnComplete
+      />,
+    );
+    const button = screen.getByRole('button');
+    fireEvent.pointerDown(button);
+    advance(1000); // mid-hold
+    expect((button as HTMLButtonElement).disabled).toBe(false);
+
+    valid.current = false; // the doc converged synchronously; the guard's value is stale
+    advance(5000); // past the gate — the completing frame evaluates the guard
+
+    expect(events).toEqual(['cancel']); // abandoned, never acted
+    expect(button.getAttribute('data-armed')).toBeNull();
+    expect(button.getAttribute('data-hold-progress')).toBe('0.000');
+  });
+
+  /* CATCHES: the guard blocking a VALID completion — it must only refuse when it
+     returns false, never gate an honest hold. */
+  it('guard=true lets the hold complete and act as normal', () => {
+    const events: string[] = [];
+    render(
+      <HoldToAct
+        actionId="certify"
+        actor="lars"
+        describe="certify the passage"
+        guard={() => true}
+        holdMs={1500}
+        label="Certify this passage"
+        onAct={() => events.push('act')}
+        onArm={() => events.push('arm')}
+      />,
+    );
+    const button = screen.getByRole('button');
+    fireEvent.pointerDown(button);
+    advance(1600);
+    expect(events).toEqual(['arm', 'act']);
   });
 });
 
