@@ -13,6 +13,7 @@
     "test:mutations": "node test/mutations.mjs",
     "test:e2e": "node e2e/support/ensure-database.mjs && playwright test",
     "test:e2e:destination": "playwright install chromium && node e2e/support/ensure-database.mjs && playwright test --config playwright.destination.config.ts",
+    "test:e2e:two-browser": "bash e2e/support/two-browser-run.sh",
     "clean": "rm -rf .next"
   },
   "dependencies": {

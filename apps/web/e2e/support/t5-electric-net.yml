@@ -1,0 +1,13 @@
+# T5 (#219) acceptance-only compose override: pin the dedicated stack's network to
+# an explicit free subnet. Docker's default address pool on this box could not
+# auto-allocate a fresh /16 for a new project ("Pool overlaps with other one on
+# this address space"), so the T5 stack names its own. 172.31.0.0/16 is outside the
+# in-use 172.17/172.19/172.28 ranges; change it only if that range is later taken.
+# This file is a THIRD `-f` on top of docker-compose.yml + docker-compose.electric-dev.yml
+# and touches nothing but the project's default network IPAM.
+name: atrium
+networks:
+  default:
+    ipam:
+      config:
+        - subnet: 172.31.0.0/16
