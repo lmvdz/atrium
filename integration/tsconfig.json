@@ -9,6 +9,11 @@
     // stubbing it away would mean the test no longer drives the real client,
     // which is the whole point of it (#22 gauntlet r1, major 6).
     "lib": ["ES2023", "DOM"],
+    // A server library an integration test imports can reach a barrel that re-exports
+    // a `.tsx` for a TYPE (the E3 replica → `ConversationDoc` → `ParticipantSummary`
+    // from `@/src/components/model`, whose index re-exports a `.tsx`). The runner
+    // transforms tsx via esbuild regardless; tsc needs `jsx` set to check the graph.
+    "jsx": "react-jsx",
     "types": ["node", "vitest/globals"],
     "module": "ESNext",
     "moduleResolution": "Bundler",
@@ -17,6 +22,12 @@
     // than `dist` also means the suite never depends on build order.
     "baseUrl": "..",
     "paths": {
+      // The webapp's own `@/*` alias (apps/web/tsconfig.json), so an integration
+      // test may import a server library that resolves siblings through it — the E3
+      // server replica (`apps/web/lib/server-room-replica.ts` → the prototype's
+      // `ConversationDoc`) is the first to. Mirrors the runner's `@/` alias in
+      // `vitest.integration.config.ts` so tsc checks what the runner runs.
+      "@/*": ["./apps/web/*"],
       "@atrium/core": ["./packages/core/src/index.ts"],
       "@atrium/db": ["./packages/db/src/index.ts"],
       "@atrium/db/schema": ["./packages/db/src/schema.ts"],

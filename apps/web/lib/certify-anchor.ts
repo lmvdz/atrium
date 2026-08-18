@@ -92,7 +92,17 @@ export type CertifyAnchorRefusal =
    * function does the single insert and reports the collision rather than
    * clobbering the standing signature.
    */
-  | 'already_certified';
+  | 'already_certified'
+  /**
+   * The SERVER REPLICA lags the durable stream head at request time (E3, #203).
+   * The replica's content may be stale — a later durable update the replica has
+   * not yet consumed could change (or delete) the span — so minting is REFUSED
+   * rather than anchoring content that is not caught up. Fail-closed: a lagging or
+   * absent replica never yields a `✓`. This is DISTINCT from #209's client
+   * freshness witness — this proves the server replica is caught up to the stream,
+   * not that a client's observed fragment matches.
+   */
+  | 'replica_lagging';
 
 export type CertifyAnchorOutcome =
   | { readonly ok: true; readonly anchorId: string; readonly anchor: CovenantAnchor }
@@ -128,6 +138,32 @@ export interface CertifyAnchorInput {
    * immutability trigger once written.
    */
   readonly certifiedAt?: string;
+  /**
+   * The SERVER-REPLICA freshness gate (E3, #203). When present, minting is refused
+   * (`replica_lagging`) unless the replica the reader resolves against has consumed
+   * the durable stream up to {@link StreamFreshnessGate.requiredPosition} — the
+   * stream head captured at request time. Absent ⇒ no stream-position gate is
+   * applied (the reader's own live-doc HEAD check still guards content drift). The
+   * caller (the certify action) wires the replica's consumed position and the head.
+   */
+  readonly streamFreshness?: StreamFreshnessGate;
+}
+
+/**
+ * The server-replica stream-position freshness gate (E3, #203). Compares where the
+ * replica has caught up to against where the durable stream's head was at request
+ * time; a replica that trails the head is refused so a stale span is never anchored.
+ */
+export interface StreamFreshnessGate {
+  /** The durable stream head position captured at request time — what the replica must have reached. */
+  readonly requiredPosition: number;
+  /**
+   * The replica's currently-consumed stream position ({@link
+   * ServerRoomReplica.consumedStreamPosition}), read at mint time. A function, not a
+   * value, so it reflects the replica as it stands when the gate fires — a replica
+   * evicted between request and mint reads as `-Infinity` and refuses.
+   */
+  readonly consumedPosition: () => number;
 }
 
 /**
@@ -161,6 +197,19 @@ export async function certifyObjectSpan(input: CertifyAnchorInput): Promise<Cert
      it does not sign ✓. */
   if (session.principalKind !== 'human') {
     return { ok: false, reason: 'not_human' };
+  }
+
+  /* THE SERVER-REPLICA FRESHNESS GATE (E3, #203) — refuse to mint against a replica
+     that lags the durable stream head captured at request time. A trailing replica's
+     content may be stale (a durable update it has not yet consumed could have changed
+     or deleted the span), so anchoring it would sign content that is not caught up.
+     Checked here, before anything is derived: fail-closed and cheap. An evicted
+     replica reads `-Infinity` and refuses. Distinct from #209's client witness — this
+     is about the SERVER replica's position on the stream, not a client's observation. */
+  if (input.streamFreshness !== undefined) {
+    if (input.streamFreshness.consumedPosition() < input.streamFreshness.requiredPosition) {
+      return { ok: false, reason: 'replica_lagging' };
+    }
   }
 
   /* The certifier is built FROM THE SESSION — kind fixed to the human variant, id

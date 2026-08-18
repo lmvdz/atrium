@@ -153,8 +153,32 @@ export class ServerRoomReplica {
   /** Tags the replica's own authenticated applies so its `update` fan-out (if any) can tell them apart. */
   private readonly applyOrigin = Symbol('server-replica-authenticated-apply');
 
+  /**
+   * How far this replica has consumed the room's DURABLE STREAM — the count of
+   * `ydoc_updates` rows folded in via {@link catchUp} (E3, #203). It is the
+   * server-replica half of the freshness gate on `certifyObjectSpan`: a mint is
+   * refused when this trails the stream head at request time (the replica lags,
+   * so its content may be stale). Advanced ONLY by {@link catchUp} — the durable
+   * stream is the only thing that moves a stream position; an in-process
+   * authenticated apply is content, not a consumed stream row, so it never
+   * advances it. Distinct from #209's CLIENT freshness witness (this proves the
+   * SERVER replica is caught up to the stream, not that a client saw a fragment).
+   */
+  private streamPosition = 0;
+
   constructor(convo: ConversationDoc = new ConversationDoc()) {
     this.convo = convo;
+  }
+
+  /**
+   * The durable-stream position this replica has consumed to — the number of
+   * `ydoc_updates` rows folded in via {@link catchUp}. The freshness gate compares
+   * this against the stream head captured at certify-request time and REFUSES to
+   * mint when this trails it (fail-closed: never anchor content a lagging replica
+   * has not yet caught up to). See {@link streamPosition}.
+   */
+  consumedStreamPosition(): number {
+    return this.streamPosition;
   }
 
   /** The wrapped conversation — its `bodyPath`, `messages`, `model`, `contentFragment`. */
@@ -214,16 +238,51 @@ export class ServerRoomReplica {
   }
 
   /**
-   * Fold a whole-doc / catch-up update into the replica WITHOUT authorship. This
-   * is the convergence-only path — a catch-up from the durable stream's history
-   * whose per-item authenticated writer this process did not itself observe. Items
-   * it integrates are UNATTRIBUTED (`authenticatedAuthorOf === null` ⇒ unknown),
-   * fail-closed, until an authenticated write re-establishes authorship. Kept
-   * distinct from {@link applyAuthenticatedUpdate} on purpose: convergence is not
-   * authorship, and conflating them is the exact hole P6F-1 routed here.
+   * Fold ONE durable-stream row's update into the replica, replaying its PERSISTED
+   * authorship (E3, #203 — the load-bearing property). This is the catch-up path
+   * the {@link RoomReplicaManager} drives per `ydoc_updates` row during Electric
+   * catch-up: the row's opaque `op` bytes converge the content AND its persisted
+   * `writer_user_id`/`writer_kind` stamp (migration 0054) re-establishes authorship
+   * — so after a COLD RESTART `authenticatedAuthorOf` returns the ORIGINAL writers
+   * from DATA, never fail-closed-unknown. `writer === null` (a `system` row, or a
+   * pre-0054 row that carries no author) folds content WITHOUT authorship, exactly
+   * as before: those items read as unknown, fail-closed.
+   *
+   * ## RANGE-EXACT, and ORDER-INDEPENDENT — why it uses `parseUpdateMeta`, not the
+   * state-vector delta {@link applyAuthenticatedUpdate} uses.
+   *
+   * The stamp must land on the `(client, clock)` ranges THIS row's op introduces,
+   * and nothing else — an off-by-one would attribute a NEIGHBOR's item to the wrong
+   * writer. `parseUpdateMeta(op)` reads the exact per-client `[from, to)` ranges the
+   * op's own structs carry, INTRINSIC to the bytes: it does not depend on what is
+   * already integrated, on whether this row's deps have arrived yet, or on the order
+   * rows are replayed in. (The SV-delta the live path uses is right THERE — the
+   * connection delivered exactly the newly-integrated items — but wrong here: a row
+   * replayed before its causal dependency integrates NOTHING, so an after-minus-before
+   * delta would be empty and the stamp would be lost, then mis-charged to whichever
+   * later row happens to fill the gap.) Recording the op's declared ranges instead
+   * means a replay in ANY order lands every stamp on its own item, and the ledger's
+   * first-writer-wins makes a re-consumed row (a duplicate stream read) a no-op.
+   *
+   * A PEER RACING APPENDS AROUND A RESTART cannot poison this: its live authenticated
+   * writes land on NEW `(client, clock)` items under the peer's own clocks and its own
+   * identity, and the ledger's first-writer-wins protects every range a replayed stamp
+   * already claimed — a later apply of an already-attributed clock never re-homes it.
    */
-  catchUp(update: Uint8Array): void {
+  catchUp(update: Uint8Array, writer: WriterIdentity | null = null): void {
+    // Record the stamp over the op's OWN declared ranges FIRST — from the bytes,
+    // before integration — so attribution is range-exact and independent of whether
+    // this row's causal deps have arrived yet or of the order rows are replayed in.
+    if (writer !== null) {
+      const meta = Y.parseUpdateMeta(update);
+      for (const [client, to] of meta.to) {
+        const from = meta.from.get(client) ?? 0;
+        if (to > from) this.ledger.record(client, from, to, writer);
+      }
+    }
     Y.applyUpdate(this.convo.doc, update);
+    // One durable-stream row consumed — advance the freshness position (E3, #203).
+    this.streamPosition += 1;
   }
 
   /**
@@ -336,38 +395,37 @@ export function clearServerReplicas(): void {
 }
 
 /* ─────────────────────────────────────────────────────────────────────────────
- * NAMED INFRA GAP — what the PRODUCTION server replica needs beyond this seam.
+ * THE PRODUCTION SERVER REPLICA — E3 (#203) retired the four named gaps this block
+ * used to list. What each was, and where it now lives:
  *
- *  1. THE CATCH-UP SOURCE. This replica converges from a `ConversationTransport`.
- *     In production that is `electricConversationTransport(config)` over Electric
- *     Durable Streams, which needs (electric-transport.ts, verbatim): an Electric
- *     sync service in front of Postgres with `wal_level = logical`; the
- *     `ydoc_updates` / `ydoc_awareness` bytea tables; and a write endpoint that
- *     appends `op` rows. None stands up in-sandbox — hence the in-memory hub here.
+ *  1. THE CATCH-UP SOURCE — was "converges only from a `ConversationTransport`".
+ *     Now `RoomReplicaManager` ({@link ./room-replica-manager}) catches a replica
+ *     up from the durable stream itself: a snapshot of the room's `ydoc_updates`
+ *     rows in stream order (the Electric shape's rows), folded via {@link catchUp}.
+ *     No in-process append feed — the row is the source of truth.
  *
- *  2. THE AUTHENTICATED-WRITE INGRESS. `applyAuthenticatedUpdate(update, writer)`
- *     is driven directly in tests. In production the writer comes from the ws
- *     server's AUTHENTICATED connection (`AtriumSession`, ws-presence-server.ts /
- *     #187): a client's Yjs update arrives as an authenticated frame, the server
- *     resolves `writer = { userId, principalKind }` from the connection's session,
- *     calls this method, and fans the update out to peers. Wiring that frame into
- *     `ws-presence-server.ts`'s command path is the follow-up; the binding it
- *     needs is exactly this method's signature.
+ *  2. THE LIFECYCLE / INGRESS — `RoomReplicaManager` lazy-starts a replica on first
+ *     need and idle-evicts it; eviction is FAIL-CLOSED ({@link serverReplicaFor}
+ *     ⇒ `null` ⇒ the reader yields `~`, never a stale `✓`). The authenticated-write
+ *     ingress ({@link applyAuthenticatedUpdate}) is still the ws server's job to
+ *     wire (its writer comes from the connection's `AtriumSession`), but the door
+ *     it writes THROUGH — the `ydoc_updates` append that stamps the writer — is E2
+ *     (#202); the replica reads that stamp back on catch-up.
  *
- *  3. HISTORICAL AUTHORSHIP ACROSS A SERVER RESTART. The ledger is in-process, so
- *     a replica caught up from the durable stream after a restart sees content but
- *     not the per-item authenticated writer that produced it (⇒ {@link catchUp}
- *     attributes nothing; those items read as unknown, fail-closed). To make
- *     authorship survive a restart, the authenticated writer must be PERSISTED
- *     alongside each durable update (a signed authorship envelope, or an
- *     append-time `writer` column keyed to the update's item ranges) and replayed
- *     into the ledger on catch-up. Fail-closed-to-unknown is the safe interim: it
- *     never mis-attributes, it only declines to vouch.
+ *  3. AUTHORSHIP ACROSS A COLD RESTART — RETIRED, the load-bearing property. E2
+ *     (migration 0054) persists `writer_user_id`/`writer_kind` on every row; E3
+ *     replays that stamp into the ledger, RANGE-EXACT, as {@link catchUp} folds each
+ *     row (see that method). After a restart `authenticatedAuthorOf` returns the
+ *     ORIGINAL writers from DATA — no longer fail-closed-to-unknown.
  *
- *  4. THE REGISTRY'S TOPOLOGY. `registry` is per-process. The certify Server
- *     Action (`apps/web`) and the replica-maintaining ws server (`apps/server`)
- *     are separate processes in the shipped topology, so in production the action
- *     must reach the replica the ws server maintains — co-locate them in one
- *     process, or expose an internal authoritative-read RPC the action calls. The
- *     registry is the seam that swap slots into without touching `liveCovenantDoc`.
+ *  4. THE REGISTRY'S TOPOLOGY — the web process's replica IS its authority (NO RPC):
+ *     the certify path lazy-starts and reads the SAME in-process replica through this
+ *     registry, so there is no cross-process reach to broker. Two web processes each
+ *     catch up independently from the shared durable stream and converge to identical
+ *     content — the registry stays the per-process seam `liveCovenantDoc` reads.
+ *
+ * What remains genuinely infra-pending is the LIVE Electric subscription (streaming
+ * new rows into a warm replica between catch-ups) and the ws authenticated-write
+ * ingress — both need an Electric service / ws server the sandbox cannot stand up.
+ * The catch-up + freshness + authorship-replay seam is complete and compose-tested.
  * ───────────────────────────────────────────────────────────────────────────── */

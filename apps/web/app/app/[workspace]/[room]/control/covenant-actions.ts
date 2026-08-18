@@ -4,9 +4,25 @@ import { type CertifyAnchorOutcome, certifyObjectSpan } from '@/lib/certify-anch
 import { type BodyPath, readerForLiveDoc } from '@/lib/covenant-reader';
 import { db } from '@/lib/db';
 import { liveCovenantDoc } from '@/lib/live-covenant-doc';
+import { dbYdocStreamSource, RoomReplicaManager } from '@/lib/room-replica-manager';
+import { serverReplicaFor } from '@/lib/server-room-replica';
 import { requireSession } from '@/lib/session';
 import { loadRoom, loadWorkspace } from '@/lib/workspaces';
 import { CertifyObjectSpanInput } from './covenant-actions-input';
+
+/**
+ * The process's room-replica manager (E3, #203). Lazy-starts a room's server-
+ * authoritative replica from the durable `ydoc_updates` stream on first need,
+ * registers it so `liveCovenantDoc` resolves it, and idle-evicts it fail-closed.
+ * One per process — the web process's replica IS its authority (NO RPC). Held on
+ * `globalThis` so hot reload does not orphan a live replica behind a fresh manager.
+ */
+const replicaManager = ((): RoomReplicaManager => {
+  const key = Symbol.for('atrium.web.room-replica-manager');
+  const holder = globalThis as unknown as { [key]?: RoomReplicaManager };
+  holder[key] ??= new RoomReplicaManager({ source: dbYdocStreamSource(db()) });
+  return holder[key];
+})();
 
 /**
  * CERTIFY AN OBJECT/SPAN — the human-only gesture that mints a covenant anchor
@@ -64,6 +80,13 @@ export async function certifyObjectSpanAction(raw: unknown): Promise<CertifyAnch
   const room = await loadRoom(workspace.id, roomSlug, session.userId);
   if (!room) return { ok: false, reason: 'not_in_room' };
 
+  /* THE SERVER REPLICA (E3, #203). The stream head at REQUEST TIME is what the
+     replica must have caught up to; capture it first, then lazy-start (or reuse) the
+     replica from the durable stream — a fresh catch-up reaches at least this head, a
+     reused warm replica that trails it is refused below (`replica_lagging`). */
+  const requiredPosition = await replicaManager.streamHead(room.id);
+  await replicaManager.acquire(room.id);
+
   /* The authoritative server reader over the live doc, positioned on the human's
      selection. `liveCovenantDoc` provides the doc handle AND the content share
      (#194's seam); an absent handle fails closed (DRIFT / no capture) in the reader,
@@ -78,5 +101,13 @@ export async function certifyObjectSpanAction(raw: unknown): Promise<CertifyAnch
     authorizedRoomId: room.id,
     objectId,
     reader,
+    /* Refuse to mint if the replica lags the request-time stream head — never anchor
+       content the server replica has not caught up to. An evicted/absent replica reads
+       `-Infinity` and refuses (fail-closed). Distinct from #209's client witness. */
+    streamFreshness: {
+      requiredPosition,
+      consumedPosition: () =>
+        serverReplicaFor(room.id)?.consumedStreamPosition() ?? Number.NEGATIVE_INFINITY,
+    },
   });
 }

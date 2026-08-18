@@ -16,12 +16,20 @@ import { defineConfig } from 'vitest/config';
  */
 
 const src = (path: string) => fileURLToPath(new URL(path, import.meta.url));
+/** The webapp root, for the `@/` alias below (mirrors apps/web's own `@/*` → `./*`). */
+const webRoot = fileURLToPath(new URL('./apps/web/', import.meta.url));
 
 export default defineConfig({
   resolve: {
     // Array form, because order decides: `@atrium/db/schema` has to be matched
     // before the bare `@atrium/db` prefix would swallow it.
     alias: [
+      // The webapp's own `@/*` alias, so an integration test may import a server
+      // library that resolves siblings through it — the E3 server replica
+      // (`apps/web/lib/server-room-replica.ts` → the prototype `ConversationDoc`)
+      // is the first to. `@/` only (not `@atrium/`), matched as a prefix; mirrors
+      // `integration/tsconfig.json`'s `@/*` path so the runner runs what tsc checks.
+      { find: /^@\//, replacement: webRoot },
       { find: /^@atrium\/db\/schema$/, replacement: src('./packages/db/src/schema.ts') },
       { find: /^@atrium\/db$/, replacement: src('./packages/db/src/index.ts') },
       { find: /^@atrium\/core$/, replacement: src('./packages/core/src/index.ts') },
@@ -53,6 +61,16 @@ export default defineConfig({
       { find: /^server-only$/, replacement: src('./apps/web/node_modules/server-only/empty.js') },
     ],
   },
+  /**
+   * Force OXC's automatic JSX transform for any `.tsx` a server library pulls in
+   * transitively (the E3 replica → `ConversationDoc` → the `@/src/components/model`
+   * barrel, whose value exports live beside a `.tsx`). Without this, vite@8's OXC
+   * transformer honours Next's per-file `jsx: "preserve"` (apps/web/tsconfig) and
+   * leaves raw JSX in the output — "invalid JS syntax". `apps/web/vitest.config.ts`
+   * achieves the same with `@vitejs/plugin-react`; this node-env suite needs only the
+   * transform, not the DOM/refresh plugin. Non-JSX files are unaffected.
+   */
+  oxc: { jsx: { runtime: 'automatic' } },
   test: {
     name: 'integration',
     environment: 'node',
