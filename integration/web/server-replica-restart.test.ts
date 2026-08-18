@@ -9,7 +9,7 @@ import {
   ConversationDoc,
   conversationContentRoot,
 } from '../../apps/web/app/prototype/yjs-conversation.js';
-import { certifyObjectSpan } from '../../apps/web/lib/certify-anchor.js';
+import { certifyObjectSpan, REPLICA_ABSENT_POSITION } from '../../apps/web/lib/certify-anchor.js';
 import { CovenantDocReaderProd, readerForLiveDoc } from '../../apps/web/lib/covenant-reader.js';
 import { liveCovenantDoc } from '../../apps/web/lib/live-covenant-doc.js';
 import { roomCovenantReads } from '../../apps/web/lib/room-covenant-reads.js';
@@ -151,7 +151,7 @@ describe('authorship survives a cold restart via the durable stream (acceptance 
       userId: room.people.hexi,
       principalKind: 'agent',
     });
-    expect(replica.consumedStreamPosition()).toBe(3);
+    expect(replica.consumedStreamPosition()).toBe(3n);
     manager.evictAll();
   });
 
@@ -171,7 +171,7 @@ describe('authorship survives a cold restart via the durable stream (acceptance 
       userId: room.people.ada,
       principalKind: 'human',
     });
-    expect(replica?.consumedStreamPosition()).toBe(1); // one durable row, not two
+    expect(replica?.consumedStreamPosition()).toBe(1n); // one durable row, not two
     manager.evictAll();
   });
 });
@@ -218,7 +218,7 @@ describe('the freshness gate refuses a lagging replica, then mints once caught u
       streamFreshness: {
         requiredPosition: head1,
         consumedPosition: () =>
-          serverReplicaFor(room.roomId)?.consumedStreamPosition() ?? Number.NEGATIVE_INFINITY,
+          serverReplicaFor(room.roomId)?.consumedStreamPosition() ?? REPLICA_ABSENT_POSITION,
       },
     });
     expect(minted.ok).toBe(true);
@@ -231,7 +231,7 @@ describe('the freshness gate refuses a lagging replica, then mints once caught u
     ada2.append(msg('m2', 'delta epsilon'));
     await appendThroughDoor(handle, room.roomId, room.people.ada as string, delta(ada2, svBefore));
     const head2 = await manager.streamHead(room.roomId);
-    expect(head2).toBe(head1 + 1);
+    expect(head2).toBe(head1 + 1n);
     expect(replica.consumedStreamPosition()).toBe(head1); // still behind
 
     // A certify against the lagging replica is REFUSED — not a stale anchor.
@@ -244,7 +244,7 @@ describe('the freshness gate refuses a lagging replica, then mints once caught u
       streamFreshness: {
         requiredPosition: head2,
         consumedPosition: () =>
-          serverReplicaFor(room.roomId)?.consumedStreamPosition() ?? Number.NEGATIVE_INFINITY,
+          serverReplicaFor(room.roomId)?.consumedStreamPosition() ?? REPLICA_ABSENT_POSITION,
       },
     });
     expect(lagging).toEqual({ ok: false, reason: 'replica_lagging' });
@@ -270,7 +270,7 @@ describe('the freshness gate refuses a lagging replica, then mints once caught u
       streamFreshness: {
         requiredPosition: head2,
         consumedPosition: () =>
-          serverReplicaFor(room.roomId)?.consumedStreamPosition() ?? Number.NEGATIVE_INFINITY,
+          serverReplicaFor(room.roomId)?.consumedStreamPosition() ?? REPLICA_ABSENT_POSITION,
       },
     });
     expect(mintedAfter.ok).toBe(true);
@@ -318,7 +318,7 @@ describe('the freshness gate refuses a lagging replica, then mints once caught u
         streamFreshness: {
           requiredPosition,
           consumedPosition: () =>
-            serverReplicaFor(room.roomId)?.consumedStreamPosition() ?? Number.NEGATIVE_INFINITY,
+            serverReplicaFor(room.roomId)?.consumedStreamPosition() ?? REPLICA_ABSENT_POSITION,
         },
       });
       return outcome.ok;
@@ -337,7 +337,7 @@ describe('the freshness gate refuses a lagging replica, then mints once caught u
     // The SECOND certify — WITHOUT any manual evict — must catch the warm replica up on
     // acquire and MINT, not refuse `replica_lagging` forever. This is the blocker.
     expect(await certify(o2, 'm2')).toBe(true);
-    expect(serverReplicaFor(room.roomId)?.consumedStreamPosition()).toBe(2);
+    expect(serverReplicaFor(room.roomId)?.consumedStreamPosition()).toBe(2n);
     manager.evictAll();
   });
 
@@ -375,8 +375,8 @@ describe('the freshness gate refuses a lagging replica, then mints once caught u
     // The good row folded; the poison row was quarantined ⇒ the replica trails the head.
     expect(replica?.conversation.body('m1')?.toString()).toBe('alpha beta gamma');
     const head = await manager.streamHead(room.roomId);
-    expect(head).toBe(2);
-    expect(replica?.consumedStreamPosition()).toBe(1);
+    expect(head).toBe(2n);
+    expect(replica?.consumedStreamPosition()).toBe(1n);
 
     // certify against the lagging (poisoned) room is a CLEAN refusal, never a 500.
     const live = liveCovenantDoc(room.roomId);
@@ -391,7 +391,7 @@ describe('the freshness gate refuses a lagging replica, then mints once caught u
       streamFreshness: {
         requiredPosition: head,
         consumedPosition: () =>
-          serverReplicaFor(room.roomId)?.consumedStreamPosition() ?? Number.NEGATIVE_INFINITY,
+          serverReplicaFor(room.roomId)?.consumedStreamPosition() ?? REPLICA_ABSENT_POSITION,
       },
     });
     expect(outcome).toEqual({ ok: false, reason: 'replica_lagging' });
@@ -423,8 +423,8 @@ describe('#203 CLASS on a REAL stream: a visibility-hole reorder folds the missi
     // The REAL durable rows, in seq order, from Postgres.
     const real = dbYdocStreamSource(handle.db);
     const all = await real.snapshot(room.roomId);
-    expect(all.map((r) => r.streamSeq)).toEqual([1, 2, 3]);
-    const midSeq = all[1]?.streamSeq as number; // 2 — the row the hole hides
+    expect(all.map((r) => r.streamSeq)).toEqual([1n, 2n, 3n]);
+    const midSeq = all[1]?.streamSeq as bigint; // 2 — the row the hole hides
 
     // A source that reads real rows but momentarily HIDES the middle seq from the
     // SNAPSHOT while the HEAD (max seq) already sees it — the visibility hole. Keyed on
@@ -443,14 +443,14 @@ describe('#203 CLASS on a REAL stream: a visibility-hole reorder folds the missi
     const first = await manager.acquire(room.roomId);
     if (first === null) throw new Error('first acquire must catch up');
     expect(first.conversation.body('m2')).toBeNull(); // the hidden middle row
-    expect(first.consumedStreamPosition()).toBe(1); // gap at seq 2 holds the prefix at 1
+    expect(first.consumedStreamPosition()).toBe(1n); // gap at seq 2 holds the prefix at 1
     expect(first.consumedStreamPosition()).toBeLessThan(await manager.streamHead(room.roomId));
 
     reveal = true;
     const caughtUp = await manager.acquire(room.roomId);
     expect(caughtUp).toBe(first); // same warm object, re-caught-up
     expect(caughtUp?.conversation.body('m2')?.toString()).toBe('beta'); // once-missing row folded
-    expect(caughtUp?.consumedStreamPosition()).toBe(3);
+    expect(caughtUp?.consumedStreamPosition()).toBe(3n);
     expect(caughtUp?.consumedStreamPosition()).toBe(await manager.streamHead(room.roomId));
     manager.evictAll();
   });
@@ -510,8 +510,8 @@ describe('#203 CLASS on a REAL stream: a visibility-hole reorder folds the missi
     // stuck at 1 below a head of 3 — the room can never certify while the poison sits
     // in the stream, exactly the fail-closed the ticket asks for.
     const head = await manager.streamHead(room.roomId);
-    expect(head).toBe(3);
-    expect(replica.consumedStreamPosition()).toBe(1);
+    expect(head).toBe(3n);
+    expect(replica.consumedStreamPosition()).toBe(1n);
     expect(replica.consumedStreamPosition()).toBeLessThan(head);
     manager.evictAll();
   });
@@ -554,7 +554,7 @@ describe('the READ path lazy-starts the replica so authorship reaches the glyphs
       streamFreshness: {
         requiredPosition: head,
         consumedPosition: () =>
-          serverReplicaFor(room.roomId)?.consumedStreamPosition() ?? Number.NEGATIVE_INFINITY,
+          serverReplicaFor(room.roomId)?.consumedStreamPosition() ?? REPLICA_ABSENT_POSITION,
       },
     });
     expect(minted.ok).toBe(true);
@@ -629,5 +629,57 @@ describe('two web processes converge independently and resolve identical glyphs 
     } finally {
       await handleB.close();
     }
+  });
+});
+
+describe('#203 BIGINT HYGIENE: the durable head is read as an exact bigint at any magnitude', () => {
+  it('a stream head above 2^31 (and above 2^53) is returned exactly — never a `::int` 500, never narrowed', async () => {
+    // The real column is a Postgres `bigint`. The head query used to cast `max(...)::int`,
+    // which RAISES `integer out of range` once a room's stream_seq passes 2^31 — a 500 on
+    // certify instead of a clean `replica_lagging`. And a JS `number` cannot hold a value
+    // above 2^53. This proves `dbYdocStreamSource.head` returns each exact bigint without
+    // throwing — the whole point of reading it as `::text` → `BigInt` instead of `::int`.
+    //
+    // The mint (`max(stream_seq)+1` under a lock) cannot be fast-forwarded to 2^31, so the
+    // big-seq rows are seeded DIRECTLY. The append accident-check guard (migration 0009 —
+    // explicitly a NON-boundary) is bypassed the documented operator way,
+    // `session_replication_role = replica`, set LOCAL inside one transaction so the seed
+    // rows land on the same connection; this only stands in for the mint, it does not
+    // touch any covenant rule.
+    const room = await seedRoom(handle, ['ada']);
+    const source = dbYdocStreamSource(handle.db);
+
+    const c1 = new ConversationDoc();
+    c1.append(msg('m1', 'above int32'));
+    const op1 = Buffer.from(Y.encodeStateAsUpdate(c1.doc));
+    const c2 = new ConversationDoc();
+    c2.append(msg('m2', 'above 2^53'));
+    const op2 = Buffer.from(Y.encodeStateAsUpdate(c2.doc));
+
+    const SEQ_31 = 2n ** 31n + 7n; // 2_147_483_655 — an `::int` cast would 500 here
+    const SEQ_53 = 2n ** 53n + 7n; // 9_007_199_254_740_999 — beyond Number.MAX_SAFE_INTEGER
+
+    await handle.db.transaction(async (tx) => {
+      await tx.execute(sql`SET LOCAL session_replication_role = replica`);
+      await tx.execute(
+        sql`INSERT INTO ydoc_updates (room, op, stream_seq) VALUES (${room.roomId}::uuid, ${op1}::bytea, ${SEQ_31.toString()}::bigint)`,
+      );
+    });
+    // No throw (the `::int` path would have raised), and the value is EXACT.
+    expect(await source.head(room.roomId)).toBe(SEQ_31);
+
+    await handle.db.transaction(async (tx) => {
+      await tx.execute(sql`SET LOCAL session_replication_role = replica`);
+      await tx.execute(
+        sql`INSERT INTO ydoc_updates (room, op, stream_seq) VALUES (${room.roomId}::uuid, ${op2}::bytea, ${SEQ_53.toString()}::bigint)`,
+      );
+    });
+    // The max advances to the >2^53 row, carried without number narrowing.
+    const head = await source.head(room.roomId);
+    expect(head).toBe(SEQ_53); // the exact max, not a rounded 2^53
+    // A number-narrowed read would have collapsed distinct big seqs; the bigint keeps
+    // SEQ_53 strictly above SEQ_31 (and above 2^53 itself).
+    expect(head > SEQ_31).toBe(true);
+    expect(head > 2n ** 53n).toBe(true);
   });
 });

@@ -1,6 +1,10 @@
 'use server';
 
-import { type CertifyAnchorOutcome, certifyObjectSpan } from '@/lib/certify-anchor';
+import {
+  type CertifyAnchorOutcome,
+  certifyObjectSpan,
+  REPLICA_ABSENT_POSITION,
+} from '@/lib/certify-anchor';
 import { type BodyPath, readerForLiveDoc } from '@/lib/covenant-reader';
 import { db } from '@/lib/db';
 import { liveCovenantDoc } from '@/lib/live-covenant-doc';
@@ -94,7 +98,7 @@ export async function certifyObjectSpanAction(raw: unknown): Promise<CertifyAnch
     streamFreshness: {
       requiredPosition,
       consumedPosition: () =>
-        serverReplicaFor(room.id)?.consumedStreamPosition() ?? Number.NEGATIVE_INFINITY,
+        serverReplicaFor(room.id)?.consumedStreamPosition() ?? REPLICA_ABSENT_POSITION,
     },
   });
 }

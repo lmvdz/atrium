@@ -50,13 +50,14 @@ class FakeSource implements YdocStreamSource {
   async snapshot(roomId: string): Promise<readonly PersistedYdocUpdate[]> {
     this.calls.snapshot += 1;
     // Mint the per-room gap-free stream_seq (1..N) from the stored order — the
-    // stable row identity the replica dedupes and gap-detects on (#203).
-    return (this.store.get(roomId) ?? []).map((r, i) => ({ ...r, streamSeq: i + 1 }));
+    // stable row identity the replica dedupes and gap-detects on (#203). A bigint,
+    // exactly as `dbYdocStreamSource` now carries it.
+    return (this.store.get(roomId) ?? []).map((r, i) => ({ ...r, streamSeq: BigInt(i + 1) }));
   }
-  async head(roomId: string): Promise<number> {
+  async head(roomId: string): Promise<bigint> {
     this.calls.head += 1;
     // The head is the MAX stream_seq; the store is gap-free from 1, so that is its length.
-    return (this.store.get(roomId) ?? []).length;
+    return BigInt((this.store.get(roomId) ?? []).length);
   }
 }
 
@@ -87,7 +88,7 @@ describe('lazy-start: a replica is built from the stream on first need and regis
     expect(serverReplicaFor(ROOM)).toBe(replica); // registered for liveCovenantDoc
     expect(replica?.conversation.body('m1')?.toString()).toBe('ship it');
     expect(replica?.authenticatedAuthorOf('m1')).toEqual(ALICE); // stamp replayed
-    expect(replica?.consumedStreamPosition()).toBe(1);
+    expect(replica?.consumedStreamPosition()).toBe(1n);
   });
 
   it('a second acquire REUSES the same replica OBJECT — it does not rebuild from scratch', async () => {
@@ -106,7 +107,7 @@ describe('lazy-start: a replica is built from the stream on first need and regis
     const manager = new RoomReplicaManager({ source: new FakeSource(store) });
 
     const warm = await manager.acquire(ROOM);
-    expect(warm?.consumedStreamPosition()).toBe(1);
+    expect(warm?.consumedStreamPosition()).toBe(1n);
     expect(warm?.conversation.body('m2')).toBeNull(); // m2 not yet appended
 
     // A new durable row is appended. Without a live subscription the warm replica has
@@ -115,9 +116,9 @@ describe('lazy-start: a replica is built from the stream on first need and regis
     const caughtUp = await manager.acquire(ROOM);
 
     expect(caughtUp).toBe(warm); // same object…
-    expect(caughtUp?.consumedStreamPosition()).toBe(2); // …now caught up to head
+    expect(caughtUp?.consumedStreamPosition()).toBe(2n); // …now caught up to head
     expect(caughtUp?.conversation.body('m2')?.toString()).toBe('review it');
-    expect(await manager.streamHead(ROOM)).toBe(2);
+    expect(await manager.streamHead(ROOM)).toBe(2n);
   });
 });
 
@@ -132,15 +133,15 @@ describe('#203 CLASS: a visibility-hole reorder folds the missing middle row (st
     // distinct seq that folds cleanly.
     const c = new ConversationDoc();
     c.append(msg('m1', 'one'));
-    const r1 = { op: Y.encodeStateAsUpdate(c.doc), streamSeq: 1 };
+    const r1 = { op: Y.encodeStateAsUpdate(c.doc), streamSeq: 1n };
     const sv1 = Y.encodeStateVector(c.doc);
     c.append(msg('m2', 'two'));
-    const r2 = { op: Y.encodeStateAsUpdate(c.doc, sv1), streamSeq: 2 };
+    const r2 = { op: Y.encodeStateAsUpdate(c.doc, sv1), streamSeq: 2n };
     const sv2 = Y.encodeStateVector(c.doc);
     c.append(msg('m3', 'three'));
-    const r3 = { op: Y.encodeStateAsUpdate(c.doc, sv2), streamSeq: 3 };
+    const r3 = { op: Y.encodeStateAsUpdate(c.doc, sv2), streamSeq: 3n };
 
-    const mk = (r: { op: Uint8Array; streamSeq: number }): PersistedYdocUpdate => ({
+    const mk = (r: { op: Uint8Array; streamSeq: bigint }): PersistedYdocUpdate => ({
       op: r.op,
       writerUserId: 'u_alice',
       writerKind: 'human',
@@ -155,7 +156,7 @@ describe('#203 CLASS: a visibility-hole reorder folds the missing middle row (st
         return reveal ? [mk(r1), mk(r2), mk(r3)] : [mk(r1), mk(r3)];
       },
       async head() {
-        return 3;
+        return 3n;
       },
     };
     const manager = new RoomReplicaManager({ source });
@@ -164,7 +165,7 @@ describe('#203 CLASS: a visibility-hole reorder folds the missing middle row (st
     // position is 1 (the gap at seq 2), BELOW the head of 3 — the gate would refuse.
     const first = await manager.acquire(ROOM);
     expect(first?.conversation.body('m2')).toBeNull(); // the middle row is not here yet
-    expect(first?.consumedStreamPosition()).toBe(1);
+    expect(first?.consumedStreamPosition()).toBe(1n);
     expect(first?.consumedStreamPosition()).toBeLessThan(await manager.streamHead(ROOM));
 
     // The hole fills. A re-acquire re-catches-up: seq 2 folds (it never deduped away),
@@ -173,7 +174,7 @@ describe('#203 CLASS: a visibility-hole reorder folds the missing middle row (st
     const caughtUp = await manager.acquire(ROOM);
     expect(caughtUp).toBe(first); // same warm object
     expect(caughtUp?.conversation.body('m2')?.toString()).toBe('two'); // the once-missing row
-    expect(caughtUp?.consumedStreamPosition()).toBe(3);
+    expect(caughtUp?.consumedStreamPosition()).toBe(3n);
     expect(caughtUp?.consumedStreamPosition()).toBe(await manager.streamHead(ROOM));
   });
 });
@@ -195,9 +196,9 @@ describe('BLOCKER-2: a poison row does not crash acquire — it is quarantined, 
     expect(replica).not.toBeNull();
     // The good row folded; the poison row was quarantined (not counted).
     expect(replica?.conversation.body('m1')?.toString()).toBe('the honest reading');
-    expect(replica?.consumedStreamPosition()).toBe(1); // one of two rows applied
+    expect(replica?.consumedStreamPosition()).toBe(1n); // one of two rows applied
     // Head counts both rows, so the replica trails it — certify refuses cleanly.
-    expect(await manager.streamHead(ROOM)).toBe(2);
+    expect(await manager.streamHead(ROOM)).toBe(2n);
     expect(replica?.consumedStreamPosition()).toBeLessThan(await manager.streamHead(ROOM));
   });
 });
@@ -269,7 +270,7 @@ describe('a stream that cannot be read fails closed — no half-caught-up replic
       snapshot: async () => {
         throw new Error('stream unreachable');
       },
-      head: async () => 0,
+      head: async () => 0n,
     };
     const manager = new RoomReplicaManager({ source });
     const replica = await manager.acquire(ROOM);
@@ -278,13 +279,62 @@ describe('a stream that cannot be read fails closed — no half-caught-up replic
   });
 });
 
-describe('streamHead reports the durable head for the freshness gate', () => {
-  it('delegates to the source and reflects appended rows', async () => {
-    const rows = [row('m1', 'a', 'u_alice', 'human')];
-    const store = new Map([[ROOM, rows]]);
-    const manager = new RoomReplicaManager({ source: new FakeSource(store) });
-    expect(await manager.streamHead(ROOM)).toBe(1);
-    rows.push(row('m2', 'b', 'u_alice', 'human'));
-    expect(await manager.streamHead(ROOM)).toBe(2);
+/* `streamHead` reports the durable head (max stream_seq) for the freshness gate.
+ * The old unit test here asserted `streamHead === FakeSource.head`, where the fake's
+ * head is `store.length` — a tautology (it proved the fake, not that the head is the
+ * MAX stream_seq rather than a row count). Deleted rather than kept, because the REAL
+ * property is covered where it can actually be exercised:
+ *   - HEAD-IS-MAX-NOT-COUNT, with a gap: the '#203 CLASS' test above drives a source
+ *     whose head is a constant 3 while the snapshot exposes only 2 rows (seq 2 hidden),
+ *     so the gate compares against the max (3), not the visible count (2);
+ *   - HEAD = real `max(stream_seq)` over a gapped stream: `integration/web/
+ *     server-replica-restart.test.ts` runs the real `dbYdocStreamSource.head` against
+ *     Postgres and asserts head = 3 with a quarantined seq-2 gap (and head = 2 with a
+ *     poison row) — the actual SQL a unit fake can never stand in for. */
+
+describe('#203 BIGINT HYGIENE: big stream positions carry through the manager without narrowing', () => {
+  it('a head above 2^31 and 2^53 is returned EXACTLY, and a big seq folds/dedupes with no throw', async () => {
+    // Heads a JS `number` mishandles: >2^31 (an `::int` head would 500) and >2^53
+    // (Number.MAX_SAFE_INTEGER — a number would lose the low bits). streamHead must
+    // carry each as an exact bigint.
+    const HEAD_31 = 2n ** 31n + 7n;
+    const HEAD_53 = 2n ** 53n + 7n;
+
+    // A durable row that genuinely SITS at a big seq — its op folds, its big seq is the
+    // dedupe/gap key. The head sits one above it, so the replica lags (fail-closed).
+    const c = new ConversationDoc();
+    c.append(msg('m1', 'ship it'));
+    const bigRow: PersistedYdocUpdate = {
+      op: Y.encodeStateAsUpdate(c.doc),
+      writerUserId: 'u_alice',
+      writerKind: 'human',
+      streamSeq: HEAD_53,
+    };
+
+    for (const head of [HEAD_31, HEAD_53]) {
+      const source: YdocStreamSource = {
+        async snapshot() {
+          return [bigRow];
+        },
+        async head() {
+          return head;
+        },
+      };
+      const manager = new RoomReplicaManager({ source });
+
+      // No throw at any boundary, and the head is the EXACT bigint (not narrowed).
+      expect(await manager.streamHead(ROOM)).toBe(head);
+
+      // The big-seq row folds (content present, seq deduped), and — since seq 1..N-1 are
+      // absent — the contiguous position stays 0, strictly below the head: the replica
+      // correctly reads as lagging rather than false-passing off a narrowed compare.
+      const replica = await manager.acquire(ROOM);
+      expect(replica?.conversation.body('m1')?.toString()).toBe('ship it');
+      expect(replica?.consumedStreamPosition()).toBe(0n); // gap from seq 1 holds it at 0
+      expect(replica?.consumedStreamPosition()).toBeLessThan(await manager.streamHead(ROOM));
+
+      manager.evictAll();
+      clearServerReplicas();
+    }
   });
 });

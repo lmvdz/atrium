@@ -41,8 +41,8 @@ describe('authorship survives a cold restart — the stamp is replayed into the 
     // COLD RESTART: a fresh process, an empty ledger, rebuilding from the rows +
     // their persisted stamps.
     const restarted = new ServerRoomReplica();
-    restarted.catchUp(rowAlice, ALICE, 1);
-    restarted.catchUp(rowBob, BOB, 2);
+    restarted.catchUp(rowAlice, ALICE, 1n);
+    restarted.catchUp(rowBob, BOB, 2n);
 
     expect(restarted.conversation.body('m1')?.toString()).toBe('ship the migration');
     expect(restarted.conversation.body('m2')?.toString()).toBe('reviewed and approved');
@@ -57,7 +57,7 @@ describe('authorship survives a cold restart — the stamp is replayed into the 
     const row = Y.encodeStateAsUpdate(hexi.doc);
 
     const restarted = new ServerRoomReplica();
-    restarted.catchUp(row, HEXI, 1);
+    restarted.catchUp(row, HEXI, 1n);
     expect(restarted.authenticatedAuthorOf('a1')).toEqual(HEXI);
   });
 
@@ -67,7 +67,7 @@ describe('authorship survives a cold restart — the stamp is replayed into the 
     const row = Y.encodeStateAsUpdate(c.doc);
 
     const restarted = new ServerRoomReplica();
-    restarted.catchUp(row, null, 1); // a `system` row maps to a null writer
+    restarted.catchUp(row, null, 1n); // a `system` row maps to a null writer
     expect(restarted.conversation.body('m1')?.toString()).toBe('arrived with no author');
     expect(restarted.authenticatedAuthorOf('m1')).toBeNull();
   });
@@ -86,8 +86,8 @@ describe('the replay is RANGE-EXACT — a row’s stamp lands on its OWN items, 
     const rowB = Y.encodeStateAsUpdate(convo.doc, svA); // only m2's items, starting at A's frontier
 
     const restarted = new ServerRoomReplica();
-    restarted.catchUp(rowA, ALICE, 1); // rowA's declared range ⇒ Alice
-    restarted.catchUp(rowB, BOB, 2); // rowB's declared range ⇒ Bob
+    restarted.catchUp(rowA, ALICE, 1n); // rowA's declared range ⇒ Alice
+    restarted.catchUp(rowB, BOB, 2n); // rowB's declared range ⇒ Bob
 
     // Range-exact: m1's content is entirely Alice's, m2's entirely Bob's. An
     // off-by-one that let rowB's stamp reach one clock into rowA's range would make
@@ -116,12 +116,12 @@ describe('the replay is RANGE-EXACT — a row’s stamp lands on its OWN items, 
     // The row's stream seq is INTRINSIC (seq 1 = Alice's, 2 = Bob's),
     // regardless of the order they are replayed in.
     const forward = new ServerRoomReplica();
-    forward.catchUp(rowAlice, ALICE, 1);
-    forward.catchUp(rowBobFull, BOB, 2);
+    forward.catchUp(rowAlice, ALICE, 1n);
+    forward.catchUp(rowBobFull, BOB, 2n);
 
     const reverse = new ServerRoomReplica();
-    reverse.catchUp(rowBobFull, BOB, 2); // Bob's full-state row replayed FIRST…
-    reverse.catchUp(rowAlice, ALICE, 1); // …then Alice's genuine row.
+    reverse.catchUp(rowBobFull, BOB, 2n); // Bob's full-state row replayed FIRST…
+    reverse.catchUp(rowAlice, ALICE, 1n); // …then Alice's genuine row.
 
     for (const replica of [forward, reverse]) {
       expect(replica.conversation.body('m1')?.toString()).toBe('the original reading');
@@ -140,13 +140,13 @@ describe('the replay is RANGE-EXACT — a row’s stamp lands on its OWN items, 
     const row = Y.encodeStateAsUpdate(convo.doc);
 
     const restarted = new ServerRoomReplica();
-    restarted.catchUp(row, ALICE, 1);
+    restarted.catchUp(row, ALICE, 1n);
     // The same durable row (same stream seq) read again, and even (adversarially)
     // with a different stamp: the seq is already applied, so the second read is a
     // no-op — Alice is never re-homed, and the freshness position does not inflate.
-    restarted.catchUp(row, MALLORY, 1);
+    restarted.catchUp(row, MALLORY, 1n);
     expect(restarted.authenticatedAuthorOf('m1')).toEqual(ALICE);
-    expect(restarted.consumedStreamPosition()).toBe(1);
+    expect(restarted.consumedStreamPosition()).toBe(1n);
   });
 });
 
@@ -158,7 +158,7 @@ describe('a peer racing appends around a restart cannot poison replayed attribut
 
     // Restart: catch up Alice's row.
     const restarted = new ServerRoomReplica();
-    restarted.catchUp(row, ALICE, 1);
+    restarted.catchUp(row, ALICE, 1n);
     expect(restarted.authenticatedAuthorOf('m1')).toEqual(ALICE);
 
     // Mallory races an authenticated append of m2 right after the restart.
@@ -181,37 +181,51 @@ describe('a peer racing appends around a restart cannot poison replayed attribut
     const row = Y.encodeStateAsUpdate(alice.doc);
 
     const restarted = new ServerRoomReplica();
-    restarted.catchUp(row, ALICE, 1);
+    restarted.catchUp(row, ALICE, 1n);
     // Mallory replays Alice's exact bytes over her own authenticated connection.
     restarted.applyAuthenticatedUpdate(row, MALLORY);
     expect(restarted.authenticatedAuthorOf('m1')).toEqual(ALICE);
   });
 });
 
-describe('the freshness position advances one per consumed row', () => {
-  it('consumedStreamPosition equals the number of rows folded in', () => {
+describe('the freshness position is the highest CONTIGUOUS seq, and a live apply never advances it', () => {
+  it('consumedStreamPosition is the highest-CONTIGUOUS seq (NOT a row count), and a live authenticated apply holds it', () => {
+    // Four seqs exist (1,2,3,4) but seq 3 is a GAP: fold seqs 1, 2, 4. A COUNT of
+    // folded rows would read 3 (the old, tautological claim); the highest CONTIGUOUS
+    // seq is 2 — seq 4 is stranded above the hole at 3. This is the property that
+    // matters, distinct from the {1,3}-then-2 test below (which closes a gap): here the
+    // gap PERSISTS and holds the position down even though a strictly-higher seq folded.
     const convo = new ConversationDoc();
     convo.append(msg('m1', 'one'));
-    const rowA = Y.encodeStateAsUpdate(convo.doc);
-    const svA = Y.encodeStateVector(convo.doc);
+    const row1 = Y.encodeStateAsUpdate(convo.doc);
+    const sv1 = Y.encodeStateVector(convo.doc);
     convo.append(msg('m2', 'two'));
-    const rowB = Y.encodeStateAsUpdate(convo.doc, svA);
+    const row2 = Y.encodeStateAsUpdate(convo.doc, sv1);
+    const sv2 = Y.encodeStateVector(convo.doc);
+    convo.append(msg('m3', 'three'));
+    const row3 = Y.encodeStateAsUpdate(convo.doc, sv2); // will be folded at seq 4, leaving 3 a gap
 
     const restarted = new ServerRoomReplica();
-    expect(restarted.consumedStreamPosition()).toBe(0);
-    restarted.catchUp(rowA, ALICE, 1);
-    expect(restarted.consumedStreamPosition()).toBe(1);
-    restarted.catchUp(rowB, BOB, 2);
-    expect(restarted.consumedStreamPosition()).toBe(2);
+    expect(restarted.consumedStreamPosition()).toBe(0n);
+    restarted.catchUp(row1, ALICE, 1n);
+    expect(restarted.consumedStreamPosition()).toBe(1n);
+    restarted.catchUp(row2, BOB, 2n);
+    expect(restarted.consumedStreamPosition()).toBe(2n);
+    // Fold a row at seq 4 — three rows are now folded, but seq 3 is absent, so the
+    // CONTIGUOUS position stays at 2, NOT the count of 3. (A size-based counter would
+    // wrongly read 3 and could reach a head of 4 with the seq-3 hole still open.)
+    restarted.catchUp(row3, ALICE, 4n);
+    expect(restarted.consumedStreamPosition()).toBe(2n);
+
     // A live authenticated write is content, NOT a consumed stream row — position holds.
     const peer = new ConversationDoc();
     Y.applyUpdate(peer.doc, Y.encodeStateAsUpdate(restarted.doc));
-    peer.append(msg('m3', 'three'));
+    peer.append(msg('m4', 'four'));
     restarted.applyAuthenticatedUpdate(
       Y.encodeStateAsUpdate(peer.doc, Y.encodeStateVector(restarted.doc)),
       MALLORY,
     );
-    expect(restarted.consumedStreamPosition()).toBe(2);
+    expect(restarted.consumedStreamPosition()).toBe(2n);
   });
 
   it('the position is the highest CONTIGUOUS seq — a GAP below the head holds it back even if a later seq folds (the #203 class)', () => {
@@ -228,17 +242,17 @@ describe('the freshness position advances one per consumed row', () => {
     const row3 = Y.encodeStateAsUpdate(convo.doc, sv2);
 
     const replica = new ServerRoomReplica();
-    replica.catchUp(row1, ALICE, 1);
+    replica.catchUp(row1, ALICE, 1n);
     // seq 3 folds, but seq 2 is still a GAP. A COUNT (appliedRows.size) would read 2
     // and could reach a head of 3 with content missing — the false-pass this fix ends.
     // The contiguous-prefix position stays at 1: the gate refuses while seq 2 is absent.
-    replica.catchUp(row3, ALICE, 3);
-    expect(replica.consumedStreamPosition()).toBe(1); // NOT 2 — the gap holds it back
+    replica.catchUp(row3, ALICE, 3n);
+    expect(replica.consumedStreamPosition()).toBe(1n); // NOT 2 — the gap holds it back
 
     // Fold the missing seq 2. The prefix now closes past both 2 and the already-folded
     // 3 in one step — the row is folded (counted), never skipped-yet-counted.
-    replica.catchUp(row2, ALICE, 2);
-    expect(replica.consumedStreamPosition()).toBe(3);
+    replica.catchUp(row2, ALICE, 2n);
+    expect(replica.consumedStreamPosition()).toBe(3n);
     expect(replica.conversation.body('m2')?.toString()).toBe('two');
   });
 
@@ -248,23 +262,23 @@ describe('the freshness position advances one per consumed row', () => {
     const good = Y.encodeStateAsUpdate(alice.doc);
 
     const replica = new ServerRoomReplica();
-    replica.catchUp(good, ALICE, 1);
-    expect(replica.consumedStreamPosition()).toBe(1);
+    replica.catchUp(good, ALICE, 1n);
+    expect(replica.consumedStreamPosition()).toBe(1n);
 
     // A poison row at seq 2: parseUpdateMeta/applyUpdate throws. catchUp propagates
     // (the manager quarantines it), but the throw must leave NOTHING behind — no
     // consumed seq, no phantom ledger entry — so a later good seq-2 row folds cleanly.
     const poison = Uint8Array.from([0xff, 0xff, 0xff, 0xff, 0xff, 0xff]);
-    expect(() => replica.catchUp(poison, MALLORY, 2)).toThrow();
-    expect(replica.consumedStreamPosition()).toBe(1); // seq 2 is a gap, not consumed
+    expect(() => replica.catchUp(poison, MALLORY, 2n)).toThrow();
+    expect(replica.consumedStreamPosition()).toBe(1n); // seq 2 is a gap, not consumed
 
     // The seq-2 slot is still free: a genuine row folds there and closes the prefix.
     const bob = new ConversationDoc();
     Y.applyUpdate(bob.doc, good);
     const sv = Y.encodeStateVector(bob.doc);
     bob.append(msg('m2', 'the review'));
-    replica.catchUp(Y.encodeStateAsUpdate(bob.doc, sv), BOB, 2);
-    expect(replica.consumedStreamPosition()).toBe(2);
+    replica.catchUp(Y.encodeStateAsUpdate(bob.doc, sv), BOB, 2n);
+    expect(replica.consumedStreamPosition()).toBe(2n);
     expect(replica.authenticatedAuthorOf('m2')).toEqual(BOB);
     // …and the poison writer (Mallory) never got a phantom stamp on m1's content.
     expect(replica.authenticatedAuthorOf('m1')).toEqual(ALICE);

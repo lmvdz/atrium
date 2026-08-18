@@ -103,11 +103,15 @@ export interface WriterIdentity {
  * stream row, so it has no durable ordinal — and its items are always NEW clocks
  * that no durable row has declared yet (Yjs cannot integrate a colliding item), so
  * this value only ever loses a tie to a durable row that later re-declares the
- * SAME item with the SAME writer. `+Infinity` encodes exactly that ordering: the
- * durable stream is authoritative; a live in-memory attribution yields to a durable
- * row's stamp for the same `(client, clock)` (which is the same writer anyway).
+ * SAME item with the SAME writer. A sentinel ABOVE every real `stream_seq` encodes
+ * exactly that ordering: the durable stream is authoritative; a live in-memory
+ * attribution yields to a durable row's stamp for the same `(client, clock)` (which
+ * is the same writer anyway). `stream_seq` is a Postgres `bigint`, so its maximum is
+ * `2^63 − 1`; `2^63` is beyond any real row's seq and always loses the
+ * smallest-position tiebreak in {@link WriterLedger.writerAt} — the bigint analogue
+ * of the `+Infinity` this used before positions became `bigint` (#203 hygiene).
  */
-const LIVE_APPLY_POSITION = Number.POSITIVE_INFINITY;
+const LIVE_APPLY_POSITION = 1n << 63n;
 
 /**
  * One attributed clock range for a client: `[from, to)` written by `writer`, as
@@ -120,7 +124,9 @@ interface AttributedRange {
   readonly from: number;
   readonly to: number;
   readonly writer: WriterIdentity;
-  readonly streamPosition: number;
+  /** The declaring row's immutable `stream_seq` (a Postgres `bigint`), carried as a
+   *  JS `bigint` so a seq above `2^53` compares exactly, never narrowed (#203). */
+  readonly streamPosition: bigint;
 }
 
 /**
@@ -162,7 +168,7 @@ class WriterLedger {
     from: number,
     to: number,
     writer: WriterIdentity,
-    streamPosition: number,
+    streamPosition: bigint,
   ): void {
     if (to <= from) return;
     const ranges = this.byClient.get(client) ?? [];
@@ -220,7 +226,7 @@ export class ServerRoomReplica {
    * stream row. Distinct from #209's CLIENT freshness witness (this proves the
    * SERVER replica is caught up to the stream, not that a client saw a fragment).
    */
-  private readonly appliedRows = new Set<number>();
+  private readonly appliedRows = new Set<bigint>();
 
   /**
    * The highest CONTIGUOUS `stream_seq` folded — the largest `N` such that every
@@ -230,9 +236,10 @@ export class ServerRoomReplica {
    * hole, and a MISSING row below the head (skipped/quarantined/reordered-away)
    * stalls this value below the head even if a LATER seq was folded — which the
    * set's size would falsely count. Advanced amortized-O(1) in {@link catchUp} as
-   * each new seq closes the gap above it.
+   * each new seq closes the gap above it. Carried as a `bigint` so it holds a
+   * `stream_seq` above `2^53` without narrowing (#203 hygiene).
    */
-  private contiguousHigh = 0;
+  private contiguousHigh = 0n;
 
   constructor(convo: ConversationDoc = new ConversationDoc()) {
     this.convo = convo;
@@ -250,7 +257,7 @@ export class ServerRoomReplica {
    * head even if a later seq was folded, whereas a size count could reach the head
    * with a hole still open. See {@link appliedRows}.
    */
-  consumedStreamPosition(): number {
+  consumedStreamPosition(): bigint {
     return this.contiguousHigh;
   }
 
@@ -354,7 +361,7 @@ export class ServerRoomReplica {
    * replayed stamp already owns — a later declaration of an already-attributed clock
    * never re-homes it.
    */
-  catchUp(update: Uint8Array, writer: WriterIdentity | null, streamPosition: number): void {
+  catchUp(update: Uint8Array, writer: WriterIdentity | null, streamPosition: bigint): void {
     // A row already folded (a duplicate stream read, or the warm re-catch-up on
     // acquire) is a no-op: its content is already integrated and its stamp already
     // recorded, and re-counting its seq would falsely advance the position.
@@ -391,7 +398,7 @@ export class ServerRoomReplica {
     // #203). Reached only after `applyUpdate` succeeded: a poison row's seq stays
     // absent, so the freshness position stays below the head (fail-closed).
     this.appliedRows.add(streamPosition);
-    while (this.appliedRows.has(this.contiguousHigh + 1)) this.contiguousHigh += 1;
+    while (this.appliedRows.has(this.contiguousHigh + 1n)) this.contiguousHigh += 1n;
   }
 
   /**

@@ -61,8 +61,11 @@ export interface PersistedYdocUpdate {
    * the replica dedupes and gap-detects on, NEVER the row's position in this
    * snapshot array: a reordered snapshot reuses each row's own seq, so a late/
    * reordered row can never collide with an already-folded row's ordinal (#203).
+   *
+   * A `bigint` (the column is a Postgres `bigint`), read WITHOUT narrowing to a JS
+   * `number`, so a seq above `2^53` carries and compares exactly (#203 hygiene).
    */
-  readonly streamSeq: number;
+  readonly streamSeq: bigint;
 }
 
 /**
@@ -88,8 +91,12 @@ export interface YdocStreamSource {
    * to the head with no gap has not caught up, and a certify against it is refused
    * (fail-closed). Head-as-max and consumed-as-contiguous-prefix are the pair that
    * makes a skipped-yet-reordered row surface as a lag rather than a false pass.
+   *
+   * A `bigint` (the column is a Postgres `bigint`), so a head above `2^31` never 500s
+   * on an `::int` overflow and one above `2^53` never narrows — the whole freshness
+   * comparison is `bigint`-consistent (#203 hygiene).
    */
-  head(roomId: string): Promise<number>;
+  head(roomId: string): Promise<bigint>;
 }
 
 /**
@@ -118,7 +125,9 @@ export function dbYdocStreamSource(db: Pick<Database, 'select'>): YdocStreamSour
           op: ydocUpdates.op,
           writerUserId: ydocUpdates.writerUserId,
           writerKind: ydocUpdates.writerKind,
-          streamSeq: ydocUpdates.streamSeq,
+          // Read the bigint seq as TEXT and parse to `bigint` — bypassing drizzle's
+          // `mode: 'number'` mapper — so a seq above `2^53` is never narrowed (#203).
+          streamSeq: sql<string>`${ydocUpdates.streamSeq}::text`,
         })
         .from(ydocUpdates)
         .where(eq(ydocUpdates.room, roomId))
@@ -130,18 +139,21 @@ export function dbYdocStreamSource(db: Pick<Database, 'select'>): YdocStreamSour
         op: Uint8Array.from(r.op as Uint8Array),
         writerUserId: r.writerUserId,
         writerKind: r.writerKind,
-        streamSeq: Number(r.streamSeq),
+        streamSeq: BigInt(r.streamSeq),
       }));
     },
-    async head(roomId: string): Promise<number> {
+    async head(roomId: string): Promise<bigint> {
       // The head is the MAXIMUM stream_seq, not a row count — the value the
       // replica's highest-contiguous-seq position is compared against (#203). 0 for
-      // an empty room (coalesce), so an empty stream's gate is 0 >= 0.
+      // an empty room (coalesce), so an empty stream's gate is 0 >= 0. Cast to TEXT,
+      // NOT `::int`: `::int` would 500 (`integer out of range`) once the head passes
+      // `2^31`; reading the bigint as text and parsing to `bigint` compares exactly at
+      // any head (#203 hygiene).
       const [row] = await db
-        .select({ head: sql<number>`coalesce(max(${ydocUpdates.streamSeq}), 0)::int` })
+        .select({ head: sql<string>`coalesce(max(${ydocUpdates.streamSeq}), 0)::text` })
         .from(ydocUpdates)
         .where(eq(ydocUpdates.room, roomId));
-      return Number(row?.head ?? 0);
+      return BigInt(row?.head ?? '0');
     },
   };
 }
@@ -269,7 +281,7 @@ export class RoomReplicaManager {
   }
 
   /** The current durable-stream head position for the room (for the freshness gate). */
-  streamHead(roomId: string): Promise<number> {
+  streamHead(roomId: string): Promise<bigint> {
     return this.source.head(roomId);
   }
 

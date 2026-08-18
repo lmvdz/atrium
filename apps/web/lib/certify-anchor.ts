@@ -155,16 +155,29 @@ export interface CertifyAnchorInput {
  * time; a replica that trails the head is refused so a stale span is never anchored.
  */
 export interface StreamFreshnessGate {
-  /** The durable stream head position captured at request time — what the replica must have reached. */
-  readonly requiredPosition: number;
+  /**
+   * The durable stream head position captured at request time — what the replica must
+   * have reached. A `bigint` (the row's `stream_seq` is a Postgres `bigint`), so a head
+   * above `2^31`/`2^53` is compared exactly rather than 500ing on an `::int` overflow
+   * or silently narrowing (#203 hygiene).
+   */
+  readonly requiredPosition: bigint;
   /**
    * The replica's currently-consumed stream position ({@link
    * ServerRoomReplica.consumedStreamPosition}), read at mint time. A function, not a
    * value, so it reflects the replica as it stands when the gate fires — a replica
-   * evicted between request and mint reads as `-Infinity` and refuses.
+   * evicted between request and mint reads as {@link REPLICA_ABSENT_POSITION} and refuses.
    */
-  readonly consumedPosition: () => number;
+  readonly consumedPosition: () => bigint;
 }
+
+/**
+ * The consumed position an ABSENT/EVICTED replica reports at mint time. A real stream
+ * head coalesces to `>= 0`, so `-1n` is strictly below every possible required position
+ * and the freshness gate always refuses (fail-closed) — the `bigint` analogue of the
+ * `Number.NEGATIVE_INFINITY` this replaced when positions became `bigint` (#203).
+ */
+export const REPLICA_ABSENT_POSITION = -1n;
 
 /**
  * Is a Postgres error a unique-violation on the `(room_id, object_id)` anchor key?

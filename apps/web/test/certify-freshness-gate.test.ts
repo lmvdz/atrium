@@ -2,7 +2,7 @@ import type { CovenantDocReader } from '@atrium/core';
 import type { Database } from '@atrium/db';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import * as Y from 'yjs';
-import { certifyObjectSpan } from '@/lib/certify-anchor';
+import { certifyObjectSpan, REPLICA_ABSENT_POSITION } from '@/lib/certify-anchor';
 import {
   clearServerReplicas,
   registerServerReplica,
@@ -51,27 +51,27 @@ function forbiddenReader(): CovenantDocReader {
 
 describe('the freshness gate refuses a lagging replica before deriving anything', () => {
   it('refuses replica_lagging when the consumed position trails the required head', async () => {
-    const consumedPosition = vi.fn(() => 3);
+    const consumedPosition = vi.fn(() => 3n);
     const outcome = await certifyObjectSpan({
       database: forbiddenDatabase(),
       session: HUMAN,
       authorizedRoomId: 'room_1',
       objectId: 'o_span',
       reader: forbiddenReader(),
-      streamFreshness: { requiredPosition: 5, consumedPosition },
+      streamFreshness: { requiredPosition: 5n, consumedPosition },
     });
     expect(outcome).toEqual({ ok: false, reason: 'replica_lagging' });
     expect(consumedPosition).toHaveBeenCalled();
   });
 
-  it('an evicted/absent replica (consumedPosition -Infinity) is refused too', async () => {
+  it('an evicted/absent replica (consumedPosition REPLICA_ABSENT_POSITION) is refused too', async () => {
     const outcome = await certifyObjectSpan({
       database: forbiddenDatabase(),
       session: HUMAN,
       authorizedRoomId: 'room_1',
       objectId: 'o_span',
       reader: forbiddenReader(),
-      streamFreshness: { requiredPosition: 0, consumedPosition: () => Number.NEGATIVE_INFINITY },
+      streamFreshness: { requiredPosition: 0n, consumedPosition: () => REPLICA_ABSENT_POSITION },
     });
     expect(outcome).toEqual({ ok: false, reason: 'replica_lagging' });
   });
@@ -83,24 +83,86 @@ describe('the freshness gate refuses a lagging replica before deriving anything'
       authorizedRoomId: 'room_1',
       objectId: 'o_span',
       reader: forbiddenReader(),
-      streamFreshness: { requiredPosition: 5, consumedPosition: () => 0 },
+      streamFreshness: { requiredPosition: 5n, consumedPosition: () => 0n },
     });
     expect(outcome).toEqual({ ok: false, reason: 'not_human' });
   });
 });
 
+/* THE #203 BIGINT-HYGIENE BOUNDARY. The stream position is a Postgres `bigint`, so the
+ * gate must compare it as a JS `bigint` end-to-end. Two failure modes the old `number`
+ * path had: a head above `2^31` would 500 (`integer out of range`) off the `::int` cast
+ * before the gate even ran, and a head above `2^53` (Number.MAX_SAFE_INTEGER) would
+ * silently narrow so two DISTINCT seqs compare EQUAL — a false pass. These prove the gate
+ * neither throws nor narrows at either boundary. */
+describe('the freshness gate compares BIG stream positions exactly (bigint, #203)', () => {
+  /** A reader that resolves nothing ⇒ the gate was PASSED and derivation returns derive_failed. */
+  function nullReader(): CovenantDocReader {
+    return {
+      captureSelection: () => null,
+      authoritativeContext: () => null,
+    } as unknown as CovenantDocReader;
+  }
+
+  const BIG_31 = 2n ** 31n + 5n; // above int32 max — an `::int` head would 500 here
+
+  it('above 2^31: consumed one below the head refuses (no throw); consumed == head passes the gate', async () => {
+    const refused = await certifyObjectSpan({
+      database: forbiddenDatabase(),
+      session: HUMAN,
+      authorizedRoomId: 'room_1',
+      objectId: 'o_span',
+      reader: forbiddenReader(),
+      streamFreshness: { requiredPosition: BIG_31, consumedPosition: () => BIG_31 - 1n },
+    });
+    expect(refused).toEqual({ ok: false, reason: 'replica_lagging' });
+
+    // consumed == required: the gate lets it through to derivation (nullReader ⇒
+    // derive_failed) — proving it neither threw nor false-refused at a >2^31 position.
+    const passed = await certifyObjectSpan({
+      database: forbiddenDatabase(),
+      session: HUMAN,
+      authorizedRoomId: 'room_1',
+      objectId: 'o_span',
+      reader: nullReader(),
+      streamFreshness: { requiredPosition: BIG_31, consumedPosition: () => BIG_31 },
+    });
+    expect(passed).toEqual({ ok: false, reason: 'derive_failed' });
+  });
+
+  it('above 2^53: two positions that NARROW to the same JS number stay DISTINCT ⇒ refuse (no false pass)', async () => {
+    // Number(2^53 + 1) === Number(2^53) === 9007199254740992, so a number-narrowed gate
+    // would read consumed == required and FALSE-PASS a lagging replica. As bigints,
+    // 2^53 < 2^53 + 1, so the gate correctly refuses.
+    const head = 2n ** 53n + 1n;
+    const consumed = 2n ** 53n;
+    expect(Number(head)).toBe(Number(consumed)); // the narrowing that used to hide the lag
+    expect(consumed < head).toBe(true); // …but as bigints they are distinct
+
+    const refused = await certifyObjectSpan({
+      database: forbiddenDatabase(),
+      session: HUMAN,
+      authorizedRoomId: 'room_1',
+      objectId: 'o_span',
+      reader: forbiddenReader(),
+      streamFreshness: { requiredPosition: head, consumedPosition: () => consumed },
+    });
+    expect(refused).toEqual({ ok: false, reason: 'replica_lagging' });
+  });
+});
+
 /* The gate as the certify ACTION actually wires it (covenant-actions.ts): the
- * consumed position is `serverReplicaFor(room)?.consumedStreamPosition() ?? -Infinity`,
- * and the required position is the durable head. This asserts that WIRING — an
- * unregistered room refuses, and a caught-up registered replica is let through — not
- * just the arithmetic `3 < 5`. */
+ * consumed position is `serverReplicaFor(room)?.consumedStreamPosition() ??
+ * REPLICA_ABSENT_POSITION`, and the required position is the durable head. This asserts
+ * that WIRING — an unregistered room refuses, and a caught-up registered replica is let
+ * through — not just the arithmetic `3n < 5n`. */
 describe('the freshness gate wired the way the certify action wires it', () => {
   const ROOM = 'room_gate_wiring';
   afterEach(() => clearServerReplicas());
 
-  /** The action's exact consumed-position lambda: registry ⇒ position, else -Infinity. */
+  /** The action's exact consumed-position lambda: registry ⇒ position, else absent. */
   const consumedFromRegistry = (roomId: string) => () =>
-    serverReplicaFor(roomId)?.consumedStreamPosition() ?? Number.NEGATIVE_INFINITY;
+    serverReplicaFor(roomId)?.consumedStreamPosition() ?? REPLICA_ABSENT_POSITION;
 
   /** A reader whose derivation resolves nothing ⇒ certifyAnchor returns null (derive_failed). */
   function nullReader(): CovenantDocReader {
@@ -111,14 +173,14 @@ describe('the freshness gate wired the way the certify action wires it', () => {
   }
 
   it('serverReplicaFor null (no replica registered) ⇒ replica_lagging, before the DB', async () => {
-    // Nothing registered — the wired lambda reads -Infinity and the gate refuses.
+    // Nothing registered — the wired lambda reads REPLICA_ABSENT_POSITION and the gate refuses.
     const outcome = await certifyObjectSpan({
       database: forbiddenDatabase(),
       session: HUMAN,
       authorizedRoomId: ROOM,
       objectId: 'o_span',
       reader: forbiddenReader(),
-      streamFreshness: { requiredPosition: 1, consumedPosition: consumedFromRegistry(ROOM) },
+      streamFreshness: { requiredPosition: 1n, consumedPosition: consumedFromRegistry(ROOM) },
     });
     expect(outcome).toEqual({ ok: false, reason: 'replica_lagging' });
   });
@@ -128,9 +190,9 @@ describe('the freshness gate wired the way the certify action wires it', () => {
     const convo = new ConversationDoc();
     convo.append({ id: 'm1', time: '10:00', kind: 'human', who: 'you', text: 'ready' });
     const replica = new ServerRoomReplica();
-    replica.catchUp(Y.encodeStateAsUpdate(convo.doc), HUMAN, 1);
+    replica.catchUp(Y.encodeStateAsUpdate(convo.doc), HUMAN, 1n);
     registerServerReplica(ROOM, replica);
-    expect(replica.consumedStreamPosition()).toBe(1);
+    expect(replica.consumedStreamPosition()).toBe(1n);
 
     // consumed (1) == required (1): the gate must NOT refuse replica_lagging. It
     // proceeds to derive-and-sign, which here resolves nothing ⇒ derive_failed —
@@ -142,7 +204,7 @@ describe('the freshness gate wired the way the certify action wires it', () => {
       authorizedRoomId: ROOM,
       objectId: 'o_span',
       reader: nullReader(),
-      streamFreshness: { requiredPosition: 1, consumedPosition: consumedFromRegistry(ROOM) },
+      streamFreshness: { requiredPosition: 1n, consumedPosition: consumedFromRegistry(ROOM) },
     });
     expect(outcome).toEqual({ ok: false, reason: 'derive_failed' });
   });
@@ -166,10 +228,10 @@ describe('the freshness gate wired the way the certify action wires it', () => {
     const r3 = Y.encodeStateAsUpdate(convo.doc, sv2);
 
     const replica = new ServerRoomReplica();
-    replica.catchUp(r1, HUMAN, 1);
-    replica.catchUp(r3, HUMAN, 3); // seq 2 skipped — the reorder hole
+    replica.catchUp(r1, HUMAN, 1n);
+    replica.catchUp(r3, HUMAN, 3n); // seq 2 skipped — the reorder hole
     registerServerReplica(ROOM, replica);
-    expect(replica.consumedStreamPosition()).toBe(1); // the gap holds the prefix at 1
+    expect(replica.consumedStreamPosition()).toBe(1n); // the gap holds the prefix at 1
 
     // requiredPosition = head = max(stream_seq) = 3. The gate must REFUSE — never
     // certify over content the replica has not folded — WITHOUT touching the DB/reader.
@@ -179,21 +241,21 @@ describe('the freshness gate wired the way the certify action wires it', () => {
       authorizedRoomId: ROOM,
       objectId: 'o_span',
       reader: forbiddenReader(),
-      streamFreshness: { requiredPosition: 3, consumedPosition: consumedFromRegistry(ROOM) },
+      streamFreshness: { requiredPosition: 3n, consumedPosition: consumedFromRegistry(ROOM) },
     });
     expect(refused).toEqual({ ok: false, reason: 'replica_lagging' });
 
     // Fold the missing seq 2: the prefix closes to 3 and the SAME gate now passes to
     // derivation (nullReader ⇒ derive_failed) — the hole, once filled, is caught up.
-    replica.catchUp(r2, HUMAN, 2);
-    expect(replica.consumedStreamPosition()).toBe(3);
+    replica.catchUp(r2, HUMAN, 2n);
+    expect(replica.consumedStreamPosition()).toBe(3n);
     const passed = await certifyObjectSpan({
       database: forbiddenDatabase(),
       session: HUMAN,
       authorizedRoomId: ROOM,
       objectId: 'o_span',
       reader: nullReader(),
-      streamFreshness: { requiredPosition: 3, consumedPosition: consumedFromRegistry(ROOM) },
+      streamFreshness: { requiredPosition: 3n, consumedPosition: consumedFromRegistry(ROOM) },
     });
     expect(passed).toEqual({ ok: false, reason: 'derive_failed' });
   });

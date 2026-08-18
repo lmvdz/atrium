@@ -205,14 +205,14 @@ describe('E3 (#203) — the READ path LAZY-STARTS the replica (authorship surviv
       op: Y.encodeStateAsUpdate(authored.doc),
       writerUserId: ALICE.userId,
       writerKind: 'human',
-      streamSeq: 1,
+      streamSeq: 1n,
     };
     const source: YdocStreamSource = {
       async snapshot() {
         return [durableRow];
       },
       async head() {
-        return 1;
+        return 1n;
       },
     };
 
