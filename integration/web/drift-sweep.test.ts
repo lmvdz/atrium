@@ -55,8 +55,10 @@ import { openDatabase, resetDatabase, seedRoom } from '../support/harness.js';
  *      the sweep never clobbers it and never re-`✓`s;
  *   7. Fix 1 — the async ledger refresh is EPOCHED: a stale/older refresh completing
  *      after a newer one never wipes a newer certified set or a live `~` draft;
- *   8. Fix 2 — a freshly-certified anchor seeded via `noteCertified` is under the
- *      sweep's synchronous coverage, so its FIRST in-span edit is caught;
+ *   8. Fix 2 + r3 — a freshly-certified anchor seeded via `noteCertified` is under the
+ *      sweep's synchronous coverage, so its FIRST in-span edit is caught — even when a
+ *      STALE pre-seed ledger refresh (observed [] pre-mint) completes LAST: monotone-by-
+ *      assertion reconciliation keeps the seed sticky, so the edit is caught WITHIN THE TICK;
  *   9. Fix 3 — the overlay is FAIL-CLOSED until the sweep has spoken: a certified span
  *      with no settled sweep verdict reads `~`, not `ok`; demote-only (never mints `ok`);
  *  10. Fix 4 — the PRODUCTION teardown fail-close: evict → provider→null → the read
@@ -194,6 +196,20 @@ function settle(w: Wired): Promise<void> {
 async function seedAndSettle(w: Wired): Promise<void> {
   mgrSweep(w).sweepNow();
   await settle(w);
+}
+
+/**
+ * Poll a predicate until true (or time out). Used in the r3 racing test to await ONE
+ * sweep-driven re-resolve settling while a DIFFERENT ledger refresh is deliberately left
+ * PARKED — `settled()` cannot be used there because it would await the parked refresh too.
+ * A timeout means the awaited state never arrived (the bug), so it fails the test loudly.
+ */
+async function until(predicate: () => boolean, timeoutMs = 4000): Promise<void> {
+  const start = Date.now();
+  while (!predicate()) {
+    if (Date.now() - start > timeoutMs) throw new Error('until: predicate never became true');
+    await new Promise((r) => setTimeout(r, 5));
+  }
 }
 
 /**
@@ -553,33 +569,92 @@ describe('acceptance #7 — Fix 1: the async ledger refresh is EPOCHED (stale re
   });
 });
 
-describe('acceptance #8 — Fix 2: a freshly-certified anchor is swept on its first edit', () => {
-  it('noteCertified seeds the fresh anchor into synchronous coverage; its first in-span edit is caught', async () => {
+describe('acceptance #8 — Fix 2 + r3: a freshly-certified anchor is swept on its first edit, even racing a stale pre-seed refresh', () => {
+  it('RACING pre-seed refresh: a stale [] refresh completing LAST cannot wipe the noteCertified seed; the first in-span edit is caught WITHIN THE TICK', async () => {
+    // THE r3 RACE (class-closing): a `loadCertifiedObjectIds` refresh KICKED before the
+    // anchor was minted (it observes []) completes AFTER a `noteCertified` seed. The old
+    // latest-COMPLETED-wins reconciliation wholesale-replaced the certified set, so the stale
+    // [] pruned the seed — and the fresh anchor's FIRST in-span edit then missed within-tick
+    // detection (the sync pass no longer covered it; only a later async refresh rediscovered
+    // it). The fix makes reconciliation MONOTONE by ASSERTION epoch: a refresh ISSUED before a
+    // seed can never prune it, so the seed survives and the edit is caught within the tick.
+    //
+    // Driven with a controllable ledger loader so the completion ORDER is deterministic — the
+    // sweep class + web authority are EXACTLY production's; only the ledger read's timing is
+    // controlled (which is precisely the race). Subscribed to updates (start), so the in-span
+    // edit fires the real synchronous sweep pass.
     const w = await wire();
     const o1 = randomUUID();
-    // Certify AFTER acquire (so the acquire-time seed did NOT know o1) and DO NOT run a
-    // full ledger-refresh sweep — this is the fresh-anchor window Fix 2 addresses.
+
+    const live = liveCovenantDoc(w.roomId);
+    const reader = readerForLiveDoc(live.provider, undefined, live.options);
+    const authority = webCovenantReadAuthority({
+      loadAnchor: (objectId) => loadCovenantAnchor(handle.db, { roomId: w.roomId, objectId }),
+      reader,
+      expectedRoomId: w.roomId,
+    });
+    const loadResolvers: Array<(ids: string[]) => void> = [];
+    const sweep = new RoomDriftSweep({
+      doc: w.replica.doc,
+      authority,
+      loadCertifiedObjectIds: () =>
+        new Promise<string[]>((res) => {
+          loadResolvers.push(res);
+        }),
+      now: () => FIXED_NOW,
+    });
+    sweep.start();
+
+    // (1) KICK a pre-seed refresh (epoch 1). It observes [] (pre-mint) and is PARKED — it
+    // will complete LAST, after the seed.
+    sweep.sweepNow();
+    expect(loadResolvers.length).toBe(1);
+    const resolvePreSeed = loadResolvers[0];
+    if (resolvePreSeed === undefined) throw new Error('the pre-seed refresh must be parked');
+
+    // (2) CERTIFY o1 (anchor now in the ledger) and SEED it into the live sweep — exactly
+    // what the certify action's `noteCertifiedFor` does on a successful mint.
     await certifySpan(w, o1, 'm1', 0, 5);
+    sweep.noteCertified(o1);
+    // Let the seed's re-resolve settle to swept-clean WITHOUT awaiting the parked pre-seed
+    // refresh (`settled()` would await it and never return).
+    await until(() => sweep.sweptObjectIds().has(o1));
+    expect(sweep.sweptObjectIds().has(o1)).toBe(true); // seed is under coverage, swept-clean
 
-    // Seed the fresh anchor into the live sweep (what the certify action does in prod).
-    w.manager.noteCertifiedFor(w.roomId, o1);
-    await settle(w);
-    // Now under coverage and confirmed swept-clean.
-    expect(mgrSweep(w).sweptObjectIds().has(o1)).toBe(true);
-    expect((await reads(w, [o1]))[o1]).toBe('ok');
+    // (3) COMPLETE the stale [] refresh LAST. Issued BEFORE the seed, so monotone-by-assertion
+    // reconciliation must NOT prune the seed: the certified set and swept-clean survive.
+    resolvePreSeed([]);
+    await new Promise((r) => setTimeout(r, 0)); // flush the refresh's .then microtasks
+    expect(sweep.sweptObjectIds().has(o1)).toBe(true); // the stale [] did NOT wipe the seed
 
-    // The FIRST in-span edit fires the sweep's synchronous pass, which — because o1 is now
-    // in the certified snapshot — invalidates o1 AND clears its swept-clean confirmation
-    // WITHIN THE TICK (no await). Without the Fix 2 seed, o1 would not be in the sync pass
-    // until the async ledger refresh landed, and this would still read swept-clean.
+    // (4) FIRST in-span edit → fires the synchronous sweep pass. Because o1 SURVIVED in the
+    // certified snapshot, the sync pass invalidates o1 and clears its swept-clean WITHIN THE
+    // TICK (synchronously, no await), and drives a re-resolve that drafts `~` — without the
+    // async ledger refresh having to rediscover o1. Park the edit's own refresh to PROVE the
+    // `~` comes from the edit's synchronous sweep, not from the async rediscovery.
     peerEdit(w.replica, { userId: w.hexi, principalKind: 'agent' }, (peer) =>
       peer.body('m1')?.insert(2, 'X'),
     );
-    expect(mgrSweep(w).sweptObjectIds().has(o1)).toBe(false); // sync coverage touched it
+    expect(sweep.sweptObjectIds().has(o1)).toBe(false); // sync coverage touched it in-tick
 
-    await settle(w);
-    expect(mgrSweep(w).staleObjectIds().has(o1)).toBe(true);
-    expect((await reads(w, [o1]))[o1]).toBe('drift');
+    // WITHIN THE TICK: the edit's own re-resolve drafts `~` while the async refresh stays
+    // PARKED — staleObjectIds carries o1 without any ledger refresh having rediscovered it.
+    await until(() => sweep.staleObjectIds().has(o1));
+    expect(sweep.staleObjectIds().has(o1)).toBe(true);
+    expect(sweep.staleDraftFor(o1)?.kind).toBe('~');
+
+    // Through the REAL read path (with this sweep's overlays), o1 reads `~`.
+    const m = await roomCovenantReads(handle.db, w.roomId, [o1], {
+      acquire: (id) => w.manager.acquire(id),
+      staleObjectIds: () => sweep.staleObjectIds(),
+      sweptObjectIds: () => sweep.sweptObjectIds(),
+    });
+    expect(m[o1]).toBe('drift');
+
+    // Drain any parked refresh so no promise dangles, then tear down.
+    for (const r of loadResolvers) r([o1]);
+    await sweep.settled();
+    sweep.stop();
     teardown(w);
   });
 

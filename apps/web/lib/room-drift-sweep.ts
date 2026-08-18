@@ -158,17 +158,28 @@ export class RoomDriftSweep {
    */
   private knownCertified = new Set<string>();
   /**
-   * Monotone REFRESH epoch (E7, #199 Fix 1). Each async `loadCertifiedObjectIds`
-   * refresh captures the value of {@link refreshCounter} at kick time; its result is
-   * ADOPTED into {@link knownCertified} (and its stale-draft pruning applied) only if
-   * that epoch is still the latest to have completed ({@link appliedRefreshEpoch}). A
-   * stale/older refresh completing AFTER a newer one is DROPPED — it can never overwrite
-   * a newer certified set or momentarily empty it while anchors exist. This is the SL-4
-   * generation guard applied to the ledger refresh itself, not just per-object resolves.
+   * Monotone ISSUE epoch (E7, #199 Fix 1 + r3). Bumped when each async
+   * `loadCertifiedObjectIds` refresh is KICKED (not when it completes) and when a
+   * {@link noteCertified} seed asserts an anchor present — so every assertion of the
+   * certified set, whether from the ledger or a fresh certify, is ordered by when it
+   * was ISSUED. Reconciliation is then MONOTONE by assertion epoch, never by completion
+   * order: see {@link lastAssertedEpoch} and {@link sweep}.
    */
   private refreshCounter = 0;
-  /** The highest refresh epoch whose result has been adopted (see {@link refreshCounter}). */
-  private appliedRefreshEpoch = 0;
+  /**
+   * Per-object LAST-ASSERTED issue epoch (E7, #199 r3 — the class-closing fix). The
+   * {@link refreshCounter} value at which an anchor was most recently asserted PRESENT:
+   * stamped by {@link noteCertified} (a fresh certify seed) and by a completing refresh
+   * for each id it observed certified (its own issue epoch). A refresh that completes
+   * with issue-epoch `E` may REMOVE an anchor only if its last-asserted epoch `< E` —
+   * i.e. nothing has seeded or asserted it SINCE this refresh was issued; otherwise the
+   * refresh UNIONS its results and leaves the anchor sticky. So a refresh issued BEFORE a
+   * seed can never prune that seed (this closes the r3 pre-seed race), and a seed stays
+   * sticky until a refresh issued AFTER it confirms-or-denies it. Combined with the union
+   * (never wholesale-replace) this also closes the r2 last-write-wins wipe by construction:
+   * an older refresh completing last can neither empty the set nor prune a newer assertion.
+   */
+  private readonly lastAssertedEpoch = new Map<string, number>();
   /**
    * Objects the sweep has POSITIVELY confirmed swept-clean (E7, #199 Fix 3): a re-resolve
    * settled `ok` under the current generation and no later edit has re-opened the verdict.
@@ -288,9 +299,16 @@ export class RoomDriftSweep {
    * re-resolve), so the next update's synchronous pass already covers it and the read-path
    * overlay is fail-closed for it until its verdict settles. Idempotent for a known id
    * (a re-sweep is harmless — it over-covers, the fail-closed direction).
+   *
+   * MONOTONE-ASSERTION STAMP (E7, #199 r3): the seed records the LATEST issued epoch
+   * ({@link refreshCounter}) as this anchor's last-asserted epoch, so ANY refresh already
+   * in flight — necessarily issued at an epoch `<=` this one — can never prune the seed on
+   * completion (its removal gate requires `lastAsserted < issueEpoch`). A refresh must be
+   * issued strictly AFTER this seed to confirm-or-deny it.
    */
   noteCertified(objectId: string): void {
     this.knownCertified.add(objectId);
+    this.lastAssertedEpoch.set(objectId, this.refreshCounter);
     this.sweepObject(objectId);
   }
 
@@ -316,9 +334,13 @@ export class RoomDriftSweep {
    *       pre-edit in-flight resolve cannot recache a stale `✓`.
    *   (B) ASYNC authoritative REFRESH from the ledger: load every currently-certified
    *       object id and sweep any the snapshot did not yet know (a certify/re-certify
-   *       between updates), then adopt the refreshed set as the snapshot. This is what
-   *       makes the swept set the AUTHORITATIVE `covenant_anchors`, never a caller
-   *       allowlist an omitted id could slip through.
+   *       between updates), then UNION the refreshed set into the snapshot — never
+   *       wholesale-replace it. This is what makes the swept set the AUTHORITATIVE
+   *       `covenant_anchors`, never a caller allowlist an omitted id could slip through.
+   *       Reconciliation is MONOTONE by ASSERTION epoch (E7, #199 r3): the refresh may
+   *       PRUNE an anchor it observed absent only if nothing seeded/asserted it since this
+   *       refresh was ISSUED ({@link lastAssertedEpoch} `< issueEpoch`), so an older/pre-
+   *       seed refresh completing last can neither empty the set nor wipe a fresh seed.
    */
   private sweep(): void {
     // (A) Synchronous pass over the known-certified snapshot — within-tick fail-closed.
@@ -328,37 +350,44 @@ export class RoomDriftSweep {
     // (and the resolves it kicks). Fail-closed on a ledger throw: keep the current
     // snapshot (its objects were already swept synchronously in (A)).
     //
-    // EPOCH GUARD (E7, #199 Fix 1): stamp this refresh with a monotone epoch and ADOPT
-    // its result only if it is still the latest to complete. Without this, an older
-    // `loadCertifiedObjectIds` result completing AFTER a newer one would overwrite
-    // `knownCertified` with a stale (possibly empty, or smaller) set AND prune the
-    // stale-draft/generation entries the newer snapshot added — so the next sweep would
-    // invalidate nothing and a real drift would go undetected. Latest-epoch-wins: a
-    // stale/older refresh is dropped, never overwrites a newer set or empties it.
+    // MONOTONE-ASSERTION RECONCILIATION (E7, #199 Fix 1 + r3). Stamp this refresh with a
+    // monotone ISSUE epoch (captured NOW, at kick time) and reconcile its result by
+    // assertion order, NEVER by completion order. On completion it UNIONS its observed
+    // ids in (so a stale/older or pre-seed refresh can never empty the set) and PRUNES an
+    // observed-absent anchor only if nothing has seeded/asserted it since this refresh was
+    // ISSUED (`lastAssertedEpoch < epoch`). This closes BOTH the r2 last-write-wins wipe
+    // (an older refresh completing last cannot roll the set back) AND the r3 pre-seed race
+    // (a refresh issued before a `noteCertified` seed cannot prune that seed), because the
+    // outcome depends on issue-order assertions, not on which refresh happens to finish last.
     const epoch = ++this.refreshCounter;
     const refresh: Promise<void> = this.loadCertifiedObjectIds()
       .then((ids) => {
         const authoritative = new Set(ids);
-        // Sweep any newly-certified id the synchronous pass could not yet know. Harmless
-        // and epoch-independent (a re-resolve over-covers), so it runs regardless of the
-        // guard below — the guard protects only the SET ADOPTION + draft pruning.
+        // UNION the observed-certified ids in. Sweep any the synchronous pass could not yet
+        // know (a certify/re-certify between updates), and record this refresh's PRESENT
+        // assertion at its own issue epoch (monotone max — a later seed/refresh never lowered).
         for (const objectId of authoritative) {
           if (!this.knownCertified.has(objectId)) this.sweepObject(objectId);
+          this.knownCertified.add(objectId);
+          if (epoch > (this.lastAssertedEpoch.get(objectId) ?? 0)) {
+            this.lastAssertedEpoch.set(objectId, epoch);
+          }
         }
-        // A stale/older refresh must not roll the certified set (or its drafts) backwards.
-        if (epoch <= this.appliedRefreshEpoch) return;
-        this.appliedRefreshEpoch = epoch;
-        // Drop drafts/generations/swept-clean for objects no longer certified (anchor
-        // removed or replaced) — a `~` (or a swept-clean `ok`) over an object with no
-        // live `✓` is meaningless.
-        for (const objectId of this.knownCertified) {
-          if (!authoritative.has(objectId)) {
+        // PRUNE only anchors this refresh observed ABSENT that NOTHING has asserted since it
+        // was issued (`lastAsserted < epoch`). An anchor seeded/asserted at-or-after this
+        // refresh's issue epoch is STICKY — a pre-seed/older refresh leaves it untouched.
+        // A `~` (or swept-clean `ok`) over a genuinely-uncertified object is meaningless, so
+        // a prune drops its drafts/generation/swept-clean/assertion entries together.
+        for (const objectId of [...this.knownCertified]) {
+          if (authoritative.has(objectId)) continue;
+          if ((this.lastAssertedEpoch.get(objectId) ?? 0) < epoch) {
+            this.knownCertified.delete(objectId);
             this.drafts.delete(objectId);
             this.draftGeneration.delete(objectId);
             this.sweptClean.delete(objectId);
+            this.lastAssertedEpoch.delete(objectId);
           }
         }
-        this.knownCertified = authoritative;
       })
       .catch(() => {
         // Ledger unreachable ⇒ keep the snapshot (already swept in (A)); over-cover,
