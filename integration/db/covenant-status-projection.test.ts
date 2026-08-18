@@ -130,32 +130,71 @@ describe('the projection is set up to sync read-only, like the ydoc stream', () 
   });
 });
 
-describe('write-on-recompute: the OWNER upsert tracks the sweep', () => {
-  it('inserts a verdict at generation 1, then bumps monotonically on re-recompute', async () => {
-    await upsertCovenantStatus(handle.db, { roomId, objectId, status: 'ok' });
+describe('write-on-recompute: the OWNER upsert tracks the sweep, guarded by generation', () => {
+  it('records the caller-supplied generation, then a strictly-newer one overwrites in place', async () => {
+    await upsertCovenantStatus(handle.db, { roomId, objectId, status: 'ok', generation: 1 });
     const first = await loadCovenantStatus(handle.db, { roomId, objectId });
     expect(first).toEqual({ status: 'ok', generation: 1 });
 
-    // A later recompute finds the span drifted: the row UPDATES in place, the
-    // generation strictly increases, and the client sees the newest verdict.
-    await upsertCovenantStatus(handle.db, { roomId, objectId, status: 'drift' });
+    // A later recompute finds the span drifted, at the sweep's next LOGICAL generation:
+    // the row UPDATES in place because 2 > 1, and the client sees the newest verdict.
+    await upsertCovenantStatus(handle.db, { roomId, objectId, status: 'drift', generation: 2 });
     const second = await loadCovenantStatus(handle.db, { roomId, objectId });
     expect(second).toEqual({ status: 'drift', generation: 2 });
 
     // Still one row per (room, object) — the upsert replaced, never appended.
-    const rows = await handle.db.select().from(covenantStatus).where(eq(covenantStatus.room, roomId));
+    const rows = await handle.db
+      .select()
+      .from(covenantStatus)
+      .where(eq(covenantStatus.room, roomId));
     expect(rows).toHaveLength(1);
     expect(rows[0]?.status).toBe('drift');
   });
 
+  /**
+   * THE #217 GUARD, flipped-input proof (the mutation test). For ONE span the sweep's
+   * logical order is `ok(gen 1)` then `drift(gen 2)`, but the DB writes LAND REVERSED —
+   * the `drift(gen 2)` upsert commits first, then the racing/late `ok(gen 1)` arrives.
+   * With a blind arrival-order counter (the pre-fix code) the late `ok` would win and
+   * strand a stale false-`✓` over drifted content — the cardinal sin. With the guard,
+   * the late lower generation is a NO-OP: the row stays `drift`.
+   */
+  it('rejects a stale, out-of-order verdict — drift(gen 2) then ok(gen 1) keeps drift', async () => {
+    // Writes land in REVERSED logical order: the newer verdict first…
+    await upsertCovenantStatus(handle.db, { roomId, objectId, status: 'drift', generation: 2 });
+    // …then the stale, out-of-order older verdict, which MUST be rejected by the guard.
+    await upsertCovenantStatus(handle.db, { roomId, objectId, status: 'ok', generation: 1 });
+
+    const stranded = await loadCovenantStatus(handle.db, { roomId, objectId });
+    expect(stranded).toEqual({ status: 'drift', generation: 2 });
+
+    // And an EQUAL generation is also a no-op — the guard is strictly-greater, so a
+    // duplicate delivery of the same generation cannot flip the verdict either.
+    await upsertCovenantStatus(handle.db, { roomId, objectId, status: 'ok', generation: 2 });
+    const stillDrift = await loadCovenantStatus(handle.db, { roomId, objectId });
+    expect(stillDrift).toEqual({ status: 'drift', generation: 2 });
+  });
+
+  it('applies verdicts that arrive IN logical order — ok(gen 1) then drift(gen 2) is drift', async () => {
+    await upsertCovenantStatus(handle.db, { roomId, objectId, status: 'ok', generation: 1 });
+    await upsertCovenantStatus(handle.db, { roomId, objectId, status: 'drift', generation: 2 });
+    const row = await loadCovenantStatus(handle.db, { roomId, objectId });
+    expect(row).toEqual({ status: 'drift', generation: 2 });
+  });
+
   it('advances updated_at on each recompute, so a reader can order verdicts by time', async () => {
-    await upsertCovenantStatus(handle.db, { roomId, objectId, status: 'ok' });
+    await upsertCovenantStatus(handle.db, { roomId, objectId, status: 'ok', generation: 1 });
     const [before] = await handle.db
       .select({ updatedAt: covenantStatus.updatedAt })
       .from(covenantStatus)
       .where(and(eq(covenantStatus.room, roomId), eq(covenantStatus.objectId, objectId)));
     await new Promise((r) => setTimeout(r, 5));
-    await upsertCovenantStatus(handle.db, { roomId, objectId, status: 'unresolved' });
+    await upsertCovenantStatus(handle.db, {
+      roomId,
+      objectId,
+      status: 'unresolved',
+      generation: 2,
+    });
     const [after] = await handle.db
       .select({ updatedAt: covenantStatus.updatedAt })
       .from(covenantStatus)
@@ -166,7 +205,12 @@ describe('write-on-recompute: the OWNER upsert tracks the sweep', () => {
   /** A verdict for a span that is not a real accepted object in the room is refused. */
   it('refuses a verdict over a span that is not an accepted object in the room', async () => {
     await expect(
-      upsertCovenantStatus(handle.db, { roomId, objectId: randomUUID(), status: 'ok' }),
+      upsertCovenantStatus(handle.db, {
+        roomId,
+        objectId: randomUUID(),
+        status: 'ok',
+        generation: 1,
+      }),
     ).rejects.toMatchObject({ cause: expect.objectContaining({ code: '23503' }) });
   });
 });
@@ -227,7 +271,7 @@ describe('the REVOKE — a client can never author a verdict (RESERVED for Lars,
 
       // ── AND NOW FOR REAL, over a connection as the app role ──────────────────
       // Seed one verdict as the owner so the SELECT below has a row to return.
-      await upsertCovenantStatus(handle.db, { roomId, objectId, status: 'ok' });
+      await upsertCovenantStatus(handle.db, { roomId, objectId, status: 'ok', generation: 1 });
       const url = new URL(databaseUrl());
       url.username = appRole;
       url.password = 'probe';

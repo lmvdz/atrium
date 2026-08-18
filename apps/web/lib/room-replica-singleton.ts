@@ -49,11 +49,22 @@ export function roomReplicaManager(): RoomReplicaManager {
         // persistence error must not break DETECT, so the promise is caught and
         // swallowed (the in-process draft ledger + read-path overlay stay the
         // load-bearing `~`; this table is the durable mirror clients sync).
-        onVerdict: (objectId, status) => {
-          void upsertCovenantStatus(db(), { roomId, objectId, status }).catch(() => {
-            // Projection write failed (transient DB error, evicted room). The verdict
-            // still stands in-process; the next recompute re-upserts it.
-          });
+        onVerdict: (objectId, status, generation) => {
+          void upsertCovenantStatus(db(), { roomId, objectId, status, generation }).catch(
+            (error) => {
+              // Projection write failed (transient DB error, evicted room). The verdict
+              // still stands in-process; the next recompute re-upserts it. DO NOT swallow
+              // silently: a failed `drift` upsert that is never retried can strand the row
+              // at a stale `ok` (the #217 cardinal sin), so log it distinctly — the
+              // generation guard makes the eventual re-upsert safe, but the failure must
+              // be visible, not invisible.
+              console.error(
+                `[covenant-status] projection upsert failed room=${roomId} object=${objectId} ` +
+                  `status=${status} generation=${generation}:`,
+                error,
+              );
+            },
+          );
         },
       });
     },

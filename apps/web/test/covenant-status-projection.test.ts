@@ -29,32 +29,35 @@ describe('the sweep projects every recompute through onVerdict', () => {
   it('reports the resolved status for each certified object, following ok→drift→ok', async () => {
     const objectId = 'object-1';
     let status: CovenantReadStatus = 'ok';
-    const projected: Array<[string, CovenantReadStatus]> = [];
+    const projected: Array<[string, CovenantReadStatus, number]> = [];
 
     const sweep = new RoomDriftSweep({
       doc: new Y.Doc(),
       authority: fakeAuthority(() => status),
       loadCertifiedObjectIds: async () => [objectId],
-      onVerdict: (id, s) => projected.push([id, s]),
+      // Capture the generation too — it MUST be threaded to the seam (the #217 fix), so
+      // the durable upsert can reject a stale/out-of-order verdict.
+      onVerdict: (id, s, generation) => projected.push([id, s, generation]),
     });
 
-    // First recompute: the span resolves `ok` — the projection records `✓`.
+    // First recompute: the span resolves `ok` — the projection records `✓` at gen 1.
     sweep.sweepNow();
     await sweep.settled();
-    expect(projected.at(-1)).toEqual([objectId, 'ok']);
+    expect(projected.at(-1)).toEqual([objectId, 'ok', 1]);
 
-    // The content drifts: a later recompute resolves `drift` — the projection follows.
+    // The content drifts: a later recompute resolves `drift` — the projection follows,
+    // at a STRICTLY-GREATER logical generation (2), which the durable guard requires.
     status = 'drift';
     sweep.sweepNow();
     await sweep.settled();
-    expect(projected.at(-1)).toEqual([objectId, 'drift']);
+    expect(projected.at(-1)).toEqual([objectId, 'drift', 2]);
 
-    // Reverted to the certified bytes: `ok` again — the machine never mints a `✓`, it
-    // just reports the human anchor resolving clean once more.
+    // Reverted to the certified bytes: `ok` again at gen 3 — the machine never mints a
+    // `✓`, it just reports the human anchor resolving clean once more.
     status = 'ok';
     sweep.sweepNow();
     await sweep.settled();
-    expect(projected.at(-1)).toEqual([objectId, 'ok']);
+    expect(projected.at(-1)).toEqual([objectId, 'ok', 3]);
   });
 
   it('does not require an onVerdict hook — the sweep runs without a projection sink', async () => {

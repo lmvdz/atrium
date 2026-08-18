@@ -21,13 +21,39 @@ import { covenantStatus } from './schema.js';
  * not an in-function membership check. The REVOKE/role semantics on this
  * covenant-authority table are DRAFTED for Lars's ratification.
  *
- * ## Monotone generation, in one statement
+ * ## Generation-GUARDED upsert — the sweep's LOGICAL generation is the authority
  *
  * `(room, object_id)` is the primary key, so a re-verdict for the same span is an
- * upsert: INSERT at `generation = 1`, or on conflict bump `generation = generation + 1`
- * and re-stamp `updated_at = now()`. The bump is computed from the EXISTING row inside
- * the same statement, so it is atomic and monotone per span without a trigger or a
- * read-modify-write race.
+ * upsert. The `generation` is NOT a blind arrival-order counter — it is the drift
+ * sweep's per-object LOGICAL generation (`RoomDriftSweep`'s `draftGeneration`, bumped
+ * once per re-resolve of the span), passed in verbatim so the ORDER OF INTENT, not the
+ * order the writes happen to land in, decides the row.
+ *
+ * The conflict branch overwrites `status`/`generation`/`updated_at` ONLY WHEN the
+ * incoming generation is STRICTLY GREATER than the stored one
+ * (`setWhere: stored.generation < excluded.generation`). A stale or out-of-order
+ * verdict — a lower/equal generation arriving after a newer one already landed — is a
+ * NO-OP, never an overwrite. This is what stops the cardinal sin: an `ok(gen G1)`
+ * whose DB write races behind and lands after a `drift(gen G2>G1)` can no longer strand
+ * the row at `ok` over drifted content. The guard is enforced by Postgres in the one
+ * statement, so it is atomic and needs no read-modify-write.
+ *
+ * The INSERT seeds `generation` from the caller too (first write for the span); the
+ * check constraint `covenant_status_generation_positive` requires `>= 1`, which the
+ * sweep's logical generation always satisfies (it starts at 1 and only grows).
+ *
+ * ## Forward notes for T4 (the client consumer — NOT built here)
+ *
+ *   * The client must render `✓` ONLY on `status === 'ok'`, never on mere row
+ *     existence — a `drift`/`unresolved` row is a machine `~`, and a row's presence is
+ *     not itself a verdict.
+ *   * UN-CERTIFY is not built yet. If a span's anchor is deleted WITHOUT deleting the
+ *     object, its `covenant_status` row survives (the FK cascades on object/room delete,
+ *     not on anchor delete) at whatever generation it last held. The sweep's logical
+ *     generation resets to 1 when an object is pruned from its in-process ledger, so a
+ *     later re-certify + sweep could be rejected by this strictly-greater guard and
+ *     strand a stale verdict. Guard that seam when un-certify lands (its own #217-shaped
+ *     concern), e.g. delete the row on un-certify or reset generation together.
  */
 export async function upsertCovenantStatus(
   db: Pick<Database, 'insert'>,
@@ -36,6 +62,12 @@ export async function upsertCovenantStatus(
     readonly objectId: string;
     /** The sweep's verdict, verbatim — `ok` ⇒ `✓`; `drift`/`unresolved` ⇒ `~`. */
     readonly status: CovenantReadStatus;
+    /**
+     * The sweep's LOGICAL per-object generation for this verdict (>= 1). The guard
+     * below keeps the row at the highest generation seen, so a lower/equal (stale,
+     * out-of-order) generation is rejected rather than overwriting a newer verdict.
+     */
+    readonly generation: number;
   },
 ): Promise<void> {
   await db
@@ -44,17 +76,18 @@ export async function upsertCovenantStatus(
       room: params.roomId,
       objectId: params.objectId,
       status: params.status,
-      // First write for the span; a re-verdict takes the conflict branch below.
-      generation: 1,
+      generation: params.generation,
     })
     .onConflictDoUpdate({
       target: [covenantStatus.room, covenantStatus.objectId],
       set: {
         status: params.status,
-        // Monotone per span, computed from the existing row in this same statement.
-        generation: sql`${covenantStatus.generation} + 1`,
+        generation: params.generation,
         updatedAt: sql`now()`,
       },
+      // Only a STRICTLY-NEWER generation may overwrite. A stale/out-of-order verdict
+      // (stored.generation >= incoming) is a no-op — the guard, and the whole fix.
+      setWhere: sql`${covenantStatus.generation} < excluded.generation`,
     });
 }
 
@@ -70,7 +103,9 @@ export async function loadCovenantStatus(
   const [row] = await db
     .select({ status: covenantStatus.status, generation: covenantStatus.generation })
     .from(covenantStatus)
-    .where(and(eq(covenantStatus.room, params.roomId), eq(covenantStatus.objectId, params.objectId)))
+    .where(
+      and(eq(covenantStatus.room, params.roomId), eq(covenantStatus.objectId, params.objectId)),
+    )
     .limit(1);
   if (!row) return null;
   return { status: row.status, generation: row.generation };

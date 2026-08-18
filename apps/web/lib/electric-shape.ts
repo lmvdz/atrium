@@ -49,8 +49,10 @@ export const SHAPE_TABLES: ReadonlySet<string> = new Set([
  * projection nicety here; it is what makes the read succeed at all. The list names
  * exactly the columns y-electric reads (`op`) plus the primary key Electric
  * requires the shape to carry (`id` for `ydoc_updates`; `client_id, room` for
- * `ydoc_awareness`), and DELIBERATELY OMITS `op_digest` — the generated column —
- * along with the writer stamp and stream_seq the client never reads.
+ * `ydoc_awareness`; `room, object_id` for `covenant_status`), and DELIBERATELY OMITS
+ * `op_digest` — the generated column — along with the writer stamp and stream_seq the
+ * client never reads. `covenant_status` has no generated column, so a bare read would
+ * not 400, but it is pinned here for the same allowlist discipline as the rest.
  *
  * ## Why pinned SERVER-side rather than trusted from the client
  *
@@ -61,6 +63,10 @@ export const SHAPE_TABLES: ReadonlySet<string> = new Set([
  * widens the projection beyond what this map names, and (unlike a generated
  * column) a client cannot ask for a column that makes Electric 400 the whole
  * stream for every reader of that room.
+ *
+ * All three tables this proxy serves (`SHAPE_TABLES`) are listed here; a table with
+ * no entry falls back to Electric's all-columns default, which is only safe when the
+ * table has no generated column.
  */
 export const SHAPE_COLUMNS: Readonly<Record<string, readonly string[]>> = {
   // `id` is the primary key Electric requires the shape to carry; `op` is the Yjs
@@ -72,6 +78,12 @@ export const SHAPE_COLUMNS: Readonly<Record<string, readonly string[]>> = {
   // it. `client_id, room` are the composite primary key; `op` is the presence
   // payload; `updated` is its freshness.
   ydoc_awareness: ['client_id', 'room', 'op', 'updated'],
+  // The covenant verdict projection (#206/#217, E6). No generated column, so a bare
+  // read would not 400 — but pinned like the others for the allowlist discipline: the
+  // client never widens it. `room, object_id` are the composite primary key; `status`
+  // is the verdict the client renders `✓`/`~` from; `generation` lets the client keep
+  // the newest verdict when Electric delivers out of order; `updated_at` is its stamp.
+  covenant_status: ['room', 'object_id', 'status', 'generation', 'updated_at'],
 };
 
 /**

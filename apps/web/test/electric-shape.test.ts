@@ -188,4 +188,20 @@ describe('the tables the proxy serves', () => {
     expect(url.searchParams.get('where')).toBe('room = $1');
     expect(url.searchParams.get('params[1]')).toBe(ROOM);
   });
+
+  it('pins the covenant-status projection to its own real columns (T1×T3 reconcile)', () => {
+    // T1 added per-table column pinning; T3 added `covenant_status` to SHAPE_TABLES.
+    // The reconcile: covenant_status is listed in SHAPE_COLUMNS with its real columns,
+    // so the shape names them explicitly (allowlist discipline) and a client `columns`
+    // is discarded. It has no generated column, so this pinning is discipline, not a
+    // 400-avoidance requirement — but it must still be a valid all-real-columns read.
+    const url = buildShapeTarget({
+      upstream: UPSTREAM,
+      table: 'covenant_status',
+      room: ROOM,
+      incoming: new URLSearchParams('columns=status'),
+      secret: 'shh',
+    });
+    expect(url.searchParams.get('columns')).toBe('room,object_id,status,generation,updated_at');
+  });
 });

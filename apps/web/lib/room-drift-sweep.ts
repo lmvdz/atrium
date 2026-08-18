@@ -147,8 +147,14 @@ export interface RoomDriftSweepOptions {
    * overlay remain the load-bearing `~` signals; the projection is the durable mirror).
    * Only ever called under the current sweep generation, so a superseded compute never
    * projects a stale verdict.
+   *
+   * `generation` is the sweep's LOGICAL per-object generation for THIS verdict (>= 1).
+   * It must be carried all the way to the durable upsert so the projection is guarded by
+   * order-of-intent, not order-of-arrival: a `drift(gen 2)` whose DB write lands before a
+   * racing `ok(gen 1)` must keep the row at `drift`. Dropping this generation at the seam
+   * is exactly the defect #217 fixes — the guard has nothing to compare against without it.
    */
-  readonly onVerdict?: (objectId: string, status: CovenantReadStatus) => void;
+  readonly onVerdict?: (objectId: string, status: CovenantReadStatus, generation: number) => void;
   /** The server clock stamped on a stale draft. Defaults to `() => new Date().toISOString()`. */
   readonly now?: () => string;
 }
@@ -161,7 +167,11 @@ export class RoomDriftSweep {
   private readonly doc: Y.Doc;
   private readonly authority: CovenantReadAuthority;
   private readonly loadCertifiedObjectIds: () => Promise<Iterable<string>>;
-  private readonly onVerdict?: (objectId: string, status: CovenantReadStatus) => void;
+  private readonly onVerdict?: (
+    objectId: string,
+    status: CovenantReadStatus,
+    generation: number,
+  ) => void;
   private readonly now: () => string;
 
   /** The in-process stale-draft ledger: object → its (frozen) machine `~` draft. */
@@ -467,7 +477,9 @@ export class RoomDriftSweep {
     // covenant_status table (E6, #206). Fire-and-forget and fail-safe — see onVerdict's
     // docblock. Done here, under the generation guard, so a superseded compute never
     // projects a stale verdict; the in-process ledger below stays the load-bearing `~`.
-    this.onVerdict?.(objectId, status);
+    // The LOGICAL `generation` is threaded through so the durable upsert can reject a
+    // stale/out-of-order write (the #217 guard) instead of clobbering a newer verdict.
+    this.onVerdict?.(objectId, status, generation);
     if (status === 'ok') {
       this.drafts.delete(objectId);
       // POSITIVELY confirm swept-clean (E7, #199 Fix 3): the read-path overlay may now
