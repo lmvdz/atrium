@@ -171,11 +171,11 @@ describe('serverCovenantReadAuthority — the authority wired to the ledger read
     expect(authority.read('o_span').covenantStatus).toBe('unresolved');
   });
 
-  // E7 (#199) — the `#182-before-server-✓` gate opens ONLY under a drift sweep. With
-  // `driftSwept: true` the caller declares a RoomDriftSweep is invalidating this exact
-  // authority on every replica update, so a cached `ok` that was NOT invalidated is
-  // proven fresh and is served as `✓` — the flag SL-4 kept SET until DETECT is real.
-  it('a drift-swept authority serves a cached `ok` as `✓` (the #182 flag-clear)', async () => {
+  // E7 (#199 Fix 3) — the `#182-before-server-✓` gate opens ONLY while a drift sweep is
+  // ACTUALLY LIVE on this authority, not via a construction-time `driftSwept` boolean. A
+  // `RoomDriftSweep` marks it live on start() (guaranteeing invalidate-on-drift) and NOT
+  // live on stop()/evict — so a stopped sweep can never leave a trusting authority.
+  it('a LIVE-swept authority serves a cached `ok` as `✓`; a STOPPED one re-fail-closes', async () => {
     const fragment: RenderedFragment = {
       ancestors: [],
       nodes: [{ kind: 'text', text: 'ship it', marks: [] }],
@@ -190,16 +190,30 @@ describe('serverCovenantReadAuthority — the authority wired to the ledger read
       db: fakeDb([goodRow({ renderedDigest: digest, enclosedItems: ENCLOSED })]),
       roomId: 'room_1',
       resolveSpan,
-      driftSwept: true, // a sweep is live ⇒ the interim fail-closed guard is cleared
     });
-    const r = await authority.resolve('o_span');
-    expect(r.covenantStatus).toBe('ok');
-    // not-theater: with the guard still SET this read would demote to `~`; the swept
-    // authority trusts the cached `ok` because the sweep guarantees invalidate-on-drift.
+    // BEFORE a sweep is live: the guard is SET, so a cached `ok` is served `~`.
+    expect((await authority.resolve('o_span')).covenantStatus).toBe('ok');
+    expect(authority.read('o_span').covenantStatus).not.toBe('ok');
+
+    // A sweep goes LIVE (what RoomDriftSweep.start() does) ⇒ the cached `ok` is trusted.
+    authority.markSweepLive(true);
+    expect((await authority.resolve('o_span')).covenantStatus).toBe('ok');
     expect(authority.read('o_span').covenantStatus).toBe('ok');
+
     // The invariant the sweep upholds: an `invalidate` (what the sweep calls on a drift)
     // still demotes to `~` at once — a swept `✓` is trusted, but never a stale one.
     authority.invalidate('o_span');
+    expect(authority.read('o_span').covenantStatus).not.toBe('ok');
+
+    // STOP the sweep (stop()/evict): re-fail-close + invalidate-all. A re-resolved `ok`
+    // is no longer trusted by read() — a stopped sweep leaves no trusting authority.
+    await authority.resolve('o_span'); // cache an ok again
+    expect(authority.read('o_span').covenantStatus).toBe('ok'); // still live here
+    authority.markSweepLive(false);
+    authority.invalidateAll();
+    expect(authority.read('o_span').covenantStatus).not.toBe('ok');
+    // And a fresh resolve after stop still reads `~` (the guard is re-armed).
+    expect((await authority.resolve('o_span')).covenantStatus).toBe('ok');
     expect(authority.read('o_span').covenantStatus).not.toBe('ok');
   });
 

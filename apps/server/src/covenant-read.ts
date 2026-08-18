@@ -105,25 +105,6 @@ export function serverCovenantReadAuthority(input: {
   readonly db: Database;
   readonly roomId: string;
   readonly resolveSpan: SpanResolver;
-  /**
-   * IS A DRIFT-ON-UPDATE SWEEP DRIVING THIS AUTHORITY'S `invalidate` (E7, #182/#199)?
-   *
-   * This is the switch the `#182-before-server-✓` constraint gates on. The server
-   * has no sync doc handle, so it wires no `liveFreshness` port; its ONLY freshness
-   * signal is the `invalidate` hook a drift sweep calls on every content update. When
-   * that sweep is LIVE — a `RoomDriftSweep` (apps/web/lib/room-drift-sweep) subscribed
-   * to the room replica's Yjs updates, invalidating this exact authority —
-   * a cached `ok` that SURVIVED an invalidate-covered window IS proven fresh: any edit
-   * that could have drifted it would have invalidated it. Only then may the interim
-   * fail-closed guard be cleared.
-   *
-   * `false` / omitted (the DEFAULT): NO sweep is guaranteed, so
-   * `failClosedWithoutFreshness` stays SET and a cached `ok` is served as `~` — the
-   * pre-E7 behaviour the `#182-before-server-✓` constraint requires until DETECT is
-   * real. Do NOT pass `true` for an authority no sweep actually invalidates: that would
-   * re-open the exact fail-open (a server `✓` outliving live drift) SL-4 closed.
-   */
-  readonly driftSwept?: boolean;
 }): CovenantReadAuthority {
   const loadAnchor: AnchorLoader = (objectId) =>
     readCovenantAnchor(input.db, input.roomId, objectId);
@@ -133,15 +114,15 @@ export function serverCovenantReadAuthority(input: {
     // Bind the authority to its room: an anchor loaded for a different room fails
     // closed (defence-in-depth over the `(room_id, object_id)`-keyed query).
     expectedRoomId: input.roomId,
-    // THE `#182-before-server-✓` GATE (SL-4 fix round 2, HIGH). Cleared ONLY when a
-    // drift sweep is live on this authority (`driftSwept`), because DETECT (E7, #199)
-    // now guarantees invalidate-on-drift: a sweep re-runs on every replica update and
-    // invalidates every certified object, so a cached `ok` that was NOT invalidated is
-    // proven fresh and may be served. WITHOUT a sweep the flag stays SET: the server
-    // has no sync doc handle, nothing else invalidates, so an unproven cached `ok` is
-    // served as `~`, never a stale `✓`. Interim fail-closed by default; trusted only
-    // under the sweep that makes it safe.
-    failClosedWithoutFreshness: input.driftSwept !== true,
+    // THE `#182-before-server-✓` GATE (SL-4 fix round 2, HIGH), now tied to an
+    // ACTUALLY-LIVE sweep (E7, #199 Fix 3). The server has no sync doc handle, so this
+    // is ALWAYS SET; a cached `ok` is trusted ONLY while a drift sweep is genuinely
+    // live on this authority (`RoomDriftSweep.start()` → `authority.markSweepLive(true)`,
+    // `stop()`/evict → `markSweepLive(false)`). There is deliberately NO construction
+    // boolean to clear the guard: the old `driftSwept: true` cleared it once and left a
+    // STOPPED sweep still serving a cached `ok` as a trusted `✓` (the proved fail-open).
+    // Trust now follows the sweep's real lifecycle, so a torn-down sweep re-fail-closes.
+    failClosedWithoutFreshness: true,
   };
   return new CovenantReadAuthority(options);
 }
