@@ -196,6 +196,62 @@ describe('a hold in flight when the body converges never certifies the stale spa
   });
 });
 
+describe('a completed certify RECEIPT does not outlive the body it described (#212)', () => {
+  /* CATCHES the cardinal #212 false-✓: certify a span → the panel paints a STANDING
+     green ✓ + "a human certification now stands over this span" from the done outcome
+     → a peer edits the body (version bumps) → the resolver-driven feed glyph correctly
+     flips ✓→~, but the panel's receipt persisted, leaving a standing lie over drifted
+     content. The fix clears a completed `status` on convergence, so the confirmation is
+     an act-receipt, not a standing indicator. Flip-the-input for THIS glyph: flip the
+     signed body; the panel's ✓ must move. */
+  it('a version bump after a successful certify clears the standing ✓ and its "now stands" copy', async () => {
+    const doc = seededDoc(msg('m1', 'hello world'));
+    const onCertify = vi.fn<CertifyPassageCertify>(async () => ({ ok: true, anchorId: 'a1' }));
+    const { rerender } = renderPane(doc, 1, onCertify);
+
+    // Certify a span end-to-end: select, press-and-hold past the gate, await the ack.
+    selectChars(0, 5); // "hello"
+    const hold = screen.getByRole('button', { name: /Certify this passage/ });
+    fireEvent.pointerDown(hold);
+    advance(2100); // past the 2s gate → onAct → runCertify
+    await act(async () => {
+      await Promise.resolve();
+    });
+
+    // The receipt stands: green ✓ + the "now stands" sentence.
+    expect(onCertify).toHaveBeenCalledTimes(1);
+    expect(screen.getByTestId('certify-outcome')).toBeTruthy();
+    expect(screen.getByText(/a human certification now stands over this span/)).toBeTruthy();
+
+    // A convergence lands (a peer edits the certified body); the pane is told via
+    // `version`. The signed content has drifted, so the receipt no longer describes
+    // current state.
+    act(() => {
+      const body = doc.body('m1');
+      if (!body) throw new Error('no body');
+      body.insert(0, 'XX '); // "hello world" → "XX hello world"
+    });
+    rerender(
+      <CertifyPassage
+        actor="lars"
+        doc={doc}
+        messageId="m1"
+        objectId={OBJECT_ID}
+        onCertify={onCertify}
+        roomSlug="room"
+        version={2}
+        workspaceSlug="ws"
+      />,
+    );
+
+    // The standing ✓ and its sentence are GONE — the panel is back to idle, and the
+    // standing covenant truth is left to the resolver-driven feed glyph alone.
+    expect(screen.queryByTestId('certify-outcome')).toBeNull();
+    expect(screen.queryByText(/now stands over this span/)).toBeNull();
+    expect(screen.queryByText(/certified — a human certification/)).toBeNull();
+  });
+});
+
 describe('a hold that completes BEFORE the version bump commits still refuses (E8 r3)', () => {
   /* CATCHES the residual the r2 fix left open: the convergence-driven `disabled` flip
      is React state, so it lands only after React commits the re-render — and a queued

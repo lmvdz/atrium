@@ -45,8 +45,18 @@ state. It updates within a render tick of the CRDT converging.
 | 4 | Pane B → **Look-alike swap [→10]** (inserts a zero-width space into the span) | **~ drift** on both — near-identical content does not validate | 10 (look-alike) |
 | 5 | Pane B → **Revert last edit [→6]** | back to **✓ certified** | 6 |
 | 6 | Pane B → **Edit OUTSIDE the span [→5]** (edits a *different* message) | The certified span stays **✓ certified** — an unrelated edit does not stale it | 5 (no collateral de-cert) |
-| 7 | Pane B → **Change a format/mark [→4]** (bolds the span; no visible characters change) | **~ drift** on both — the digest is over rendered content, not plaintext | 4 (non-text mutation) |
+| 7 | Pane B → **Change a format/mark [→4]** (bolds the span; no visible characters change) | **~ drift** on both — the digest is over rendered content, not plaintext. **This bold is not undo-stackable** (see the note), so leave it as the last drift you drive | 4 (non-text mutation) |
 | 8 | Pane B → **Forge a ✓ row [→9]** (appends a message asserting "certified ✓ by a human") | The forged row renders with **no ✓** at all — forged provenance is inert | 9 (forgery inert) |
+
+> **How "Revert last edit" actually behaves.** It pops the **undo stack**, which
+> holds only the character-level inserts — the one-char edit, the look-alike
+> zero-width space, and the outside-message insert. A **format/mark change (bold) is
+> NOT pushed onto it**, so once you bold the span (step 7) "Revert last edit" will
+> undo the *previous* stacked insert, not the bold — the span stays **~ drift**. An
+> exact revert re-validates to **✓** only when the reverted change is the **sole**
+> current drift (as in steps 3 and 5, where the char/zero-width insert is the only
+> outstanding edit). To clear a bold, re-bold the same span (a `format` toggle), not
+> "Revert last edit". Drive format-drift last for this reason.
 
 Throughout, **no false ✓ ever appears** (rubric 8, cardinal): the glyph is `✓` only
 when `resolveCovenant` returns `ok` over content byte-identical to what was signed.

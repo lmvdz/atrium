@@ -274,15 +274,29 @@ export function CertifyPassage({
   const bodyLength = bodyModelLength(segments);
   const divergesFromRaw = useMemo(() => bodyRenderDivergesFromRaw(segments), [segments]);
 
-  // INVALIDATE A PENDING SELECTION WHEN THE BODY CHANGES (E8 finding #1). A span
-  // captured against the previous body indexes coordinates that no longer describe
-  // what the human read; it must never complete a certify. On any convergence we
-  // clear the pending span (disabling the ✓) AND collapse the browser selection, so
-  // the human re-selects against the recomputed body rather than certifying at stale
-  // coords. The first render's run is a no-op (span is already null).
+  // INVALIDATE A PENDING SELECTION — AND A COMPLETED ACT-RECEIPT — WHEN THE BODY
+  // CHANGES (E8 finding #1, extended for #212). A span captured against the previous
+  // body indexes coordinates that no longer describe what the human read; it must
+  // never complete a certify. On any convergence we clear the pending span (disabling
+  // the ✓) AND collapse the browser selection, so the human re-selects against the
+  // recomputed body rather than certifying at stale coords.
+  //
+  // A COMPLETED `done` status is stale for the identical reason (#212): the ✓ receipt
+  // "a human certification now stands over this span" describes the body at the
+  // version it was certified at; once the body converges past that version the
+  // sentence no longer describes current state, and a standing green ✓ in the panel
+  // becomes a user-reachable lie over drifted content (the resolver-driven feed
+  // `CovenantGlyph` correctly flips ✓→~, but this panel receipt did not). So a
+  // completed status is reset to idle on convergence: the panel's confirmation is an
+  // ACT-RECEIPT, not a standing covenant indicator — the standing truth comes ONLY
+  // from the resolver-driven feed glyph. The reset is unconditional on convergence
+  // (not gated on whether the edit touched this span): a receipt must not outlive the
+  // state it described, full stop. The first render's run is a no-op (span is already
+  // null and status is already idle).
   // biome-ignore lint/correctness/useExhaustiveDependencies: fire only on a body convergence, keyed by `version`
   useEffect(() => {
     setSpan(null);
+    setStatus({ phase: 'idle' });
     const sel = bodyRef.current?.ownerDocument?.defaultView?.getSelection();
     sel?.removeAllRanges();
   }, [version]);
