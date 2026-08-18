@@ -25,6 +25,7 @@
     "db:generate": "pnpm --filter @atrium/db generate",
     "db:migrate": "pnpm --filter @atrium/db migrate",
     "infra:up": "docker compose up -d postgres minio",
+    "infra:up:electric": "docker compose up -d postgres minio && pnpm db:migrate && docker compose up --no-deps --abort-on-container-exit --exit-code-from electric-init electric-init && docker compose -f docker-compose.yml -f docker-compose.electric-dev.yml up -d --no-deps electric",
     "infra:down": "docker compose down",
     "seed:controlplane": "pnpm --filter \"./packages/*\" build && pnpm --filter @atrium/server exec tsx ../../scripts/seed-controlplane.ts",
     "seed:dogfood": "pnpm --filter \"./packages/*\" build && pnpm --filter @atrium/server exec tsx ../../scripts/seed-dogfood.ts"

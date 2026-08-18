@@ -1,0 +1,39 @@
+# ╔═══════════════════════════════════════════════════════════════════════════╗
+# ║  DEVELOPMENT ONLY — publishes the Electric sync service on loopback so the  ║
+# ║  host-run app (`pnpm dev`) can reach it. NOT for any deployed stack.        ║
+# ║                                                                           ║
+# ║      docker compose -f docker-compose.yml -f docker-compose.electric-dev.yml up -d electric
+# ║                                                                           ║
+# ║  or, the one-command target that also runs the role/publication setup:     ║
+# ║                                                                           ║
+# ║      pnpm infra:up:electric                                                 ║
+# ╚═══════════════════════════════════════════════════════════════════════════╝
+#
+# Why this override exists
+# ------------------------
+# In the PRODUCTION stack (docker-compose.yml) Electric has NO published port on
+# purpose: it is a sync engine with no idea who is asking, so the only thing that
+# ever talks to it is the `app` container, over the compose network at
+# `http://electric:3000`, through `apps/web/app/electric/v1/shape/route.ts` which
+# authenticates the session and pins the room `where` server-side. Publishing a
+# port there would be a second way in that skips all of that. That security model
+# is deliberate and this file does NOT change it for any deployed stack.
+#
+# The everyday dev loop is different in ONE way: `pnpm dev` runs the Next.js app
+# on the HOST, not in the compose network, so it cannot resolve the `electric`
+# hostname. It reaches Electric through `ELECTRIC_URL=http://localhost:3100` (the
+# value the .env.example hint names), which needs a published port to exist. This
+# file adds exactly that port and nothing else.
+#
+# 127.0.0.1 only — same rule as postgres and minio in the base file. Electric is
+# still not on any network you do not own; it is reachable only from this host,
+# and the app's shape proxy is still the only authorization gate. A dev curling
+# `localhost:3100` directly gets the same "Electric trusts anyone with the
+# secret" surface the compose network already had — which is why ELECTRIC_SECRET
+# is still required and still the only lock at this layer.
+name: atrium
+
+services:
+  electric:
+    ports:
+      - '127.0.0.1:${ELECTRIC_PORT:-3100}:3000'
