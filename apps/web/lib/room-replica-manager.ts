@@ -158,9 +158,49 @@ export function dbYdocStreamSource(db: Pick<Database, 'select'>): YdocStreamSour
   };
 }
 
+/**
+ * A drift-on-update sweep the manager owns per replica (E7, #199 Fix 2). The
+ * concrete implementation is `RoomDriftSweep` (apps/web/lib/room-drift-sweep); this
+ * narrow structural interface keeps the generic manager from importing it — the
+ * covenant wiring is INJECTED via {@link RoomReplicaManagerOptions.sweepFactory}, so
+ * the manager owns only the LIFECYCLE (start on acquire, stop on evict), not the
+ * covenant specifics.
+ */
+export interface ReplicaSweep {
+  /** Subscribe to the replica doc's updates. */
+  start(): void;
+  /** Unsubscribe AND invalidate-all the authority (drop stale cached `ok`) — teardown. */
+  stop(): void;
+  /** Run one sweep now to seed verdicts against the just-caught-up doc. */
+  sweepNow(): void;
+  /** The object ids the sweep currently reads as `~` (for the read path overlay). */
+  staleObjectIds(): ReadonlySet<string>;
+  /**
+   * The certified objects the sweep has positively confirmed swept-clean (E7, #199
+   * Fix 3) — consumed by the read path to be FAIL-CLOSED until the sweep has spoken: a
+   * certified object NOT in this set has no settled sweep verdict, so the overlay
+   * withholds `ok` and reads `~`.
+   */
+  sweptObjectIds(): ReadonlySet<string>;
+  /**
+   * Seed a freshly-certified anchor so its first in-span edit is caught (E7, #199
+   * Fix 2) — the certify path calls this on a successful mint.
+   */
+  noteCertified(objectId: string): void;
+}
+
 export interface RoomReplicaManagerOptions {
   /** The durable-stream catch-up source (Electric shape in prod, {@link dbYdocStreamSource} here). */
   readonly source: YdocStreamSource;
+  /**
+   * OPTIONAL per-replica drift sweep factory (E7, #199 Fix 2). When set, the manager
+   * starts a sweep for a room's replica on `acquire` (seeding verdicts with one
+   * `sweepNow`) and stops it on evict — so DETECT is LIVE in production, not only in
+   * the test. `null` from the factory means "no sweep for this room" (fail-closed:
+   * the read path then falls back to its own fresh re-resolve). The covenant wiring
+   * lives in `room-replica-singleton`; the generic manager only owns the lifecycle.
+   */
+  readonly sweepFactory?: (roomId: string, replica: ServerRoomReplica) => ReplicaSweep | null;
   /**
    * Evict a replica unused for at least this long ({@link RoomReplicaManager.sweepIdle}).
    * Defaults to five minutes. A replica is cheap to rebuild (a fresh catch-up), so idle
@@ -175,6 +215,8 @@ export interface RoomReplicaManagerOptions {
 interface Entry {
   readonly replica: ServerRoomReplica;
   lastUsedAt: number;
+  /** The drift sweep bound to THIS replica's doc (E7, #199 Fix 2), if any. */
+  sweep?: ReplicaSweep;
 }
 
 /**
@@ -186,11 +228,62 @@ export class RoomReplicaManager {
   private readonly source: YdocStreamSource;
   private readonly idleMs: number;
   private readonly now: () => number;
+  private readonly sweepFactory?: (
+    roomId: string,
+    replica: ServerRoomReplica,
+  ) => ReplicaSweep | null;
 
   constructor(options: RoomReplicaManagerOptions) {
     this.source = options.source;
     this.idleMs = options.idleMs ?? 5 * 60_000;
     this.now = options.now ?? Date.now;
+    this.sweepFactory = options.sweepFactory;
+  }
+
+  /**
+   * Ensure the room's replica has a live drift sweep (E7, #199 Fix 2). Idempotent —
+   * a sweep already on the entry is left running (a warm re-catch-up's `update` events
+   * already drove it). Created only when a `sweepFactory` is wired; a factory `null`
+   * means "no sweep for this room". Started and seeded (`sweepNow`) against the
+   * just-caught-up doc.
+   */
+  private ensureSweep(roomId: string, entry: Entry): void {
+    if (this.sweepFactory === undefined || entry.sweep !== undefined) return;
+    const sweep = this.sweepFactory(roomId, entry.replica);
+    if (sweep === null) return;
+    entry.sweep = sweep;
+    sweep.start();
+    sweep.sweepNow(); // seed verdicts against the caught-up content
+  }
+
+  /**
+   * The object ids the room's live sweep currently reads as `~` (E7, #199 Fix 2) —
+   * consumed by the read path to force those spans `~` in the glyph map. `undefined`
+   * when no replica/sweep is held for the room (the read path then relies on its own
+   * fresh re-resolve, itself fail-closed).
+   */
+  staleObjectIdsFor(roomId: string): ReadonlySet<string> | undefined {
+    return this.entries.get(roomId)?.sweep?.staleObjectIds();
+  }
+
+  /**
+   * The certified objects the room's live sweep has confirmed swept-clean (E7, #199
+   * Fix 3) — consumed by the read path so the overlay is FAIL-CLOSED until the sweep has
+   * spoken. `undefined` when no replica/sweep is held for the room (the read path then
+   * has no swept-clean signal and falls back to its own fail-closed fresh re-resolve).
+   */
+  sweptObjectIdsFor(roomId: string): ReadonlySet<string> | undefined {
+    return this.entries.get(roomId)?.sweep?.sweptObjectIds();
+  }
+
+  /**
+   * Seed a freshly-certified anchor into the room's live sweep (E7, #199 Fix 2), so its
+   * FIRST in-span edit is caught rather than missed until the next async ledger refresh.
+   * The certify path calls this after a successful mint. A no-op when no sweep is held
+   * for the room (a cold room's next `acquire` seeds every anchor from the ledger anyway).
+   */
+  noteCertifiedFor(roomId: string, objectId: string): void {
+    this.entries.get(roomId)?.sweep?.noteCertified(objectId);
   }
 
   /**
@@ -277,6 +370,10 @@ export class RoomReplicaManager {
         // replica trails the head and certify refuses cleanly rather than 500ing.
       }
     }
+    // Start (once) the room's drift sweep against the now-caught-up doc (E7 Fix 2).
+    // A warm reuse's re-catch-up already drove the existing sweep via `update` events.
+    const entry = this.entries.get(roomId);
+    if (entry !== undefined) this.ensureSweep(roomId, entry);
     return replica;
   }
 
@@ -316,6 +413,13 @@ export class RoomReplicaManager {
 
   private dispose(roomId: string, entry: Entry): void {
     this.entries.delete(roomId);
+    // Stop the drift sweep FIRST (E7, #199): unsubscribe from the doc AND invalidate-all
+    // its authority, so an evicted replica never leaves a sweep serving a stale cached
+    // `ok`. Before the doc is destroyed, so the `off('update')` lands on a live doc. The
+    // provider is unregistered below (serverReplicaFor → null), so the read path's fresh
+    // per-request resolve then yields `~` — the proven production teardown fail-close.
+    entry.sweep?.stop();
+    entry.sweep = undefined;
     // Only unregister if we are still the registered authority — never yank someone
     // else's replica. Destroy ours regardless so its doc is freed.
     if (serverReplicaFor(roomId) === entry.replica) unregisterServerReplica(roomId);

@@ -173,6 +173,19 @@ export interface CovenantReadAuthorityOptions {
    * This is a HARD sequencing constraint: **do not flip the server to trust a cached
    * `ok` (clear this flag) before #182's invalidate-on-drift is live.**
    *
+   * ## What the flag does, precisely (E7, #199 Fix 4)
+   *
+   * With the flag SET, a sync {@link CovenantReadAuthority.read} NEVER vouches for a
+   * cached `ok` on its own — it demotes every cached `ok` to `~`. Freshness is driven
+   * ENTIRELY by the explicit {@link CovenantReadAuthority.invalidate} hook (the drift
+   * sweep calls it on every content update) plus a fresh `resolve()`; a cached `ok` is
+   * only ever re-established by a resolve that ran after the last invalidate. There is
+   * NO caller boolean and NO `sweepLive` gate that "opens" trust — an earlier round
+   * shipped a `markSweepLive`/`sweepLive` mechanism for exactly that, but it was DEAD on
+   * the production wiring (production binds the web authority, which has a
+   * {@link liveFreshness} port and never reaches this branch), so it was removed rather
+   * than kept as a guarantee production does not exercise.
+   *
    * Absent / `false` (the default, and the invalidate-driven mode the web binding uses
    * alongside its always-wired freshness port): a cached result is trusted until an
    * explicit `invalidate` drops it — the pre-existing static-doc contract.
@@ -279,8 +292,21 @@ export class CovenantReadAuthority {
   private readonly inflight = new Map<string, Promise<CovenantReadResult>>();
   /** Per-object invalidation generation — bumped by {@link invalidate}; guards recache. */
   private readonly generation = new Map<string, number>();
-
   constructor(private readonly opts: CovenantReadAuthorityOptions) {}
+
+  /**
+   * INVALIDATE EVERY currently-known object at once (E7, #199) — the teardown hook a
+   * sweep calls on `stop()`/evict so a torn-down sweep never leaves a stale cached `ok`
+   * behind. Drops every cached result and bumps every generation (cached AND in-flight),
+   * so `read()` returns `~` immediately and no resolve kicked before the teardown can
+   * recache an `ok` afterwards.
+   */
+  invalidateAll(): void {
+    // Snapshot both key sets first — invalidate() mutates the maps as it runs.
+    for (const objectId of new Set([...this.cache.keys(), ...this.inflight.keys()])) {
+      this.invalidate(objectId);
+    }
+  }
 
   private generationOf(objectId: string): number {
     return this.generation.get(objectId) ?? 0;
@@ -315,12 +341,22 @@ export class CovenantReadAuthority {
       if (current === null) return false; // cannot prove fresh ⇒ STALE ⇒ `~`
       return current === entry.token; // any freshness-token advance (SV or delete set) ⇒ STALE
     }
-    // No freshness port. Either invalidate-driven trust (the default: a cached result is
-    // trusted until an explicit `invalidate` drops it) OR — when the binding cannot rely
-    // on invalidate coverage — fail-closed: an `ok` that cannot be proven fresh is STALE
-    // and served as `~`. The server sets `failClosedWithoutFreshness` until #182 wires
-    // invalidate-on-drift (see {@link CovenantReadAuthorityOptions.failClosedWithoutFreshness}).
-    return !this.opts.failClosedWithoutFreshness;
+    // No freshness port.
+    if (this.opts.failClosedWithoutFreshness) {
+      // FAIL-CLOSED: an authority with no sync doc handle cannot PROVE a cached `ok` is
+      // still fresh, so `read()` never serves it — it is demoted to `~` and freshness is
+      // driven ENTIRELY by the explicit `invalidate` hook (the drift sweep calls it on
+      // every content update) plus a fresh `resolve()` per read. A cached `ok` that
+      // survives is only ever re-established by a resolve that ran AFTER the last
+      // invalidate; the sync `read()` never vouches for one on its own. (E7, #199 Fix 4:
+      // the old `sweepLive`/`markSweepLive` trust-gate was DEAD on the production wiring —
+      // production binds the web authority, which has a `liveFreshness` port and never
+      // reached this branch — so it was removed rather than shipped as a false guarantee.)
+      return false;
+    }
+    // No port and not fail-closed ⇒ the pre-existing invalidate-driven trust: a cached
+    // result is trusted until an explicit `invalidate` drops it.
+    return true;
   }
 
   /**

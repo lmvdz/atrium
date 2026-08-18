@@ -1,5 +1,10 @@
 import 'server-only';
+import { listCovenantAnchorObjectIds, loadCovenantAnchor } from '@atrium/db';
+import { webCovenantReadAuthority } from './covenant-read';
+import { readerForLiveDoc } from './covenant-reader';
 import { db } from './db';
+import { liveCovenantDoc } from './live-covenant-doc';
+import { RoomDriftSweep } from './room-drift-sweep';
 import { dbYdocStreamSource, RoomReplicaManager } from './room-replica-manager';
 
 /**
@@ -18,6 +23,28 @@ import { dbYdocStreamSource, RoomReplicaManager } from './room-replica-manager';
 export function roomReplicaManager(): RoomReplicaManager {
   const key = Symbol.for('atrium.web.room-replica-manager');
   const holder = globalThis as unknown as { [key]?: RoomReplicaManager };
-  holder[key] ??= new RoomReplicaManager({ source: dbYdocStreamSource(db()) });
+  holder[key] ??= new RoomReplicaManager({
+    source: dbYdocStreamSource(db()),
+    // E7, #199 Fix 2 — WIRE DETECT LIVE. Each acquired replica gets a drift sweep over
+    // its authoritative `Y.Doc`, driving a fail-closed read authority whose `invalidate`
+    // fires on every content update. The swept set is the AUTHORITATIVE `covenant_anchors`
+    // (Fix 1), never a caller allowlist. The manager starts it on acquire (seeding one
+    // `sweepNow`) and stops it — re-fail-closing the authority — on evict (Fix 3).
+    sweepFactory: (roomId, replica) => {
+      const live = liveCovenantDoc(roomId);
+      const reader = readerForLiveDoc(live.provider, undefined, live.options);
+      const authority = webCovenantReadAuthority({
+        loadAnchor: (objectId) => loadCovenantAnchor(db(), { roomId, objectId }),
+        reader,
+        expectedRoomId: roomId,
+      });
+      return new RoomDriftSweep({
+        doc: replica.doc,
+        authority,
+        // AUTHORITATIVE certified set from the ledger, not a caller list (Fix 1).
+        loadCertifiedObjectIds: () => listCovenantAnchorObjectIds(db(), { roomId }),
+      });
+    },
+  });
   return holder[key] as RoomReplicaManager;
 }

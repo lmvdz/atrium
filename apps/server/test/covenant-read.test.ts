@@ -171,6 +171,46 @@ describe('serverCovenantReadAuthority — the authority wired to the ledger read
     expect(authority.read('o_span').covenantStatus).toBe('unresolved');
   });
 
+  // E7 (#199 Fix 4) — the `#182-before-server-✓` gate is ALWAYS fail-closed on a
+  // no-freshness-port authority: read() NEVER vouches for a cached `ok`. The old
+  // `driftSwept`/`markSweepLive` gate that "opened" trust was DEAD on the production
+  // wiring (production binds the WEB authority with a `liveFreshness` port) and was
+  // removed. Freshness here is driven by `invalidate` + a fresh `resolve()`, and
+  // teardown via `invalidateAll` drops every cached `ok`.
+  it('read() never serves a cached `ok`; invalidate/invalidateAll are the freshness drivers', async () => {
+    const fragment: RenderedFragment = {
+      ancestors: [],
+      nodes: [{ kind: 'text', text: 'ship it', marks: [] }],
+    };
+    const digest = renderedDigestOf(fragment);
+    const resolveSpan = async (anchor: CovenantAnchor): Promise<ResolvedSpan | null> => ({
+      fragment,
+      enclosedItems: anchor.enclosedItems,
+      snapshotVerified: true,
+    });
+    const authority = serverCovenantReadAuthority({
+      db: fakeDb([goodRow({ renderedDigest: digest, enclosedItems: ENCLOSED })]),
+      roomId: 'room_1',
+      resolveSpan,
+    });
+    // A genuine `ok` resolves, but read() serves `~` — the server cannot prove freshness
+    // on its own, and there is no `markSweepLive` gate to open trust.
+    expect((await authority.resolve('o_span')).covenantStatus).toBe('ok');
+    expect(authority.read('o_span').covenantStatus).not.toBe('ok');
+    // There is no `markSweepLive` API any more — the dead trust-gate was removed (Fix 4).
+    expect((authority as unknown as { markSweepLive?: unknown }).markSweepLive).toBeUndefined();
+
+    // `invalidate` still bumps the generation + drops the cache (what a sweep calls on a
+    // drift); a subsequent read stays `~`.
+    authority.invalidate('o_span');
+    expect(authority.read('o_span').covenantStatus).not.toBe('ok');
+
+    // Teardown: invalidateAll drops every cached object at once.
+    await authority.resolve('o_span'); // cache an ok again (still not read()-trusted)
+    authority.invalidateAll();
+    expect(authority.read('o_span').covenantStatus).not.toBe('ok');
+  });
+
   it('a ledger read that THROWS (null-certifier parse aside) fails closed to drift, never propagates', async () => {
     const authority = serverCovenantReadAuthority({
       db: fakeDb([goodRow({ renderedDigest: 'not-a-sha256' })]),

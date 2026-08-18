@@ -64,6 +64,27 @@ export async function roomCovenantReads(
      * production singleton's real-Postgres source.
      */
     readonly acquire?: (roomId: string) => Promise<unknown>;
+    /**
+     * The object ids the room's LIVE drift sweep currently reads as `~` (E7, #199
+     * Fix 2). Defaults to the process singleton's `staleObjectIdsFor`; a test injects
+     * a fake. Consuming it is what makes the live sweep's push-based DETECT reach the
+     * glyphs, not only the pull-based re-resolve below — a span the sweep marks `~` is
+     * FORCED `~` here (fail-closed: it can only ever demote an `ok`, never mint one).
+     */
+    readonly staleObjectIds?: (roomId: string) => ReadonlySet<string> | undefined;
+    /**
+     * The certified objects the room's live sweep has confirmed SWEPT-CLEAN (E7, #199
+     * Fix 3). Defaults to the process singleton's `sweptObjectIdsFor`; a test injects a
+     * fake. This is what makes the overlay FAIL-CLOSED until the sweep has spoken: a fresh
+     * `resolve()` that concludes `ok` is served `ok` ONLY if the sweep has positively
+     * swept the object clean; a certified object with no settled sweep verdict yet (a
+     * freshly-certified anchor, or one an edit re-opened before its re-resolve settled) is
+     * NOT in this set, so its `ok` is WITHHELD and it reads `~`. Demote-only: the overlay
+     * never mints an `ok` the resolve did not produce — it only withholds one until swept.
+     * When `undefined` (no sweep/manager) the overlay does not withhold: the fresh
+     * re-resolve, itself fail-closed, is the sole verdict (matching the no-overlay case).
+     */
+    readonly sweptObjectIds?: (roomId: string) => ReadonlySet<string> | undefined;
   },
 ): Promise<Record<string, CovenantReadStatus>> {
   if (objectIds.length === 0) return {};
@@ -71,6 +92,33 @@ export async function roomCovenantReads(
   // authorship, not `~`. Fail-closed: any failure here leaves the provider `null`.
   const acquire = options?.acquire ?? ((id: string) => roomReplicaManager().acquire(id));
   await acquire(roomId);
+  // The live sweep's current `~` drafts — consumed as a fail-closed overlay below.
+  // The default reads the process singleton; a test injects its own. Guarded: if no
+  // sweep/manager is available (a test that stubs `acquire` but not this), fall back to
+  // `undefined` (no overlay) rather than throwing — the fresh re-resolve is itself
+  // fail-closed, so the overlay is additive, never load-bearing for a `~`.
+  const staleObjectIds =
+    options?.staleObjectIds ??
+    ((id: string): ReadonlySet<string> | undefined => {
+      try {
+        return roomReplicaManager().staleObjectIdsFor(id);
+      } catch {
+        return undefined;
+      }
+    });
+  // The live sweep's SWEPT-CLEAN set (E7, #199 Fix 3) — the overlay withholds `ok` for a
+  // certified object not yet confirmed clean by the sweep (fail-closed until it speaks).
+  const sweptObjectIds =
+    options?.sweptObjectIds ??
+    ((id: string): ReadonlySet<string> | undefined => {
+      try {
+        return roomReplicaManager().sweptObjectIdsFor(id);
+      } catch {
+        return undefined;
+      }
+    });
+  const stale = staleObjectIds(roomId);
+  const sweptClean = sweptObjectIds(roomId);
   const live = liveCovenantDoc(roomId);
   const reader = readerForLiveDoc(live.provider, undefined, live.options);
   const authority = webCovenantReadAuthority({
@@ -84,7 +132,23 @@ export async function roomCovenantReads(
   const resolved = await Promise.all(
     unique.map(async (objectId) => {
       const { covenantStatus } = await authority.resolve(objectId);
-      return [objectId, covenantStatus] as const;
+      // OVERLAY the live sweep, fail-closed and DEMOTE-ONLY (E7, #199 Fix 2 + Fix 3):
+      //   1. an object the sweep has marked `~` is `~` regardless of this fresh resolve —
+      //      the sweep's push-based DETECT is authoritative for a `~` (Fix 2);
+      //   2. a fresh `ok` is served ONLY if the sweep has positively swept the object
+      //      clean; a certified object with no settled sweep verdict yet (a freshly-
+      //      certified anchor, or one an edit re-opened before its re-resolve settled) is
+      //      WITHHELD to `~` (Fix 3) — fail-closed until the sweep speaks.
+      // Both directions only ever demote an `ok` to `~`; the overlay never mints an `ok`.
+      // When the swept-clean signal is absent (no sweep/manager), it does not withhold —
+      // the fresh re-resolve, itself fail-closed, stands alone.
+      let status: CovenantReadStatus = covenantStatus;
+      if (stale?.has(objectId)) {
+        status = 'drift';
+      } else if (covenantStatus === 'ok' && sweptClean !== undefined && !sweptClean.has(objectId)) {
+        status = 'drift'; // certified but not-yet-swept-clean ⇒ withhold `ok`, fail-closed
+      }
+      return [objectId, status] as const;
     }),
   );
   return Object.fromEntries(resolved);

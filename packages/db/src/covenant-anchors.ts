@@ -124,3 +124,29 @@ export async function loadCovenantAnchor(
   });
   return parsed.success ? parsed.data : null;
 }
+
+/**
+ * THE AUTHORITATIVE CERTIFIED-OBJECT SET for a room (E7, #199 Fix 1) — every
+ * `object_id` that HAS a live covenant anchor in `covenant_anchors`, read straight
+ * from the ledger. This is the set the drift-on-update sweep re-resolves: deriving it
+ * from the ledger (not from a caller-passed list) is what closes the false-`✓` hole —
+ * an object a caller forgot to enumerate would never be swept and a stale `✓` over it
+ * would go undetected, whereas the ledger names EVERY certified span by construction.
+ *
+ * Deliberately UNFILTERED and un-parsed: it returns the raw certified `object_id`s
+ * (a malformed anchor still names a span that must be swept — the per-object resolve
+ * fails it closed to `drift`, so over-covering here is the fail-closed direction).
+ * Room-scoped on the `(room_id, object_id)` index; distinct because the unique index
+ * already guarantees one live anchor per object, but `DISTINCT` keeps it robust if a
+ * future migration relaxes that.
+ */
+export async function listCovenantAnchorObjectIds(
+  db: Pick<Database, 'selectDistinct'>,
+  params: { readonly roomId: string },
+): Promise<string[]> {
+  const rows = await db
+    .selectDistinct({ objectId: covenantAnchors.objectId })
+    .from(covenantAnchors)
+    .where(eq(covenantAnchors.roomId, params.roomId));
+  return rows.map((r) => r.objectId);
+}
